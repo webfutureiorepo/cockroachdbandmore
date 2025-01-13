@@ -1,25 +1,22 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+import { Nodes } from "@cockroachlabs/icons";
+import { Tooltip } from "antd";
+import classNames from "classnames/bind";
 import moment from "moment-timezone";
 import React, { useState } from "react";
-import { Nodes } from "@cockroachlabs/icons";
+
 import { NamedOperationMetadata } from "src/api/tracezApi";
 import { EmptyTable } from "src/empty";
+import { CircleFilled } from "src/icon";
 import { ColumnDescriptor, SortSetting, SortedTable } from "src/sortedtable";
 
 import styles from "../snapshot.module.scss";
-import classNames from "classnames/bind";
-import { CircleFilled } from "src/icon";
+
 import { formatDurationHours } from "./spanTable";
-import { Tooltip } from "antd";
-import "antd/lib/tooltip/style";
+
 const cx = classNames.bind(styles);
 
 class SpanMetadataSortedTable extends SortedTable<NamedOperationMetadata> {}

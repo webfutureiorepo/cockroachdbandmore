@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colserde_test
 
@@ -232,7 +227,9 @@ func randomDataFromType(rng *rand.Rand, t *types.T, n int, nullProbability float
 		)
 		for i := range data {
 			d := randgen.RandDatum(rng, t, false /* nullOk */)
-			data[i], err = valueside.Encode(data[i], valueside.NoColumnID, d, scratch)
+			data[i], scratch, err = valueside.EncodeWithScratch(
+				data[i], valueside.NoColumnID, d, scratch[:0],
+			)
 			if err != nil {
 				panic(err)
 			}
@@ -349,7 +346,7 @@ func TestRecordBatchSerializerDeserializeMemoryEstimate(t *testing.T) {
 
 	c, err := colserde.NewArrowBatchConverter(typs, colserde.BiDirectional, testMemAcc)
 	require.NoError(t, err)
-	defer c.Release(context.Background())
+	defer c.Close(context.Background())
 	r, err := colserde.NewRecordBatchSerializer(typs)
 	require.NoError(t, err)
 	require.NoError(t, roundTripBatch(src, dest, c, r))

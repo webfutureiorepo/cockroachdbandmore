@@ -1,38 +1,32 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-import React, { useContext } from "react";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import classNames from "classnames/bind";
-import _ from "lodash";
-import { RouteComponentProps } from "react-router-dom";
-import { Helmet } from "react-helmet";
-import moment from "moment-timezone";
-
-import statementsStyles from "../statementsPage/statementsPage.module.scss";
+import { ArrowLeft } from "@cockroachlabs/icons";
 import {
-  SortedTable,
-  ISortedTablePagination,
-  SortSetting,
-} from "../sortedtable";
+  InlineAlert,
+  Tooltip,
+  Text,
+  Heading,
+} from "@cockroachlabs/ui-components";
+import { Col, Row } from "antd";
+import classNames from "classnames/bind";
+import get from "lodash/get";
+import Long from "long";
+import moment from "moment-timezone";
+import React, { useContext } from "react";
+import { Helmet } from "react-helmet";
+import { RouteComponentProps } from "react-router-dom";
+
+import { SqlStatsSortType } from "src/api/statementsApi";
 import { PageConfig, PageConfigItem } from "src/pageConfig";
-import { InlineAlert, Tooltip } from "@cockroachlabs/ui-components";
-import { Pagination } from "../pagination";
-import { TableStatistics } from "../tableStatistics";
-import { baseHeadingClasses } from "../transactionsPage/transactionsPageClasses";
-import { Button } from "../button";
-import { tableClasses } from "../transactionsTable/transactionsTableClasses";
-import { SqlBox } from "../sql";
-import { aggregateStatements } from "../transactionsPage/utils";
-import { Loading } from "../loading";
-import { SummaryCard, SummaryCardItem } from "../summaryCard";
+import {
+  populateRegionNodeForStatements,
+  makeStatementsColumns,
+} from "src/statementsTable/statementsTable";
+import { TimeScaleLabel } from "src/timeScaleDropdown/timeScaleLabel";
+import { Transaction } from "src/transactionsTable";
 import {
   Bytes,
   calculateTotalWorkload,
@@ -41,24 +35,9 @@ import {
   formatNumberForDisplay,
   queryByName,
   appNamesAttr,
+  unset,
 } from "src/util";
-import { UIConfigState } from "../store";
-import LoadingError from "../sqlActivity/errorComponent";
 
-import summaryCardStyles from "../summaryCard/summaryCard.module.scss";
-import transactionDetailsStyles from "./transactionDetails.modules.scss";
-import { Col, Row } from "antd";
-import "antd/lib/col/style";
-import "antd/lib/row/style";
-import { Text, Heading } from "@cockroachlabs/ui-components";
-import { formatTwoPlaces } from "../barCharts";
-import { ArrowLeft } from "@cockroachlabs/icons";
-import {
-  populateRegionNodeForStatements,
-  makeStatementsColumns,
-} from "src/statementsTable/statementsTable";
-import { Transaction } from "src/transactionsTable";
-import Long from "long";
 import {
   createCombinedStmtsRequest,
   InsightRecommendation,
@@ -67,11 +46,33 @@ import {
   StatementsRequest,
   TxnInsightsRequest,
 } from "../api";
+import { formatTwoPlaces } from "../barCharts";
+import { Button } from "../button";
+import { CockroachCloudContext } from "../contexts";
 import {
   getTxnInsightRecommendations,
   InsightType,
   TxnInsightEvent,
 } from "../insights";
+import {
+  InsightsSortedTable,
+  makeInsightsColumns,
+} from "../insightsTable/insightsTable";
+import insightTableStyles from "../insightsTable/insightsTable.module.scss";
+import { Loading } from "../loading";
+import { Pagination } from "../pagination";
+import {
+  SortedTable,
+  ISortedTablePagination,
+  SortSetting,
+} from "../sortedtable";
+import { SqlBox } from "../sql";
+import LoadingError from "../sqlActivity/errorComponent";
+import statementsStyles from "../statementsPage/statementsPage.module.scss";
+import { UIConfigState } from "../store";
+import { SummaryCard, SummaryCardItem } from "../summaryCard";
+import summaryCardStyles from "../summaryCard/summaryCard.module.scss";
+import { TableStatistics } from "../tableStatistics";
 import {
   getValidOption,
   TimeScale,
@@ -80,26 +81,22 @@ import {
   timeScaleRangeToObj,
   toRoundedDateRange,
 } from "../timeScaleDropdown";
-
 import timeScaleStyles from "../timeScaleDropdown/timeScale.module.scss";
-import insightTableStyles from "../insightsTable/insightsTable.module.scss";
-import {
-  InsightsSortedTable,
-  makeInsightsColumns,
-} from "../insightsTable/insightsTable";
-import { CockroachCloudContext } from "../contexts";
-import { SqlStatsSortType } from "src/api/statementsApi";
+import { baseHeadingClasses } from "../transactionsPage/transactionsPageClasses";
+import { aggregateStatements } from "../transactionsPage/utils";
+import { tableClasses } from "../transactionsTable/transactionsTableClasses";
+
+import transactionDetailsStyles from "./transactionDetails.modules.scss";
 import {
   getStatementsForTransaction,
   getTxnFromSqlStatsMemoized,
   getTxnQueryString,
 } from "./transactionDetailsUtils";
-import { TimeScaleLabel } from "src/timeScaleDropdown/timeScaleLabel";
+
 const { containerClass } = tableClasses;
 const cx = classNames.bind(statementsStyles);
 const timeScaleStylesCx = classNames.bind(timeScaleStyles);
 const insightsTableCx = classNames.bind(insightTableStyles);
-import { unset } from "src/util";
 
 type Statement =
   protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
@@ -400,7 +397,7 @@ export class TransactionDetails extends React.Component<
             const meanIdleLatency = transactionSampled ? (
               <Text>
                 {formatNumberForDisplay(
-                  _.get(transactionStats, "idle_lat.mean", 0),
+                  get(transactionStats, "idle_lat.mean", 0),
                   duration,
                 )}
               </Text>
@@ -435,7 +432,7 @@ export class TransactionDetails extends React.Component<
             const maxDisc = transactionSampled ? (
               <Text>
                 {formatNumberForDisplay(
-                  _.get(transactionStats, "exec_stats.max_disk_usage.mean", 0),
+                  get(transactionStats, "exec_stats.max_disk_usage.mean", 0),
                   Bytes,
                 )}
               </Text>

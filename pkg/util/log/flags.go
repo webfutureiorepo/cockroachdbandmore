@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -16,14 +11,15 @@ import (
 	"io/fs"
 	"math"
 	"strings"
+	"sync/atomic"
 
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -40,7 +36,11 @@ type config struct {
 	// flushWrites can be set asynchronously to force all file output to
 	// be flushed to disk immediately. This is set via SetAlwaysFlush()
 	// and used e.g. in start.go upon encountering errors.
-	flushWrites syncutil.AtomicBool
+	flushWrites atomic.Bool
+}
+
+type FileSinkMetrics struct {
+	LogBytesWritten *atomic.Uint64
 }
 
 var debugLog *loggerT
@@ -54,6 +54,8 @@ var debugLog *loggerT
 // in support escalations.
 const redactionPolicyManagedEnvVar = "COCKROACH_REDACTION_POLICY_MANAGED"
 
+var RedactionPolicyManaged = envutil.EnvOrDefaultBool(redactionPolicyManagedEnvVar, false)
+
 func init() {
 	logflags.InitFlags(
 		&logging.showLogs,
@@ -66,7 +68,7 @@ func init() {
 	// using TestLogScope.
 	cfg := getTestConfig(nil /* output to files disabled */, true /* mostly inline */)
 
-	if _, err := ApplyConfig(cfg); err != nil {
+	if _, err := ApplyConfig(cfg, nil /* fileSinkMetricsForDir */, nil /* fatalOnLogStall */); err != nil {
 		panic(err)
 	}
 
@@ -81,7 +83,7 @@ func init() {
 //
 // This is used to assert that configuration is performed
 // before logging has been used for the first time.
-func IsActive() (active bool, firstUse string) {
+func IsActive() (active bool, firstUse debugutil.SafeStack) {
 	logging.mu.Lock()
 	defer logging.mu.Unlock()
 	return logging.mu.active, logging.mu.firstUseStack
@@ -90,7 +92,11 @@ func IsActive() (active bool, firstUse string) {
 // ApplyConfig applies the given configuration.
 //
 // The returned logShutdownFn can be used to gracefully shut down logging facilities.
-func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
+func ApplyConfig(
+	config logconfig.Config,
+	fileSinkMetricsForDir map[string]FileSinkMetrics,
+	fatalOnLogStall func() bool,
+) (logShutdownFn func(), err error) {
 	// Sanity check.
 	if active, firstUse := IsActive(); active {
 		reportOrPanic(context.Background(), nil /* sv */, "logging already active; first use:\n%s", firstUse)
@@ -145,7 +151,7 @@ func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
 	logging.allSinkInfos.clear()
 
 	// Indicate whether we're running in a managed environment. Impacts redaction policies.
-	logging.setManagedRedactionPolicy(envutil.EnvOrDefaultBool(redactionPolicyManagedEnvVar, false))
+	logging.setManagedRedactionPolicy(RedactionPolicyManaged)
 
 	// If capture of internal fd2 writes is enabled, set it up here.
 	if config.CaptureFd2.Enable {
@@ -165,7 +171,7 @@ func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
 		bt, bf := true, false
 		mf := logconfig.ByteSize(math.MaxInt64)
 		f := logconfig.DefaultFileFormat
-		fm := logconfig.FilePermissions(0o644)
+		fm := logconfig.DefaultFilePerms
 		fakeConfig := logconfig.FileSinkConfig{
 			FileDefaults: logconfig.FileDefaults{
 				CommonSinkConfig: logconfig.CommonSinkConfig{
@@ -190,7 +196,14 @@ func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
 		if err := fakeConfig.Channels.Validate(fakeConfig.CommonSinkConfig.Filter); err != nil {
 			return nil, errors.NewAssertionErrorWithWrappedErrf(err, "programming error: incorrect filter config")
 		}
-		fileSinkInfo, fileSink, err := newFileSinkInfo("stderr", fakeConfig)
+
+		// Collect stats for disk writes incurred by logs.
+		var metrics FileSinkMetrics
+		if fileSinkMetricsForDir != nil {
+			metrics = fileSinkMetricsForDir[*fakeConfig.Dir]
+		}
+
+		fileSinkInfo, fileSink, err := newFileSinkInfo("stderr", fakeConfig, metrics)
 		if err != nil {
 			return nil, err
 		}
@@ -246,7 +259,7 @@ func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
 	}
 
 	// Apply the stderr sink configuration.
-	logging.stderrSink.noColor.Set(config.Sinks.Stderr.NoColor)
+	logging.stderrSink.noColor.Store(config.Sinks.Stderr.NoColor)
 	if err := logging.stderrSinkInfoTemplate.applyConfig(config.Sinks.Stderr.CommonSinkConfig); err != nil {
 		return nil, err
 	}
@@ -307,10 +320,18 @@ func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
 		if fileGroupName == "default" {
 			fileGroupName = ""
 		}
-		fileSinkInfo, fileSink, err := newFileSinkInfo(fileGroupName, *fc)
+
+		// Collect stats for disk writes incurred by logs.
+		var metrics FileSinkMetrics
+		if fileSinkMetricsForDir != nil {
+			metrics = fileSinkMetricsForDir[*fc.Dir]
+		}
+
+		fileSinkInfo, fileSink, err := newFileSinkInfo(fileGroupName, *fc, metrics)
 		if err != nil {
 			return nil, err
 		}
+		fileSink.fatalOnLogStall = fatalOnLogStall
 		attachBufferWrapper(fileSinkInfo, fc.CommonSinkConfig.Buffering, closer)
 		attachSinkInfo(fileSinkInfo, &fc.Channels)
 
@@ -362,7 +383,7 @@ func ApplyConfig(config logconfig.Config) (logShutdownFn func(), err error) {
 // newFileSinkInfo creates a new fileSink and its accompanying sinkInfo
 // from the provided configuration.
 func newFileSinkInfo(
-	fileGroupName string, c logconfig.FileSinkConfig,
+	fileGroupName string, c logconfig.FileSinkConfig, metrics FileSinkMetrics,
 ) (*sinkInfo, *fileSink, error) {
 	info := &sinkInfo{}
 	if err := info.applyConfig(c.CommonSinkConfig); err != nil {
@@ -377,6 +398,7 @@ func newFileSinkInfo(
 		int64(*c.MaxGroupSize),
 		info.getStartLines,
 		fs.FileMode(*c.FilePermissions),
+		metrics.LogBytesWritten,
 	)
 	info.sink = fileSink
 	return info, fileSink, nil
@@ -516,7 +538,7 @@ func DescribeAppliedConfig() string {
 	}
 
 	// Describe the stderr sink.
-	config.Sinks.Stderr.NoColor = logging.stderrSink.noColor.Get()
+	config.Sinks.Stderr.NoColor = logging.stderrSink.noColor.Load()
 	config.Sinks.Stderr.CommonSinkConfig = logging.stderrSinkInfoTemplate.describeAppliedConfig()
 
 	describeConnections := func(l *loggerT, ch Channel,

@@ -36,7 +36,7 @@ Schema change plan for CREATE DATABASE ‹db›; following CREATE UNIQUE INDEX �
  │              ├── SetNameInDescriptor {"DescriptorID":106,"Name":"public"}
  │              ├── AddDescriptorName {"Namespace":{"DatabaseID":105,"DescriptorID":106,"Name":"public"}}
  │              ├── AddSchemaParent {"Parent":{"ParentDatabaseID":105,"SchemaID":106}}
- │              ├── UpdateOwner {"Owner":{"DescriptorID":106,"Owner":"admin"}}
+ │              ├── UpdateOwner {"Owner":{"DescriptorID":106,"Owner":"root"}}
  │              ├── UpdateUserPrivileges {"Privileges":{"DescriptorID":106,"Privileges":2,"UserName":"admin","WithGrantOption":2}}
  │              ├── UpdateUserPrivileges {"Privileges":{"DescriptorID":106,"Privileges":516,"UserName":"public"}}
  │              ├── UpdateUserPrivileges {"Privileges":{"DescriptorID":106,"Privileges":2,"UserName":"root","WithGrantOption":2}}
@@ -71,7 +71,7 @@ Schema change plan for CREATE DATABASE ‹db›; following CREATE UNIQUE INDEX �
  │    │    └── 1 Mutation operation
  │    │         └── UndoAllInTxnImmediateMutationOpSideEffects
  │    └── Stage 2 of 2 in PreCommitPhase
- │         ├── 19 elements transitioning toward PUBLIC
+ │         ├── 18 elements transitioning toward PUBLIC
  │         │    ├── ABSENT → PUBLIC           IndexColumn:{DescID: 104 (t), ColumnID: 2 (j), IndexID: 2 (idx+)}
  │         │    ├── ABSENT → PUBLIC           IndexColumn:{DescID: 104 (t), ColumnID: 1 (i), IndexID: 2 (idx+)}
  │         │    ├── ABSENT → PUBLIC           IndexName:{DescID: 104 (t), Name: "idx", IndexID: 2 (idx+)}
@@ -79,7 +79,6 @@ Schema change plan for CREATE DATABASE ‹db›; following CREATE UNIQUE INDEX �
  │         │    ├── ABSENT → BACKFILL_ONLY    SecondaryIndex:{DescID: 104 (t), IndexID: 2 (idx+), ConstraintID: 2, TemporaryIndexID: 3 (crdb_internal_index_3_name_placeholder), SourceIndexID: 1 (t_pkey), RecreateSourceIndexID: 0}
  │         │    ├── ABSENT → DESCRIPTOR_ADDED Database:{DescID: 105 (db+)}
  │         │    ├── ABSENT → PUBLIC           Namespace:{DescID: 105 (db+), Name: "db"}
- │         │    ├── ABSENT → PUBLIC           DatabaseData:{DescID: 105 (db+)}
  │         │    ├── ABSENT → PUBLIC           Owner:{DescID: 105 (db+)}
  │         │    ├── ABSENT → PUBLIC           UserPrivileges:{DescID: 105 (db+), Name: "admin"}
  │         │    ├── ABSENT → PUBLIC           UserPrivileges:{DescID: 105 (db+), Name: "public"}
@@ -113,7 +112,7 @@ Schema change plan for CREATE DATABASE ‹db›; following CREATE UNIQUE INDEX �
  │              ├── SetNameInDescriptor {"DescriptorID":106,"Name":"public"}
  │              ├── AddDescriptorName {"Namespace":{"DatabaseID":105,"DescriptorID":106,"Name":"public"}}
  │              ├── AddSchemaParent {"Parent":{"ParentDatabaseID":105,"SchemaID":106}}
- │              ├── UpdateOwner {"Owner":{"DescriptorID":106,"Owner":"admin"}}
+ │              ├── UpdateOwner {"Owner":{"DescriptorID":106,"Owner":"root"}}
  │              ├── UpdateUserPrivileges {"Privileges":{"DescriptorID":106,"Privileges":2,"UserName":"admin","WithGrantOption":2}}
  │              ├── UpdateUserPrivileges {"Privileges":{"DescriptorID":106,"Privileges":516,"UserName":"public"}}
  │              ├── UpdateUserPrivileges {"Privileges":{"DescriptorID":106,"Privileges":2,"UserName":"root","WithGrantOption":2}}
@@ -184,9 +183,10 @@ Schema change plan for CREATE DATABASE ‹db›; following CREATE UNIQUE INDEX �
  │              └── ValidateIndex {"IndexID":2,"TableID":104}
  └── PostCommitNonRevertiblePhase
       └── Stage 1 of 1 in PostCommitNonRevertiblePhase
-           ├── 3 elements transitioning toward PUBLIC
+           ├── 4 elements transitioning toward PUBLIC
            │    ├── VALIDATED             → PUBLIC           SecondaryIndex:{DescID: 104 (t), IndexID: 2 (idx+), ConstraintID: 2, TemporaryIndexID: 3 (crdb_internal_index_3_name_placeholder), SourceIndexID: 1 (t_pkey), RecreateSourceIndexID: 0}
            │    ├── DESCRIPTOR_ADDED      → PUBLIC           Database:{DescID: 105 (db+)}
+           │    ├── ABSENT                → PUBLIC           DatabaseData:{DescID: 105 (db+)}
            │    └── DESCRIPTOR_ADDED      → PUBLIC           Schema:{DescID: 106 (public+)}
            ├── 4 elements transitioning toward TRANSIENT_ABSENT
            │    ├── PUBLIC                → TRANSIENT_ABSENT IndexColumn:{DescID: 104 (t), ColumnID: 2 (j), IndexID: 3 (crdb_internal_index_3_name_placeholder)}

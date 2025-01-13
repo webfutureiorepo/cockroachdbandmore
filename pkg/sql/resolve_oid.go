@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -30,10 +25,9 @@ import (
 func (p *planner) ResolveOIDFromString(
 	ctx context.Context, resultType *types.T, toResolve *tree.DString,
 ) (_ *tree.DOid, errSafeToIgnore bool, _ error) {
-	ie := p.ExecCfg().InternalDB.NewInternalExecutor(p.SessionData())
 	return resolveOID(
 		ctx, p.Txn(),
-		ie,
+		p.InternalSQLTxn(),
 		resultType, toResolve,
 	)
 }
@@ -42,10 +36,9 @@ func (p *planner) ResolveOIDFromString(
 func (p *planner) ResolveOIDFromOID(
 	ctx context.Context, resultType *types.T, toResolve *tree.DOid,
 ) (_ *tree.DOid, errSafeToIgnore bool, _ error) {
-	ie := p.ExecCfg().InternalDB.NewInternalExecutor(p.SessionData())
 	return resolveOID(
 		ctx, p.Txn(),
-		ie,
+		p.InternalSQLTxn(),
 		resultType, toResolve,
 	)
 }
@@ -89,7 +82,7 @@ func resolveOID(
 		return nil, true, pgerror.Newf(info.errType,
 			"%s %s does not exist", info.objName, toResolve)
 	}
-	return tree.NewDOidWithName(
+	return tree.NewDOidWithTypeAndName(
 		results[0].(*tree.DOid).Oid,
 		resultType,
 		tree.AsStringWithFlags(results[1], tree.FmtBareStrings),

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -33,6 +28,11 @@ func (i *immediateVisitor) UpsertSchemaComment(
 
 func (i *immediateVisitor) UpsertTableComment(_ context.Context, op scop.UpsertTableComment) error {
 	i.AddComment(op.TableID, 0, catalogkeys.TableCommentType, op.Comment)
+	return nil
+}
+
+func (i *immediateVisitor) UpsertTypeComment(_ context.Context, op scop.UpsertTypeComment) error {
+	i.AddComment(op.TypeID, 0, catalogkeys.TypeCommentType, op.Comment)
 	return nil
 }
 

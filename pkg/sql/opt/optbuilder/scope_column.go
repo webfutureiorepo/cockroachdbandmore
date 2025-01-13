@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -153,7 +148,6 @@ func (c *scopeColumn) funcParamReferencedBy(idx tree.PlaceholderIdx) bool {
 // clearName sets the empty table and column name. This is used to make the
 // column anonymous so that it cannot be referenced, but will still be
 // projected.
-// TODO(mgartner): Do we still need this?
 func (c *scopeColumn) clearName() {
 	c.name.Anonymize()
 	c.table = tree.TableName{}
@@ -289,6 +283,9 @@ func scopeColName(name tree.Name) scopeColumnName {
 // is not empty. If the given name is empty, the returned scopeColumnName
 // represents an anonymous function argument that cannot be referenced, and it
 // will be added to the metadata with the descriptive name "arg<ord>".
+// TODO(119502): unnamed parameters can be referenced via $i notation (for SQL
+// routines only IN / INOUT parameters can be referenced this way, for PLpgSQL
+// routines all parameters can).
 func funcParamColName(name tree.Name, ord int) scopeColumnName {
 	alias := string(name)
 	if alias == "" {

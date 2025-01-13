@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package slstorage
 
@@ -25,6 +20,9 @@ type FakeStorage struct {
 	mu struct {
 		syncutil.Mutex
 		sessions map[sqlliveness.SessionID]hlc.Timestamp
+
+		// Used to inject errors into the storage layer.
+		insertError func(sid sqlliveness.SessionID, expiration hlc.Timestamp) error
 	}
 }
 
@@ -33,6 +31,16 @@ func NewFakeStorage() *FakeStorage {
 	fs := &FakeStorage{}
 	fs.mu.sessions = make(map[sqlliveness.SessionID]hlc.Timestamp)
 	return fs
+}
+
+// SetInjectedFailure adds support for injecting failures for different
+// operations.
+func (s *FakeStorage) SetInjectedFailure(
+	insertError func(sid sqlliveness.SessionID, expiration hlc.Timestamp) error,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mu.insertError = insertError
 }
 
 // IsAlive implements the sqlliveness.Reader interface.
@@ -51,6 +59,12 @@ func (s *FakeStorage) Insert(
 ) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Support injecting errors during the initial creation of the session.
+	if s.mu.insertError != nil {
+		if err := s.mu.insertError(sid, expiration); err != nil {
+			return err
+		}
+	}
 	if _, ok := s.mu.sessions[sid]; ok {
 		return errors.Errorf("session %s already exists", sid)
 	}
@@ -61,14 +75,14 @@ func (s *FakeStorage) Insert(
 // Update implements the slinstance.Storage interface.
 func (s *FakeStorage) Update(
 	_ context.Context, sid sqlliveness.SessionID, expiration hlc.Timestamp,
-) (bool, error) {
+) (bool, hlc.Timestamp, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.mu.sessions[sid]; !ok {
-		return false, nil
+		return false, hlc.Timestamp{}, nil
 	}
 	s.mu.sessions[sid] = expiration
-	return true, nil
+	return true, expiration, nil
 }
 
 // Delete is needed to manually delete a session for testing purposes.

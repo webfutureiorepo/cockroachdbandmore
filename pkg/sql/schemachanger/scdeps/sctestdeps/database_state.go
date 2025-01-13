@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctestdeps
 
@@ -158,7 +153,9 @@ func ReadCurrentDatabaseFromDB(t *testing.T, tdb *sqlutils.SQLRunner) (db string
 // ReadSessionDataFromDB reads the session data out of tdb and then
 // allows the caller to modify it with the passed function.
 func ReadSessionDataFromDB(
-	t *testing.T, tdb *sqlutils.SQLRunner, override func(sd *sessiondata.SessionData),
+	t *testing.T,
+	tdb *sqlutils.SQLRunner,
+	override func(sd *sessiondata.SessionData, localData sessiondatapb.LocalOnlySessionData),
 ) sessiondata.SessionData {
 	hexSessionData := tdb.QueryStr(t, `SELECT encode(crdb_internal.serialize_session(), 'hex')`)
 	if len(hexSessionData) == 0 {
@@ -178,7 +175,7 @@ func ReadSessionDataFromDB(
 		t.Fatal(err)
 	}
 	sd.SessionData = m.SessionData
-	override(sd)
+	override(sd, m.LocalOnlySessionData)
 	return *sd
 }
 

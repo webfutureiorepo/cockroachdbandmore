@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -345,19 +340,6 @@ SET CLUSTER SETTING sql.defaults.use_declarative_schema_changer = 'off';
 				`ALTER TABLE t DROP COLUMN j`,
 			},
 			validations: commonValidations,
-		},
-		{
-			name: "alter column type",
-			setupStmts: []string{
-				commonCreateTable,
-				commonPopulateData,
-				`SET enable_experimental_alter_column_type_general = true`,
-			},
-			truncateStmt: "TRUNCATE TABLE t",
-			stmts: []string{
-				`ALTER TABLE t ALTER COLUMN j TYPE STRING`,
-			},
-			expErrRE: `pq: unimplemented: cannot perform TRUNCATE on "t" which has an ongoing column type change`,
 		},
 	}
 	for _, tc := range cases {

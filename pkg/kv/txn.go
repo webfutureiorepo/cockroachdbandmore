@@ -1,20 +1,17 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kv
 
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/isolation"
@@ -27,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -46,6 +44,29 @@ import (
 // path for some reason), and the async pool is full (i.e. the system is
 // under load), then it makes sense to abandon the cleanup before too long.
 const asyncRollbackTimeout = time.Minute
+
+// MaxInternalTxnAutoRetries controls the maximum number of auto-retries a call
+// to kv.DB.Txn will perform before aborting the transaction and returning an
+// error. This is used to prevent infinite retry loops where a transaction has
+// little chance of succeeding in the future but continues to hold locks from
+// earlier epochs.
+var MaxInternalTxnAutoRetries = settings.RegisterIntSetting(
+	settings.ApplicationLevel,
+	"kv.transaction.internal.max_auto_retries",
+	"controls the maximum number of auto-retries an internal KV transaction will "+
+		"perform before aborting and returning an error. Can be set to 0 to disable any "+
+		"retry attempt.",
+	100,
+	settings.NonNegativeInt,
+)
+
+var ErrAutoRetryLimitExhausted = errors.New("retry limit exhausted")
+
+// IsAutoRetryLimitExhaustedError checks if the given error indicates
+// that the maximum number of transaction auto-retries has been reached.
+func IsAutoRetryLimitExhaustedError(err error) bool {
+	return errors.Is(err, ErrAutoRetryLimitExhausted)
+}
 
 // Txn is an in-progress distributed database transaction. A Txn is safe for
 // concurrent use by multiple goroutines.
@@ -241,6 +262,14 @@ func (txn *Txn) ID() uuid.UUID {
 	return txn.mu.ID
 }
 
+// Key returns the current "anchor" key of the transaction, or nil if no such
+// key has been set because the transaction has not yet acquired any locks.
+func (txn *Txn) Key() roachpb.Key {
+	txn.mu.Lock()
+	defer txn.mu.Unlock()
+	return txn.mu.sender.Key()
+}
+
 // Epoch exports the txn's epoch.
 func (txn *Txn) Epoch() enginepb.TxnEpoch {
 	txn.mu.Lock()
@@ -253,27 +282,25 @@ func (txn *Txn) statusLocked() roachpb.TransactionStatus {
 	return txn.mu.sender.TxnStatus()
 }
 
-// IsCommitted returns true iff the transaction has the committed status.
-func (txn *Txn) IsCommitted() bool {
+// hasStatus returns true iff the transaction has the provided status.
+func (txn *Txn) hasStatus(s roachpb.TransactionStatus) bool {
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
-	return txn.statusLocked() == roachpb.COMMITTED
+	return txn.statusLocked() == s
 }
 
+// IsCommitted returns true iff the transaction has the committed status.
+func (txn *Txn) IsCommitted() bool { return txn.hasStatus(roachpb.COMMITTED) }
+
 // IsAborted returns true iff the transaction has the aborted status.
-func (txn *Txn) IsAborted() bool {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	return txn.statusLocked() == roachpb.ABORTED
-}
+func (txn *Txn) IsAborted() bool { return txn.hasStatus(roachpb.ABORTED) }
+
+// IsPrepared returns true iff the transaction has the prepared status.
+func (txn *Txn) IsPrepared() bool { return txn.hasStatus(roachpb.PREPARED) }
 
 // IsOpen returns true iff the transaction is in the open state where
 // it can accept further commands.
-func (txn *Txn) IsOpen() bool {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	return txn.statusLocked() == roachpb.PENDING
-}
+func (txn *Txn) IsOpen() bool { return txn.hasStatus(roachpb.PENDING) }
 
 // isClientFinalized returns true if the client has issued an EndTxn request in
 // an attempt to finalize the transaction.
@@ -586,20 +613,6 @@ func (txn *Txn) CPut(ctx context.Context, key, value interface{}, expValue []byt
 	return getOneErr(txn.Run(ctx, b), b)
 }
 
-// InitPut sets the first value for a key to value. An error is reported if a
-// value already exists for the key and it's not equal to the value passed in.
-// If failOnTombstones is set to true, tombstones count as mismatched values
-// and will cause a ConditionFailedError.
-//
-// key can be either a byte slice or a string. value can be any key type, a
-// protoutil.Message or any Go primitive type (bool, int, etc). It is illegal to
-// set value to nil.
-func (txn *Txn) InitPut(ctx context.Context, key, value interface{}, failOnTombstones bool) error {
-	b := txn.NewBatch()
-	b.InitPut(key, value, failOnTombstones)
-	return getOneErr(txn.Run(ctx, b), b)
-}
-
 // Inc increments the integer value at key. If the key does not exist it will
 // be created with an initial value of 0 which will then be incremented. If the
 // key exists but was set using Put or CPut an error will be returned.
@@ -864,7 +877,7 @@ func (txn *Txn) UpdateDeadline(ctx context.Context, deadline hlc.Timestamp) erro
 // the current time, except in extraordinary circumstances. In cases where
 // considering it helps, it helps a lot. In cases where considering it
 // does not help, it does not hurt much.
-func (txn *Txn) DeadlineLikelySufficient(sv *settings.Values) bool {
+func (txn *Txn) DeadlineLikelySufficient() bool {
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
 	// Instead of using the current HLC clock we will
@@ -876,6 +889,7 @@ func (txn *Txn) DeadlineLikelySufficient(sv *settings.Values) bool {
 	// 3) If we are writing to non-blocking ranges than any
 	//    push will be into the future.
 	getTargetTS := func() hlc.Timestamp {
+		sv := txn.db.SettingsValues()
 		now := txn.db.Clock().NowAsClockTimestamp()
 		maxClockOffset := txn.db.Clock().MaxOffset()
 		lagTargetDuration := closedts.TargetDuration.Get(sv)
@@ -974,6 +988,21 @@ func (txn *Txn) rollback(ctx context.Context) *kvpb.Error {
 	return nil
 }
 
+// Prepare sends an EndTxnRequest with Prepare=true. Once a transaction is
+// prepared, it cannot be used to perform any more reads or writes. A prepared
+// transaction can only be committed or rolled back.
+func (txn *Txn) Prepare(ctx context.Context) error {
+	if txn.typ != RootTxn {
+		return errors.WithContextTags(errors.AssertionFailedf("Prepare() called on leaf txn"), ctx)
+	}
+
+	et := endTxnReq(true, txn.deadline())
+	et.req.Prepare = true
+	ba := &kvpb.BatchRequest{Requests: et.unionArr[:]}
+	_, pErr := txn.Send(ctx, ba)
+	return pErr.GoError()
+}
+
 // AddCommitTrigger adds a closure to be executed on successful commit
 // of the transaction.
 func (txn *Txn) AddCommitTrigger(trigger func(ctx context.Context)) {
@@ -1025,7 +1054,10 @@ func (e *AutoCommitError) Error() string {
 func (txn *Txn) exec(ctx context.Context, fn func(context.Context, *Txn) error) (err error) {
 	// Run fn in a retry loop until we encounter a success or
 	// error condition this loop isn't capable of handling.
-	for {
+	retryOpts := base.DefaultRetryOptions()
+	retryOpts.InitialBackoff = 20 * time.Millisecond
+	retryOpts.MaxBackoff = 200 * time.Millisecond
+	for r := retry.Start(retryOpts); r.Next(); {
 		if err := ctx.Err(); err != nil {
 			return errors.Wrap(err, "txn exec")
 		}
@@ -1070,7 +1102,7 @@ func (txn *Txn) exec(ctx context.Context, fn func(context.Context, *Txn) error) 
 					// TransactionRetryWithProtoRefreshError if the closure ran another
 					// transaction internally and let the error propagate upwards instead
 					// of handling it.
-					return errors.Wrapf(err, "retryable error from another txn")
+					return errors.Wrap(errors.Opaque(err), "retryable error from another txn")
 				}
 				if txn.isClientFinalized() {
 					// We've already committed or rolled back, so we can't retry. The
@@ -1084,6 +1116,38 @@ func (txn *Txn) exec(ctx context.Context, fn func(context.Context, *Txn) error) 
 
 		if !retryable {
 			break
+		}
+
+		// Determine whether the transaction has exceeded the maximum number of
+		// automatic retries. We check this after each failed attempt to allow the
+		// cluster setting to be changed while a transaction is stuck in a retry
+		// loop.
+		maxRetries := math.MaxInt64
+		if txn.db.ctx.Settings != nil {
+			// txn.db.ctx.Settings == nil is only expected in tests.
+			maxRetries = int(MaxInternalTxnAutoRetries.Get(&txn.db.ctx.Settings.SV))
+		}
+		// Add 1 because r.CurrentAttempt() starts at 0.
+		attempt := r.CurrentAttempt() + 1
+		if attempt > maxRetries {
+			// If the retries limit has been exceeded, rollback and return an error.
+			rollbackErr := txn.Rollback(ctx)
+			// NOTE: we don't errors.Wrap the most recent retry error because we want
+			// to terminate it here. Instead, we mark the error to allow callers to
+			// detect this condition and avoid automatic retries. We also include the
+			// original error in the error message.
+			err = errors.Mark(errors.Errorf("have retried transaction: %s %d times, most recently because of the "+
+				"retryable error: %s. Terminating retry loop and returning error due to cluster setting %s (%d). "+
+				"Rollback error: %v.", txn.DebugName(), attempt, err, MaxInternalTxnAutoRetries.Name(), maxRetries, rollbackErr),
+				ErrAutoRetryLimitExhausted)
+			log.Warningf(ctx, "%v", err)
+			break
+		}
+
+		const warnEvery = 10
+		if attempt%warnEvery == 0 {
+			log.Warningf(ctx, "have retried transaction: %s %d times, most recently because of the "+
+				"retryable error: %s. Is the transaction stuck in a retry loop?", txn.DebugName(), attempt, err)
 		}
 
 		if err := txn.PrepareForRetry(ctx); err != nil {

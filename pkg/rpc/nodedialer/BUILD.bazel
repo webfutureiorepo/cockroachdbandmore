@@ -6,16 +6,21 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/rpc/nodedialer",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/base",
+        "//pkg/clusterversion",
         "//pkg/kv/kvbase",
         "//pkg/kv/kvpb",
         "//pkg/roachpb",
         "//pkg/rpc",
+        "//pkg/settings",
+        "//pkg/settings/cluster",
         "//pkg/util/circuit",
         "//pkg/util/log",
+        "//pkg/util/metamorphic",
         "//pkg/util/stop",
         "//pkg/util/tracing",
         "@com_github_cockroachdb_errors//:errors",
-        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//:grpc",
     ],
 )
 
@@ -24,10 +29,6 @@ go_test(
     size = "small",
     srcs = ["nodedialer_test.go"],
     embed = [":nodedialer"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/clusterversion",
         "//pkg/kv/kvpb",
@@ -46,7 +47,7 @@ go_test(
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
     ],
 )

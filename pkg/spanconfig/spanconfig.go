@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfig
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -61,6 +57,11 @@ type KVAccessor interface {
 	// its operations discarded if aborted, valid only if committed). If nil, a
 	// transaction is created internally for every operation.
 	WithTxn(context.Context, *kv.Txn) KVAccessor
+
+	// WithISQLTxn returns a KVAccessor that runs using the given isql.Txn (with
+	// its operations discarded if aborted, valid only if committed). This makes
+	// it possible to use the KVAccessor in the context of a SQL transaction.
+	WithISQLTxn(context.Context, isql.Txn) KVAccessor
 }
 
 // KVSubscriber presents a consistent[1] snapshot of a StoreReader and
@@ -240,9 +241,9 @@ type Store interface {
 
 // StoreWriter is the write-only portion of the Store interface.
 type StoreWriter interface {
-	// Apply applies a batch of non-overlapping updates atomically[1] and
-	// returns (i) the existing spans that were deleted, and (ii) the entries
-	// that were newly added to make room for the batch.
+	// Apply applies a batch of non-overlapping updates atomically and returns (i)
+	// the existing spans that were deleted, and (ii) the entries that were newly
+	// added to make room for the batch.
 	//
 	// Span configs are stored in non-overlapping fashion. When an update
 	// overlaps with existing configs, the existing configs are deleted. If the
@@ -268,11 +269,7 @@ type StoreWriter interface {
 	//  Deleted  |             [------------- B -----------)[---------- C -----)
 	//  Added    |             [--- D ----)[-- B --)         [-- C -)[--- E ---)
 	//  Store*   | [--- A ----)[--- D ----)[-- B --)         [-- C -)[--- E ---)
-	//
-	// [1]: Unless dryrun is true. We'll still generate the same {deleted,added}
-	//      lists.
-	// TODO(arul): Get rid of dryrun; we don't make use of it anywhere.
-	Apply(ctx context.Context, dryrun bool, updates ...Update) (
+	Apply(ctx context.Context, updates ...Update) (
 		deleted []Target, added []Record,
 	)
 }
@@ -282,7 +279,11 @@ type StoreWriter interface {
 type StoreReader interface {
 	NeedsSplit(ctx context.Context, start, end roachpb.RKey) (bool, error)
 	ComputeSplitKey(ctx context.Context, start, end roachpb.RKey) (roachpb.RKey, error)
-	GetSpanConfigForKey(ctx context.Context, key roachpb.RKey) (roachpb.SpanConfig, error)
+	// GetSpanConfigForKey returns the span configuration for the
+	// given key and the span that the retruened configuration
+	// applies to. Callers can use the returned span to check if a
+	// request is completely contained by the returned config.
+	GetSpanConfigForKey(ctx context.Context, key roachpb.RKey) (roachpb.SpanConfig, roachpb.Span, error)
 }
 
 // Limiter is used to limit the number of span configs installed by secondary

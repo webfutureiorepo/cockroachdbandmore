@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package status
 
@@ -520,9 +515,12 @@ func TestMetricsRecorder(t *testing.T) {
 		{"testGauge", "gauge", 20},
 		{"testGaugeFloat64", "floatgauge", 20},
 		{"testCounter", "counter", 5},
-		{"testHistogram", "histogram", 9},
+		{"testHistogram", "histogram", 10},
 		{"testAggGauge", "agggauge", 4},
 		{"testAggCounter", "aggcounter", 7},
+		{"testCounterVec", "counterVec", 7},
+		{"testGaugeVec", "gaugeVec", 7},
+		{"testHistogramVec", "histogramVec", 7},
 
 		// Stats needed for store summaries.
 		{"replicas.leaders", "gauge", 1},
@@ -613,12 +611,36 @@ func TestMetricsRecorder(t *testing.T) {
 				})
 				reg.reg.AddMetric(h)
 				h.RecordValue(data.val)
-				for _, q := range metric.RecordHistogramQuantiles {
+				for _, q := range metric.HistogramMetricComputers {
+					if !q.IsSummaryMetric {
+						continue
+					}
 					addExpected(reg.prefix, data.name+q.Suffix, reg.source, 100, 10, reg.isNode)
 				}
 				addExpected(reg.prefix, data.name+"-count", reg.source, 100, 1, reg.isNode)
-				addExpected(reg.prefix, data.name+"-sum", reg.source, 100, 9, reg.isNode)
-				addExpected(reg.prefix, data.name+"-avg", reg.source, 100, 9, reg.isNode)
+				addExpected(reg.prefix, data.name+"-sum", reg.source, 100, 10, reg.isNode)
+			case "counterVec":
+				// Note that we don't call addExpected for this case. metric.PrometheusVector
+				// metrics should not be recorded into TSDB.
+				cv := metric.NewExportedCounterVec(metric.Metadata{Name: reg.prefix + data.name}, []string{"label1"})
+				reg.reg.AddMetric(cv)
+				cv.Inc(map[string]string{"label1": "label1"}, data.val)
+			case "gaugeVec":
+				// Note that we don't call addExpected for this case. metric.PrometheusVector
+				// metrics should not be recorded into TSDB.
+				gv := metric.NewExportedGaugeVec(metric.Metadata{Name: reg.prefix + data.name}, []string{"label1"})
+				reg.reg.AddMetric(gv)
+				gv.Update(map[string]string{"label1": "label1"}, data.val)
+			case "histogramVec":
+				// Note that we don't call addExpected for this case. metric.PrometheusVector
+				// metrics should not be recorded into TSDB.
+				hv := metric.NewExportedHistogramVec(
+					metric.Metadata{Name: reg.prefix + data.name},
+					metric.IOLatencyBuckets,
+					[]string{"label1"},
+				)
+				reg.reg.AddMetric(hv)
+				hv.Observe(map[string]string{"label1": "label1"}, float64(data.val))
 			default:
 				t.Fatalf("unexpected: %+v", data)
 			}

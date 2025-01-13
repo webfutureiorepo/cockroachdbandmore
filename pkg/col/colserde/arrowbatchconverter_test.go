@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colserde_test
 
@@ -50,7 +45,7 @@ func TestArrowBatchConverterRandom(t *testing.T) {
 	typs, b := randomBatch(testAllocator)
 	c, err := colserde.NewArrowBatchConverter(typs, colserde.BiDirectional, testMemAcc)
 	require.NoError(t, err)
-	defer c.Release(context.Background())
+	defer c.Close(context.Background())
 
 	// Make a copy of the original batch because the converter modifies and casts
 	// data without copying for performance reasons.
@@ -104,7 +99,7 @@ func TestRecordBatchRoundtripThroughBytes(t *testing.T) {
 		dest := testAllocator.NewMemBatchWithMaxCapacity(typs)
 		c, err := colserde.NewArrowBatchConverter(typs, colserde.BiDirectional, testMemAcc)
 		require.NoError(t, err)
-		defer c.Release(context.Background())
+		defer c.Close(context.Background())
 		r, err := colserde.NewRecordBatchSerializer(typs)
 		require.NoError(t, err)
 
@@ -177,12 +172,12 @@ func runConversionBenchmarks(
 			b.Fatalf("unexpected batch width: %d", batch.Width())
 		}
 		var typNameSuffix string
-		if typ == types.Bytes {
+		if typ.Identical(types.Bytes) {
 			tc.numBytes = int64(tc.bytesFixedLength * coldata.BatchSize())
 			if tc.bytesFixedLength == bytesInlinedLen {
 				typNameSuffix = "_inlined"
 			}
-		} else if typ == types.Decimal {
+		} else if typ.Identical(types.Decimal) {
 			// Decimal is variable length type, so we want to calculate precisely the
 			// total size of all decimals in the vector.
 			decimals := batch.ColVec(0).Decimal()
@@ -225,7 +220,7 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		func(b *testing.B, batch coldata.Batch, typ *types.T) {
 			c, err := colserde.NewArrowBatchConverter([]*types.T{typ}, colserde.BiDirectional, testMemAcc)
 			require.NoError(b, err)
-			defer c.Release(ctx)
+			defer c.Close(ctx)
 			var data []array.Data
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -242,7 +237,7 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		func(b *testing.B, batch coldata.Batch, typ *types.T) {
 			c, err := colserde.NewArrowBatchConverter([]*types.T{typ}, colserde.BiDirectional, testMemAcc)
 			require.NoError(b, err)
-			defer c.Release(ctx)
+			defer c.Close(ctx)
 			data, err := c.BatchToArrow(ctx, batch)
 			dataCopy := make([]array.Data, len(data))
 			require.NoError(b, err)

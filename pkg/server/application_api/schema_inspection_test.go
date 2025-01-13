@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package application_api_test
 
@@ -395,7 +390,7 @@ func TestAdminAPITableDetails(t *testing.T) {
 			// Verify statistics last updated.
 			{
 
-				showStatisticsForTableQuery := fmt.Sprintf("SELECT max(created) AS created FROM [SHOW STATISTICS FOR TABLE %s.%s]", escDBName, tblName)
+				showStatisticsForTableQuery := fmt.Sprintf("SELECT max(created) AS stats_last_created_at FROM [SHOW STATISTICS FOR TABLE %s.%s]", escDBName, tblName)
 
 				row := db.QueryRow(showStatisticsForTableQuery)
 				var createdTs time.Time
@@ -486,11 +481,6 @@ func TestAdminAPITableStats(t *testing.T) {
 	const nodeCount = 3
 	tc := testcluster.StartTestCluster(t, nodeCount, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationAuto,
-		ServerArgs: base.TestServerArgs{
-			ScanInterval:    time.Millisecond,
-			ScanMinIdleTime: time.Millisecond,
-			ScanMaxIdleTime: time.Millisecond,
-		},
 	})
 	defer tc.Stopper().Stop(context.Background())
 

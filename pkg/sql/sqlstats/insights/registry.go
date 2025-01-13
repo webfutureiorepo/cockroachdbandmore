@@ -1,24 +1,16 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package insights
 
 import (
-	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/obsservice/obspb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/redact"
 )
 
@@ -26,13 +18,16 @@ import (
 // statement execution to determine which statements are outliers and
 // writes insights into the provided sink.
 type lockingRegistry struct {
-	statements map[clusterunique.ID]*statementBuf
-	detector   detector
-	causes     *causes
-	sink       sink
+	statements   map[clusterunique.ID]*statementBuf
+	detector     detector
+	causes       *causes
+	store        *LockingStore
+	testingKnobs *TestingKnobs
 }
 
-var _ Writer = &lockingRegistry{}
+func (r *lockingRegistry) Clear() {
+	r.statements = make(map[clusterunique.ID]*statementBuf)
+}
 
 func (r *lockingRegistry) ObserveStatement(sessionID clusterunique.ID, statement *Statement) {
 	if !r.enabled() {
@@ -90,20 +85,24 @@ func addProblem(arr []Problem, n Problem) []Problem {
 	return append(arr, n)
 }
 
-func (r *lockingRegistry) ObserveTransaction(
-	ctx context.Context, sessionID clusterunique.ID, transaction *Transaction,
-) {
+func (r *lockingRegistry) ObserveTransaction(sessionID clusterunique.ID, transaction *Transaction) {
 	if !r.enabled() {
 		return
 	}
 	if transaction.ID.String() == "00000000-0000-0000-0000-000000000000" {
 		return
 	}
-	statements, ok := r.statements[sessionID]
+	statements, ok := func() (*statementBuf, bool) {
+		statements, ok := r.statements[sessionID]
+		if !ok {
+			return nil, false
+		}
+		delete(r.statements, sessionID)
+		return statements, true
+	}()
 	if !ok {
 		return
 	}
-	delete(r.statements, sessionID)
 	defer statements.release()
 
 	// Mark statements which are detected as slow or have a failed status.
@@ -179,12 +178,17 @@ func (r *lockingRegistry) ObserveTransaction(
 		transaction.LastErrorCode = lastStmtErrCode
 	}
 
-	r.sink.AddInsight(insight)
-	// Exporting Insights to Observability Service.
-	if SQLInsightsStatsExportEnabled.Get(&r.causes.st.SV) {
-		err := r.sink.ExportInsight(ctx, insight)
-		if err != nil {
-			log.Errorf(ctx, "encountered an error at insights export: %v", err)
+	r.store.addInsight(insight)
+}
+
+// clearSession removes the session from the registry and releases the
+// associated statement buffer.
+func (r *lockingRegistry) clearSession(sessionID clusterunique.ID) {
+	if b, ok := r.statements[sessionID]; ok {
+		delete(r.statements, sessionID)
+		b.release()
+		if r.testingKnobs != nil && r.testingKnobs.OnSessionClear != nil {
+			r.testingKnobs.OnSessionClear(sessionID)
 		}
 	}
 }
@@ -199,103 +203,14 @@ func (r *lockingRegistry) enabled() bool {
 	return r.detector.enabled()
 }
 
-func newRegistry(st *cluster.Settings, detector detector, sink sink) *lockingRegistry {
+func newRegistry(
+	st *cluster.Settings, detector detector, store *LockingStore, knobs *TestingKnobs,
+) *lockingRegistry {
 	return &lockingRegistry{
-		statements: make(map[clusterunique.ID]*statementBuf),
-		detector:   detector,
-		causes:     &causes{st: st},
-		sink:       sink,
+		statements:   make(map[clusterunique.ID]*statementBuf),
+		detector:     detector,
+		causes:       &causes{st: st},
+		store:        store,
+		testingKnobs: knobs,
 	}
-}
-
-func (s *Statement) CopyTo(
-	ctx context.Context, t *Transaction, session *Session, other *obspb.StatementInsightsStatistics,
-) {
-	if other == nil {
-		log.Errorf(ctx, "no object passed from pool for Insights exporter")
-		return
-	}
-
-	other.AutoRetryReason = s.AutoRetryReason
-	other.Contention = s.Contention
-	other.CPUSQLNanos = s.CPUSQLNanos
-	other.Database = s.Database
-	other.EndTime = &s.EndTime
-	other.ErrorCode = s.ErrorCode
-	other.FingerprintID = uint64(s.FingerprintID)
-	other.FullScan = s.FullScan
-	other.IndexRecommendations = s.IndexRecommendations
-	other.Nodes = s.Nodes
-	other.PlanGist = s.PlanGist
-	other.Query = s.Query
-	other.Retries = s.Retries
-	other.RowsRead = s.RowsRead
-	other.RowsWritten = s.RowsWritten
-	other.ServiceLatSeconds = s.LatencyInSeconds
-	other.StartTime = &s.StartTime
-	other.LastErrorRedactable = string(s.ErrorMsg.Redact())
-	var err error
-	other.ID, err = s.ID.MarshalJSON()
-	if err != nil {
-		log.Errorf(ctx, "marshalling statement insights ID for Insights exporter")
-	}
-
-	other.ApplicationName = t.ApplicationName
-	other.ImplicitTxn = t.ImplicitTxn
-	other.TxnFingerprintID = uint64(t.FingerprintID)
-	other.User = t.User
-	other.UserPriority = t.UserPriority
-
-	txnID, err := t.ID.MarshalJSON()
-	if err != nil {
-		log.Errorf(ctx, "marshalling transaction insights ID for Insights exporter")
-	} else {
-		other.TransactionID = txnID
-		other.ID = txnID
-	}
-	other.SessionID, err = session.ID.MarshalJSON()
-	if err != nil {
-		log.Errorf(ctx, "marshalling sessions ID for Insights exporter")
-	}
-
-	switch s.Status {
-	case Statement_Completed:
-		other.Status = obspb.StatementInsightsStatistics_Completed
-	case Statement_Failed:
-		other.Status = obspb.StatementInsightsStatistics_Failed
-	default:
-		other.Status = obspb.StatementInsightsStatistics_Completed
-	}
-
-	switch s.Problem {
-	case Problem_FailedExecution:
-		other.Problem = obspb.StatementInsightsStatistics_FailedExecution
-	case Problem_SlowExecution:
-		other.Problem = obspb.StatementInsightsStatistics_SlowExecution
-	default:
-		other.Problem = obspb.StatementInsightsStatistics_None
-	}
-
-	other.Causes = []obspb.StatementInsightsStatistics_Cause{}
-	for _, c := range s.Causes {
-		switch c {
-		case Cause_SuboptimalPlan:
-			other.Causes = append(other.Causes, obspb.StatementInsightsStatistics_SuboptimalPlan)
-		case Cause_HighRetryCount:
-			other.Causes = append(other.Causes, obspb.StatementInsightsStatistics_HighRetryCount)
-		case Cause_PlanRegression:
-			other.Causes = append(other.Causes, obspb.StatementInsightsStatistics_PlanRegression)
-		case Cause_HighContention:
-			other.Causes = append(other.Causes, obspb.StatementInsightsStatistics_HighContention)
-		default:
-			other.Causes = append(other.Causes, obspb.StatementInsightsStatistics_Unset)
-		}
-	}
-
-	// TODO(maryliag): add information about Contention Events
-	// and Idle/Parse/Run Latencies.
-	//other.ContentionEvents
-	//other.IdleLatSeconds
-	//other.ParseLatSeconds
-	//other.RunLatSeconds
 }

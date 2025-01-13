@@ -12,6 +12,7 @@ go_library(
         "//pkg/util/log",
         "//pkg/util/stop",
         "//pkg/util/timeutil",
+        "@com_github_cockroachdb_redact//:redact",
     ],
 )
 
@@ -20,10 +21,6 @@ go_test(
     size = "small",
     srcs = ["batcher_test.go"],
     embed = [":requestbatcher"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/kv/kvpb",
         "//pkg/roachpb",
@@ -31,6 +28,7 @@ go_test(
         "//pkg/util/leaktest",
         "//pkg/util/stop",
         "//pkg/util/timeutil",
+        "@com_github_cockroachdb_errors//:errors",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_x_sync//errgroup",

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -27,12 +21,16 @@ func addMonitor(
 	t *testing.T,
 	ctx context.Context,
 	st *cluster.Settings,
-	name string,
+	name redact.SafeString,
 	parent *mon.BytesMonitor,
 	usedBytes int64,
 	reservedBytes int64,
 ) *mon.BytesMonitor {
-	m := mon.NewMonitor(redact.RedactableString(name), mon.MemoryResource, nil, nil, 1, math.MaxInt64, st)
+	m := mon.NewMonitor(mon.Options{
+		Name:      mon.MakeMonitorName(name),
+		Increment: 1,
+		Settings:  st,
+	})
 	m.Start(ctx, parent, mon.NewStandaloneBudget(reservedBytes))
 	if usedBytes != 0 {
 		acc := m.MakeBoundAccount()

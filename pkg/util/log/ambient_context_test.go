@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -70,16 +65,13 @@ func TestAnnotateCtxSpan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Annotate a context that has no span. The tracer will create a non-recordable
-	// span. We just check here that AnnotateCtxWithSpan properly returns it to the
-	// caller.
+	// Annotate a context that has no span. The tracer will not create a span.
 
 	ac.Tracer = tracer
 	ctx, sp := ac.AnnotateCtxWithSpan(context.Background(), "s")
 	defer sp.Finish()
+	require.Nil(t, sp)
 	require.Equal(t, sp, tracing.SpanFromContext(ctx))
-	require.NotNil(t, sp)
-	require.False(t, sp.IsVerbose())
 }
 
 func TestAnnotateCtxNodeStoreReplica(t *testing.T) {

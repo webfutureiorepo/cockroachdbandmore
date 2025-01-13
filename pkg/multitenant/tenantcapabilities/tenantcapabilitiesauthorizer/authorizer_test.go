@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcapabilitiesauthorizer
 
@@ -115,6 +110,12 @@ func TestDataDriven(t *testing.T) {
 					return "ok"
 				}
 				return err.Error()
+			case "has-tsdb-all-capability":
+				err := authorizer.HasTSDBAllMetricsCapability(context.Background(), tenID)
+				if err == nil {
+					return "ok"
+				}
+				return err.Error()
 			case "set-authorizer-mode":
 				var valStr string
 				d.ScanArgs(t, "value", &valStr)
@@ -122,7 +123,7 @@ func TestDataDriven(t *testing.T) {
 				if !ok {
 					t.Fatalf("unknown authorizer mode %s", valStr)
 				}
-				authorizerMode.Override(ctx, &clusterSettings.SV, val)
+				authorizerMode.Override(ctx, &clusterSettings.SV, authorizerModeType(val))
 			case "is-exempt-from-rate-limiting":
 				return fmt.Sprintf("%t", authorizer.IsExemptFromRateLimiting(context.Background(), tenID))
 			default:
@@ -176,14 +177,39 @@ func (m mockReader) GetGlobalCapabilityState() map[roachpb.TenantID]*tenantcapab
 }
 
 func TestAllBatchCapsAreBoolean(t *testing.T) {
-	for _, capID := range reqMethodToCap {
+	checkCap := func(t *testing.T, capID tenantcapabilities.ID) {
 		if capID >= tenantcapabilities.MaxCapabilityID {
 			// One of the special values.
-			continue
+			return
 		}
 		caps := &tenantcapabilitiespb.TenantCapabilities{}
 		var v *tenantcapabilities.BoolValue
 		require.Implements(t, v, tenantcapabilities.MustGetValueByID(caps, capID))
+	}
+
+	for m, mc := range reqMethodToCap {
+		if mc.capFn != nil {
+			switch m {
+			case kvpb.EndTxn:
+				// Handled below.
+			default:
+				t.Fatalf("unexpected capability function for %s", m)
+			}
+		} else {
+			checkCap(t, mc.capID)
+		}
+	}
+
+	{
+		const method = kvpb.EndTxn
+		mc := reqMethodToCap[method]
+		capIDs := []tenantcapabilities.ID{
+			mc.get(&kvpb.EndTxnRequest{}),
+			mc.get(&kvpb.EndTxnRequest{Prepare: true}),
+		}
+		for _, capID := range capIDs {
+			checkCap(t, capID)
+		}
 	}
 }
 

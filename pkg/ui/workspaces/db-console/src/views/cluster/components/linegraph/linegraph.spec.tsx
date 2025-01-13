@@ -1,30 +1,26 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { shallow, ShallowWrapper } from "enzyme";
-import React from "react";
-import uPlot from "uplot";
-import _ from "lodash";
-
-import LineGraph, { InternalLineGraph, OwnProps } from "./index";
-import { fillGaps } from "./index";
-import * as timewindow from "src/redux/timeScale";
-import * as protos from "src/js/protos";
-import { Axis } from "src/views/shared/components/metricQuery";
 import {
   calculateXAxisDomain,
   calculateYAxisDomain,
   util,
 } from "@cockroachlabs/cluster-ui";
-import { configureUPlotLineChart } from "src/views/cluster/util/graphs";
+import { shallow, ShallowWrapper } from "enzyme";
+import flatMap from "lodash/flatMap";
+import isEmpty from "lodash/isEmpty";
 import Long from "long";
+import React from "react";
+import uPlot from "uplot";
+
+import * as protos from "src/js/protos";
+import * as timewindow from "src/redux/timeScale";
+import { configureUPlotLineChart } from "src/views/cluster/util/graphs";
+import { Axis } from "src/views/shared/components/metricQuery";
+
+import LineGraph, { fillGaps, InternalLineGraph, OwnProps } from "./index";
 
 describe("<LineGraph>", function () {
   let mockProps: OwnProps;
@@ -114,7 +110,7 @@ describe("<LineGraph>", function () {
         ],
       },
     });
-    const result = _.isEmpty(instance.u);
+    const result = isEmpty(instance.u);
     expect(result).toEqual(false);
   });
 
@@ -148,7 +144,7 @@ describe("<LineGraph>", function () {
     };
     const mockData: protos.cockroach.ts.tspb.TimeSeriesQueryResponse =
       new protos.cockroach.ts.tspb.TimeSeriesQueryResponse();
-    const resultDatapoints = _.flatMap(mockData.results, result =>
+    const resultDatapoints = flatMap(mockData.results, result =>
       result.datapoints.map(dp => dp.value),
     );
     const mockOptions = configureUPlotLineChart(
@@ -162,7 +158,6 @@ describe("<LineGraph>", function () {
           util.NanoToMilli(mockProps.timeInfo.start.toNumber()),
           util.NanoToMilli(mockProps.timeInfo.end.toNumber()),
         ),
-      false,
     );
     instance.u = new uPlot(mockOptions);
     const setDataSpy = jest.spyOn(instance.u, "setData");

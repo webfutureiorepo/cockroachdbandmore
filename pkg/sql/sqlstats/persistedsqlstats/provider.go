@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // persistedsqlstats is a subsystem that is responsible for flushing node-local
 // in-memory stats into persisted system tables.
@@ -46,9 +41,11 @@ type Config struct {
 	JobRegistry             *jobs.Registry
 
 	// Metrics.
-	FlushCounter   *metric.Counter
-	FlushDuration  metric.IHistogram
-	FailureCounter *metric.Counter
+	FlushesSuccessful       *metric.Counter
+	FlushLatency            metric.IHistogram
+	FlushDoneSignalsIgnored *metric.Counter
+	FlushesFailed           *metric.Counter
+	FlushedFingerprintCount *metric.Counter
 
 	// Testing knobs.
 	Knobs *sqlstats.TestingKnobs
@@ -63,12 +60,6 @@ type PersistedSQLStats struct {
 	*sslocal.SQLStats
 
 	cfg *Config
-
-	// memoryPressureSignal is used by the persistedsqlstats.ApplicationStats to signal
-	// memory pressure during stats recording. A signal is emitted through this
-	// channel either if the fingerprint limit or the memory limit has been
-	// exceeded.
-	memoryPressureSignal chan struct{}
 
 	// Used to signal the flush completed.
 	flushDoneMu struct {
@@ -97,10 +88,9 @@ var _ sqlstats.Provider = &PersistedSQLStats{}
 // New returns a new instance of the PersistedSQLStats.
 func New(cfg *Config, memSQLStats *sslocal.SQLStats) *PersistedSQLStats {
 	p := &PersistedSQLStats{
-		SQLStats:             memSQLStats,
-		cfg:                  cfg,
-		memoryPressureSignal: make(chan struct{}),
-		drain:                make(chan struct{}),
+		SQLStats: memSQLStats,
+		cfg:      cfg,
+		drain:    make(chan struct{}),
 	}
 
 	p.jobMonitor = jobMonitor{
@@ -167,7 +157,7 @@ func (s *PersistedSQLStats) startSQLStatsFlushLoop(ctx context.Context, stopper 
 		})
 
 		initialDelay := s.nextFlushInterval()
-		timer := timeutil.NewTimer()
+		var timer timeutil.Timer
 		timer.Reset(initialDelay)
 
 		log.Infof(ctx, "starting sql-stats-worker with initial delay: %s", initialDelay)
@@ -178,10 +168,6 @@ func (s *PersistedSQLStats) startSQLStatsFlushLoop(ctx context.Context, stopper 
 			select {
 			case <-timer.C:
 				timer.Read = true
-			case <-s.memoryPressureSignal:
-				// We are experiencing memory pressure, so we flush SQL stats to disk
-				// immediately, rather than waiting the full flush interval, in an
-				// attempt to relieve some of that pressure.
 			case <-resetIntervalChanged:
 				// In this case, we would restart the loop without performing any flush
 				// and recalculate the flush interval in the for-loop's post statement.
@@ -192,7 +178,12 @@ func (s *PersistedSQLStats) startSQLStatsFlushLoop(ctx context.Context, stopper 
 				return
 			}
 
-			s.Flush(ctx)
+			flushed := s.MaybeFlush(ctx, stopper)
+
+			if !flushed {
+				// If the flush did not do any work, don't signal flush completion.
+				continue
+			}
 
 			// Tell the local activity translator job, if any, that we've
 			// performed a round of flush.
@@ -207,6 +198,14 @@ func (s *PersistedSQLStats) startSQLStatsFlushLoop(ctx context.Context, stopper 
 					return
 				case <-s.drain:
 					return
+				default:
+					// Don't block the flush loop if the sql activity update job is not
+					// ready to receive. We should at least continue to collect and flush
+					// stats for this node.
+					s.cfg.FlushDoneSignalsIgnored.Inc(1)
+					if log.V(1) {
+						log.Warning(ctx, "sql-stats-worker: unable to signal flush completion")
+					}
 				}
 			}
 		}
@@ -262,15 +261,4 @@ func (s *PersistedSQLStats) jitterInterval(interval time.Duration) time.Duration
 
 	jitteredInterval := time.Duration(frac * float64(interval.Nanoseconds()))
 	return jitteredInterval
-}
-
-// GetApplicationStats implements sqlstats.Provider interface.
-func (s *PersistedSQLStats) GetApplicationStats(
-	appName string, internal bool,
-) sqlstats.ApplicationStats {
-	appStats := s.SQLStats.GetApplicationStats(appName, internal)
-	return &ApplicationStats{
-		ApplicationStats:     appStats,
-		memoryPressureSignal: s.memoryPressureSignal,
-	}
 }

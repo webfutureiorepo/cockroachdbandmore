@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colflow
 
@@ -55,9 +50,9 @@ func convertToVecTree(
 		// the creator.
 		&fakeBatchReceiver{},
 		localProcessors,
-		nil,       /* localVectorSources */
-		func() {}, /* onFlowCleanupEnd */
-		"",        /* statementSQL */
+		nil, /* localVectorSources */
+		nil, /* onFlowCleanupEnd */
+		"",  /* statementSQL */
 	)
 	creator := newVectorizedFlowCreator(
 		flowBase, nil /* componentCreator */, recordingStats,
@@ -65,6 +60,13 @@ func convertToVecTree(
 	)
 	fuseOpt := flowinfra.FuseNormally
 	if flowCtx.Local && !execinfra.HasParallelProcessors(flow) {
+		// TODO(yuzefovich): this check doesn't exactly match what we have on
+		// the main code path where we use !LocalState.MustUseLeafTxn() in the
+		// conditional. Concretely, it means that if we choose to use the
+		// Streamer at the execution time, we will use FuseNormally, yet here
+		// we'd pick FuseAggressively. The issue is minor though since we do
+		// capture the correct vectorized plan in the stmt bundle, so only
+		// explicit EXPLAIN (VEC) is affected.
 		fuseOpt = flowinfra.FuseAggressively
 	}
 	opChains, _, err = creator.setupFlow(ctx, flow.Processors, fuseOpt)

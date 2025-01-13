@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package base
 
@@ -16,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server/autoconfig/acprovider"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils/listenerutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -48,7 +42,8 @@ type TestServerArgs struct {
 	// If not set (and hence the server is the only one in the cluster), the
 	// default zone config will be overridden to disable all replication - so that
 	// tests don't get log spam about ranges not being replicated enough. This
-	// is always set to true when the server is started via a TestCluster.
+	// is always set to true when the server is started via a TestCluster, unless
+	// the StartSingleNode TestClusterArgs is set.
 	PartOfCluster bool
 
 	// Listener (if nonempty) is the listener to use for all incoming RPCs.
@@ -113,8 +108,6 @@ type TestServerArgs struct {
 	TimeSeriesQueryMemoryBudget int64
 	SQLMemoryPoolSize           int64
 	CacheSize                   int64
-	SnapshotSendLimit           int64
-	SnapshotApplyLimit          int64
 
 	// By default, test servers have AutoInitializeCluster=true set in
 	// their config. If NoAutoInitializeCluster is set, that behavior is disabled
@@ -169,14 +162,6 @@ type TestServerArgs struct {
 	// CockroachDB upgrades and periodically reports diagnostics to
 	// Cockroach Labs. Should remain disabled during unit testing.
 	StartDiagnosticsReporting bool
-
-	// ObsServiceAddr is the address to which events will be exported over OTLP.
-	// If empty, exporting events is inhibited.
-	ObsServiceAddr string
-
-	// AutoConfigProvider provides auto-configuration tasks to apply on
-	// the cluster during server initialization.
-	AutoConfigProvider acprovider.Provider
 }
 
 // TestClusterArgs contains the parameters one can set when creating a test
@@ -196,6 +181,10 @@ type TestClusterArgs struct {
 	// IDs unpredictable. Even in ParallelStart mode, StartTestCluster
 	// waits for all nodes to start before returning.
 	ParallelStart bool
+	// StartSingleNode will initialize the cluster like 'cockroach
+	// start-single-node'. Attempts to add more than one node to the cluster will
+	// fail.
+	StartSingleNode bool
 
 	// ServerArgsPerNode override the default ServerArgs with the value in this
 	// map. The map's key is an index within TestCluster.Servers. If there is
@@ -513,15 +502,12 @@ func DefaultTestTempStorageConfig(st *cluster.Settings) TempStorageConfig {
 func DefaultTestTempStorageConfigWithSize(
 	st *cluster.Settings, maxSizeBytes int64,
 ) TempStorageConfig {
-	monitor := mon.NewMonitor(
-		"in-mem temp storage",
-		mon.DiskResource,
-		nil,             /* curCount */
-		nil,             /* maxHist */
-		1024*1024,       /* increment */
-		maxSizeBytes/10, /* noteworthy */
-		st,
-	)
+	monitor := mon.NewMonitor(mon.Options{
+		Name:      mon.MakeMonitorName("in-mem temp storage"),
+		Res:       mon.DiskResource,
+		Increment: 1024 * 1024,
+		Settings:  st,
+	})
 	monitor.Start(context.Background(), nil /* pool */, mon.NewStandaloneBudget(maxSizeBytes))
 	return TempStorageConfig{
 		InMemory: true,
@@ -631,7 +617,11 @@ type TestTenantArgs struct {
 	// determine the tenant's HTTP port.
 	StartingHTTPPort int
 
-	// TracingDefault controls whether the tracing will be on or off by default.
+	// Tracer, if set, will be used by the Server for creating Spans.
+	Tracer *tracing.Tracer
+
+	// TracingDefault controls whether the tracing will be on or off by default,
+	// if Tracer is not set.
 	TracingDefault tracing.TracingMode
 
 	// GoroutineDumpDirName is used to initialize the same named field on the
@@ -645,6 +635,13 @@ type TestTenantArgs struct {
 	// heapprofiler. If empty, no heap profiles will be collected during the test.
 	// If set, this directory should be cleaned up after the test completes.
 	HeapProfileDirName string
+
+	// CPUProfileDirName is used to initialize the same named field on the
+	// SQLServer.BaseConfig field. It is the directory name for cpu profiles
+	// using cpuprofiler. If empty, no cpu profiles will be collected during the
+	// test. If set, this directory should be cleaned up after the test
+	// completes.
+	CPUProfileDirName string
 
 	// StartDiagnosticsReporting checks cluster.TelemetryOptOut(), and
 	// if not disabled starts the asynchronous goroutine that checks for

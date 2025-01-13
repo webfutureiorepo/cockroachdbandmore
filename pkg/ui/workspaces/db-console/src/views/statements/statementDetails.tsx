@@ -1,17 +1,28 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+import {
+  StatementDetails,
+  StatementDetailsDispatchProps,
+  StatementDetailsStateProps,
+  toRoundedDateRange,
+  util,
+  api as clusterUiApi,
+} from "@cockroachlabs/cluster-ui";
+import Long from "long";
+import moment from "moment-timezone";
 import { connect } from "react-redux";
+import { RouteComponentProps } from "react-router";
 import { withRouter } from "react-router-dom";
 import { createSelector } from "reselect";
-import Long from "long";
 
+import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
+import {
+  trackCancelDiagnosticsBundleAction,
+  trackDownloadDiagnosticsBundleAction,
+  trackStatementDetailsSubnavSelectionAction,
+} from "src/redux/analyticsActions";
 import {
   refreshLiveness,
   refreshNodes,
@@ -20,39 +31,23 @@ import {
   refreshUserSQLRoles,
   refreshStatementFingerprintInsights,
 } from "src/redux/apiReducers";
-import { RouteComponentProps } from "react-router";
 import { nodeRegionsByIDSelector } from "src/redux/nodes";
 import { AdminUIState, AppDispatch } from "src/redux/state";
-import { selectDiagnosticsReportsByStatementFingerprint } from "src/redux/statements/statementsSelectors";
-import {
-  StatementDetails,
-  StatementDetailsDispatchProps,
-  StatementDetailsStateProps,
-  toRoundedDateRange,
-  util,
-} from "@cockroachlabs/cluster-ui";
 import {
   cancelStatementDiagnosticsReportAction,
   createStatementDiagnosticsReportAction,
   setGlobalTimeScaleAction,
 } from "src/redux/statements";
-import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
+import { selectDiagnosticsReportsByStatementFingerprint } from "src/redux/statements/statementsSelectors";
+import { selectTimeScale } from "src/redux/timeScale";
 import {
   selectHasAdminRole,
   selectHasViewActivityRedactedRole,
 } from "src/redux/user";
-import {
-  trackCancelDiagnosticsBundleAction,
-  trackDownloadDiagnosticsBundleAction,
-  trackStatementDetailsSubnavSelectionAction,
-} from "src/redux/analyticsActions";
 import { StatementDetailsResponseMessage } from "src/util/api";
+import { appNamesAttr, statementAttr } from "src/util/constants";
 import { getMatchParamByName, queryByName } from "src/util/query";
 
-import { appNamesAttr, statementAttr } from "src/util/constants";
-import { selectTimeScale } from "src/redux/timeScale";
-import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
-import moment from "moment-timezone";
 import { requestTimeLocalSetting } from "./statementsPage";
 
 const { generateStmtDetailsToID } = util;
@@ -182,7 +177,12 @@ const mapDispatchToProps: StatementDetailsDispatchProps = {
 };
 
 export default withRouter(
-  connect<StatementDetailsStateProps, StatementDetailsDispatchProps>(
+  connect<
+    StatementDetailsStateProps,
+    StatementDetailsDispatchProps,
+    RouteComponentProps,
+    AdminUIState
+  >(
     mapStateToProps,
     mapDispatchToProps,
   )(StatementDetails),

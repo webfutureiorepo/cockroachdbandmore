@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,21 +247,31 @@ func (q *quitTest) checkNoLeases(ctx context.Context, nodeID int) {
 
 			q.t.L().Printf("retrieving ranges for node %d\n", i)
 			// Get the report via HTTP.
-			// Flag -s is to remove progress on stderr, so that the buffer
-			// contains the JSON of the response and nothing else.
 			adminAddrs, err := q.c.InternalAdminUIAddr(ctx, q.t.L(), q.c.Node(i))
 			if err != nil {
 				q.Fatal(err)
 			}
-			result, err := q.c.RunWithDetailsSingleNode(ctx, q.t.L(), option.WithNodes(q.c.Node(i)),
-				"curl", "-s", fmt.Sprintf("http://%s/_status/ranges/local",
-					adminAddrs[0]))
+			url := fmt.Sprintf("https://%s/_status/ranges/local", adminAddrs[0])
+			client := roachtestutil.DefaultHTTPClient(q.c, q.t.L(), roachtestutil.HTTPTimeout(15*time.Second))
 			if err != nil {
 				q.Fatal(err)
 			}
+			var data []byte
+			func() {
+				response, err := client.Get(ctx, url)
+				if err != nil {
+					q.Fatal(err)
+				}
+				defer response.Body.Close()
+				data, err = io.ReadAll(response.Body)
+				if err != nil {
+					q.Fatal(err)
+				}
+			}()
+
 			// Persist the response to artifacts to aid debugging. See #75438.
 			_ = os.WriteFile(filepath.Join(q.t.ArtifactsDir(), fmt.Sprintf("status_ranges_n%d.json", i)),
-				[]byte(result.Stdout), 0644,
+				data, 0644,
 			)
 			// We need just a subset of the response. Make an ad-hoc
 			// struct with just the bits of interest.
@@ -286,7 +292,7 @@ func (q *quitTest) checkNoLeases(ctx context.Context, nodeID int) {
 				} `json:"ranges"`
 			}
 			var details jsonOutput
-			if err := json.Unmarshal([]byte(result.Stdout), &details); err != nil {
+			if err := json.Unmarshal(data, &details); err != nil {
 				q.Fatal(err)
 			}
 			// Some sanity check.
@@ -385,13 +391,10 @@ func registerQuitTransfersLeases(r registry.Registry) {
 	// kill. If the drain is successful, the leases are transferred
 	// successfully even if if the process terminates non-gracefully.
 	registerTest("drain", "v20.1.0", func(ctx context.Context, t test.Test, c cluster.Cluster, nodeID int) {
-		pgurl, err := roachtestutil.DefaultPGUrl(ctx, c, t.L(), c.Node(nodeID))
-		if err != nil {
-			t.Fatal(err)
-		}
 		result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(c.Node(nodeID)),
-			"./cockroach", "node", "drain", "--insecure", "--logtostderr=INFO",
-			fmt.Sprintf("--url=%s", pgurl),
+			"./cockroach", "node", "drain", "--logtostderr=INFO",
+			fmt.Sprintf("--port={pgport:%d}", nodeID),
+			fmt.Sprintf("--certs-dir %s", install.CockroachNodeCertsDir),
 		)
 		t.L().Printf("cockroach node drain:\n%s\n", result.Stdout+result.Stdout)
 		if err != nil {
@@ -432,13 +435,10 @@ func registerQuitTransfersLeases(r registry.Registry) {
 		// - we add one to bring the value back between 1 and NodeCount
 		//   inclusive.
 		otherNodeID := (nodeID % c.Spec().NodeCount) + 1
-		pgurl, err := roachtestutil.DefaultPGUrl(ctx, c, t.L(), c.Node(otherNodeID))
-		if err != nil {
-			t.Fatal(err)
-		}
 		result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(c.Node(otherNodeID)),
-			"./cockroach", "node", "drain", "--insecure", "--logtostderr=INFO",
-			fmt.Sprintf("--url=%s", pgurl),
+			"./cockroach", "node", "drain", "--logtostderr=INFO",
+			fmt.Sprintf("--port={pgport:%d}", otherNodeID),
+			fmt.Sprintf("--certs-dir %s", install.CockroachNodeCertsDir),
 			fmt.Sprintf("%d", nodeID),
 		)
 		t.L().Printf("cockroach node drain:\n%s\n", result.Stdout+result.Stderr)

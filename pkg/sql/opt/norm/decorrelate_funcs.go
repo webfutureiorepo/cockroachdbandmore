@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm
 
@@ -14,6 +9,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
@@ -45,6 +41,44 @@ func (c *CustomFuncs) HasHoistableSubquery(scalar opt.ScalarExpr) bool {
 }
 
 func (c *CustomFuncs) deriveHasHoistableSubquery(scalar opt.ScalarExpr) bool {
+	if c.deriveHasUnhoistableExpr(scalar) {
+		// Some expressions disqualify subquery-hoisting entirely.
+		return false
+	}
+	return c.deriveHasHoistableSubqueryImpl(scalar)
+}
+
+// deriveHasUnhoistableExpr checks for expressions within the given scalar
+// expression which cannot be hoisted. This is necessary beyond existing
+// volatility checks because of #97432: when a subquery-hoisting rule is
+// triggered, *all* correlated subqueries are hoisted, not just the leak-proof
+// subqueries. Therefore, it is necessary for correctness to avoid hoisting
+// entirely in the presence of certain expressions.
+func (c *CustomFuncs) deriveHasUnhoistableExpr(expr opt.Expr) bool {
+	switch t := expr.(type) {
+	case *memo.BarrierExpr:
+		// An optimization barrier indicates the presence of an expression which
+		// cannot be reordered with other expressions.
+		return true
+	case *memo.UDFCallExpr:
+		if t.Def.RoutineLang == tree.RoutineLangPLpgSQL {
+			// Hoisting a PL/pgSQL sub-routine could move it out of tail-call
+			// position, forcing inefficient nested execution.
+			//
+			// TODO(#119956): consider relaxing this for routines which aren't already
+			// in tail-call position.
+			return true
+		}
+	}
+	for i := 0; i < expr.ChildCount(); i++ {
+		if c.deriveHasUnhoistableExpr(expr.Child(i)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *CustomFuncs) deriveHasHoistableSubqueryImpl(scalar opt.ScalarExpr) bool {
 	switch t := scalar.(type) {
 	case *memo.SubqueryExpr:
 		return !t.Input.Relational().OuterCols.Empty()
@@ -89,6 +123,105 @@ func (c *CustomFuncs) deriveHasHoistableSubquery(scalar opt.ScalarExpr) bool {
 		}
 	}
 
+	// Special handling for conditional expressions, which maintain invariants
+	// about when input expressions are evaluated.
+	switch scalar.Op() {
+	case opt.CaseOp, opt.CoalesceOp, opt.IfErrOp:
+		return c.deriveConditionalHasHoistableSubquery(scalar)
+	}
+
+	// If HasHoistableSubquery is true for any child, then it's true for this
+	// expression as well. The exception is conditional expressions, which are
+	// handled above.
+	for i, n := 0, scalar.ChildCount(); i < n; i++ {
+		child := scalar.Child(i).(opt.ScalarExpr)
+		if c.deriveHasHoistableSubquery(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// deriveConditionalHasHoistableSubquery analyzes a conditional expression for
+// subqueries that can be "hoisted" into a join and replaced with a simple
+// variable reference. It returns true when there is at least one subquery that
+// can be hoisted, even if there is a subquery within the conditional expression
+// that cannot be hoisted.
+func (c *CustomFuncs) deriveConditionalHasHoistableSubquery(scalar opt.ScalarExpr) bool {
+	if !c.f.evalCtx.SessionData().OptimizerUseConditionalHoistFix {
+		return c.legacyDeriveConditionalHasHoistableSubquery(scalar)
+	}
+	// Conditional expressions maintain invariants about when input expressions
+	// are evaluated. For example, a CASE statement does not evaluate a WHEN
+	// branch until its guard condition passes. A child expression that is
+	// conditionally evaluated can only be hoisted if it is leak-proof, since
+	// hoisting can change whether / how many times an expression is evaluated.
+	var sharedProps props.Shared
+	deriveCanHoistChild := func(child opt.ScalarExpr, isConditional bool) bool {
+		if c.deriveHasHoistableSubquery(child) {
+			if isConditional {
+				memo.BuildSharedProps(child, &sharedProps, c.f.evalCtx)
+				return sharedProps.VolatilitySet.IsLeakproof()
+			}
+			return true
+		}
+		return false
+	}
+	switch t := scalar.(type) {
+	case *memo.CaseExpr:
+		// The input expression is always evaluated.
+		if c.deriveHasHoistableSubquery(t.Input) {
+			return true
+		}
+		for i := range t.Whens {
+			whenExpr := t.Whens[i].(*memo.WhenExpr)
+			if deriveCanHoistChild(whenExpr.Condition, i > 0) {
+				// The first condition is always evaluated. The remaining conditions are
+				// conditionally evaluated.
+				return true
+			}
+			// The WHEN branches are conditionally evaluated.
+			if deriveCanHoistChild(whenExpr.Value, true /* isConditional */) {
+				return true
+			}
+		}
+		// The ELSE branch is conditionally evaluated.
+		return deriveCanHoistChild(t.OrElse, true /* isConditional */)
+	case *memo.CoalesceExpr:
+		// The first argument is always evaluated. The remaining arguments are
+		// conditionally evaluated.
+		for i := range t.Args {
+			if deriveCanHoistChild(t.Args[i], i > 0) {
+				return true
+			}
+		}
+		return false
+	case *memo.IfErrExpr:
+		// The condition expression is always evaluated. The OrElse expressions are
+		// conditionally evaluated.
+		if c.deriveHasHoistableSubquery(t.Cond) {
+			return true
+		}
+		for i := range t.OrElse {
+			if deriveCanHoistChild(t.OrElse[i], true /* isConditional */) {
+				return true
+			}
+		}
+		return false
+	default:
+		panic(errors.AssertionFailedf("unhandled op: %v", scalar.Op()))
+	}
+}
+
+// legacyDeriveConditionalHasHoistableSubquery contains the logic for analyzing
+// conditional expressions from before #97432 was fixed. It differs from
+// deriveConditionalHasHoistableSubquery mostly in its layout, but also returns
+// false early for a COALESCE with a volatile branch, when later branches may
+// still be hoistable.
+//
+// TODO(drewk): consider deleting this once we have high confidence it won't
+// lead to plan regressions.
+func (c *CustomFuncs) legacyDeriveConditionalHasHoistableSubquery(scalar opt.ScalarExpr) bool {
 	// If HasHoistableSubquery is true for any child, then it's true for this
 	// expression as well. The exception is Case/If branches that have side
 	// effects. These can only be executed if the branch test evaluates to true,
@@ -253,7 +386,13 @@ func (c *CustomFuncs) HoistJoinSubquery(
 	}
 
 	join := c.ConstructApplyJoin(op, left, hoister.input(), newFilters, private)
-	passthrough := c.OutputCols(left).Union(c.OutputCols(right))
+	var passthrough opt.ColSet
+	switch op {
+	case opt.SemiJoinOp, opt.AntiJoinOp:
+		passthrough = c.OutputCols(left)
+	default:
+		passthrough = c.OutputCols(left).Union(c.OutputCols(right))
+	}
 	return c.f.ConstructProject(join, memo.EmptyProjectionsExpr, passthrough)
 }
 
@@ -388,14 +527,9 @@ func (c *CustomFuncs) ConstructApplyJoin(
 // input expression (perhaps augmented with a key column(s) or wrapped by
 // Ordinality).
 func (c *CustomFuncs) EnsureKey(in memo.RelExpr) memo.RelExpr {
-	_, ok := c.CandidateKey(in)
-	if ok {
-		return in
-	}
-
 	// Try to add the preexisting primary key if the input is a Scan or Scan
 	// wrapped in a Select.
-	if res, ok := c.TryAddKeyToScan(in); ok {
+	if res, ok := c.tryFindExistingKey(in); ok {
 		return res
 	}
 
@@ -405,13 +539,22 @@ func (c *CustomFuncs) EnsureKey(in memo.RelExpr) memo.RelExpr {
 	return c.f.ConstructOrdinality(in, &private)
 }
 
-// TryAddKeyToScan checks whether the input expression is a non-virtual table
-// Scan, either alone or wrapped in a Select. If so, it returns a new Scan
-// (possibly wrapped in a Select) augmented with the preexisting primary key
-// for the table.
-func (c *CustomFuncs) TryAddKeyToScan(in memo.RelExpr) (_ memo.RelExpr, ok bool) {
-	augmentScan := func(scan *memo.ScanExpr) (_ memo.RelExpr, ok bool) {
-		private := scan.ScanPrivate
+// tryFindExistingKey attempts to find an existing key for the input expression.
+// It may modify the expression in order to project the key column.
+func (c *CustomFuncs) tryFindExistingKey(in memo.RelExpr) (_ memo.RelExpr, ok bool) {
+	_, hasKey := c.CandidateKey(in)
+	if hasKey {
+		return in, true
+	}
+	switch t := in.(type) {
+	case *memo.ProjectExpr:
+		input, foundKey := c.tryFindExistingKey(t.Input)
+		if foundKey {
+			return c.f.ConstructProject(input, t.Projections, input.Relational().OutputCols), true
+		}
+
+	case *memo.ScanExpr:
+		private := t.ScanPrivate
 		tableID := private.Table
 		table := c.f.Metadata().Table(tableID)
 		if !table.IsVirtualTable() {
@@ -419,20 +562,11 @@ func (c *CustomFuncs) TryAddKeyToScan(in memo.RelExpr) (_ memo.RelExpr, ok bool)
 			private.Cols = private.Cols.Union(keyCols)
 			return c.f.ConstructScan(&private), true
 		}
-		return nil, false
-	}
-
-	switch t := in.(type) {
-	case *memo.ScanExpr:
-		if res, ok := augmentScan(t); ok {
-			return res, true
-		}
 
 	case *memo.SelectExpr:
-		if scan, ok := t.Input.(*memo.ScanExpr); ok {
-			if res, ok := augmentScan(scan); ok {
-				return c.f.ConstructSelect(res, t.Filters), true
-			}
+		input, foundKey := c.tryFindExistingKey(t.Input)
+		if foundKey {
+			return c.f.ConstructSelect(input, t.Filters), true
 		}
 	}
 
@@ -733,6 +867,16 @@ func (c *CustomFuncs) ConstructAnyCondition(
 	return c.ConstructBinary(private.Cmp, scalar, inputVar)
 }
 
+// ConvertSubToExistsPrivate converts the given SubqueryPrivate to an
+// ExistsPrivate.
+func (c *CustomFuncs) ConvertSubToExistsPrivate(sub *memo.SubqueryPrivate) *memo.ExistsPrivate {
+	col := c.f.Metadata().AddColumn("exists", types.Bool)
+	return &memo.ExistsPrivate{
+		LazyEvalProjectionCol: col,
+		SubqueryPrivate:       *sub,
+	}
+}
+
 // ConstructBinary builds a dynamic binary expression, given the binary
 // operator's type and its two arguments.
 func (c *CustomFuncs) ConstructBinary(op opt.Operator, left, right opt.ScalarExpr) opt.ScalarExpr {
@@ -760,6 +904,7 @@ type subqueryHoister struct {
 	f       *Factory
 	mem     *memo.Memo
 	hoisted memo.RelExpr
+	scratch props.Shared
 }
 
 func (r *subqueryHoister) init(c *CustomFuncs, input memo.RelExpr) {
@@ -874,6 +1019,11 @@ func (r *subqueryHoister) hoistAll(scalar opt.ScalarExpr) opt.ScalarExpr {
 			colID = subqueryProps.OutputCols.SingleColumn()
 		}
 		return r.f.ConstructVariable(colID)
+
+	case opt.CaseOp, opt.CoalesceOp, opt.IfErrOp:
+		if r.f.evalCtx.SessionData().OptimizerUseConditionalHoistFix {
+			return r.constructConditionalExpr(scalar)
+		}
 	}
 
 	return r.f.Replace(scalar, func(nd opt.Expr) opt.Expr {
@@ -892,6 +1042,61 @@ func (r *subqueryHoister) hoistAll(scalar opt.ScalarExpr) opt.ScalarExpr {
 		}
 		return nd
 	}).(opt.ScalarExpr)
+}
+
+// constructConditionalExpr handles the special case of hoisting subqueries
+// within a conditional expression, which must maintain invariants as to when
+// its children are evaluated. For example, a branch of a CASE statement can
+// only be evaluated if its guard condition passes.
+func (r *subqueryHoister) constructConditionalExpr(scalar opt.ScalarExpr) opt.ScalarExpr {
+	maybeHoistChild := func(child opt.ScalarExpr, isConditional bool) opt.ScalarExpr {
+		if isConditional {
+			// This child expression is conditionally evaluated, so it can only be
+			// hoisted if it does not have side effects.
+			r.scratch = props.Shared{}
+			memo.BuildSharedProps(child, &r.scratch, r.f.evalCtx)
+			if !r.scratch.VolatilitySet.IsLeakproof() {
+				return child
+			}
+		}
+		return r.hoistAll(child)
+	}
+
+	switch t := scalar.(type) {
+	case *memo.CaseExpr:
+		// The input expression is unconditionally evaluated.
+		newInput := r.hoistAll(t.Input)
+		newWhens := make(memo.ScalarListExpr, len(t.Whens))
+		for i := range t.Whens {
+			// WHEN conditions other than the first are conditionally evaluated. The
+			// branches are always conditionally evaluated.
+			whenExpr := t.Whens[i].(*memo.WhenExpr)
+			newCond := maybeHoistChild(whenExpr.Condition, i > 0)
+			newVal := maybeHoistChild(whenExpr.Value, true /* isConditional */)
+			newWhens[i] = r.f.ConstructWhen(newCond, newVal)
+		}
+		// The ELSE branch is conditionally evaluated.
+		newOrElse := maybeHoistChild(t.OrElse, true /* isConditional */)
+		return r.f.ConstructCase(newInput, newWhens, newOrElse)
+	case *memo.CoalesceExpr:
+		// The first argument is unconditionally evaluated; the rest are
+		// conditional.
+		newArgs := make(memo.ScalarListExpr, len(t.Args))
+		for i, arg := range t.Args {
+			newArgs[i] = maybeHoistChild(arg, i > 0)
+		}
+		return r.f.ConstructCoalesce(newArgs)
+	case *memo.IfErrExpr:
+		// The condition expression is always evaluated. The OrElse expressions are
+		// conditionally evaluated.
+		newCond := r.hoistAll(t.Cond)
+		newOrElse := make(memo.ScalarListExpr, len(t.OrElse))
+		for i := range t.OrElse {
+			newOrElse[i] = maybeHoistChild(t.OrElse[i], true /* isConditional */)
+		}
+		return r.f.ConstructIfErr(newCond, newOrElse, t.ErrCode)
+	}
+	panic(errors.AssertionFailedf("unexpected op: %s", scalar.Op()))
 }
 
 // constructGroupByExists transforms a scalar Exists expression like this:
@@ -919,19 +1124,34 @@ func (r *subqueryHoister) hoistAll(scalar opt.ScalarExpr) opt.ScalarExpr {
 // CONST_AGG which will need to be changed to a CONST_NOT_NULL_AGG (which is
 // defined to ignore those nulls so that its result will be unaffected).
 func (r *subqueryHoister) constructGroupByExists(subquery memo.RelExpr) memo.RelExpr {
-	trueColID := r.f.Metadata().AddColumn("true", types.Bool)
-	aggColID := r.f.Metadata().AddColumn("true_agg", types.Bool)
+	var canaryColTyp *types.T
+	var canaryColID opt.ColumnID
+	var subqueryWithCanary memo.RelExpr
+	if subquery.Relational().NotNullCols.Empty() {
+		canaryColTyp = types.Bool
+		canaryColID = r.f.Metadata().AddColumn("canary", types.Bool)
+		subqueryWithCanary = r.f.ConstructProject(
+			subquery,
+			memo.ProjectionsExpr{r.f.ConstructProjectionsItem(memo.TrueSingleton, canaryColID)},
+			opt.ColSet{},
+		)
+	} else {
+		canaryColID, _ = subquery.Relational().NotNullCols.Next(0)
+		canaryColTyp = r.mem.Metadata().ColumnMeta(canaryColID).Type
+		subqueryWithCanary = r.f.ConstructProject(
+			subquery,
+			memo.ProjectionsExpr{},
+			opt.MakeColSet(canaryColID),
+		)
+	}
+	aggColID := r.f.Metadata().AddColumn("canary_agg", canaryColTyp)
 	existsColID := r.f.Metadata().AddColumn("exists", types.Bool)
 
 	return r.f.ConstructProject(
 		r.f.ConstructScalarGroupBy(
-			r.f.ConstructProject(
-				subquery,
-				memo.ProjectionsExpr{r.f.ConstructProjectionsItem(memo.TrueSingleton, trueColID)},
-				opt.ColSet{},
-			),
+			subqueryWithCanary,
 			memo.AggregationsExpr{r.f.ConstructAggregationsItem(
-				r.f.ConstructConstAgg(r.f.ConstructVariable(trueColID)),
+				r.f.ConstructConstAgg(r.f.ConstructVariable(canaryColID)),
 				aggColID,
 			)},
 			memo.EmptyGroupingPrivate,
@@ -1210,6 +1430,10 @@ func (c *CustomFuncs) tryRemapOuterCols(
 // cycles. Any other rules that reuse this logic should reconsider the
 // simplification made in getSubstituteColsSetOp.
 //
+// NOTE: care must be taken for operators that may aggregate or "group" rows.
+// If rows for which the outer-column equality holds are grouped together with
+// those for which it does not, the result set will be incorrect (see #130001).
+//
 // getSubstituteColsRelExpr copies substituteCols before performing any
 // modifications, so the original ColSet is not mutated.
 func (c *CustomFuncs) getSubstituteColsRelExpr(
@@ -1245,16 +1469,29 @@ func (c *CustomFuncs) getSubstituteColsRelExpr(
 		*memo.SemiJoinApplyExpr, *memo.AntiJoinExpr, *memo.AntiJoinApplyExpr:
 		// [PushSelectIntoJoinLeft]
 		// [PushSelectCondLeftIntoJoinLeftAndRight]
+		// NOTE: These join variants do perform "grouping" operations, but only on
+		// the right input, for which we do not push down the equality.
 		substituteCols = getSubstituteColsLeftSemiAntiJoin(t, substituteCols)
 	case *memo.GroupByExpr, *memo.DistinctOnExpr:
 		// [PushSelectIntoGroupBy]
-		// Filters must refer only to grouping and ConstAgg columns.
+		// Filters must refer only to grouping columns. This ensures that the rows
+		// that satisfy the outer-column equality are grouped separately from those
+		// that do not. The rows that do not satisfy the equality will therefore not
+		// affect the values of the rows that do, and they will be filtered out
+		// later, ensuring that the transformation does not change the result set.
+		// See also #130001.
+		//
+		// NOTE: this is more restrictive than PushSelectIntoGroupBy, which also
+		// allows references to ConstAgg columns.
 		private := t.Private().(*memo.GroupingPrivate)
-		aggs := t.Child(1).(*memo.AggregationsExpr)
-		substituteCols.IntersectionWith(c.GroupingAndConstCols(private, *aggs))
+		substituteCols.IntersectionWith(private.GroupingCols)
 	case *memo.UnionExpr, *memo.UnionAllExpr, *memo.IntersectExpr,
 		*memo.IntersectAllExpr, *memo.ExceptExpr, *memo.ExceptAllExpr:
 		// [PushFilterIntoSetOp]
+		// NOTE: the distinct variants (Union, Intersect, Except) de-duplicate
+		// across all columns, so the requirement that filters only reference
+		// grouping columns is always satisfied. See the comment for DistinctOn
+		// above.
 		substituteCols = getSubstituteColsSetOp(t, substituteCols)
 	default:
 		// Filter push-down through this expression is not supported.
@@ -1299,4 +1536,33 @@ func getSubstituteColsSetOp(set memo.RelExpr, substituteCols opt.ColSet) opt.Col
 		}
 	}
 	return newSubstituteCols
+}
+
+// MakeCoalesceProjectionsForUnion builds a series of projections that coalesce
+// columns from the left and right inputs of a union, projecting the result
+// using the union operator's output columns.
+func (c *CustomFuncs) MakeCoalesceProjectionsForUnion(
+	setPrivate *memo.SetPrivate,
+) memo.ProjectionsExpr {
+	projections := make(memo.ProjectionsExpr, len(setPrivate.OutCols))
+	for i := range setPrivate.OutCols {
+		projections[i] = c.f.ConstructProjectionsItem(
+			c.f.ConstructCoalesce(memo.ScalarListExpr{
+				c.f.ConstructVariable(setPrivate.LeftCols[i]),
+				c.f.ConstructVariable(setPrivate.RightCols[i]),
+			}),
+			setPrivate.OutCols[i],
+		)
+	}
+	return projections
+}
+
+// MakeAnyNotNullScalarGroupBy wraps the input expression in a ScalarGroupBy
+// that aggregates the input columns with AnyNotNull functions.
+func (c *CustomFuncs) MakeAnyNotNullScalarGroupBy(input memo.RelExpr) memo.RelExpr {
+	return c.f.ConstructScalarGroupBy(
+		input,
+		c.MakeAggCols(opt.AnyNotNullAggOp, input.Relational().OutputCols),
+		memo.EmptyGroupingPrivate,
+	)
 }

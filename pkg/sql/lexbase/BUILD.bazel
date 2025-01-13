@@ -23,10 +23,6 @@ go_test(
     name = "lexbase_test",
     size = "small",
     srcs = ["encode_test.go"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         ":lexbase",
         "//pkg/sql/parser",
@@ -43,7 +39,7 @@ genrule(
     cmd = """
         $(location //pkg/sql/lexbase/allkeywords) < $(location //pkg/sql/parser:sql.y) > $@
     """,
-    exec_tools = [
+    tools = [
         "//pkg/sql/lexbase/allkeywords",
     ],
     visibility = [
@@ -64,7 +60,7 @@ genrule(
      echo; \
      grep '^const [A-Z][_A-Z0-9]* ' $(location //pkg/sql/parser:sql-goyacc)) > $@
     """,
-    exec_tools = [
+    tools = [
         "//pkg/sql/parser:sql-goyacc",
     ],
     visibility = [

@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package diagnosticsccl_test
 
@@ -13,6 +10,7 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -35,12 +33,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/system"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
 const elemName = "somestring"
+
+var setTelemetryHttpTimeout = func(newVal time.Duration) func() {
+	prior := diagnostics.TelemetryHttpTimeout
+	diagnostics.TelemetryHttpTimeout = newVal
+	return func() {
+		diagnostics.TelemetryHttpTimeout = prior
+	}
+}
 
 func TestTenantReport(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -127,6 +134,19 @@ func TestServerReport(t *testing.T) {
 		})
 	}
 
+	// We want to ensure that non-reportable settings, sensitive
+	// settings, and all string settings are redacted. Below we override
+	// one of each.
+	settingOverrides := []string{
+		`SET CLUSTER SETTING server.oidc_authentication.client_id = 'sensitive-client-id'`, // Sensitive setting.
+		`SET CLUSTER SETTING sql.log.user_audit = 'test_role NONE'`,                        // Non-reportable setting.
+		`SET CLUSTER SETTING changefeed.node_throttle_config = '{"message_rate": 0.5}'`,    // String setting.
+	}
+	for _, s := range settingOverrides {
+		_, err := rt.serverDB.Exec(s)
+		require.NoError(t, err)
+	}
+
 	expectedUsageReports := 0
 
 	clusterSecret := sql.ClusterSecret.Get(&rt.settings.SV)
@@ -198,7 +218,7 @@ func TestServerReport(t *testing.T) {
 	// 3 + 3 = 6: set 3 initially and org is set mid-test for 3 altered settings,
 	// plus version, reporting and secret settings are set in startup
 	// migrations.
-	expected, actual := 7, len(last.AlteredSettings)
+	expected, actual := 7+len(settingOverrides), len(last.AlteredSettings)
 	require.Equal(t, expected, actual, "expected %d changed settings, got %d: %v", expected, actual, last.AlteredSettings)
 
 	for key, expected := range map[string]string{
@@ -209,6 +229,9 @@ func TestServerReport(t *testing.T) {
 		"server.time_until_store_dead":             "1m30s",
 		"version":                                  clusterversion.Latest.String(),
 		"cluster.secret":                           "<redacted>",
+		"server.oidc_authentication.client_id":     "<redacted>",
+		"sql.log.user_audit":                       "<redacted>",
+		"changefeed.node_throttle_config":          "<redacted>",
 	} {
 		got, ok := last.AlteredSettings[key]
 		require.True(t, ok, "expected report of altered setting %q", key)
@@ -275,6 +298,103 @@ func TestServerReport(t *testing.T) {
 			require.Equal(t, prefs, zone.LeasePreferences)
 		}
 	}
+}
+
+func TestTelemetry_SuccessfulTelemetryPing(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	defer setTelemetryHttpTimeout(3 * time.Second)()
+	rt := startReporterTest(t, base.TestIsSpecificToStorageLayerAndNeedsASystemTenant)
+	defer rt.Close()
+
+	ctx := context.Background()
+	setupCluster(t, rt.serverDB)
+
+	for _, tc := range []struct {
+		name                  string
+		respError             error
+		respCode              int
+		waitSeconds           int
+		expectTimestampUpdate bool
+	}{
+		{
+			name:                  "200 response",
+			respError:             nil,
+			respCode:              200,
+			expectTimestampUpdate: true,
+		},
+		{
+			name:                  "400 response",
+			respError:             nil,
+			respCode:              400,
+			expectTimestampUpdate: true,
+		},
+		{
+			name:                  "500 response",
+			respError:             nil,
+			respCode:              500,
+			expectTimestampUpdate: true,
+		},
+		{
+			name:                  "connection error",
+			respError:             errors.New("connection refused"),
+			expectTimestampUpdate: false,
+		},
+		{
+			name:                  "client timeout",
+			respError:             &timeutil.TimeoutError{},
+			waitSeconds:           5,
+			expectTimestampUpdate: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer rt.diagServer.SetRespError(tc.respError)()
+			defer rt.diagServer.SetRespCode(tc.respCode)()
+			defer rt.diagServer.SetWaitSeconds(tc.waitSeconds)()
+			rt.timesource.Advance(time.Hour)
+
+			dr := rt.server.DiagnosticsReporter().(*diagnostics.Reporter)
+
+			before := rt.timesource.Now().Unix()
+			oldTimestamp := dr.LastSuccessfulTelemetryPing.Load()
+			require.LessOrEqual(t, dr.LastSuccessfulTelemetryPing.Load(), before)
+
+			rt.timesource.Advance(time.Hour)
+			dr.ReportDiagnostics(ctx)
+
+			if tc.expectTimestampUpdate {
+				require.Greater(t, dr.LastSuccessfulTelemetryPing.Load(), before)
+			} else {
+				require.Equal(t, oldTimestamp, dr.LastSuccessfulTelemetryPing.Load())
+			}
+		})
+	}
+
+}
+
+// This test will block on `stopper.Stop` if the diagnostics reporter
+// doesn't honor stopper quiescence when making its HTTP request.
+func TestTelemetryQuiesce(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	defer setTelemetryHttpTimeout(10 * time.Minute)()
+	rt := startReporterTest(t, base.TestIsSpecificToStorageLayerAndNeedsASystemTenant)
+	defer rt.Close()
+
+	ctx := context.Background()
+	setupCluster(t, rt.serverDB)
+
+	// Ensure that we block for long enough to trigger test timeout.
+	defer rt.diagServer.SetWaitSeconds(15 * 60)()
+	dr := rt.server.DiagnosticsReporter().(*diagnostics.Reporter)
+	stopper := rt.server.Stopper()
+
+	dr.PeriodicallyReportDiagnostics(ctx, stopper)
+	stopper.Stop(ctx)
+	<-stopper.IsStopped()
 }
 
 func TestUsageQuantization(t *testing.T) {
@@ -379,6 +499,7 @@ type reporterTest struct {
 	serverArgs   base.TestServerArgs
 	server       serverutils.TestServerInterface
 	serverDB     *gosql.DB
+	timesource   *timeutil.ManualTime
 }
 
 func (t *reporterTest) Close() {
@@ -396,6 +517,7 @@ func startReporterTest(
 		cloudEnable: cloudinfo.Disable(),
 		settings:    cluster.MakeTestingClusterSettings(),
 		diagServer:  diagutils.NewServer(),
+		timesource:  timeutil.NewManualTime(timeutil.Now()),
 	}
 
 	url := rt.diagServer.URL()
@@ -408,6 +530,7 @@ func startReporterTest(
 		Server: &server.TestingKnobs{
 			DiagnosticsTestingKnobs: diagnostics.TestingKnobs{
 				OverrideReportingURL: &url,
+				TimeSource:           rt.timesource,
 			},
 		},
 	}

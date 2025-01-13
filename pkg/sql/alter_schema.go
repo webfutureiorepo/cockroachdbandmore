@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -32,6 +28,7 @@ import (
 )
 
 type alterSchemaNode struct {
+	zeroInputPlanNode
 	n    *tree.AlterSchema
 	db   *dbdesc.Mutable
 	desc *schemadesc.Mutable
@@ -76,19 +73,13 @@ func (p *planner) AlterSchema(ctx context.Context, n *tree.AlterSchema) (planNod
 		if err != nil {
 			return nil, err
 		}
-		// The user must be a superuser or the owner of the schema to modify it.
-		hasAdmin, err := p.HasAdminRole(ctx)
+		// The user must be the owner of the schema to modify it.
+		hasOwnership, err := p.HasOwnership(ctx, desc)
 		if err != nil {
 			return nil, err
 		}
-		if !hasAdmin {
-			hasOwnership, err := p.HasOwnership(ctx, desc)
-			if err != nil {
-				return nil, err
-			}
-			if !hasOwnership {
-				return nil, pgerror.Newf(pgcode.InsufficientPrivilege, "must be owner of schema %q", desc.Name)
-			}
+		if !hasOwnership {
+			return nil, pgerror.Newf(pgcode.InsufficientPrivilege, "must be owner of schema %q", desc.Name)
 		}
 		sqltelemetry.IncrementUserDefinedSchemaCounter(sqltelemetry.UserDefinedSchemaAlter)
 		return &alterSchemaNode{n: n, db: db, desc: desc}, nil
@@ -98,6 +89,12 @@ func (p *planner) AlterSchema(ctx context.Context, n *tree.AlterSchema) (planNod
 }
 
 func (n *alterSchemaNode) startExec(params runParams) error {
+	// Exit early with an error if the schema is undergoing a declarative schema
+	// change.
+	if catalog.HasConcurrentDeclarativeSchemaChange(n.desc) {
+		return scerrors.ConcurrentSchemaChangeError(n.desc)
+	}
+
 	switch t := n.n.Cmd.(type) {
 	case *tree.AlterSchemaRename:
 		newName := string(t.NewName)

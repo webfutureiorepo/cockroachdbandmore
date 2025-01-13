@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -68,19 +65,24 @@ func validateExternalConnectionSinkURI(
 	}
 
 	if knobs, ok := serverCfg.TestingKnobs.Changefeed.(*TestingKnobs); ok && knobs.WrapSink != nil {
-		wrapSink := knobs.WrapSink
-		knobs.WrapSink = nil
-		defer func() { knobs.WrapSink = wrapSink }()
+		newCfg := *serverCfg
+		newKnobs := *knobs
+		newKnobs.WrapSink = nil
+		newCfg.TestingKnobs.Changefeed = &newKnobs
+		serverCfg = &newCfg
 	}
 
 	// Validate the URI by creating a canary sink.
 	//
 	// TODO(adityamaru): When we add `CREATE EXTERNAL CONNECTION ... WITH` support
 	// to accept JSONConfig we should validate that here too.
-	_, err := getSink(ctx, serverCfg, jobspb.ChangefeedDetails{SinkURI: uri}, nil, env.Username,
+	s, err := getSink(ctx, serverCfg, jobspb.ChangefeedDetails{SinkURI: uri}, nil, env.Username,
 		jobspb.JobID(0), (*sliMetrics)(nil))
 	if err != nil {
 		return errors.Wrap(err, "invalid changefeed sink URI")
+	}
+	if err := s.Close(); err != nil {
+		return errors.Wrap(err, "failed to close canary sink")
 	}
 
 	return nil
@@ -100,6 +102,7 @@ var supportedExternalConnectionTypes = map[string]connectionpb.ConnectionProvide
 	changefeedbase.SinkSchemeWebhookHTTP:           connectionpb.ConnectionProvider_webhookhttp,
 	changefeedbase.SinkSchemeWebhookHTTPS:          connectionpb.ConnectionProvider_webhookhttps,
 	changefeedbase.SinkSchemeConfluentKafka:        connectionpb.ConnectionProvider_kafka,
+	changefeedbase.SinkSchemeAzureKafka:            connectionpb.ConnectionProvider_kafka,
 	// TODO (zinger): Not including SinkSchemeExperimentalSQL for now because A: it's undocumented
 	// and B, in tests it leaks a *gosql.DB and I can't figure out why.
 }
@@ -118,6 +121,15 @@ func init() {
 			validateExternalConnectionSinkURI,
 		)
 	}
+
+	cloud.RegisterRedactedParams(cloud.RedactedParams(
+		changefeedbase.SinkParamSASLPassword,
+		changefeedbase.SinkParamCACert,
+		changefeedbase.SinkParamClientCert,
+		changefeedbase.SinkParamClientKey,
+		changefeedbase.SinkParamConfluentAPISecret,
+		changefeedbase.SinkParamAzureAccessKey,
+	))
 }
 
 type externalConnectionProvider interface {

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package props_test
 
@@ -101,7 +96,7 @@ func TestFuncDeps_ComputeClosure(t *testing.T) {
 	fd2.AddConstants(c(2))
 	fd2.AddEquivalency(2, 3)
 	fd2.AddSynthesizedCol(c(4), 5)
-	verifyFD(t, fd2, "lax-key(1); ()-->(2,3), (1)~~>(4), (2)==(3), (3)==(2), (4)-->(5)")
+	verifyFD(t, fd2, "lax-key(1); ()-->(2,3), (1)~~>(4), (4)-->(5), (2)==(3), (3)==(2)")
 
 	testcases := []struct {
 		fd       *props.FuncDepSet
@@ -139,7 +134,7 @@ func TestFuncDeps_InClosureOf(t *testing.T) {
 	fd.AddLaxKey(c(1), c(1, 4))
 	fd.AddEquivalency(2, 3)
 	fd.AddSynthesizedCol(c(4), 5)
-	verifyFD(t, fd, "lax-key(1); ()-->(2,3), (1)~~>(4), (2)==(3), (3)==(2), (4)-->(5)")
+	verifyFD(t, fd, "lax-key(1); ()-->(2,3), (1)~~>(4), (4)-->(5), (2)==(3), (3)==(2)")
 
 	testcases := []struct {
 		cols     []opt.ColumnID
@@ -395,7 +390,7 @@ func TestFuncDeps_MakeMax1Row(t *testing.T) {
 	abcde.AddEquivalency(1, 2)
 	abcde.AddEquivalency(3, 4)
 	abcde.MakeMax1Row(c(1, 2, 3))
-	verifyFD(t, abcde, "key(); ()-->(1-3), (2)==(1), (1)==(2)")
+	verifyFD(t, abcde, "key(); ()-->(1-3), (1)==(2), (2)==(1)")
 	testColsAreStrictKey(t, abcde, c(), true)
 
 	// Retain partial equivalencies. (1)==(2) is extracted from (1)==(2,4).
@@ -403,7 +398,7 @@ func TestFuncDeps_MakeMax1Row(t *testing.T) {
 	abcde.AddEquivalency(1, 2)
 	abcde.AddEquivalency(1, 4)
 	abcde.MakeMax1Row(c(1, 2, 3))
-	verifyFD(t, abcde, "key(); ()-->(1-3), (2)==(1), (1)==(2)")
+	verifyFD(t, abcde, "key(); ()-->(1-3), (1)==(2), (2)==(1)")
 	testColsAreStrictKey(t, abcde, c(), true)
 
 	// No columns with equivalencies.
@@ -609,7 +604,7 @@ func TestFuncDeps_AddSynthesizedCol(t *testing.T) {
 	var anb1 props.FuncDepSet
 	anb1.CopyFrom(makeJoinFD(t))
 	anb1.AddSynthesizedCol(c(2), 100)
-	verifyFD(t, &anb1, "key(10,11); (1)-->(2-5), (2,3)~~>(1,4,5), (10,11)-->(12,13), (1)==(10), (10)==(1), (2)-->(100)")
+	verifyFD(t, &anb1, "key(10,11); (1)-->(2-5), (2,3)~~>(1,4,5), (10,11)-->(12,13), (2)-->(100), (1)==(10), (10)==(1)")
 	anb1.ProjectCols(c(1, 11, 100))
 	verifyFD(t, &anb1, "key(1,11); (1)-->(100)")
 	testColsAreStrictKey(t, &anb1, c(1, 11, 100), true)
@@ -1130,9 +1125,9 @@ func TestFuncDeps_MakeLeftOuter(t *testing.T) {
 	roj.MakeProduct(makeMnpqFD(t))
 	roj.AddEquivalency(1, 10)
 	roj.AddEquivalency(1, 2)
-	verifyFD(t, &roj, "key(10,11); (1)-->(3-5), (2,3)~~>(1,4,5), (10,11)-->(12,13), (1)==(2,10), (10)==(1,2), (2)==(1,10)")
+	verifyFD(t, &roj, "key(10,11); (1)-->(3-5), (2,3)~~>(1,4,5), (10,11)-->(12,13), (1)==(2,10), (2)==(1,10), (10)==(1,2)")
 	roj.MakeLeftOuter(mnpq, &props.FuncDepSet{}, preservedCols, nullExtendedCols, c(1, 2, 10, 11))
-	verifyFD(t, &roj, "key(10,11); (1)-->(3-5), (2,3)~~>(1,4,5), (10,11)-->(1-5,12,13), (1)==(2), (2)==(1), (1)~~>(10), (2)~~>(10)")
+	verifyFD(t, &roj, "key(10,11); (1)-->(3-5), (2,3)~~>(1,4,5), (10,11)-->(1-5,12,13), (1)~~>(10), (2)~~>(10), (1)==(2), (2)==(1)")
 
 	// Test filter equivalency that includes columns from both sides of join
 	// boundary.
@@ -1281,6 +1276,16 @@ func TestFuncDeps_RemapFrom(t *testing.T) {
 	to = opt.ColList{10, 30, 40, 50}
 	res.RemapFrom(abcde, from, to)
 	verifyFD(t, &res, "key(10); (10)-->(30,40,50)")
+
+	// Test a one-to-many relationship between remapped columns. An equality
+	// should be split into two, and the remapped key should be reduced.
+	eqFD := &props.FuncDepSet{}
+	eqFD.AddStrictKey(c(1, 2, 3), c(1, 2, 3))
+	eqFD.AddEquivalency(2, 3)
+	from = opt.ColList{1, 2, 2, 3}
+	to = opt.ColList{10, 30, 20, 50}
+	res.RemapFrom(eqFD, from, to)
+	verifyFD(t, &res, "key(10,50); (20)==(30,50), (30)==(20,50), (50)==(20,30)")
 }
 
 // Construct base table FD from figure 3.3, page 114:

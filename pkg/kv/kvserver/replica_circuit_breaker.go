@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -17,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -29,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"go.etcd.io/raft/v3"
 )
 
 type replicaInCircuitBreaker interface {
@@ -39,6 +34,7 @@ type replicaInCircuitBreaker interface {
 	slowReplicationThreshold(ba *kvpb.BatchRequest) (time.Duration, bool)
 	replicaUnavailableError(err error) error
 	poisonInflightLatches(err error)
+	IsDestroyed() (DestroyReason, error)
 }
 
 var defaultReplicaCircuitBreakerSlowReplicationThreshold = envutil.EnvOrDefaultDuration(
@@ -167,9 +163,9 @@ func (r replicaCircuitBreakerLogger) OnTrip(b *circuit.Breaker, prev, cur error)
 	log.Errorf(r.ambientCtx.AnnotateCtx(context.Background()), "%s", buf)
 }
 
-func (r replicaCircuitBreakerLogger) OnReset(br *circuit.Breaker) {
+func (r replicaCircuitBreakerLogger) OnReset(br *circuit.Breaker, prev error) {
 	r.onReset()
-	r.EventHandler.OnReset(br)
+	r.EventHandler.OnReset(br, prev)
 }
 
 func (br *replicaCircuitBreaker) asyncProbe(report func(error), done func()) {
@@ -209,7 +205,8 @@ func sendProbe(ctx context.Context, r replicaInCircuitBreaker) error {
 	// enhance the probe, we may need to allow any additional requests we send to
 	// chose to bypass the circuit breaker explicitly.
 	desc := r.Desc()
-	if !desc.IsInitialized() {
+	// Untrip the breaker if the replica is destroyed or not initialized.
+	if reason, _ := r.IsDestroyed(); !desc.IsInitialized() || reason == destroyReasonRemoved {
 		return nil
 	}
 	ba := &kvpb.BatchRequest{}

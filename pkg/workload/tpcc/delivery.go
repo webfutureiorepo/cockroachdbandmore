@@ -1,20 +1,15 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tpcc
 
 import (
 	"context"
-	gosql "database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
@@ -78,7 +73,7 @@ func createDelivery(
 	return del, nil
 }
 
-func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
+func (del *delivery) run(ctx context.Context, wID int) (interface{}, time.Duration, error) {
 	del.config.auditor.deliveryTransactions.Add(1)
 
 	rng := rand.New(rand.NewSource(uint64(timeutil.Now().UnixNano())))
@@ -86,7 +81,7 @@ func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
 	oCarrierID := rng.Intn(10) + 1
 	olDeliveryD := timeutil.Now()
 
-	err := del.config.executeTx(
+	onTxnStartDuration, err := del.config.executeTx(
 		ctx, del.mcp.Get(),
 		func(tx pgx.Tx) error {
 			// 2.7.4.2. For each district:
@@ -96,10 +91,10 @@ func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
 				var oID int
 				if err := del.selectNewOrder.QueryRowTx(ctx, tx, wID, dID).Scan(&oID); err != nil {
 					// If no matching order is found, the delivery of this order is skipped.
-					if !errors.Is(err, gosql.ErrNoRows) {
-						del.config.auditor.skippedDelivieries.Add(1)
-						return err
+					if !errors.Is(err, pgx.ErrNoRows) {
+						return errors.Wrap(err, "select new_order failed")
 					}
+					del.config.auditor.skippedDelivieries.Add(1)
 					continue
 				}
 				dIDoIDPairs[dID] = oID
@@ -108,38 +103,41 @@ func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
 				if err := del.sumAmount.QueryRowTx(
 					ctx, tx, wID, dID, oID,
 				).Scan(&olTotal); err != nil {
-					return err
+					return errors.Wrap(err, "select order_line failed")
 				}
 				dIDolTotalPairs[dID] = olTotal
 			}
 			dIDoIDPairsStr := makeInTuples(dIDoIDPairs)
 
-			rows, err := tx.Query(
-				ctx,
-				fmt.Sprintf(`
-					UPDATE "order"
-					SET o_carrier_id = %d
-					WHERE o_w_id = %d AND (o_d_id, o_id) IN (%s)
-					RETURNING o_d_id, o_c_id`,
-					oCarrierID, wID, dIDoIDPairsStr,
-				),
-			)
-			if err != nil {
-				return err
-			}
 			dIDcIDPairs := make(map[int]int)
-			for rows.Next() {
-				var dID, oCID int
-				if err := rows.Scan(&dID, &oCID); err != nil {
-					rows.Close()
+			err := func() error {
+				rows, err := tx.Query(
+					ctx,
+					fmt.Sprintf(`
+						UPDATE "order"
+						SET o_carrier_id = %d
+						WHERE o_w_id = %d AND (o_d_id, o_id) IN (%s)
+						RETURNING o_d_id, o_c_id`,
+						oCarrierID, wID, dIDoIDPairsStr,
+					),
+				)
+				if err != nil {
 					return err
 				}
-				dIDcIDPairs[dID] = oCID
+				defer rows.Close()
+
+				for rows.Next() {
+					var dID, oCID int
+					if err := rows.Scan(&dID, &oCID); err != nil {
+						return err
+					}
+					dIDcIDPairs[dID] = oCID
+				}
+				return rows.Err()
+			}()
+			if err != nil {
+				return errors.Wrap(err, "update order failed")
 			}
-			if err := rows.Err(); err != nil {
-				return err
-			}
-			rows.Close()
 
 			if err := checkSameKeys(dIDoIDPairs, dIDcIDPairs); err != nil {
 				return err
@@ -157,8 +155,9 @@ func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
 					dIDToOlTotalStr, wID, dIDcIDPairsStr,
 				),
 			); err != nil {
-				return err
+				return errors.Wrap(err, "update customer failed")
 			}
+
 			if _, err := tx.Exec(
 				ctx,
 				fmt.Sprintf(`
@@ -167,10 +166,10 @@ func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
 					wID, dIDoIDPairsStr,
 				),
 			); err != nil {
-				return err
+				return errors.Wrap(err, "delete new_order failed")
 			}
 
-			_, err = tx.Exec(
+			if _, err := tx.Exec(
 				ctx,
 				fmt.Sprintf(`
 					UPDATE order_line
@@ -178,10 +177,13 @@ func (del *delivery) run(ctx context.Context, wID int) (interface{}, error) {
 					WHERE ol_w_id = %d AND (ol_d_id, ol_o_id) IN (%s)`,
 					olDeliveryD.Format("2006-01-02 15:04:05"), wID, dIDoIDPairsStr,
 				),
-			)
-			return err
+			); err != nil {
+				return errors.Wrap(err, "update order_line failed")
+			}
+
+			return nil
 		})
-	return nil, err
+	return nil, onTxnStartDuration, err
 }
 
 func makeInTuples(pairs map[int]int) string {

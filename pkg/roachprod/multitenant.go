@@ -1,19 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachprod
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
@@ -27,7 +20,6 @@ import (
 func StartServiceForVirtualCluster(
 	ctx context.Context,
 	l *logger.Logger,
-	externalCluster string,
 	storageCluster string,
 	startOpts install.StartOpts,
 	clusterSettingsOpts ...install.ClusterSettingOption,
@@ -38,36 +30,23 @@ func StartServiceForVirtualCluster(
 		return err
 	}
 
-	var kvAddrs []string
-	for _, node := range sc.Nodes {
-		port, err := sc.NodePort(ctx, node, "" /* virtualClusterName */, 0 /* sqlInstance */)
-		if err != nil {
-			return err
-		}
-		kvAddrs = append(kvAddrs, fmt.Sprintf("%s:%d", sc.Host(node), port))
-	}
-	startOpts.KVAddrs = strings.Join(kvAddrs, ",")
-	startOpts.KVCluster = sc
+	startOpts.StorageCluster = sc
 
-	var startCluster *install.SyncedCluster
-	if externalCluster == "" {
-		// If we are starting a service in shared process mode, `Start` is
-		// called on the storage cluster itself.
-		startCluster = sc
-	} else {
+	// If we are starting a service in shared process mode, `Start` is
+	// called on the storage cluster itself.
+	startCluster := sc
+
+	if startOpts.Target == install.StartServiceForVirtualCluster {
+		l.Printf("Starting SQL/HTTP instances for the virtual cluster")
 		// If we are starting a service in external process mode, `Start`
 		// is called on the nodes where the SQL server processed should be
 		// created.
-		ec, err := newCluster(l, externalCluster, clusterSettingsOpts...)
+		ec, err := newCluster(l, startOpts.VirtualClusterLocation, clusterSettingsOpts...)
 		if err != nil {
 			return err
 		}
 
 		startCluster = ec
-	}
-
-	if startOpts.Target == install.StartServiceForVirtualCluster {
-		l.Printf("Starting SQL/HTTP instances for the virtual cluster")
 	}
 	return startCluster.Start(ctx, l, startOpts)
 }
@@ -82,5 +61,5 @@ func StopServiceForVirtualCluster(
 	}
 
 	label := install.VirtualClusterLabel(stopOpts.VirtualClusterName, stopOpts.SQLInstance)
-	return c.Stop(ctx, l, stopOpts.Sig, stopOpts.Wait, stopOpts.MaxWait, label)
+	return c.Stop(ctx, l, stopOpts.Sig, stopOpts.Wait, stopOpts.GracePeriod, label)
 }

@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedbase
 
@@ -13,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 )
 
 // TableDescriptorPollInterval controls how fast table descriptors are polled. A
@@ -168,17 +165,21 @@ func validateSinkThrottleConfig(values *settings.Values, configStr string) error
 	return json.Unmarshal([]byte(configStr), config)
 }
 
-// MinHighWaterMarkCheckpointAdvance specifies the minimum amount of time the
-// changefeed high water mark must advance for it to be eligible for checkpointing.
-var MinHighWaterMarkCheckpointAdvance = settings.RegisterDurationSetting(
+// ResolvedTimestampMinUpdateInterval specifies the minimum amount of time that
+// must have elapsed since the last time a changefeed's resolved timestamp was
+// updated before it is eligible to updated again.
+var ResolvedTimestampMinUpdateInterval = settings.RegisterDurationSetting(
 	settings.ApplicationLevel,
 	"changefeed.min_highwater_advance",
-	"minimum amount of time the changefeed high water mark must advance "+
-		"for it to be eligible for checkpointing; Default of 0 will checkpoint every time frontier "+
-		"advances, as long as the rate of checkpointing keeps up with the rate of frontier changes",
+	"minimum amount of time that must have elapsed since the last time "+
+		"a changefeed's resolved timestamp was updated before it is eligible to be "+
+		"updated again; default of 0 means no minimum interval is enforced but "+
+		"updating will still be limited by the average time it takes to checkpoint progress",
 	0,
 	settings.NonNegativeDuration,
-	settings.WithPublic)
+	settings.WithPublic,
+	settings.WithName("changefeed.resolved_timestamp.min_update_interval"),
+)
 
 // EventMemoryMultiplier is the multiplier for the amount of memory needed to process an event.
 //
@@ -202,6 +203,14 @@ var ProtectTimestampInterval = settings.RegisterDurationSetting(
 	10*time.Minute,
 	settings.PositiveDuration,
 	settings.WithPublic)
+
+// ProtectTimestampLag controls how much the protected timestamp record should lag behind the high watermark
+var ProtectTimestampLag = settings.RegisterDurationSetting(
+	settings.ApplicationLevel,
+	"changefeed.protect_timestamp.lag",
+	"controls how far behind the checkpoint the changefeed's protected timestamp is",
+	10*time.Minute,
+	settings.PositiveDuration)
 
 // MaxProtectedTimestampAge controls the frequency of protected timestamp record updates
 var MaxProtectedTimestampAge = settings.RegisterDurationSetting(
@@ -238,7 +247,7 @@ var EventConsumerWorkerQueueSize = settings.RegisterIntSetting(
 	"changefeed.event_consumer_worker_queue_size",
 	"if changefeed.event_consumer_workers is enabled, this setting sets the maxmimum number of events "+
 		"which a worker can buffer",
-	int64(util.ConstantWithMetamorphicTestRange("changefeed.event_consumer_worker_queue_size", 16, 0, 16)),
+	int64(metamorphic.ConstantWithTestRange("changefeed.event_consumer_worker_queue_size", 16, 0, 16)),
 	settings.NonNegativeInt,
 	settings.WithPublic)
 
@@ -283,7 +292,9 @@ var SinkIOWorkers = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
 	"changefeed.sink_io_workers",
 	"the number of workers used by changefeeds when sending requests to the sink "+
-		"(currently webhook only): <0 disables, 0 assigns a reasonable default, >0 assigns the setting value",
+		"(currently the batching versions of webhook, pubsub, and kafka sinks that are "+
+		"enabled by changefeed.new_<sink type>_sink_enabled only): <0 disables, 0 assigns "+
+		"a reasonable default, >0 assigns the setting value",
 	0,
 	settings.WithPublic)
 
@@ -301,6 +312,26 @@ var SinkPacerRequestSize = settings.RegisterDurationSetting(
 	settings.PositiveDuration,
 )
 
+// UsageMetricsReportingInterval is the interval at which the changefeed
+// calculates and updates its usage metric.
+var UsageMetricsReportingInterval = settings.RegisterDurationSetting(
+	settings.ApplicationLevel,
+	"changefeed.usage.reporting_interval",
+	"the interval at which the changefeed calculates and updates its usage metric",
+	5*time.Minute,
+	settings.PositiveDuration, settings.DurationInRange(2*time.Minute, 50*time.Minute),
+)
+
+// UsageMetricsReportingTimeoutPercent is the percent of
+// UsageMetricsReportingInterval that may be spent gathering the usage metrics.
+var UsageMetricsReportingTimeoutPercent = settings.RegisterIntSetting(
+	settings.ApplicationLevel,
+	"changefeed.usage.reporting_timeout_percent",
+	"the percent of changefeed.usage.reporting_interval that may be spent gathering the usage metrics",
+	50,
+	settings.IntInRange(10, 100),
+)
+
 // DefaultLaggingRangesThreshold is the default duration by which a range must be
 // lagging behind the present to be considered as 'lagging' behind in metrics.
 var DefaultLaggingRangesThreshold = 3 * time.Minute
@@ -308,3 +339,11 @@ var DefaultLaggingRangesThreshold = 3 * time.Minute
 // DefaultLaggingRangesPollingInterval is the default polling rate at which
 // lagging ranges are checked and metrics are updated.
 var DefaultLaggingRangesPollingInterval = 1 * time.Minute
+
+var Quantize = settings.RegisterDurationSettingWithExplicitUnit(
+	settings.ApplicationLevel,
+	"changefeed.resolved_timestamp.granularity",
+	"the granularity at which changefeed progress are quantized to make tracking more efficient",
+	0,
+	settings.NonNegativeDuration,
+)

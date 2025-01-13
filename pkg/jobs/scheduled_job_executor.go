@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -156,13 +151,13 @@ func RegisterExecutorsMetrics(registry *metric.Registry) error {
 func DefaultHandleFailedRun(schedule *ScheduledJob, fmtOrMsg string, args ...interface{}) {
 	switch schedule.ScheduleDetails().OnError {
 	case jobspb.ScheduleDetails_RETRY_SOON:
-		schedule.SetScheduleStatus("retrying: "+fmtOrMsg, args...)
+		schedule.SetScheduleStatusf("retrying: "+fmtOrMsg, args...)
 		schedule.SetNextRun(schedule.env.Now().Add(retryFailedJobAfter)) // TODO(yevgeniy): backoff
 	case jobspb.ScheduleDetails_PAUSE_SCHED:
 		schedule.Pause()
-		schedule.SetScheduleStatus("schedule paused: "+fmtOrMsg, args...)
+		schedule.SetScheduleStatusf("schedule paused: "+fmtOrMsg, args...)
 	case jobspb.ScheduleDetails_RETRY_SCHED:
-		schedule.SetScheduleStatus("reschedule: "+fmtOrMsg, args...)
+		schedule.SetScheduleStatusf("reschedule: "+fmtOrMsg, args...)
 	}
 }
 

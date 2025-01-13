@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -31,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"go.opentelemetry.io/otel/attribute"
@@ -57,7 +53,7 @@ type txnState struct {
 		txn *kv.Txn
 
 		// txnStart records the time that txn started.
-		txnStart time.Time
+		txnStart crtime.Mono
 
 		// The transaction's priority.
 		priority roachpb.UserPriority
@@ -69,14 +65,17 @@ type txnState struct {
 		// has executed.
 		stmtCount int
 
-		// autoRetryReason records the error causing an auto-retryable error event if
-		// the current transaction is being automatically retried. This is used in
-		// statement traces to give more information in statement diagnostic bundles.
+		// autoRetryReason records the error causing an auto-retryable error event
+		// if the current transaction is being automatically retried. This is used
+		// in statement traces to give more information in statement diagnostic
+		// bundles, and also is surfaced in the DB Console.
 		autoRetryReason error
 
-		// autoRetryCounter keeps track of the which iteration of a transaction
-		// auto-retry we're currently in. It's 0 whenever the transaction state is not
-		// stateOpen.
+		// autoRetryCounter keeps track of the number of automatic retries that have
+		// occurred. It includes per-statement retries performed under READ
+		// COMMITTED as well as transaction retries for serialization failures under
+		// REPEATABLE READ and SERIALIZABLE. It's 0 whenever the transaction state
+		// is not stateOpen.
 		autoRetryCounter int32
 	}
 
@@ -90,6 +89,10 @@ type txnState struct {
 	// often root spans, as SQL txns are frequently the level at which we do
 	// tracing. This context is hijacked when session tracing is enabled.
 	Ctx context.Context
+
+	// txnCancelFn is a function that can be used to cancel the current
+	// txn context.
+	txnCancelFn context.CancelFunc
 
 	// recordingThreshold, is not zero, indicates that sp is recording and that
 	// the recording should be dumped to the log if execution of the transaction
@@ -201,17 +204,18 @@ func (ts *txnState) resetForNewSQLTxn(
 	// (automatic or user-directed) retries. The span is closed by finishSQLTxn().
 	opName := sqlTxnName
 	alreadyRecording := tranCtx.sessionTracing.Enabled()
-
+	ctx, cancelFn := context.WithCancel(connCtx)
 	var sp *tracing.Span
 	duration := traceTxnThreshold.Get(&tranCtx.settings.SV)
 	if alreadyRecording || duration > 0 {
-		ts.Ctx, sp = tracing.EnsureChildSpan(connCtx, tranCtx.tracer, opName,
+		ts.Ctx, sp = tracing.EnsureChildSpan(ctx, tranCtx.tracer, opName,
 			tracing.WithRecording(tracingpb.RecordingVerbose))
 	} else if ts.testingForceRealTracingSpans {
-		ts.Ctx, sp = tracing.EnsureChildSpan(connCtx, tranCtx.tracer, opName, tracing.WithForceRealSpan())
+		ts.Ctx, sp = tracing.EnsureChildSpan(ctx, tranCtx.tracer, opName, tracing.WithForceRealSpan())
 	} else {
-		ts.Ctx, sp = tracing.EnsureChildSpan(connCtx, tranCtx.tracer, opName)
+		ts.Ctx, sp = tracing.EnsureChildSpan(ctx, tranCtx.tracer, opName)
 	}
+	ts.txnCancelFn = cancelFn
 	if txnType == implicitTxn {
 		sp.SetTag("implicit", attribute.StringValue("true"))
 	}
@@ -248,7 +252,7 @@ func (ts *txnState) resetForNewSQLTxn(
 
 		txnID = ts.mu.txn.ID()
 		sp.SetTag("txn", attribute.StringValue(txnID.String()))
-		ts.mu.txnStart = timeutil.Now()
+		ts.mu.txnStart = crtime.NowMono()
 		ts.mu.autoRetryCounter = 0
 		ts.mu.autoRetryReason = nil
 		return txnID
@@ -289,6 +293,9 @@ func (ts *txnState) finishSQLTxn() (txnID uuid.UUID, commitTimestamp hlc.Timesta
 	}
 
 	sp.Finish()
+	if ts.txnCancelFn != nil {
+		ts.txnCancelFn()
+	}
 	ts.Ctx = nil
 	ts.recordingThreshold = 0
 	return func() (txnID uuid.UUID, timestamp hlc.Timestamp) {
@@ -303,7 +310,7 @@ func (ts *txnState) finishSQLTxn() (txnID uuid.UUID, commitTimestamp hlc.Timesta
 			}
 		}
 		ts.mu.txn = nil
-		ts.mu.txnStart = time.Time{}
+		ts.mu.txnStart = 0
 		return txnID, timestamp
 	}()
 }
@@ -323,6 +330,9 @@ func (ts *txnState) finishExternalTxn() {
 		if sp := tracing.SpanFromContext(ts.Ctx); sp != nil {
 			sp.Finish()
 		}
+	}
+	if ts.txnCancelFn != nil {
+		ts.txnCancelFn()
 	}
 	ts.Ctx = nil
 	ts.mu.Lock()
@@ -460,6 +470,10 @@ const (
 	// rolled back, not to a savepoint). It is generated when an implicit
 	// transaction fails and when an explicit transaction runs a ROLLBACK.
 	txnRollback
+	// txnPrepare means that the SQL transaction has been prepared and is now
+	// being dissociated from the session. It is generated when an explicit
+	// transaction runs a PREPARE TRANSACTION statement.
+	txnPrepare
 	// txnRestart means that the transaction is restarting. The iteration of the
 	// txn just finished will not commit. It is generated when we're about to
 	// auto-retry a txn and after a rollback to a savepoint placed at the start of

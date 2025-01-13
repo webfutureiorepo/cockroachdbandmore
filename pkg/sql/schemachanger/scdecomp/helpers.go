@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scdecomp
 
@@ -23,6 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/lib/pq/oid"
 )
 
@@ -75,7 +72,8 @@ func (w *walkCtx) newExpression(expr string) (*scpb.Expression, error) {
 		for _, si := range seqIdents {
 			if !si.IsByID() {
 				panic(scerrors.NotImplementedErrorf(nil, /* n */
-					"sequence %q referenced by name", si.SeqName))
+					redact.Sprintf("sequence %q referenced by name", si.SeqName),
+				))
 			}
 			seqIDs.Add(descpb.ID(si.SeqID))
 		}
@@ -101,11 +99,19 @@ func (w *walkCtx) newExpression(expr string) (*scpb.Expression, error) {
 		}
 	}
 
-	referencedColumns, err := schemaexpr.ExtractColumnIDs(
-		w.desc.(catalog.TableDescriptor), e,
-	)
-	if err != nil {
-		return nil, err
+	var referencedColumns catalog.TableColSet
+	switch t := w.desc.(type) {
+	case catalog.TableDescriptor:
+		referencedColumns, err = schemaexpr.ExtractColumnIDs(t, e)
+		if err != nil {
+			return nil, err
+		}
+	case catalog.FunctionDescriptor:
+		// newExpression is called only for DEFAULT expressions of function
+		// parameters which cannot have column references. Column references
+		// from the function body are handled in WrapFunctionBody.
+	default:
+		return nil, errors.AssertionFailedf("expected either TableDescriptor of FunctionDescriptor, found %T", t)
 	}
 	referencedFnIDs, err := schemaexpr.GetUDFIDs(e)
 	if err != nil {
@@ -124,6 +130,7 @@ func newTypeT(t *types.T) *scpb.TypeT {
 	return &scpb.TypeT{
 		Type:          t,
 		ClosedTypeIDs: typedesc.GetTypeDescriptorClosure(t).Ordered(),
+		TypeName:      t.SQLString(),
 	}
 }
 
@@ -133,6 +140,7 @@ func NewElementCreationMetadata(
 	clusterVersion clusterversion.ClusterVersion,
 ) *scpb.ElementCreationMetadata {
 	return &scpb.ElementCreationMetadata{
-		In_23_1OrLater: clusterVersion.IsActive(clusterversion.V23_1),
+		In_23_1OrLater: true,
+		In_24_3OrLater: true,
 	}
 }

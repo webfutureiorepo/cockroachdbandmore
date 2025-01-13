@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowcontainer
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
@@ -39,31 +35,16 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := eval.MakeTestingEvalContext(st)
-	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec, nil /* statsCollector */)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tempEngine.Close()
 
+	unlimitedMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	// These monitors are started and stopped by subtests.
-	memoryMonitor := mon.NewMonitor(
-		"test-mem",
-		mon.MemoryResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
-	diskMonitor := mon.NewMonitor(
-		"test-disk",
-		mon.DiskResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
+	memoryMonitor := getMemoryMonitor(st)
+	diskMonitor := getDiskMonitor(st)
 
 	const numRows = 10
 	const numCols = 1
@@ -73,7 +54,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	getRowContainer := func() *HashDiskBackedRowContainer {
-		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, diskMonitor, tempEngine)
+		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, unlimitedMemMonitor, diskMonitor, tempEngine)
 		err = rc.Init(
 			ctx,
 			false, /* shouldMark */
@@ -111,7 +92,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 			// over all rows added so far.
 			i := rc.NewUnmarkedIterator(ctx)
 			defer i.Close()
-			if err := verifyRows(i, rows[:mid], &evalCtx, ordering); err != nil {
+			if err := verifyRows(ctx, i, rows[:mid], &evalCtx, ordering); err != nil {
 				t.Fatalf("verifying memory rows failed with: %s", err)
 			}
 		}()
@@ -129,7 +110,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 		func() {
 			i := rc.NewUnmarkedIterator(ctx)
 			defer i.Close()
-			if err := verifyRows(i, rows, &evalCtx, ordering); err != nil {
+			if err := verifyRows(ctx, i, rows, &evalCtx, ordering); err != nil {
 				t.Fatalf("verifying disk rows failed with: %s", err)
 			}
 		}()
@@ -218,7 +199,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cmp, err := compareEncRows(
-				types.OneIntCol, row, rows[counter], &evalCtx, &tree.DatumAlloc{}, ordering,
+				ctx, types.OneIntCol, row, rows[counter], &evalCtx, &tree.DatumAlloc{}, ordering,
 			); err != nil {
 				t.Fatal(err)
 			} else if cmp != 0 {
@@ -243,7 +224,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cmp, err := compareEncRows(
-				types.OneIntCol, row, rows[counter], &evalCtx, &tree.DatumAlloc{}, ordering,
+				ctx, types.OneIntCol, row, rows[counter], &evalCtx, &tree.DatumAlloc{}, ordering,
 			); err != nil {
 				t.Fatal(err)
 			} else if cmp != 0 {
@@ -293,7 +274,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cmp, err := compareEncRows(
-				types.OneIntCol, row, rows[counter], &evalCtx, &tree.DatumAlloc{}, ordering,
+				ctx, types.OneIntCol, row, rows[counter], &evalCtx, &tree.DatumAlloc{}, ordering,
 			); err != nil {
 				t.Fatal(err)
 			} else if cmp != 0 {
@@ -325,46 +306,31 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := eval.MakeTestingEvalContext(st)
-	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec, nil /* statsCollector */)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tempEngine.Close()
 
+	unlimitedMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	// These monitors are started and stopped by subtests.
-	memoryMonitor := mon.NewMonitor(
-		"test-mem",
-		mon.MemoryResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
-	diskMonitor := mon.NewMonitor(
-		"test-disk",
-		mon.DiskResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
+	memoryMonitor := getMemoryMonitor(st)
+	diskMonitor := getDiskMonitor(st)
 
 	const numRowsInBucket = 4
 	const numRows = 12
 	const numCols = 2
 	rows := randgen.MakeRepeatedIntRows(numRowsInBucket, numRows, numCols)
 	storedEqColumns := columns{0}
-	types := []*types.T{types.Int, types.Int}
+	typs := []*types.T{types.Int, types.Int}
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	getRowContainer := func() *HashDiskBackedRowContainer {
-		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, diskMonitor, tempEngine)
+		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, unlimitedMemMonitor, diskMonitor, tempEngine)
 		err = rc.Init(
 			ctx,
 			true, /* shouldMark */
-			types,
+			typs,
 			storedEqColumns,
 			true, /*encodeNull */
 		)
@@ -400,7 +366,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 			// over all rows added so far.
 			i := rc.NewUnmarkedIterator(ctx)
 			defer i.Close()
-			if err := verifyRows(i, rows[:mid], &evalCtx, ordering); err != nil {
+			if err := verifyRows(ctx, i, rows[:mid], &evalCtx, ordering); err != nil {
 				t.Fatalf("verifying memory rows failed with: %s", err)
 			}
 		}()
@@ -418,7 +384,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 		func() {
 			i := rc.NewUnmarkedIterator(ctx)
 			defer i.Close()
-			if err := verifyRows(i, rows, &evalCtx, ordering); err != nil {
+			if err := verifyRows(ctx, i, rows, &evalCtx, ordering); err != nil {
 				t.Fatalf("verifying disk rows failed with: %s", err)
 			}
 		}()
@@ -448,7 +414,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 			// over all rows added so far.
 			i := rc.NewUnmarkedIterator(ctx)
 			defer i.Close()
-			if err := verifyRows(i, rows, &evalCtx, ordering); err != nil {
+			if err := verifyRows(ctx, i, rows, &evalCtx, ordering); err != nil {
 				t.Fatalf("verifying memory rows failed with: %s", err)
 			}
 		}()
@@ -456,7 +422,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 			t.Fatal(err)
 		}
 		func() {
-			i, err := rc.NewBucketIterator(ctx, rows[0], storedEqColumns)
+			i, err := rc.NewBucketIterator(ctx, rows[0], storedEqColumns, types.OneIntCol)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -479,7 +445,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 			t.Fatal("unexpectedly using memory")
 		}
 		func() {
-			i, err := rc.NewBucketIterator(ctx, rows[0], storedEqColumns)
+			i, err := rc.NewBucketIterator(ctx, rows[0], storedEqColumns, types.OneIntCol)
 			if err != nil {
 				t.Fatal(err)
 			}

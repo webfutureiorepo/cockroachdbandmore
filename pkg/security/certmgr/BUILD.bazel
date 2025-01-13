@@ -1,5 +1,4 @@
-load("@bazel_gomock//:gomock.bzl", "gomock")
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test", "gomock")
 
 go_library(
     name = "certmgr",
@@ -14,6 +13,7 @@ go_library(
     deps = [
         "//pkg/util/log",
         "//pkg/util/log/eventpb",
+        "//pkg/util/log/severity",
         "//pkg/util/syncutil",
         "//pkg/util/sysutil",
         "//pkg/util/timeutil",
@@ -30,10 +30,6 @@ go_test(
         ":mocks_certmgr",  # keep
     ],
     embed = [":certmgr"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/testutils",
         "//pkg/util/leaktest",

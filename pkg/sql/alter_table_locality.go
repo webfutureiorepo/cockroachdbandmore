@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -38,6 +33,7 @@ import (
 )
 
 type alterTableSetLocalityNode struct {
+	zeroInputPlanNode
 	n         tree.AlterTableLocality
 	tableDesc *tabledesc.Mutable
 	dbDesc    catalog.DatabaseDescriptor
@@ -70,7 +66,7 @@ func (p *planner) AlterTableLocality(
 	}
 
 	// Ensure that the database is multi-region enabled.
-	dbDesc, err := p.Descriptors().ByID(p.txn).WithoutNonPublic().Get().Database(ctx, tableDesc.GetParentID())
+	dbDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).WithoutNonPublic().Get().Database(ctx, tableDesc.GetParentID())
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +81,7 @@ func (p *planner) AlterTableLocality(
 	}
 
 	// Disallow schema changes if this table's schema is locked.
-	if err := checkTableSchemaUnlocked(tableDesc); err != nil {
+	if err := checkSchemaChangeIsAllowed(tableDesc, n); err != nil {
 		return nil, err
 	}
 
@@ -119,7 +115,7 @@ func (n *alterTableSetLocalityNode) alterTableLocalityGlobalToRegionalByTable(
 		)
 	}
 
-	dbDesc, err := params.p.Descriptors().ByID(params.p.txn).WithoutNonPublic().Get().Database(params.ctx, n.tableDesc.ParentID)
+	dbDesc, err := params.p.Descriptors().ByIDWithoutLeased(params.p.txn).WithoutNonPublic().Get().Database(params.ctx, n.tableDesc.ParentID)
 	if err != nil {
 		return err
 	}
@@ -181,7 +177,7 @@ func (n *alterTableSetLocalityNode) alterTableLocalityRegionalByTableToRegionalB
 		)
 	}
 
-	dbDesc, err := params.p.Descriptors().ByID(params.p.txn).WithoutNonPublic().Get().Database(params.ctx, n.tableDesc.ParentID)
+	dbDesc, err := params.p.Descriptors().ByIDWithoutLeased(params.p.txn).WithoutNonPublic().Get().Database(params.ctx, n.tableDesc.ParentID)
 	if err != nil {
 		return err
 	}
@@ -652,7 +648,7 @@ func setNewLocalityConfig(
 	kvTrace bool,
 ) error {
 	getMultiRegionTypeDesc := func() (*typedesc.Mutable, error) {
-		dbDesc, err := descsCol.ByID(txn).WithoutNonPublic().Get().Database(ctx, desc.GetParentID())
+		dbDesc, err := descsCol.ByIDWithoutLeased(txn).WithoutNonPublic().Get().Database(ctx, desc.GetParentID())
 		if err != nil {
 			return nil, err
 		}

@@ -1,23 +1,22 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
 	gosql "database/sql"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -52,7 +51,6 @@ func TestSampledStatsCollection(t *testing.T) {
 				Query:       stmt,
 				ImplicitTxn: implicitTxn,
 				Database:    database,
-				Failed:      false,
 			}
 			var stats *appstatspb.CollectedStatementStatistics
 			require.NoError(t, sqlStats.
@@ -63,8 +61,7 @@ func TestSampledStatsCollection(t *testing.T) {
 					func(ctx context.Context, statistics *appstatspb.CollectedStatementStatistics) error {
 						if statistics.Key.Query == key.Query &&
 							statistics.Key.ImplicitTxn == key.ImplicitTxn &&
-							statistics.Key.Database == key.Database &&
-							statistics.Key.Failed == key.Failed {
+							statistics.Key.Database == key.Database {
 							stats = statistics
 						}
 
@@ -201,4 +198,96 @@ func TestSampledStatsCollection(t *testing.T) {
 		// stats are collected. Should we make DEALLOCATE similar to that, or
 		// should we change PREPARE so that stats are collected?
 	})
+}
+
+// TestSampledStatsCollectionOnNewFingerprint tests that we sample
+// a fingerprint if it's the first time the current sql stats
+// container has seen it, unless the container is full.
+func TestSampledStatsCollectionOnNewFingerprint(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testApp := `sampling-test`
+	ctx := context.Background()
+	var collectedTxnStats []sqlstats.RecordedTxnStats
+	s := serverutils.StartServerOnly(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			SQLExecutor: &ExecutorTestingKnobs{
+				DisableProbabilisticSampling: true,
+				OnRecordTxnFinish: func(isInternal bool, _ *sessionphase.Times, stmt string, txnStats sqlstats.RecordedTxnStats) {
+					// We won't run into a race here because we'll only observe
+					// txns from a single connection.
+					if txnStats.SessionData.ApplicationName == testApp {
+						if strings.Contains(stmt, `SET application_name`) {
+							return
+						}
+						collectedTxnStats = append(collectedTxnStats, txnStats)
+					}
+				},
+			},
+		},
+	})
+	defer s.Stopper().Stop(ctx)
+	ts := s.ApplicationLayer()
+	st := &ts.ClusterSettings().SV
+	conn := sqlutils.MakeSQLRunner(ts.SQLConn(t))
+	conn.Exec(t, "SET application_name = $1", testApp)
+
+	t.Run("do-sampling-when-container-not-full", func(t *testing.T) {
+		// All of these statements should be sampled because they are new
+		// fingerprints.
+		queries := []string{
+			"SELECT 1",
+			"SELECT 1, 2, 3",
+			"CREATE TABLE IF NOT EXISTS foo (x INT)",
+			"SELECT * FROM foo",
+			// Since the sampling key does not include the txn fingerprint, no
+			// statements in this txn should be sampled.
+			"BEGIN; SELECT 1; COMMIT;",
+		}
+
+		for _, q := range queries {
+			conn.Exec(t, q)
+		}
+
+		require.Equal(t, len(queries), len(collectedTxnStats))
+
+		// We should have collected stats for each of the queries except the last.
+		for i := range collectedTxnStats[:len(queries)-1] {
+			require.True(t, collectedTxnStats[i].CollectedExecStats)
+		}
+		require.False(t, collectedTxnStats[len(queries)-1].CollectedExecStats)
+	})
+
+	collectedTxnStats = nil
+
+	t.Run("skip-sampling-when-container-full", func(t *testing.T) {
+		// We'll set the in-memory container cap to 1 statement. The container
+		// will be full after the first statement is recorded, and thus each
+		// subsequent statement will be new to the container.
+		persistedsqlstats.MinimumInterval.Override(ctx, st, 10*time.Minute)
+		sqlstats.MaxMemSQLStatsStmtFingerprints.Override(ctx, st, 1)
+		// Use a new conn to ensure we hit the cap (the limit is node-wide).
+		conn2 := sqlutils.MakeSQLRunner(ts.SQLConn(t))
+		conn2.Exec(t, "SELECT 1")
+
+		queries := []string{
+			"SELECT 'aaaaaa'",
+			"CREATE TABLE IF NOT EXISTS bar (x INT)",
+			"SELECT * FROM bar",
+			"BEGIN; SELECT 1; SELECT 1, 2; COMMIT;",
+		}
+
+		// Back to our observed connection.
+		for _, q := range queries {
+			conn.Exec(t, q)
+		}
+		require.Equal(t, len(queries), len(collectedTxnStats))
+
+		// Verify we did not collect execution stats for any of the queries.
+		for i := range collectedTxnStats {
+			require.False(t, collectedTxnStats[i].CollectedExecStats)
+		}
+	})
+
 }

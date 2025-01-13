@@ -1,38 +1,37 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
 import (
 	"context"
 	"path/filepath"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/elastic/gosigar"
 )
 
-func computeStoreProperties(
-	ctx context.Context, dir string, readonly bool, encryptionEnabled bool,
-) roachpb.StoreProperties {
+func computeStoreProperties(ctx context.Context, cfg engineConfig) roachpb.StoreProperties {
 	props := roachpb.StoreProperties{
-		ReadOnly:  readonly,
-		Encrypted: encryptionEnabled,
+		Dir:       cfg.env.Dir,
+		ReadOnly:  cfg.env.IsReadOnly(),
+		Encrypted: cfg.env.Encryption != nil,
+	}
+	if cfg.opts.WALFailover != nil {
+		props.WalFailoverPath = new(string)
+		*props.WalFailoverPath = cfg.opts.WALFailover.Secondary.Dirname
 	}
 
 	// In-memory store?
-	if dir == "" {
+	if cfg.env.Dir == "" {
 		return props
 	}
 
-	fsprops := getFileSystemProperties(ctx, dir)
+	fsprops := getFileSystemProperties(ctx, cfg.env.Dir)
 	props.FileStoreProperties = &fsprops
 	return props
 }
@@ -77,10 +76,7 @@ func getFileSystemProperties(ctx context.Context, dir string) roachpb.FileStoreP
 	// is typically being deployed are well-behaved in that regard:
 	// Kubernetes mirrors /proc/mount in /etc/mtab.
 	for i := len(fslist.List) - 1; i >= 0; i-- {
-		// filepath.Rel can reliably tell us if a path is relative to
-		// another: if it is not, an error is returned.
-		_, err := filepath.Rel(fslist.List[i].DirName, absPath)
-		if err == nil {
+		if pathIsInside(fslist.List[i].DirName, absPath) {
 			fsInfo = &fslist.List[i]
 			break
 		}
@@ -96,4 +92,21 @@ func getFileSystemProperties(ctx context.Context, dir string) roachpb.FileStoreP
 	fsprops.MountPoint = fsInfo.DirName
 	fsprops.MountOptions = fsInfo.Options
 	return fsprops
+}
+
+// pathIsInside returns true if the absolute target path is inside a base path.
+func pathIsInside(basePath string, absTargetPath string) bool {
+	// filepath.Rel can reliably tell us if a path is relative to
+	// another: if it is not, an error is returned.
+	relPath, err := filepath.Rel(basePath, absTargetPath)
+	if err != nil {
+		return false
+	}
+	if strings.HasPrefix(relPath, "..") {
+		// This check is consistent with internal filepath code (like isLocal).
+		if len(relPath) == 2 || relPath[2] == filepath.Separator {
+			return false
+		}
+	}
+	return true
 }

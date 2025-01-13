@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
@@ -187,7 +182,7 @@ func TestForecastColumnStatistics(t *testing.T) {
 				{at: 7, row: 25, dist: 5, null: 0, size: 1},
 			},
 			at:       11,
-			forecast: &testStat{at: 11, row: 25, dist: 1, null: 0, size: 1},
+			forecast: &testStat{at: 11, row: 25, dist: 2, null: 0, size: 1},
 		},
 		// Growing AvgSize
 		{
@@ -207,7 +202,7 @@ func TestForecastColumnStatistics(t *testing.T) {
 				{at: 6, row: 10, dist: 8, null: 0, size: 10},
 			},
 			at:       9,
-			forecast: &testStat{at: 9, row: 10, dist: 8, null: 0, size: 0},
+			forecast: &testStat{at: 9, row: 10, dist: 8, null: 0, size: 3},
 		},
 		// Growing from empty table
 		{
@@ -435,8 +430,8 @@ func TestForecastColumnStatistics(t *testing.T) {
 			},
 			at: 11,
 			forecast: &testStat{
-				at: 11, row: 25, dist: 1, null: 0, size: 1,
-				hist: testHistogram{{25, 0, 0, 404}},
+				at: 11, row: 25, dist: 2, null: 0, size: 1,
+				hist: testHistogram{{13, 0, 0, 404}, {0, 12, 1, 500}},
 			},
 		},
 		// Histogram, growing from empty table

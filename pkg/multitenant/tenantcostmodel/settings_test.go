@@ -1,16 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcostmodel
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -123,4 +119,78 @@ func TestRegionalCostMultiplierTable_CostMultiplier(t *testing.T) {
 		ToRegion:   "also-does-not-exist",
 	}]
 	require.Equal(t, cost, NetworkCost(0))
+}
+
+func TestEstimatedCPUSetting(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	for _, tc := range []struct {
+		name    string
+		jsonStr string
+		err     string
+	}{
+		{
+			name:    "empty string",
+			jsonStr: ``,
+		},
+		{
+			name:    "invalid JSON",
+			jsonStr: `{"foo":`,
+			err:     "unexpected end of JSON input",
+		},
+		{
+			name: "valid JSON",
+			jsonStr: func() string {
+				bytes, err := json.Marshal(&DefaultEstimatedCPUModel)
+				require.NoError(t, err)
+				return string(bytes)
+			}(),
+		},
+		{
+			name:    "mismatched ReadRequestCost field lengths",
+			jsonStr: `{"ReadRequestCost": {"BatchSize": [], "CPUPerRequest": [1]}}`,
+			err:     "estimated_cpu model lookup arrays cannot have different lengths",
+		},
+		{
+			name:    "mismatched ReadBytesCost field lengths",
+			jsonStr: `{"ReadBytesCost": {"PayloadSize": [1], "CPUPerByte": [1, 2]}}`,
+			err:     "estimated_cpu model lookup arrays cannot have different lengths",
+		},
+		{
+			name:    "mismatched WriteBatchCost field lengths",
+			jsonStr: `{"WriteBatchCost": {"RatePerNode": [1, 2], "CPUPerRequest": [1]}}`,
+			err:     "estimated_cpu model lookup arrays cannot have different lengths",
+		},
+		{
+			name:    "mismatched WriteRequestCost field lengths",
+			jsonStr: `{"WriteRequestCost": {"BatchSize": [], "CPUPerRequest": [1]}}`,
+			err:     "estimated_cpu model lookup arrays cannot have different lengths",
+		},
+		{
+			name:    "mismatched WriteBytesCost field lengths",
+			jsonStr: `{"WriteBytesCost": {"PayloadSize": [1], "CPUPerByte": []}}`,
+			err:     "estimated_cpu model lookup arrays cannot have different lengths",
+		},
+		{
+			name: "Background CPU Amortization cannot be zero",
+			jsonStr: `{"WriteBytesCost": {"PayloadSize": [1], "CPUPerByte": [2]},
+						"BackgroundCPU": {"Amount": 0.5, "Amortization": 0}}`,
+			err: "estimated_cpu model cannot use zero or negative CPU amortization",
+		},
+		{
+			name: "Background CPU Amortization cannot be negative",
+			jsonStr: `{"WriteBytesCost": {"PayloadSize": [1], "CPUPerByte": [2]},
+						"BackgroundCPU": {"Amount": 0.5, "Amortization": -5}}`,
+			err: "estimated_cpu model cannot use zero or negative CPU amortization",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := EstimatedCPUCostSetting.Validate(nil, tc.jsonStr)
+			if tc.err != "" {
+				require.Regexp(t, tc.err, err.Error())
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

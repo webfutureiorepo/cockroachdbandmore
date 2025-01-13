@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -23,13 +18,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowdispatch"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/node_rac2"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -39,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 const channelServerBrokenRangeMessage = "channelServer broken range"
@@ -109,10 +106,18 @@ func (s channelServer) HandleDelegatedSnapshot(
 type raftTransportTestContext struct {
 	t              testing.TB
 	stopper        *stop.Stopper
+	clocks         map[roachpb.NodeID]clockWithManualSource
 	transports     map[roachpb.NodeID]*kvserver.RaftTransport
 	nodeRPCContext *rpc.Context
 	gossip         *gossip.Gossip
 	st             *cluster.Settings
+}
+
+// clockWithManualSource is a pair of clocks: a manual clock and a clock that
+// uses the manual clock as a source.
+type clockWithManualSource struct {
+	manual *hlc.HybridManualClock
+	clock  *hlc.Clock
 }
 
 func newRaftTransportTestContext(t testing.TB, st *cluster.Settings) *raftTransportTestContext {
@@ -121,6 +126,7 @@ func newRaftTransportTestContext(t testing.TB, st *cluster.Settings) *raftTransp
 	rttc := &raftTransportTestContext{
 		t:          t,
 		stopper:    stop.NewStopper(stop.WithTracer(tr)),
+		clocks:     map[roachpb.NodeID]clockWithManualSource{},
 		transports: map[roachpb.NodeID]*kvserver.RaftTransport{},
 		st:         st,
 	}
@@ -154,7 +160,8 @@ func (rttc *raftTransportTestContext) AddNode(nodeID roachpb.NodeID) *kvserver.R
 		nodeID, util.TestAddr, rttc.stopper,
 		kvflowdispatch.NewDummyDispatch(), kvserver.NoopStoresFlowControlIntegration{},
 		kvserver.NoopRaftTransportDisconnectListener{},
-		nil,
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, nil,
 	)
 	rttc.GossipNode(nodeID, addr)
 	return transport
@@ -171,21 +178,27 @@ func (rttc *raftTransportTestContext) AddNodeWithoutGossip(
 	kvflowTokenDispatch kvflowcontrol.DispatchReader,
 	kvflowHandles kvflowcontrol.Handles,
 	disconnectListener kvserver.RaftTransportDisconnectListener,
+	piggybacker node_rac2.PiggybackMsgReader,
+	piggybackedResponseScheduler kvserver.PiggybackedAdmittedResponseScheduler,
 	knobs *kvserver.RaftTransportTestingKnobs,
 ) (*kvserver.RaftTransport, net.Addr) {
+	manual := hlc.NewHybridManualClock()
+	clock := hlc.NewClockForTesting(manual)
+	rttc.clocks[nodeID] = clockWithManualSource{manual: manual, clock: clock}
 	grpcServer, err := rpc.NewServer(context.Background(), rttc.nodeRPCContext)
 	require.NoError(rttc.t, err)
-	ctwWithTracer := log.MakeTestingAmbientCtxWithNewTracer()
 	transport := kvserver.NewRaftTransport(
-		ctwWithTracer,
+		log.MakeTestingAmbientCtxWithNewTracer(),
 		rttc.st,
-		ctwWithTracer.Tracer,
+		rttc.stopper,
+		clock,
 		nodedialer.New(rttc.nodeRPCContext, gossip.AddressResolver(rttc.gossip)),
 		grpcServer,
-		rttc.stopper,
 		kvflowTokenDispatch,
 		kvflowHandles,
 		disconnectListener,
+		piggybacker,
+		piggybackedResponseScheduler,
 		knobs,
 	)
 	rttc.transports[nodeID] = transport
@@ -222,8 +235,8 @@ func (rttc *raftTransportTestContext) ListenStore(
 func (rttc *raftTransportTestContext) Send(
 	from, to roachpb.ReplicaDescriptor, rangeID roachpb.RangeID, msg raftpb.Message,
 ) bool {
-	msg.To = uint64(to.ReplicaID)
-	msg.From = uint64(from.ReplicaID)
+	msg.To = raftpb.PeerID(to.ReplicaID)
+	msg.From = raftpb.PeerID(from.ReplicaID)
 	req := &kvserverpb.RaftMessageRequest{
 		RangeID:     rangeID,
 		Message:     msg,
@@ -296,8 +309,8 @@ func TestSendAndReceive(t *testing.T) {
 			baseReq := kvserverpb.RaftMessageRequest{
 				RangeID: 1,
 				Message: raftpb.Message{
-					From: uint64(fromStoreID),
-					To:   uint64(toStoreID),
+					From: raftpb.PeerID(fromStoreID),
+					To:   raftpb.PeerID(toStoreID),
 				},
 				FromReplica: roachpb.ReplicaDescriptor{
 					NodeID:  fromNodeID,
@@ -328,7 +341,7 @@ func TestSendAndReceive(t *testing.T) {
 	for toStoreID := range storeNodes {
 		for len(messageTypeCounts[toStoreID]) > 0 {
 			req := <-channels[toStoreID].ch
-			if req.Message.To != uint64(toStoreID) {
+			if req.Message.To != raftpb.PeerID(toStoreID) {
 				t.Errorf("got unexpected message %v on channel %d", req, toStoreID)
 			}
 
@@ -367,8 +380,8 @@ func TestSendAndReceive(t *testing.T) {
 		RangeID: 1,
 		Message: raftpb.Message{
 			Type: raftpb.MsgApp,
-			From: uint64(replicaIDs[fromStoreID]),
-			To:   uint64(replicaIDs[toStoreID]),
+			From: raftpb.PeerID(replicaIDs[fromStoreID]),
+			To:   raftpb.PeerID(replicaIDs[toStoreID]),
 		},
 		FromReplica: roachpb.ReplicaDescriptor{
 			NodeID:    storeNodes[fromStoreID],
@@ -457,7 +470,8 @@ func TestRaftTransportCircuitBreaker(t *testing.T) {
 		kvflowdispatch.NewDummyDispatch(),
 		kvserver.NoopStoresFlowControlIntegration{},
 		kvserver.NoopRaftTransportDisconnectListener{},
-		nil,
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, nil,
 	)
 	serverChannel := rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
 
@@ -571,7 +585,8 @@ func TestReopenConnection(t *testing.T) {
 			kvflowdispatch.NewDummyDispatch(),
 			kvserver.NoopStoresFlowControlIntegration{},
 			kvserver.NoopRaftTransportDisconnectListener{},
-			nil,
+			(*node_rac2.AdmittedPiggybacker)(nil),
+			nil, nil,
 		)
 	rttc.GossipNode(serverReplica.NodeID, serverAddr)
 	rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
@@ -610,7 +625,8 @@ func TestReopenConnection(t *testing.T) {
 		kvflowdispatch.NewDummyDispatch(),
 		kvserver.NoopStoresFlowControlIntegration{},
 		kvserver.NoopRaftTransportDisconnectListener{},
-		nil,
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, nil,
 	)
 	replacementChannel := rttc.ListenStore(replacementReplica.NodeID, replacementReplica.StoreID)
 
@@ -698,4 +714,51 @@ func TestSendFailureToConnectDoesNotHangRaft(t *testing.T) {
 		},
 		Message: raftpb.Message{To: to, From: from},
 	}, rpc.DefaultClass)
+}
+
+// TestRaftTransportClockPropagation verifies that hlc clock timestamps are
+// propagated across the RaftTransport.
+func TestRaftTransportClockPropagation(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	rttc := newRaftTransportTestContext(t, cluster.MakeTestingClusterSettings())
+	defer rttc.Stop()
+
+	serverReplica := roachpb.ReplicaDescriptor{
+		NodeID:    2,
+		StoreID:   2,
+		ReplicaID: 2,
+	}
+	rttc.AddNode(serverReplica.NodeID)
+	serverChannel := rttc.ListenStore(serverReplica.NodeID, serverReplica.StoreID)
+
+	clientReplica := roachpb.ReplicaDescriptor{
+		NodeID:    1,
+		StoreID:   1,
+		ReplicaID: 1,
+	}
+	rttc.AddNode(clientReplica.NodeID)
+
+	// Pause all clocks.
+	for _, c := range rttc.clocks {
+		c.manual.Pause()
+	}
+
+	// Advance the client's clock beyond the server's.
+	serverNow := rttc.clocks[serverReplica.NodeID].clock.Now()
+	var clientNow hlc.Timestamp
+	for clientNow.LessEq(serverNow) {
+		rttc.clocks[clientReplica.NodeID].manual.Increment(1000000)
+		clientNow = rttc.clocks[clientReplica.NodeID].clock.Now()
+	}
+
+	// Send a message from the client to the server.
+	sent := rttc.Send(clientReplica, serverReplica, 1 /* rangeID */, raftpb.Message{Commit: 10})
+	require.True(t, sent, "failed to send message")
+	req := <-serverChannel.ch
+	require.Equal(t, uint64(10), req.Message.Commit)
+
+	// The server's clock should have been updated to the client's time.
+	serverNow = rttc.clocks[serverReplica.NodeID].clock.Now()
+	require.False(t, serverNow.Less(clientNow))
 }

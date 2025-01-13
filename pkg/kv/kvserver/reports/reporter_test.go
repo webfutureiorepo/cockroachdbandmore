@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package reports
 
@@ -41,9 +36,8 @@ func TestConstraintConformanceReportIntegration(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	// This test takes seconds because of replication vagaries.
 	skip.UnderShort(t)
-	// Under stressrace, replication changes seem to hit 1m deadline errors and
+	// Under race, replication changes seem to hit 1m deadline errors and
 	// don't make progress.
-	skip.UnderStressRace(t)
 	skip.UnderRace(t, "takes >1min under race")
 	// Similarly, skip the test under deadlock builds.
 	skip.UnderDeadlock(t, "takes >1min under deadlock")
@@ -125,6 +119,11 @@ func TestConstraintConformanceReportIntegration(t *testing.T) {
 func TestCriticalLocalitiesReportIntegration(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	skip.UnderStressWithIssue(t, 134948)
+	skip.UnderRaceWithIssue(t, 134948)
+	skip.UnderShort(t)
+
 	ctx := context.Background()
 	// 2 regions, 3 dcs per region.
 	tc := serverutils.StartCluster(t, 6, base.TestClusterArgs{

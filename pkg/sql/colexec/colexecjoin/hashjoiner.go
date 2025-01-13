@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecjoin
 
@@ -246,7 +241,6 @@ type hashJoiner struct {
 	}
 
 	exportBufferedState struct {
-		hashTableReleased  bool
 		rightExported      int
 		rightWindowedBatch coldata.Batch
 	}
@@ -709,13 +703,8 @@ func (hj *hashJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch {
 		// point we haven't requested a single batch from the left.
 		return coldata.ZeroBatch
 	} else if hj.InputTwo == input {
-		if hj.exportBufferedState.hashTableReleased {
-			return coldata.ZeroBatch
-		}
-		if hj.exportBufferedState.rightExported == hj.ht.Vals.Length() {
-			// We no longer need the hash table, so we can release it.
-			hj.ht.Release()
-			hj.exportBufferedState.hashTableReleased = true
+		if hj.ht == nil || hj.exportBufferedState.rightExported == hj.ht.Vals.Length() {
+			// The right input has been fully exported.
 			return coldata.ZeroBatch
 		}
 		newRightExported := hj.exportBufferedState.rightExported + coldata.BatchSize()
@@ -740,6 +729,30 @@ func (hj *hashJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch {
 		// This code is unreachable, but the compiler cannot infer that.
 		return nil
 	}
+}
+
+// ReleaseBeforeExport implements the colexecop.BufferingInMemoryOperator
+// interface.
+func (hj *hashJoiner) ReleaseBeforeExport() {}
+
+// ReleaseAfterExport implements the colexecop.BufferingInMemoryOperator
+// interface.
+func (hj *hashJoiner) ReleaseAfterExport(input colexecop.Operator) {
+	if hj.InputOne == input {
+		// We don't have anything to release for the left input.
+		return
+	}
+	if hj.ht == nil {
+		// Resources have already been released.
+		return
+	}
+	// We can only spill to disk while building the hash table (i.e. before the
+	// probing phase), so we only need to release the hash table and the
+	// windowed batch we used for the export (since we haven't allocated any
+	// other resources).
+	hj.ht.Release()
+	hj.ht = nil
+	hj.exportBufferedState.rightWindowedBatch = nil
 }
 
 func (hj *hashJoiner) resetOutput(nResults int) {
@@ -782,13 +795,12 @@ func (hj *hashJoiner) Reset(ctx context.Context) {
 	// complete in build() method.
 	hj.emittingRightState.rowIdx = 0
 	if buildutil.CrdbTestBuild {
-		if hj.exportBufferedState.hashTableReleased {
+		if hj.ht == nil {
 			colexecerror.InternalError(errors.AssertionFailedf(
 				"the hash joiner is being reset after having spilled to disk",
 			))
 		}
 	}
-	hj.exportBufferedState.hashTableReleased = false
 	hj.exportBufferedState.rightExported = 0
 }
 

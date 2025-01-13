@@ -1,17 +1,19 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { SortSetting } from "@cockroachlabs/cluster-ui";
 import { ReactWrapper } from "enzyme";
-import { times } from "lodash";
+import times from "lodash/times";
 import Long from "long";
+import React from "react";
+
+import { cockroach } from "src/js/protos";
+import { LocalSetting } from "src/redux/localsettings";
+import { livenessByNodeIDSelector, LivenessStatus } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
+import { connectedMount } from "src/test-utils";
 
 import {
   decommissionedNodesTableDataSelector,
@@ -20,12 +22,6 @@ import {
   NodeList,
   NodeStatusRow,
 } from "./index";
-import { AdminUIState } from "src/redux/state";
-import { LocalSetting } from "src/redux/localsettings";
-import { connectedMount } from "src/test-utils";
-import { cockroach } from "src/js/protos";
-import { livenessByNodeIDSelector, LivenessStatus } from "src/redux/nodes";
-import { SortSetting } from "@cockroachlabs/cluster-ui";
 
 import NodeLivenessStatus = cockroach.kv.kvserver.liveness.livenesspb.NodeLivenessStatus;
 import MembershipStatus = cockroach.kv.kvserver.liveness.livenesspb.MembershipStatus;

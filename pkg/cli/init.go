@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -38,7 +33,16 @@ you would use for the sql command).
 	RunE: clierrorplus.MaybeDecorateError(runInit),
 }
 
+var initCmdOptions = struct {
+	virtualized      bool
+	virtualizedEmpty bool
+}{}
+
 func runInit(cmd *cobra.Command, args []string) error {
+	if initCmdOptions.virtualized && initCmdOptions.virtualizedEmpty {
+		return errors.Newf("only one of --virtualized and --virtualized-empty can be used")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -52,9 +56,18 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	defer finish()
 
+	typ := serverpb.InitType_NONE
+	if initCmdOptions.virtualized {
+		typ = serverpb.InitType_VIRTUALIZED
+	} else if initCmdOptions.virtualizedEmpty {
+		typ = serverpb.InitType_VIRTUALIZED_EMPTY
+	}
+
 	// Actually perform cluster initialization.
 	c := serverpb.NewInitClient(conn)
-	if _, err = c.Bootstrap(ctx, &serverpb.BootstrapRequest{}); err != nil {
+	if _, err = c.Bootstrap(ctx, &serverpb.BootstrapRequest{
+		InitType: typ,
+	}); err != nil {
 		return err
 	}
 

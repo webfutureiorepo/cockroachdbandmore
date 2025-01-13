@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -37,7 +32,6 @@ var jasyncSqlBlocklist = blocklist{
 	`com.github.aysnc.sql.db.integration.PreparedStatementSpec.prepared statements should support handling JSON type`:                                               "unknown",
 	`com.github.aysnc.sql.db.integration.TransactionSpec.transactions should commit simple inserts`:                                                                 "unknown",
 	`com.github.aysnc.sql.db.integration.TransactionSpec.transactions should commit simple inserts, prepared statements`:                                            "unknown",
-	`com.github.aysnc.sql.db.integration.TransactionSpec.transactions should rollback explicitly`:                                                                   "unknown",
 	`com.github.aysnc.sql.db.integration.TransactionSpec.transactions should rollback to savepoint`:                                                                 "unknown",
 	`com.github.aysnc.sql.db.integration.pool.ActorAsyncObjectPoolSpec.pool should enqueue an action if the pool is full`:                                           "unknown",
 	`com.github.aysnc.sql.db.integration.pool.ActorAsyncObjectPoolSpec.pool should give me a valid object when I ask for one`:                                       "unknown",

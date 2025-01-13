@@ -1,10 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -13,13 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -31,7 +28,6 @@ type sinkTelemetryData struct {
 type periodicTelemetryLogger struct {
 	ctx               context.Context
 	sinkTelemetryData sinkTelemetryData
-	job               *jobs.Job
 	changefeedDetails eventpb.CommonChangefeedEventDetails
 	settings          *cluster.Settings
 
@@ -39,13 +35,9 @@ type periodicTelemetryLogger struct {
 }
 
 type telemetryLogger interface {
-	// recordEmittedBytes records the number of emitted bytes without
-	// publishing logs.
-	recordEmittedBytes(numBytes int)
-
-	// recordEmittedMessages records the number of emitted messages without
-	// publishing logs.
-	recordEmittedMessages(numMessages int)
+	// incEmittedCounters increments the counters for emitted messages and bytes
+	// without publishing logs.
+	incEmittedCounters(numMessages int, numBytes int)
 
 	// maybeFlushLogs flushes buffered metrics to logs depending
 	// on the semantics of the implementation.
@@ -58,29 +50,28 @@ type telemetryLogger interface {
 var _ telemetryLogger = (*periodicTelemetryLogger)(nil)
 
 func makePeriodicTelemetryLogger(
-	ctx context.Context, job *jobs.Job, s *cluster.Settings,
+	ctx context.Context,
+	details jobspb.ChangefeedDetails,
+	description string,
+	jobID jobspb.JobID,
+	s *cluster.Settings,
 ) (*periodicTelemetryLogger, error) {
 	return &periodicTelemetryLogger{
 		ctx:               ctx,
-		job:               job,
-		changefeedDetails: getCommonChangefeedEventDetails(ctx, job.Details().(jobspb.ChangefeedDetails), job.Payload().Description),
+		changefeedDetails: makeCommonChangefeedEventDetails(ctx, details, description, jobID),
 		sinkTelemetryData: sinkTelemetryData{},
 		settings:          s,
 	}, nil
 }
 
-// recordEmittedBytes implements the telemetryLogger interface.
-func (ptl *periodicTelemetryLogger) recordEmittedBytes(numBytes int) {
+// incEmittedCounters implements the telemetryLogger interface.
+func (ptl *periodicTelemetryLogger) incEmittedCounters(numMessages, numBytes int) {
+	ptl.sinkTelemetryData.emittedMessages.Add(int64(numMessages))
 	ptl.sinkTelemetryData.emittedBytes.Add(int64(numBytes))
 }
 
 func (ptl *periodicTelemetryLogger) resetEmittedBytes() int64 {
 	return ptl.sinkTelemetryData.emittedBytes.Swap(0)
-}
-
-// recordEmittedMessages implements the telemetryLogger interface.
-func (ptl *periodicTelemetryLogger) recordEmittedMessages(numMessages int) {
-	ptl.sinkTelemetryData.emittedMessages.Add(int64(numMessages))
 }
 
 func (ptl *periodicTelemetryLogger) resetEmittedMessages() int64 {
@@ -109,12 +100,11 @@ func (ptl *periodicTelemetryLogger) maybeFlushLogs() {
 
 	continuousTelemetryEvent := &eventpb.ChangefeedEmittedBytes{
 		CommonChangefeedEventDetails: ptl.changefeedDetails,
-		JobId:                        int64(ptl.job.ID()),
 		EmittedBytes:                 ptl.resetEmittedBytes(),
 		EmittedMessages:              ptl.resetEmittedMessages(),
 		LoggingInterval:              loggingInterval,
 	}
-	log.StructuredEvent(ptl.ctx, continuousTelemetryEvent)
+	log.StructuredEvent(ptl.ctx, severity.INFO, continuousTelemetryEvent)
 }
 
 func (ptl *periodicTelemetryLogger) close() {
@@ -125,31 +115,40 @@ func (ptl *periodicTelemetryLogger) close() {
 
 	continuousTelemetryEvent := &eventpb.ChangefeedEmittedBytes{
 		CommonChangefeedEventDetails: ptl.changefeedDetails,
-		JobId:                        int64(ptl.job.ID()),
 		EmittedBytes:                 ptl.resetEmittedBytes(),
 		EmittedMessages:              ptl.resetEmittedMessages(),
 		LoggingInterval:              loggingInterval,
 		Closing:                      true,
 	}
-	log.StructuredEvent(ptl.ctx, continuousTelemetryEvent)
+	log.StructuredEvent(ptl.ctx, severity.INFO, continuousTelemetryEvent)
 }
 
 func wrapMetricsRecorderWithTelemetry(
-	ctx context.Context, job *jobs.Job, s *cluster.Settings, mb metricsRecorder,
+	ctx context.Context,
+	details jobspb.ChangefeedDetails,
+	description string,
+	jobID jobspb.JobID,
+	s *cluster.Settings,
+	mb metricsRecorder,
+	knobs TestingKnobs,
 ) (*telemetryMetricsRecorder, error) {
-	logger, err := makePeriodicTelemetryLogger(ctx, job, s)
+	var logger telemetryLogger
+	logger, err := makePeriodicTelemetryLogger(ctx, details, description, jobID, s)
 	if err != nil {
 		return &telemetryMetricsRecorder{}, err
 	}
+	if knobs.WrapTelemetryLogger != nil {
+		logger = knobs.WrapTelemetryLogger(logger)
+	}
 	return &telemetryMetricsRecorder{
+		metricsRecorder: mb,
 		telemetryLogger: logger,
-		inner:           mb,
 	}, nil
 }
 
 type telemetryMetricsRecorder struct {
-	telemetryLogger *periodicTelemetryLogger
-	inner           metricsRecorder
+	metricsRecorder
+	telemetryLogger telemetryLogger
 }
 
 var _ metricsRecorder = (*telemetryMetricsRecorder)(nil)
@@ -158,23 +157,10 @@ func (r *telemetryMetricsRecorder) close() {
 	r.telemetryLogger.close()
 }
 
-func (r *telemetryMetricsRecorder) recordMessageSize(sz int64) {
-	r.inner.recordMessageSize(sz)
-}
-
-func (r *telemetryMetricsRecorder) makeCloudstorageFileAllocCallback() func(delta int64) {
-	return r.inner.makeCloudstorageFileAllocCallback()
-}
-
-func (r *telemetryMetricsRecorder) recordInternalRetry(numMessages int64, reducedBatchSize bool) {
-	r.inner.recordInternalRetry(numMessages, reducedBatchSize)
-}
-
 func (r *telemetryMetricsRecorder) recordOneMessage() recordOneMessageCallback {
 	return func(mvcc hlc.Timestamp, bytes int, compressedBytes int) {
-		r.inner.recordOneMessage()(mvcc, bytes, compressedBytes)
-		r.telemetryLogger.recordEmittedBytes(bytes)
-		r.telemetryLogger.recordEmittedMessages(1)
+		r.metricsRecorder.recordOneMessage()(mvcc, bytes, compressedBytes)
+		r.telemetryLogger.incEmittedCounters(1 /* numMessages */, bytes)
 		r.telemetryLogger.maybeFlushLogs()
 	}
 }
@@ -182,47 +168,18 @@ func (r *telemetryMetricsRecorder) recordOneMessage() recordOneMessageCallback {
 func (r *telemetryMetricsRecorder) recordEmittedBatch(
 	startTime time.Time, numMessages int, mvcc hlc.Timestamp, bytes int, compressedBytes int,
 ) {
-	r.inner.recordEmittedBatch(startTime, numMessages, mvcc, bytes, compressedBytes)
-	r.telemetryLogger.recordEmittedBytes(bytes)
-	r.telemetryLogger.recordEmittedMessages(numMessages)
+	r.metricsRecorder.recordEmittedBatch(startTime, numMessages, mvcc, bytes, compressedBytes)
+	r.telemetryLogger.incEmittedCounters(numMessages, bytes)
 	r.telemetryLogger.maybeFlushLogs()
 }
 
-func (r *telemetryMetricsRecorder) recordResolvedCallback() func() {
-	return r.inner.recordResolvedCallback()
-}
-
-func (r *telemetryMetricsRecorder) recordFlushRequestCallback() func() {
-	return r.inner.recordFlushRequestCallback()
-}
-
-func (r *telemetryMetricsRecorder) getBackfillCallback() func() func() {
-	return r.inner.getBackfillCallback()
-}
-
-func (r *telemetryMetricsRecorder) getBackfillRangeCallback() func(int64) (func(), func()) {
-	return r.inner.getBackfillRangeCallback()
-}
-
-func (r *telemetryMetricsRecorder) recordSizeBasedFlush() {
-	r.inner.recordSizeBasedFlush()
-}
-
-func (r *telemetryMetricsRecorder) recordSinkIOInflightChange(delta int64) {
-	r.inner.recordSinkIOInflightChange(delta)
-}
-
-func (r *telemetryMetricsRecorder) newParallelIOMetricsRecorder() parallelIOMetricsRecorder {
-	return r.inner.newParallelIOMetricsRecorder()
-}
-
-// continuousTelemetryInterval determines the interval at which each node emits telemetry events
-// during the lifespan of each enterprise changefeed.
+// continuousTelemetryInterval determines the interval at which each node emits
+// periodic telemetry events during the lifespan of each changefeed.
 var continuousTelemetryInterval = settings.RegisterDurationSetting(
 	settings.ApplicationLevel,
 	"changefeed.telemetry.continuous_logging.interval",
 	"determines the interval at which each node emits continuous telemetry events"+
-		" during the lifespan of every enterprise changefeed; setting a zero value disables",
+		" during the lifespan of every changefeed; setting a zero value disables logging",
 	24*time.Hour,
 	settings.NonNegativeDuration,
 )

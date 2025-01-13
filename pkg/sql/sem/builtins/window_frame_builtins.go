@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -39,11 +34,12 @@ type indexedValue struct {
 type slidingWindow struct {
 	values  ring.Buffer[*indexedValue]
 	evalCtx *eval.Context
-	cmp     func(*eval.Context, tree.Datum, tree.Datum) int
+	cmp     func(context.Context, *eval.Context, tree.Datum, tree.Datum) (int, error)
 }
 
 func makeSlidingWindow(
-	evalCtx *eval.Context, cmp func(*eval.Context, tree.Datum, tree.Datum) int,
+	evalCtx *eval.Context,
+	cmp func(context.Context, *eval.Context, tree.Datum, tree.Datum) (int, error),
 ) *slidingWindow {
 	return &slidingWindow{
 		evalCtx: evalCtx,
@@ -56,14 +52,18 @@ func makeSlidingWindow(
 // deque always contains unique values sorted in descending order of their
 // "priority" (when we encounter duplicates, we always keep the one with the
 // largest idx).
-func (sw *slidingWindow) add(iv *indexedValue) {
+func (sw *slidingWindow) add(ctx context.Context, iv *indexedValue) error {
 	for i := sw.values.Len() - 1; i >= 0; i-- {
-		if sw.cmp(sw.evalCtx, sw.values.Get(i).value, iv.value) > 0 {
+		cmp, err := sw.cmp(ctx, sw.evalCtx, sw.values.Get(i).value, iv.value)
+		if err != nil {
+			return err
+		} else if cmp > 0 {
 			break
 		}
 		sw.values.RemoveLast()
 	}
 	sw.values.AddLast(iv)
+	return nil
 }
 
 // removeAllBefore removes all values from the beginning of the deque that have
@@ -130,7 +130,10 @@ func (w *slidingWindowFunc) Compute(
 			if res == nil {
 				res = args[0]
 			} else {
-				if w.sw.cmp(evalCtx, args[0], res) > 0 {
+				cmp, err := w.sw.cmp(ctx, evalCtx, args[0], res)
+				if err != nil {
+					return nil, err
+				} else if cmp > 0 {
 					res = args[0]
 				}
 			}
@@ -164,7 +167,10 @@ func (w *slidingWindowFunc) Compute(
 			// case of a window frame with no non-null values is handled below.
 			continue
 		}
-		w.sw.add(&indexedValue{value: value, idx: idx})
+		err = w.sw.add(ctx, &indexedValue{value: value, idx: idx})
+		if err != nil {
+			return nil, err
+		}
 	}
 	w.prevEnd = frameEndIdx
 

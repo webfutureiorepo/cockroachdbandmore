@@ -1,16 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 import (
+	"context"
 	gosql "database/sql"
 	"strings"
 	"testing"
@@ -24,19 +20,49 @@ import (
 // GenerateAndCheckRedactedExplainsForPII generates num random statements and
 // checks that the output of all variants of EXPLAIN (REDACT) on each random
 // statement does not contain injected PII.
+//
+// The caller is expected to have set statement timeout on the connection.
 func GenerateAndCheckRedactedExplainsForPII(
 	t *testing.T,
 	smith *sqlsmith.Smither,
 	num int,
-	query func(sql string) (*gosql.Rows, error),
+	conn *gosql.Conn,
 	containsPII func(explain, output string) error,
 ) {
+	ctx := context.Background()
+	// We expect that the caller has set non-zero statement timeout - double
+	// check that.
+	rows, err := conn.QueryContext(ctx, "SHOW statement_timeout;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var timeout int
+		if err = rows.Scan(&timeout); err != nil {
+			t.Fatal(err)
+		}
+		if timeout == 0 {
+			t.Fatal("expected non-zero timeout")
+		}
+	}
+
 	// Generate a few random statements.
-	statements := make([]string, num)
+	statements := make([]string, 0, num)
 	t.Log("generated statements:")
-	for i := range statements {
-		statements[i] = smith.Generate()
-		t.Log(statements[i])
+	for len(statements) < num {
+		stmt := smith.Generate()
+		// Try vanilla EXPLAIN on this stmt to ensure that it is sound.
+		rows, err := conn.QueryContext(ctx, "EXPLAIN "+stmt)
+		if err != nil {
+			// We shouldn't see any internal errors - ignore all others.
+			if strings.Contains(err.Error(), "internal error") {
+				t.Error(err)
+			}
+		} else {
+			rows.Close()
+			statements = append(statements, stmt)
+			t.Log(stmt + ";")
+		}
 	}
 
 	// Gather EXPLAIN variants to test.
@@ -85,7 +111,7 @@ func GenerateAndCheckRedactedExplainsForPII(
 							}
 							for _, stmt := range statements {
 								explain := cmd + " (" + mode + flag + "REDACT) " + stmt
-								rows, err := query(explain)
+								rows, err := conn.QueryContext(ctx, explain)
 								if err != nil {
 									// There are many legitimate errors that could be returned
 									// that don't indicate a PII leak or a test failure. For
@@ -98,7 +124,7 @@ func GenerateAndCheckRedactedExplainsForPII(
 									} else if !strings.Contains(msg, "syntax error") {
 										// Skip logging syntax errors, since they're expected to be
 										// common and uninteresting.
-										t.Logf("encountered non-internal error: %s\n", err)
+										t.Logf("encountered non-internal error: %s\n%s\n\n", err, explain)
 									}
 									continue
 								}

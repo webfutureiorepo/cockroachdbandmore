@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -93,8 +88,8 @@ func TestAmbiguousCommit(t *testing.T) {
 
 		params.Knobs.KVClient = &kvcoord.ClientTestingKnobs{
 			TransportFactory: func(factory kvcoord.TransportFactory) kvcoord.TransportFactory {
-				return func(options kvcoord.SendOptions, slice kvcoord.ReplicaSlice) (kvcoord.Transport, error) {
-					transport, err := factory(options, slice)
+				return func(options kvcoord.SendOptions, slice kvcoord.ReplicaSlice) kvcoord.Transport {
+					transport := factory(options, slice)
 					return &interceptingTransport{
 						Transport: transport,
 						sendNext: func(ctx context.Context, ba *kvpb.BatchRequest) (*kvpb.BatchResponse, error) {
@@ -124,7 +119,7 @@ func TestAmbiguousCommit(t *testing.T) {
 								return transport.SendNext(ctx, ba)
 							}
 						},
-					}, err
+					}
 				}
 			},
 		}
@@ -156,7 +151,7 @@ func TestAmbiguousCommit(t *testing.T) {
 		for _, server := range tc.Servers {
 			st := server.ClusterSettings()
 			st.Manual.Store(true)
-			sql.DistSQLClusterExecMode.Override(ctx, &st.SV, int64(sessiondatapb.DistSQLOff))
+			sql.DistSQLClusterExecMode.Override(ctx, &st.SV, sessiondatapb.DistSQLOff)
 		}
 
 		sqlDB := tc.Conns[0]

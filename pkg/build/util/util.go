@@ -1,24 +1,20 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file contains assorted utilities for working with Bazel internals.
 
 package util
 
 import (
+	"cmp"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -183,8 +179,8 @@ func MergeTestXMLs(suitesToMerge []TestSuites, outFile io.Writer) error {
 	for _, testCase := range cases {
 		resultSuite.TestCases = append(resultSuite.TestCases, testCase)
 	}
-	sort.Slice(resultSuite.TestCases, func(i, j int) bool {
-		return resultSuite.TestCases[i].Name < resultSuite.TestCases[j].Name
+	slices.SortFunc(resultSuite.TestCases, func(a, b *testCase) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return writeToFile(&resultSuites, outFile)
 }

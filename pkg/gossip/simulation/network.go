@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package simulation
 
@@ -259,7 +254,7 @@ func (n *Network) IsNetworkConnected() bool {
 func (n *Network) infosSent() int {
 	var count int64
 	for _, node := range n.Nodes {
-		count += node.Gossip.GetNodeMetrics().InfosSent.Counter.Count()
+		count += node.Gossip.GetNodeMetrics().InfosSent.Count()
 	}
 	return int(count)
 }
@@ -269,7 +264,7 @@ func (n *Network) infosSent() int {
 func (n *Network) infosReceived() int {
 	var count int64
 	for _, node := range n.Nodes {
-		count += node.Gossip.GetNodeMetrics().InfosReceived.Counter.Count()
+		count += node.Gossip.GetNodeMetrics().InfosReceived.Count()
 	}
 	return int(count)
 }

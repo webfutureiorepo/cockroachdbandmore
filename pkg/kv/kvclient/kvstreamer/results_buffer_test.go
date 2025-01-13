@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstreamer
 
@@ -44,23 +39,28 @@ func TestInOrderResultsBuffer(t *testing.T) {
 		ctx,
 		base.DefaultTestTempStorageConfig(st),
 		base.DefaultTestStoreSpec,
+		nil, /* statsCollector */
 	)
 	require.NoError(t, err)
 	defer tempEngine.Close()
-	diskMonitor := mon.NewMonitor(
-		"test-disk",
-		mon.DiskResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
+	memMonitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-mem"),
+		Res:      mon.MemoryResource,
+		Settings: st,
+	})
+	memMonitor.Start(ctx, nil, mon.NewStandaloneBudget(math.MaxInt64))
+	defer memMonitor.Stop(ctx)
+	memAcc := memMonitor.MakeBoundAccount()
+	diskMonitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-disk"),
+		Res:      mon.DiskResource,
+		Settings: st,
+	})
 	diskMonitor.Start(ctx, nil, mon.NewStandaloneBudget(math.MaxInt64))
 	defer diskMonitor.Stop(ctx)
 
-	budget := newBudget(nil /* acc */, math.MaxInt /* limitBytes */)
-	diskBuffer := TestResultDiskBufferConstructor(tempEngine, diskMonitor)
+	budget := newBudget(mon.NewStandaloneUnlimitedAccount(), math.MaxInt /* limitBytes */)
+	diskBuffer := TestResultDiskBufferConstructor(tempEngine, memAcc, diskMonitor)
 	b := newInOrderResultsBuffer(budget, diskBuffer)
 	defer b.close(ctx)
 
@@ -118,7 +118,9 @@ func TestInOrderResultsBuffer(t *testing.T) {
 			b.Lock()
 			numToAdd := rng.Intn(len(addOrder)) + 1
 			for i := 0; i < numToAdd; i++ {
-				b.addLocked(results[addOrder[0]])
+				r := results[addOrder[0]]
+				require.NoError(t, budget.consumeLocked(ctx, r.memoryTok.toRelease, false /* allowDebt */))
+				b.addLocked(r)
 				addOrder = addOrder[1:]
 			}
 			b.doneAddingLocked(ctx)

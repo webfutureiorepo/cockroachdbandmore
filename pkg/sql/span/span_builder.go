@@ -1,16 +1,12 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package span
 
 import (
+	"context"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -44,24 +40,50 @@ type Builder struct {
 	alloc     tree.DatumAlloc
 }
 
-// Init initializes a Builder with a table and index.
+// Init initializes a Builder with a table and index. It does not set up the
+// Builder to create external spans, even if the table uses external row data.
 func (s *Builder) Init(
 	evalCtx *eval.Context, codec keys.SQLCodec, table catalog.TableDescriptor, index catalog.Index,
 ) {
+	if ext := table.ExternalRowData(); ext != nil {
+		panic(errors.AssertionFailedf("%s uses external row data", table.GetName()))
+	}
 	s.evalCtx = evalCtx
 	s.codec = codec
 	s.keyAndPrefixCols = table.IndexFetchSpecKeyAndSuffixColumns(index)
 	s.KeyPrefix = rowenc.MakeIndexKeyPrefix(codec, table.GetID(), index.GetID())
 }
 
-// InitWithFetchSpec creates a Builder using IndexFetchSpec.
+// InitAllowingExternalRowData initializes a Builder with a table and index. If
+// the table uses external row data, the Builder will create external spans.
+func (s *Builder) InitAllowingExternalRowData(
+	evalCtx *eval.Context, codec keys.SQLCodec, table catalog.TableDescriptor, index catalog.Index,
+) {
+	s.evalCtx = evalCtx
+	s.keyAndPrefixCols = table.IndexFetchSpecKeyAndSuffixColumns(index)
+	if ext := table.ExternalRowData(); ext != nil {
+		s.codec = keys.MakeSQLCodec(ext.TenantID)
+		s.KeyPrefix = rowenc.MakeIndexKeyPrefix(s.codec, ext.TableID, index.GetID())
+	} else {
+		s.codec = codec
+		s.KeyPrefix = rowenc.MakeIndexKeyPrefix(codec, table.GetID(), index.GetID())
+	}
+}
+
+// InitWithFetchSpec creates a Builder using IndexFetchSpec. If the spec
+// specifies external row data, the Builder will create external spans.
 func (s *Builder) InitWithFetchSpec(
 	evalCtx *eval.Context, codec keys.SQLCodec, spec *fetchpb.IndexFetchSpec,
 ) {
 	s.evalCtx = evalCtx
-	s.codec = codec
 	s.keyAndPrefixCols = spec.KeyAndSuffixColumns
-	s.KeyPrefix = rowenc.MakeIndexKeyPrefix(codec, spec.TableID, spec.IndexID)
+	if ext := spec.External; ext != nil {
+		s.codec = keys.MakeSQLCodec(ext.TenantID)
+		s.KeyPrefix = rowenc.MakeIndexKeyPrefix(s.codec, ext.TableID, spec.IndexID)
+	} else {
+		s.codec = codec
+		s.KeyPrefix = rowenc.MakeIndexKeyPrefix(codec, spec.TableID, spec.IndexID)
+	}
 }
 
 // SpanFromEncDatums encodes a span with len(values) constraint columns from the
@@ -82,6 +104,7 @@ func (s *Builder) SpanFromEncDatums(
 // generated. Since the exec code knows nothing about index column sorting
 // direction we assume ascending if they are descending we deal with that here.
 func (s *Builder) SpanFromEncDatumsWithRange(
+	ctx context.Context,
 	values rowenc.EncDatumRow,
 	prefixLen int,
 	startBound, endBound *rowenc.EncDatum,
@@ -103,8 +126,8 @@ func (s *Builder) SpanFromEncDatumsWithRange(
 			return roachpb.Span{}, true, true, nil
 		}
 		if !startInclusive {
-			if (isDesc && startBound.Datum.IsMin(s.evalCtx)) ||
-				(!isDesc && startBound.Datum.IsMax(s.evalCtx)) {
+			if (isDesc && startBound.Datum.IsMin(ctx, s.evalCtx)) ||
+				(!isDesc && startBound.Datum.IsMax(ctx, s.evalCtx)) {
 				// There are no values that satisfy the start bound.
 				return roachpb.Span{}, false, true, nil
 			}
@@ -134,7 +157,7 @@ func (s *Builder) SpanFromEncDatumsWithRange(
 			// filtered cases where this is not possible. If the index column is ASC,
 			// we can directly increment the key below instead of the datum.
 			var ok bool
-			startDatum, ok = startDatum.Prev(s.evalCtx)
+			startDatum, ok = startDatum.Prev(ctx, s.evalCtx)
 			if !ok {
 				return roachpb.Span{}, false, false, errors.AssertionFailedf(
 					"couldn't get a Prev value for %s", startBound.Datum,
@@ -370,7 +393,7 @@ var _ InvertedSpans = inverted.SpanExpressionProtoSpans{}
 // scratch can be an optional roachpb.Spans slice that will be reused to
 // populate the result.
 func (s *Builder) SpansFromInvertedSpans(
-	invertedSpans InvertedSpans, c *constraint.Constraint, scratch roachpb.Spans,
+	ctx context.Context, invertedSpans InvertedSpans, c *constraint.Constraint, scratch roachpb.Spans,
 ) (roachpb.Spans, error) {
 	if invertedSpans == nil {
 		return nil, errors.AssertionFailedf("invertedSpans cannot be nil")
@@ -386,7 +409,7 @@ func (s *Builder) SpansFromInvertedSpans(
 			span := c.Spans.Get(i)
 
 			// The spans must have the same start and end key.
-			if !span.HasSingleKey(s.evalCtx) {
+			if !span.HasSingleKey(ctx, s.evalCtx) {
 				return nil, errors.AssertionFailedf("constraint span %s does not have a single key", span)
 			}
 

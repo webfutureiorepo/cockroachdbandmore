@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package slstorage
 
@@ -51,8 +46,8 @@ func TestGetEncoder(t *testing.T) {
 	}
 	tests := []testCase{
 		{
-			name:      "v23_1",
-			version:   clusterversion.V23_1,
+			name:      "current",
+			version:   clusterversion.Latest,
 			readCodec: isRbr,
 			dualCodec: isNil,
 		},
@@ -60,7 +55,7 @@ func TestGetEncoder(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			storage := NewTestingStorage(
-				log.AmbientContext{}, nil, nil, nil, keys.SystemSQLCodec, nil, nil, systemschema.SqllivenessTable(), nil)
+				log.AmbientContext{}, nil, nil, nil, keys.SystemSQLCodec, nil, nil, systemschema.SqllivenessTable(), nil, true /*withSyntheticClock*/)
 
 			checkCodec(t, tc.readCodec, storage.keyCodec)
 		})

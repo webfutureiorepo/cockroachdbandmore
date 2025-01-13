@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package registry
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,6 +24,18 @@ var LibGEOS = []string{"libgeos", "libgeos_c"}
 // PrometheusNameSpace is the namespace which all metrics exposed on the roachtest
 // endpoint should use.
 var PrometheusNameSpace = "roachtest"
+
+// testStats is internally populated based on its previous runs and used for
+// deciding on the current execution approach. This includes decisions like
+// executing the test on spot VM vs ondemand VM.
+// The stats are populated if selective-tests is enabled.
+type testStats struct {
+	// AvgDurationInMillis is the average duration that the test takes to run
+	AvgDurationInMillis int64
+	// LastFailureIsPreempt indicates that the last run of the test failed
+	// due to VM preemption
+	LastFailureIsPreempt bool
+}
 
 // TestSpec is a spec for a roachtest.
 type TestSpec struct {
@@ -86,11 +94,14 @@ type TestSpec struct {
 	// still be run regularly.
 	NonReleaseBlocker bool
 
-	// RequiresLicense indicates that the test requires an
-	// enterprise license to run correctly. Use this to ensure
-	// tests will fail-early if COCKROACH_DEV_LICENSE is not set
-	// in the environment.
-	RequiresLicense bool
+	// RequiresDeprecatedWorkload indicates that the test requires
+	// the 'workload' binary to be present for the test to run. Use
+	// this to ensure tests will fail-early if a 'workload' binary
+	// does not exist.
+	//
+	// N.B. The workload binary is deprecated, use 'cockroach workload'
+	// instead if the desired workload exists there.
+	RequiresDeprecatedWorkload bool
 
 	// EncryptionSupport encodes to what extent tests supports
 	// encryption-at-rest. See the EncryptionSupport type for details.
@@ -135,6 +146,42 @@ type TestSpec struct {
 	// If one is not specified, the default behavior is to upload
 	// a binary with the crdb_test flag randomly enabled or disabled.
 	CockroachBinary ClusterCockroachBinary
+
+	// TestSelectionOptOutSuites is the list of test suites that determines
+	// whether a specific test should be considered for test selection or not.
+	// Tha value is a list of strings which corresponds to the available
+	// suites. This specific test will not be considered for test selection
+	// for the suites and the test will always run.
+	// e.g. if  TestSelectionOptOutSuites = Suites(Nightly, Weekly), the test
+	// will always run for Nightly and Weekly.
+	// Note that this flag needs to be set with a specific reason in the comment
+	// explaining why the test has been chosen for opting out of test selection.
+	TestSelectionOptOutSuites SuiteSet
+
+	// Randomized indicates if the test performs randomized
+	// actions. These tests are prioritized and not subject to test
+	// selection, as a passing run does not indicate that the same run
+	// will pass again due to the non-deterministic nature of the test.
+	// We have also seen cases where a randomized test takes a long time
+	// (sometimes months) to hit a bug, so running them consistently is
+	// important.
+	Randomized bool
+
+	// stats are populated by test selector based on previous execution data
+	stats *testStats
+}
+
+// SetStats sets the stats for the test
+func (ts *TestSpec) SetStats(avgDurationInMillis int64, lastFailureIsPreempt bool) {
+	ts.stats = &testStats{
+		AvgDurationInMillis:  avgDurationInMillis,
+		LastFailureIsPreempt: lastFailureIsPreempt,
+	}
+}
+
+// IsLastFailurePreempt returns true is the last failure of the test was due to VM preemption.
+func (ts *TestSpec) IsLastFailurePreempt() bool {
+	return ts.stats != nil && ts.stats.LastFailureIsPreempt
 }
 
 // PostValidation is a type of post-validation that runs after a test completes.
@@ -171,6 +218,8 @@ func (l LeaseType) String() string {
 		return "epoch"
 	case ExpirationLeases:
 		return "expiration"
+	case LeaderLeases:
+		return "leader"
 	case MetamorphicLeases:
 		return "metamorphic"
 	default:
@@ -185,30 +234,37 @@ const (
 	EpochLeases
 	// ExpirationLeases uses expiration leases for all ranges.
 	ExpirationLeases
+	// LeaderLeases uses leader leases where possible.
+	LeaderLeases
 	// MetamorphicLeases randomly chooses epoch or expiration
-	// leases (across the entire cluster)
+	// leases (across the entire cluster).
 	MetamorphicLeases
 )
 
-var allClouds = []string{spec.Local, spec.GCE, spec.AWS, spec.Azure}
+// LeaseTypes contains all lease types.
+//
+// The list does not contain aliases like "default" and "metamorphic".
+var LeaseTypes = []LeaseType{EpochLeases, ExpirationLeases, LeaderLeases}
 
 // CloudSet represents a set of clouds.
 //
 // Instances of CloudSet are immutable. The uninitialized (zero) value is not
 // valid.
 type CloudSet struct {
-	// m contains only values from allClouds.
-	m map[string]struct{}
+	m map[spec.Cloud]struct{}
 }
 
 // AllClouds contains all clouds.
-var AllClouds = Clouds(allClouds...)
+var AllClouds = Clouds(spec.Local, spec.GCE, spec.AWS, spec.Azure)
 
 // AllExceptLocal contains all clouds except Local.
 var AllExceptLocal = AllClouds.NoLocal()
 
 // AllExceptAWS contains all clouds except AWS.
 var AllExceptAWS = AllClouds.NoAWS()
+
+// AllExceptAzure contains all clouds except Azure.
+var AllExceptAzure = AllClouds.NoAzure()
 
 // OnlyAWS contains only the AWS cloud.
 var OnlyAWS = Clouds(spec.AWS)
@@ -219,13 +275,15 @@ var OnlyGCE = Clouds(spec.GCE)
 // OnlyAzure contains only the Azure cloud.
 var OnlyAzure = Clouds(spec.Azure)
 
-// OnlyLocal contains only the GCE cloud.
+// OnlyLocal contains only the Local cloud.
 var OnlyLocal = Clouds(spec.Local)
+
+// CloudsWithServiceRegistration contains clouds that support service registration.
+var CloudsWithServiceRegistration = Clouds(spec.Local, spec.GCE)
 
 // Clouds creates a CloudSet for the given clouds. Cloud names must be one of:
 // spec.Local, spec.GCE, spec.AWS, spec.Azure.
-func Clouds(clouds ...string) CloudSet {
-	assertValidValues(allClouds, clouds...)
+func Clouds(clouds ...spec.Cloud) CloudSet {
 	return CloudSet{m: addToSet(nil, clouds...)}
 }
 
@@ -244,8 +302,18 @@ func (cs CloudSet) NoAzure() CloudSet {
 	return CloudSet{m: removeFromSet(cs.m, spec.Azure)}
 }
 
+// Remove removes all clouds passed in and returns the new set.
+func (cs CloudSet) Remove(clouds CloudSet) CloudSet {
+	copyCs := CloudSet{m: cs.m}
+	for c := range clouds.m {
+		copyCs.m = removeFromSet(copyCs.m, c)
+	}
+
+	return copyCs
+}
+
 // Contains returns true if the set contains the given cloud.
-func (cs CloudSet) Contains(cloud string) bool {
+func (cs CloudSet) Contains(cloud spec.Cloud) bool {
 	cs.AssertInitialized()
 	_, ok := cs.m[cloud]
 	return ok
@@ -253,14 +321,30 @@ func (cs CloudSet) Contains(cloud string) bool {
 
 func (cs CloudSet) String() string {
 	cs.AssertInitialized()
-	return setToString(allClouds, cs.m)
+	if len(cs.m) == 0 {
+		return "<none>"
+	}
+	res := make([]spec.Cloud, 0, len(cs.m))
+	for k := range cs.m {
+		res = append(res, k)
+	}
+	slices.Sort(res)
+	strs := make([]string, len(res))
+	for i := range res {
+		strs[i] = res[i].String()
+	}
+	return strings.Join(strs, ",")
 }
 
 // AssertInitialized panics if the CloudSet is the zero value.
 func (cs CloudSet) AssertInitialized() {
-	if cs.m == nil {
+	if !cs.IsInitialized() {
 		panic("CloudSet not initialized")
 	}
+}
+
+func (cs CloudSet) IsInitialized() bool {
+	return cs.m != nil
 }
 
 // Suite names.
@@ -271,7 +355,6 @@ const (
 	ORM                   = "orm"
 	Driver                = "driver"
 	Tool                  = "tool"
-	Smoketest             = "smoketest"
 	Quick                 = "quick"
 	Fixtures              = "fixtures"
 	Pebble                = "pebble"
@@ -279,11 +362,15 @@ const (
 	PebbleNightlyYCSB     = "pebble_nightly_ycsb"
 	PebbleNightlyYCSBRace = "pebble_nightly_ycsb_race"
 	Roachtest             = "roachtest"
+	Acceptance            = "acceptance"
+	Perturbation          = "perturbation"
+	MixedVersion          = "mixedversion"
 )
 
 var allSuites = []string{
-	Nightly, Weekly, ReleaseQualification, ORM, Driver, Tool, Smoketest, Quick, Fixtures,
-	Pebble, PebbleNightlyWrite, PebbleNightlyYCSB, PebbleNightlyYCSBRace, Roachtest,
+	Nightly, Weekly, ReleaseQualification, ORM, Driver, Tool, Quick, Fixtures,
+	Pebble, PebbleNightlyWrite, PebbleNightlyYCSB, PebbleNightlyYCSBRace, Roachtest, Acceptance,
+	Perturbation, MixedVersion,
 }
 
 // SuiteSet represents a set of suites.
@@ -322,9 +409,14 @@ func (ss SuiteSet) String() string {
 
 // AssertInitialized panics if the SuiteSet is the zero value.
 func (ss SuiteSet) AssertInitialized() {
-	if ss.m == nil {
+	if !ss.IsInitialized() {
 		panic("SuiteSet not initialized")
 	}
+}
+
+// IsInitialized returns false if the SuiteSet is the zero value.
+func (ss SuiteSet) IsInitialized() bool {
+	return ss.m != nil
 }
 
 // assertValidValues asserts that the given values exist in the validValues slice.
@@ -344,8 +436,8 @@ func assertValidValues(validValues []string, values ...string) {
 }
 
 // addToSet returns a new set that is the initial set with the given values added.
-func addToSet(initial map[string]struct{}, values ...string) map[string]struct{} {
-	m := make(map[string]struct{})
+func addToSet[T comparable](initial map[T]struct{}, values ...T) map[T]struct{} {
+	m := make(map[T]struct{})
 	for k := range initial {
 		m[k] = struct{}{}
 	}
@@ -356,8 +448,8 @@ func addToSet(initial map[string]struct{}, values ...string) map[string]struct{}
 }
 
 // removeFromSet returns a new set that is the initial set with the given values removed.
-func removeFromSet(initial map[string]struct{}, values ...string) map[string]struct{} {
-	m := make(map[string]struct{})
+func removeFromSet[T comparable](initial map[T]struct{}, values ...T) map[T]struct{} {
+	m := make(map[T]struct{})
 	for k := range initial {
 		m[k] = struct{}{}
 	}

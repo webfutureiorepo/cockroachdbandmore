@@ -1,15 +1,11 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useMemo } from "react";
 import classNames from "classnames/bind";
+import React, { useMemo } from "react";
+
 import {
   ActiveTransaction,
   ActiveTransactionFilters,
@@ -17,21 +13,23 @@ import {
 import ColumnsSelector, {
   SelectOption,
 } from "src/columnsSelector/columnsSelector";
+import { isSelectedColumn } from "src/columnsSelector/utils";
+import { calculateActiveFilters } from "src/queryFilter/filter";
+import { SortedTable } from "src/sortedtable";
 import sortableTableStyles from "src/sortedtable/sortedtable.module.scss";
-import { EmptyTransactionsPlaceholder } from "src/transactionsPage/emptyTransactionsPlaceholder";
 import { TableStatistics } from "src/tableStatistics";
+import { EmptyTransactionsPlaceholder } from "src/transactionsPage/emptyTransactionsPlaceholder";
+import { TransactionViewType } from "src/transactionsPage/transactionsPageTypes";
+
 import {
   ISortedTablePagination,
   SortSetting,
 } from "../sortedtable/sortedtable";
+
 import {
   makeActiveTransactionsColumns,
   getColumnOptions,
 } from "./activeTransactionsTable";
-import { TransactionViewType } from "src/transactionsPage/transactionsPageTypes";
-import { calculateActiveFilters } from "src/queryFilter/filter";
-import { isSelectedColumn } from "src/columnsSelector/utils";
-import { SortedTable } from "src/sortedtable";
 
 const sortableTableCx = classNames.bind(sortableTableStyles);
 

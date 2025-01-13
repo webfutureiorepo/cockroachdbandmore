@@ -1,18 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file implements data structures used by index constraints generation.
 
 package constraint
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -191,13 +187,13 @@ func TestSpanSingleKey(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		st := cluster.MakeTestingClusterSettings()
-		evalCtx := eval.MakeTestingEvalContext(st)
+		ctx := context.Background()
+		evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 
 		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
 			var sp Span
 			sp.Init(tc.start, tc.startBoundary, tc.end, tc.endBoundary)
-			if sp.HasSingleKey(&evalCtx) != tc.expected {
+			if sp.HasSingleKey(ctx, &evalCtx) != tc.expected {
 				t.Errorf("expected: %v, actual: %v", tc.expected, !tc.expected)
 			}
 		})

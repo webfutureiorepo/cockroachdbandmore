@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecdisk
 
@@ -228,7 +223,7 @@ func newHashBasedPartitioner(
 		fdSemaphore semaphore.Semaphore,
 	) colexecop.ResettableOperator,
 	diskAcc *mon.BoundAccount,
-	converterMemAcc *mon.BoundAccount,
+	diskQueueMemAcc *mon.BoundAccount,
 	numRequiredActivePartitions int,
 ) *hashBasedPartitioner {
 	// Make a copy of the DiskQueueCfg and set defaults for the partitioning
@@ -250,7 +245,7 @@ func newHashBasedPartitioner(
 	for i := range inputs {
 		partitioners[i] = colcontainer.NewPartitionedDiskQueue(
 			inputTypes[i], diskQueueCfg, partitionedDiskQueueSemaphore,
-			colcontainer.PartitionerStrategyDefault, diskAcc, converterMemAcc,
+			colcontainer.PartitionerStrategyDefault, diskAcc, diskQueueMemAcc,
 		)
 		partitionedInputs[i] = newPartitionerToOperator(
 			unlimitedAllocator, inputTypes[i], partitioners[i],
@@ -335,7 +330,7 @@ func (op *hashBasedPartitioner) Init(ctx context.Context) {
 	op.cancelChecker.Init(op.Ctx)
 	op.partitionsToProcessUsingMain = make(map[int]*hbpPartitionInfo)
 	// If we are initializing the hash-based partitioner, it means that we had
-	// to fallback from the in-memory one since the inputs had more tuples that
+	// to fall back from the in-memory one since the inputs had more tuples that
 	// could fit into the memory, and, therefore, it makes sense to instantiate
 	// the batches with maximum capacity.
 	op.scratch.batches = append(op.scratch.batches, op.unlimitedAllocator.NewMemBatchWithFixedCapacity(op.inputTypes[0], coldata.BatchSize()))

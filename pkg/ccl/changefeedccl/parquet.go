@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -22,15 +19,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/parquet"
 	"github.com/cockroachdb/errors"
 )
 
-// includeParquestTestMetadata configures the parquet writer to write
-// metadata required for reading parquet files in tests.
-var includeParquestTestMetadata = buildutil.CrdbTestBuild
+// includeParquestTestMetadata configures the parquet writer to write extra
+// column metadata for parquet files in tests.
+var includeParquestTestMetadata = buildutil.CrdbTestBuild ||
+	envutil.EnvOrDefaultBool("COCKROACH_CHANGEFEED_TESTING_INCLUDE_PARQUET_TEST_METADATA",
+		false)
 
 type parquetWriter struct {
 	inner        *parquet.Writer
@@ -52,9 +52,18 @@ func newParquetSchemaDefintion(
 ) (*parquet.SchemaDefinition, error) {
 	var columnNames []string
 	var columnTypes []*types.T
+	seenColumnNames := make(map[string]bool)
 
 	numCols := 0
 	if err := row.ForAllColumns().Col(func(col cdcevent.ResultColumn) error {
+		if _, ok := seenColumnNames[col.Name]; ok {
+			// If a column is both the primary key and one of the selected columns in
+			// a cdc query, we do not want to duplicate it in the parquet output. We
+			// deduplicate that here and where we populate the datums (see
+			// populateDatums).
+			return nil
+		}
+		seenColumnNames[col.Name] = true
 		columnNames = append(columnNames, col.Name)
 		columnTypes = append(columnTypes, col.Typ)
 		numCols += 1
@@ -115,6 +124,7 @@ func newParquetWriterFromRow(
 		if opts, err = addParquetTestMetadata(row, encodingOpts, opts); err != nil {
 			return nil, err
 		}
+		opts = append(opts, parquet.WithMetadata(parquet.MakeReaderMetadata(schemaDef)))
 	}
 	writer, err := parquet.NewWriter(schemaDef, sink, opts...)
 
@@ -163,7 +173,16 @@ func (w *parquetWriter) populateDatums(
 ) error {
 	datums := w.datumAlloc[:0]
 
-	if err := updatedRow.ForAllColumns().Datum(func(d tree.Datum, _ cdcevent.ResultColumn) error {
+	seenColumnNames := make(map[string]bool)
+	if err := updatedRow.ForAllColumns().Datum(func(d tree.Datum, col cdcevent.ResultColumn) error {
+		if _, ok := seenColumnNames[col.Name]; ok {
+			// If a column is both the primary key and one of the selected columns in
+			// a cdc query, we do not want to duplicate it in the parquet output. We
+			// deduplicate that here and in the schema definition (see
+			// newParquetSchemaDefintion).
+			return nil
+		}
+		seenColumnNames[col.Name] = true
 		datums = append(datums, d)
 		return nil
 	}); err != nil {
@@ -228,7 +247,7 @@ func addParquetTestMetadata(
 ) ([]parquet.Option, error) {
 	// NB: Order matters. When iterating using ForAllColumns, which is used when
 	// writing datums and defining the schema, the order of columns usually
-	// matches the underlying table. If a composite keys defined, the order in
+	// matches the underlying table. If a composite key is defined, the order in
 	// ForEachKeyColumn may not match. In tests, we want to use the latter
 	// order when printing the keys.
 	keyCols := map[string]int{}
@@ -261,7 +280,16 @@ func addParquetTestMetadata(
 	// cdcevent.ResultColumn. The Ordinal() method may return an invalid
 	// number for virtual columns.
 	idx := 0
+	seenColumnNames := make(map[string]bool)
 	if err := row.ForAllColumns().Col(func(col cdcevent.ResultColumn) error {
+		if _, ok := seenColumnNames[col.Name]; ok {
+			// Since we deduplicate columns with the same name in the parquet output,
+			// we should not even increment our index for columns we've seen before.
+			// Since we have already seen this column name we have also already found
+			// the relevant index.
+			return nil
+		}
+		seenColumnNames[col.Name] = true
 		if _, colIsInKey := keyCols[col.Name]; colIsInKey {
 			keyCols[col.Name] = idx
 		}
@@ -335,4 +363,20 @@ func deserializeMap(s string) (orderedKeys []string, m map[string]int, err error
 		m[key] = value
 	}
 	return orderedKeys, m, nil
+}
+
+// TestingGetEventTypeColIdx returns the index of the extra column added to
+// every parquet file which indicate the type of event that generated a
+// particular row. Please read parquetCrdbEventTypeColName and
+// addParquetTestMetadata for more details.
+func TestingGetEventTypeColIdx(rd parquet.ReadDatumsMetadata) (int, error) {
+	columnsNamesString, ok := rd.MetaFields["allCols"]
+	if !ok {
+		return -1, errors.Errorf("could not find column names in parquet metadata")
+	}
+	_, columnNameSet, err := deserializeMap(columnsNamesString)
+	if err != nil {
+		return -1, err
+	}
+	return columnNameSet[parquetCrdbEventTypeColName], nil
 }

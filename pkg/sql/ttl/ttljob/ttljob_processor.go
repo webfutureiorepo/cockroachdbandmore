@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttljob
 
@@ -14,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"math/rand"
 	"runtime"
 	"sync/atomic"
 	"time"
@@ -63,50 +59,19 @@ func (t *ttlProcessor) Start(ctx context.Context) {
 	t.MoveToDraining(err)
 }
 
-func (t *ttlProcessor) work(ctx context.Context) error {
-
-	ttlSpec := t.ttlSpec
-	flowCtx := t.FlowCtx
-	serverCfg := flowCtx.Cfg
-	db := serverCfg.DB
-	descsCol := flowCtx.Descriptors
-	codec := serverCfg.Codec
-	details := ttlSpec.RowLevelTTLDetails
-	tableID := details.TableID
-	cutoff := details.Cutoff
-	ttlExpr := ttlSpec.TTLExpr
-
-	selectRateLimit := ttlSpec.SelectRateLimit
-	// Default 0 value to "unlimited" in case job started on node <= v23.2.
-	// todo(sql-foundations): Remove this in 25.1 for consistency with
-	//  deleteRateLimit.
-	if selectRateLimit == 0 {
-		selectRateLimit = math.MaxInt64
-	}
-	selectRateLimiter := quotapool.NewRateLimiter(
-		"ttl-select",
-		quotapool.Limit(selectRateLimit),
-		selectRateLimit,
-	)
-
-	deleteRateLimit := ttlSpec.DeleteRateLimit
-	deleteRateLimiter := quotapool.NewRateLimiter(
-		"ttl-delete",
-		quotapool.Limit(deleteRateLimit),
-		deleteRateLimit,
-	)
-
-	var (
-		relationName      string
-		pkColIDs          catalog.TableColMap
-		pkColNames        []string
-		pkColTypes        []*types.T
-		pkColDirs         []catenumpb.IndexColumn_Direction
-		numFamilies       int
-		labelMetrics      bool
-		processorRowCount int64
-	)
-	if err := db.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+func getTableInfo(
+	ctx context.Context, db descs.DB, descsCol *descs.Collection, tableID descpb.ID,
+) (
+	relationName string,
+	pkColIDs catalog.TableColMap,
+	pkColNames []string,
+	pkColTypes []*types.T,
+	pkColDirs []catenumpb.IndexColumn_Direction,
+	numFamilies int,
+	labelMetrics bool,
+	err error,
+) {
+	err = db.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		desc, err := descsCol.ByIDWithLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, tableID)
 		if err != nil {
 			return err
@@ -145,7 +110,47 @@ func (t *ttlProcessor) work(ctx context.Context) error {
 
 		relationName = tn.FQString() + "@" + lexbase.EscapeSQLIdent(primaryIndexDesc.Name)
 		return nil
-	}); err != nil {
+	})
+	return relationName, pkColIDs, pkColNames, pkColTypes, pkColDirs, numFamilies, labelMetrics, err
+}
+
+func (t *ttlProcessor) work(ctx context.Context) error {
+
+	ttlSpec := t.ttlSpec
+	flowCtx := t.FlowCtx
+	serverCfg := flowCtx.Cfg
+	db := serverCfg.DB
+	descsCol := flowCtx.Descriptors
+	codec := serverCfg.Codec
+	details := ttlSpec.RowLevelTTLDetails
+	tableID := details.TableID
+	cutoff := details.Cutoff
+	ttlExpr := ttlSpec.TTLExpr
+
+	selectRateLimit := ttlSpec.SelectRateLimit
+	// Default 0 value to "unlimited" in case job started on node <= v23.2.
+	// todo(sql-foundations): Remove this in 25.1 for consistency with
+	//  deleteRateLimit.
+	if selectRateLimit == 0 {
+		selectRateLimit = math.MaxInt64
+	}
+	selectRateLimiter := quotapool.NewRateLimiter(
+		"ttl-select",
+		quotapool.Limit(selectRateLimit),
+		selectRateLimit,
+	)
+
+	deleteRateLimit := ttlSpec.DeleteRateLimit
+	deleteRateLimiter := quotapool.NewRateLimiter(
+		"ttl-delete",
+		quotapool.Limit(deleteRateLimit),
+		deleteRateLimit,
+	)
+
+	relationName, pkColIDs, pkColNames, pkColTypes, pkColDirs, numFamilies, labelMetrics, err := getTableInfo(
+		ctx, db, descsCol, tableID,
+	)
+	if err != nil {
 		return err
 	}
 
@@ -161,7 +166,59 @@ func (t *ttlProcessor) work(ctx context.Context) error {
 	if processorSpanCount < processorConcurrency {
 		processorConcurrency = processorSpanCount
 	}
-	err := func() error {
+	var processorRowCount atomic.Int64
+	var spansProccessedSinceLastUpdate atomic.Int64
+	var rowsProccessedSinceLastUpdate atomic.Int64
+
+	// Update progress for approximately every 1% of spans processed, at least
+	// 60 seconds apart with jitter.
+	updateEvery := max(1, processorSpanCount/100)
+	updateEveryDuration := 60*time.Second + time.Duration(rand.Int63n(10*1000))*time.Millisecond
+	lastUpdated := timeutil.Now()
+	updateFractionCompleted := func() error {
+		jobID := ttlSpec.JobID
+		lastUpdated = timeutil.Now()
+		spansToAdd := spansProccessedSinceLastUpdate.Swap(0)
+		rowsToAdd := rowsProccessedSinceLastUpdate.Swap(0)
+
+		var deletedRowCount, processedSpanCount, totalSpanCount int64
+		var fractionCompleted float32
+
+		err := jobRegistry.UpdateJobWithTxn(
+			ctx,
+			jobID,
+			nil, /* txn */
+			func(_ isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
+				progress := md.Progress
+				rowLevelTTL := progress.Details.(*jobspb.Progress_RowLevelTTL).RowLevelTTL
+				rowLevelTTL.JobProcessedSpanCount += spansToAdd
+				rowLevelTTL.JobDeletedRowCount += rowsToAdd
+				deletedRowCount = rowLevelTTL.JobDeletedRowCount
+				processedSpanCount = rowLevelTTL.JobProcessedSpanCount
+				totalSpanCount = rowLevelTTL.JobTotalSpanCount
+
+				fractionCompleted = float32(rowLevelTTL.JobProcessedSpanCount) / float32(rowLevelTTL.JobTotalSpanCount)
+				progress.Progress = &jobspb.Progress_FractionCompleted{
+					FractionCompleted: fractionCompleted,
+				}
+
+				ju.UpdateProgress(progress)
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+		processorID := t.ProcessorID
+		log.Infof(
+			ctx,
+			"TTL fractionCompleted updated processorID=%d tableID=%d deletedRowCount=%d processedSpanCount=%d totalSpanCount=%d fractionCompleted=%.3f",
+			processorID, tableID, deletedRowCount, processedSpanCount, totalSpanCount, fractionCompleted,
+		)
+		return nil
+	}
+
+	err = func() error {
 		boundsChan := make(chan QueryBounds, processorConcurrency)
 		defer close(boundsChan)
 		for i := int64(0); i < processorConcurrency; i++ {
@@ -200,7 +257,9 @@ func (t *ttlProcessor) work(ctx context.Context) error {
 						deleteBuilder,
 					)
 					// add before returning err in case of partial success
-					atomic.AddInt64(&processorRowCount, spanRowCount)
+					processorRowCount.Add(spanRowCount)
+					rowsProccessedSinceLastUpdate.Add(spanRowCount)
+					spansProccessedSinceLastUpdate.Add(1)
 					if err != nil {
 						// Continue until channel is fully read.
 						// Otherwise, the keys input will be blocked.
@@ -233,6 +292,17 @@ func (t *ttlProcessor) work(ctx context.Context) error {
 			} else if hasRows {
 				// Only process bounds from spans with rows inside them.
 				boundsChan <- bounds
+			} else {
+				// If the span has no rows, we still need to increment the processed
+				// count.
+				spansProccessedSinceLastUpdate.Add(1)
+			}
+
+			if spansProccessedSinceLastUpdate.Load() >= updateEvery &&
+				timeutil.Since(lastUpdated) >= updateEveryDuration {
+				if err := updateFractionCompleted(); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -242,6 +312,9 @@ func (t *ttlProcessor) work(ctx context.Context) error {
 	}
 
 	if err := group.Wait(); err != nil {
+		return err
+	}
+	if err := updateFractionCompleted(); err != nil {
 		return err
 	}
 
@@ -254,21 +327,24 @@ func (t *ttlProcessor) work(ctx context.Context) error {
 		func(_ isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
 			progress := md.Progress
 			rowLevelTTL := progress.Details.(*jobspb.Progress_RowLevelTTL).RowLevelTTL
-			rowLevelTTL.JobRowCount += processorRowCount
 			processorID := t.ProcessorID
 			rowLevelTTL.ProcessorProgresses = append(rowLevelTTL.ProcessorProgresses, jobspb.RowLevelTTLProcessorProgress{
 				ProcessorID:          processorID,
 				SQLInstanceID:        sqlInstanceID,
-				ProcessorRowCount:    processorRowCount,
+				ProcessorRowCount:    processorRowCount.Load(),
 				ProcessorSpanCount:   processorSpanCount,
 				ProcessorConcurrency: processorConcurrency,
 			})
+			var fractionCompleted float32
+			if f, ok := progress.Progress.(*jobspb.Progress_FractionCompleted); ok {
+				fractionCompleted = f.FractionCompleted
+			}
 			ju.UpdateProgress(progress)
 			log.VInfof(
 				ctx,
 				2, /* level */
-				"TTL processorRowCount updated jobID=%d processorID=%d sqlInstanceID=%d tableID=%d jobRowCount=%d processorRowCount=%d",
-				jobID, processorID, sqlInstanceID, tableID, rowLevelTTL.JobRowCount, processorRowCount,
+				"TTL processorRowCount updated processorID=%d sqlInstanceID=%d tableID=%d jobRowCount=%d processorRowCount=%d fractionCompleted=%.3f",
+				processorID, sqlInstanceID, tableID, rowLevelTTL.JobDeletedRowCount, processorRowCount.Load(), fractionCompleted,
 			)
 			return nil
 		},
@@ -303,7 +379,7 @@ func (t *ttlProcessor) runTTLOnQueryBounds(
 			nil, /* txn */
 			// This is a test-only knob, so we're ok not specifying custom
 			// InternalExecutorOverride.
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			preSelectStatement,
 		); err != nil {
 			return spanRowCount, err
@@ -360,7 +436,7 @@ func (t *ttlProcessor) runTTLOnQueryBounds(
 				return nil
 			}
 			if err := serverCfg.DB.Txn(
-				ctx, do, isql.SteppingEnabled(), isql.WithPriority(admissionpb.TTLLowPri),
+				ctx, do, isql.SteppingEnabled(), isql.WithPriority(admissionpb.BulkLowPri),
 			); err != nil {
 				return spanRowCount, errors.Wrapf(err, "error during row deletion")
 			}

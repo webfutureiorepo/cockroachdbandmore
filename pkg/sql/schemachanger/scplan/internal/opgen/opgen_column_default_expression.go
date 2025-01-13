@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -41,6 +36,16 @@ func init() {
 					}
 					return &scop.UpdateTableBackReferencesInSequences{
 						SequenceIDs:            this.UsesSequenceIDs,
+						BackReferencedTableID:  this.TableID,
+						BackReferencedColumnID: this.ColumnID,
+					}
+				}),
+				emit(func(this *scpb.ColumnDefaultExpression) *scop.AddTableColumnBackReferencesInFunctions {
+					if len(this.UsesFunctionIDs) == 0 {
+						return nil
+					}
+					return &scop.AddTableColumnBackReferencesInFunctions{
+						FunctionIDs:            this.UsesFunctionIDs,
 						BackReferencedTableID:  this.TableID,
 						BackReferencedColumnID: this.ColumnID,
 					}

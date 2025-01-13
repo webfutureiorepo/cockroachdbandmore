@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -153,7 +148,6 @@ func (tc *txnCommitter) SendLocked(
 	if err := tc.validateEndTxnBatch(ba); err != nil {
 		return nil, kvpb.NewError(err)
 	}
-
 	// Determine whether we can elide the EndTxn entirely. We can do so if the
 	// transaction is read-only, which we determine based on whether the EndTxn
 	// request contains any writes.
@@ -208,6 +202,9 @@ func (tc *txnCommitter) SendLocked(
 	switch br.Txn.Status {
 	case roachpb.STAGING:
 		// Continue with STAGING-specific validation and cleanup.
+	case roachpb.PREPARED:
+		// The transaction is prepared.
+		return br, nil
 	case roachpb.COMMITTED:
 		// The transaction is explicitly committed. This is possible if all
 		// in-flight writes were sent to the same range as the EndTxn request,
@@ -354,6 +351,11 @@ func (tc *txnCommitter) canCommitInParallel(ba *kvpb.BatchRequest, et *kvpb.EndT
 		return false
 	}
 
+	// We don't support a parallel prepare.
+	if et.Prepare {
+		return false
+	}
+
 	// If the transaction has a commit trigger, we don't allow it to commit in
 	// parallel with writes. There's no fundamental reason for this restriction,
 	// but for now it's not worth the complication.
@@ -367,31 +369,21 @@ func (tc *txnCommitter) canCommitInParallel(ba *kvpb.BatchRequest, et *kvpb.EndT
 	for _, ru := range ba.Requests[:len(ba.Requests)-1] {
 		req := ru.GetInner()
 		switch {
-		case kvpb.IsIntentWrite(req):
-			if kvpb.IsRange(req) {
-				// Similar to how we can't pipeline ranged writes, we also can't
-				// commit in parallel with them. The reason for this is that the
-				// status resolution process for STAGING transactions wouldn't
-				// know where to look for the corresponding intents.
-				return false
-			}
-			// All other point writes are included in the EndTxn request's
-			// InFlightWrites set and are visible to the status resolution
-			// process for STAGING transactions. Populating InFlightWrites
-			// has already been done by the txnPipeliner.
+		case kvpb.CanParallelCommit(req):
+			//  The request can be part of a batch that is committed in parallel.
 
 		case req.Method() == kvpb.QueryIntent:
-			// QueryIntent requests are compatable with parallel commits. The
+			// QueryIntent requests are compatible with parallel commits. The
 			// intents being queried are also attached to the EndTxn request's
 			// InFlightWrites set and are visible to the status resolution
 			// process for STAGING transactions. Populating InFlightWrites has
 			// already been done by the txnPipeliner.
 
 		default:
-			// All other request types, notably Get and Scan requests, are
-			// incompatible with parallel commits because their outcome is
-			// not taken into consideration by the status resolution process
-			// for STAGING transactions.
+			// All other request types, notably Get, Scan and DeleteRange requests,
+			// are incompatible with parallel commits because their outcome is not
+			// taken into consideration by the status resolution process for STAGING
+			// transactions.
 			return false
 		}
 	}

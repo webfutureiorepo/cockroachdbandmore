@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -19,8 +14,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -53,7 +51,7 @@ func registerCancel(r registry.Registry) {
 
 			t.Status("restoring TPCH dataset for Scale Factor 1")
 			if err := loadTPCHDataset(
-				ctx, t, c, conn, 1 /* sf */, c.NewMonitor(ctx), c.All(), false /* disableMergeQueue */, false, /* secure */
+				ctx, t, c, conn, 1 /* sf */, c.NewMonitor(ctx), c.All(), false, /* disableMergeQueue */
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -70,30 +68,32 @@ func registerCancel(r registry.Registry) {
 					// (either query execution error or an error indicating the
 					// absence of expected cancellation error).
 					errCh := make(chan error, 1)
-					go func(queryNum int) {
-						runnerConn := c.Conn(ctx, t.L(), 1)
+					t.Go(func(taskCtx context.Context, l *logger.Logger) error {
+						runnerConn := c.Conn(taskCtx, l, 1)
 						defer runnerConn.Close()
 						setupQueries := []string{"USE tpch;"}
 						if !useDistsql {
 							setupQueries = append(setupQueries, "SET distsql = off;")
 						}
 						for _, setupQuery := range setupQueries {
-							t.L().Printf("executing setup query %q", setupQuery)
+							l.Printf("executing setup query %q", setupQuery)
 							if _, err := runnerConn.Exec(setupQuery); err != nil {
 								errCh <- err
 								close(sem)
-								return
+								// Errors are handled in the main goroutine.
+								return nil //nolint:returnerrcheck
 							}
 						}
 						query := tpch.QueriesByNumber[queryNum]
-						t.L().Printf("executing q%d\n", queryNum)
+						l.Printf("executing q%d\n", queryNum)
 						close(sem)
 						_, err := runnerConn.Exec(query)
 						if err == nil {
 							err = errors.New("query completed before it could be canceled")
 						}
 						errCh <- err
-					}(queryNum)
+						return nil
+					}, task.Name("query-runner"))
 
 					// Wait for the query-runner goroutine to start as well as
 					// to execute setup queries.
@@ -105,11 +105,11 @@ func registerCancel(r registry.Registry) {
 					timeoutCh := time.After(10 * time.Second)
 					pollingStartTime := timeutil.Now()
 					for {
-						// Sleep for some random duration up to 1000ms. This
+						// Sleep for some random duration up to 500ms. This
 						// allows us to sometimes find the query when it's in
 						// the planning stage while in most cases it's in the
 						// execution stage already.
-						toSleep := time.Duration(rng.Intn(1001)) * time.Millisecond
+						toSleep := time.Duration(rng.Intn(501)) * time.Millisecond
 						t.Status(fmt.Sprintf("sleeping for %s", toSleep))
 						time.Sleep(toSleep)
 						rows, err := conn.Query(`SELECT query_id, query FROM [SHOW CLUSTER QUERIES] WHERE query NOT LIKE '%SHOW CLUSTER QUERIES%'`)
@@ -177,10 +177,12 @@ func registerCancel(r registry.Registry) {
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             fmt.Sprintf("cancel/tpch/distsql/queries=%s,nodes=%d", queries, numNodes),
-		Owner:            registry.OwnerSQLQueries,
-		Cluster:          r.MakeClusterSpec(numNodes),
-		CompatibleClouds: registry.AllExceptAWS,
+		Name:    fmt.Sprintf("cancel/tpch/distsql/queries=%s,nodes=%d", queries, numNodes),
+		Owner:   registry.OwnerSQLQueries,
+		Cluster: r.MakeClusterSpec(numNodes),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
 		Suites:           registry.Suites(registry.Nightly),
 		Leases:           registry.MetamorphicLeases,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -189,10 +191,12 @@ func registerCancel(r registry.Registry) {
 	})
 
 	r.Add(registry.TestSpec{
-		Name:             fmt.Sprintf("cancel/tpch/local/queries=%s,nodes=%d", queries, numNodes),
-		Owner:            registry.OwnerSQLQueries,
-		Cluster:          r.MakeClusterSpec(numNodes),
-		CompatibleClouds: registry.AllExceptAWS,
+		Name:    fmt.Sprintf("cancel/tpch/local/queries=%s,nodes=%d", queries, numNodes),
+		Owner:   registry.OwnerSQLQueries,
+		Cluster: r.MakeClusterSpec(numNodes),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
 		Suites:           registry.Suites(registry.Nightly),
 		Leases:           registry.MetamorphicLeases,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {

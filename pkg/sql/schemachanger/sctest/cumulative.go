@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctest
 
@@ -185,7 +180,7 @@ func ExecuteWithDMLInjection(t *testing.T, relPath string, factory TestServerFac
 
 				if t.Failed() {
 					t.Log("forcing job failure from BeforeStage due to test failure")
-					return errors.New("t.Failed() is true")
+					return jobs.MarkAsPermanentJobError(errors.New("t.Failed() is true"))
 				}
 
 				s := p.Stages[stageIdx]
@@ -198,6 +193,7 @@ func ExecuteWithDMLInjection(t *testing.T, relPath string, factory TestServerFac
 					defer jobErrorMutex.Unlock()
 					key := makeStageKey(s.Phase, s.Ordinal, p.InRollback || p.CurrentState.InRollback)
 					if _, ok := usedStages[key.AsInt()]; !ok {
+						t.Logf("Injecting into stage: %s", &key)
 						// Rollbacks don't count towards the successful count
 						if !p.InRollback && !p.CurrentState.InRollback &&
 							p.Stages[stageIdx].Phase != scop.PreCommitPhase {
@@ -216,9 +212,9 @@ func ExecuteWithDMLInjection(t *testing.T, relPath string, factory TestServerFac
 							}
 						}
 						usedStages[key.AsInt()] = struct{}{}
-						t.Logf("Completed stage: %+v", key)
+						t.Logf("Completed stage: %s", &key)
 					} else {
-						t.Logf("Retrying stage: %+v", key)
+						t.Logf("Retrying stage: %s", &key)
 					}
 				}
 				return nil
@@ -248,6 +244,7 @@ func ExecuteWithDMLInjection(t *testing.T, relPath string, factory TestServerFac
 			// commits, this enforces any sanity checks one last time in
 			// the final descriptor state.
 			if lastRollbackStageKey != nil {
+				t.Logf("Job transaction committed. Re-inject statements from rollback: %s", lastRollbackStageKey.String())
 				injectionFunc(*lastRollbackStageKey, tdb, successfulStages)
 			}
 			require.Equal(t, errorDetected, schemaChangeErrorRegex != nil)

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -37,7 +32,7 @@ func registerLibPQ(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -104,7 +99,9 @@ func registerLibPQ(r registry.Registry) {
 		result, err := c.RunWithDetailsSingleNode(
 			ctx, t.L(),
 			option.WithNodes(node),
-			fmt.Sprintf(`cd %s && PGPORT={pgport:1} PGUSER=root PGSSLMODE=disable PGDATABASE=postgres go test -list "%s"`, libPQPath, testListRegex),
+			fmt.Sprintf(
+				`cd %s && PGPORT={pgport:1} PGUSER=%s PGPASSWORD=%s PGSSLMODE=require PGDATABASE=postgres go test -list "%s"`,
+				libPQPath, install.DefaultUser, install.DefaultPassword, testListRegex),
 		)
 		require.NoError(t, err)
 
@@ -131,8 +128,8 @@ func registerLibPQ(r registry.Registry) {
 		_ = c.RunE(
 			ctx,
 			option.WithNodes(node),
-			fmt.Sprintf("cd %s && PGPORT={pgport:1} PGUSER=test_admin PGSSLMODE=disable PGDATABASE=postgres go test -run %s -v 2>&1 | %s/bin/go-junit-report > %s",
-				libPQPath, allowedTestsRegExp, goPath, resultsPath),
+			fmt.Sprintf("cd %s && PGPORT={pgport:1} PGUSER=%s PGPASSWORD=%s PGSSLMODE=require PGDATABASE=postgres go test -run %s -v 2>&1 | %s/bin/go-junit-report > %s",
+				libPQPath, install.DefaultUser, install.DefaultPassword, allowedTestsRegExp, goPath, resultsPath),
 		)
 
 		parseAndSummarizeJavaORMTestsResults(

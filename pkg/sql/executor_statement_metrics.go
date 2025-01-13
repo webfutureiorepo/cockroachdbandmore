@@ -1,18 +1,13 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
-	"sort"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/contentionpb"
@@ -26,14 +21,19 @@ import (
 
 // EngineMetrics groups a set of SQL metrics.
 type EngineMetrics struct {
-	// The subset of SELECTs that are processed through DistSQL.
+	// The subset of SELECTs that are requested to be processed through DistSQL.
 	DistSQLSelectCount *metric.Counter
+	// The subset of SELECTs that were executed by DistSQL with full or partial
+	// distribution.
+	DistSQLSelectDistributedCount *metric.Counter
 	// The subset of queries which we attempted and failed to plan with the
 	// cost-based optimizer.
-	SQLOptFallbackCount   *metric.Counter
-	SQLOptPlanCacheHits   *metric.Counter
-	SQLOptPlanCacheMisses *metric.Counter
+	SQLOptFallbackCount       *metric.Counter
+	SQLOptPlanCacheHits       *metric.Counter
+	SQLOptPlanCacheMisses     *metric.Counter
+	StatementFingerprintCount *metric.UniqueCounter
 
+	SQLExecLatencyDetail  *metric.HistogramVec
 	DistSQLExecLatency    metric.IHistogram
 	SQLExecLatency        metric.IHistogram
 	DistSQLServiceLatency metric.IHistogram
@@ -75,10 +75,12 @@ type StatsMetrics struct {
 
 	DiscardedStatsCount *metric.Counter
 
-	SQLStatsFlushStarted  *metric.Counter
-	SQLStatsFlushFailure  *metric.Counter
-	SQLStatsFlushDuration metric.IHistogram
-	SQLStatsRemovedRows   *metric.Counter
+	SQLStatsFlushesSuccessful       *metric.Counter
+	SQLStatsFlushDoneSignalsIgnored *metric.Counter
+	SQLStatsFlushFingerprintCount   *metric.Counter
+	SQLStatsFlushesFailed           *metric.Counter
+	SQLStatsFlushLatency            metric.IHistogram
+	SQLStatsRemovedRows             *metric.Counter
 
 	SQLTxnStatsCollectionOverhead metric.IHistogram
 }
@@ -139,25 +141,8 @@ func (ex *connExecutor) recordStatementSummary(
 	execOverheadSec := svcLatSec - processingLatSec
 
 	stmt := &planner.stmt
-	shouldIncludeInLatencyMetrics := shouldIncludeStmtInLatencyMetrics(stmt)
 	flags := planner.curPlan.flags
-	if automaticRetryCount == 0 {
-		ex.updateOptCounters(flags)
-		m := &ex.metrics.EngineMetrics
-		if flags.IsDistributed() {
-			if _, ok := stmt.AST.(*tree.Select); ok {
-				m.DistSQLSelectCount.Inc(1)
-			}
-			if shouldIncludeInLatencyMetrics {
-				m.DistSQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
-				m.DistSQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
-			}
-		}
-		if shouldIncludeInLatencyMetrics {
-			m.SQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
-			m.SQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
-		}
-	}
+	ex.recordStatementLatencyMetrics(stmt, flags, automaticRetryCount, runLatRaw, svcLatRaw)
 
 	fullScan := flags.IsSet(planFlagContainsFullIndexScan) || flags.IsSet(planFlagContainsFullTableScan)
 	recordedStmtStatsKey := appstatspb.StatementStatisticsKey{
@@ -167,7 +152,6 @@ func (ex *connExecutor) recordStatementSummary(
 		Vec:          flags.IsSet(planFlagVectorized),
 		ImplicitTxn:  flags.IsSet(planFlagImplicitTxn),
 		FullScan:     fullScan,
-		Failed:       stmtErr != nil,
 		Database:     planner.SessionData().Database,
 		PlanHash:     planner.instrumentation.planGist.Hash(),
 	}
@@ -175,22 +159,22 @@ func (ex *connExecutor) recordStatementSummary(
 	idxRecommendations := idxrecommendations.FormatIdxRecommendations(planner.instrumentation.indexRecs)
 	queryLevelStats, queryLevelStatsOk := planner.instrumentation.GetQueryLevelStats()
 
-	var sqlInstanceIds []int64
+	var sqlInstanceIDs []int64
+	var kvNodeIDs []int32
 	if queryLevelStatsOk {
-		sqlInstanceIds = make([]int64, 0, len(queryLevelStats.SqlInstanceIds))
-		for sqlInstanceId := range queryLevelStats.SqlInstanceIds {
-			sqlInstanceIds = append(sqlInstanceIds, int64(sqlInstanceId))
+		sqlInstanceIDs = make([]int64, 0, len(queryLevelStats.SQLInstanceIDs))
+		for _, sqlInstanceID := range queryLevelStats.SQLInstanceIDs {
+			sqlInstanceIDs = append(sqlInstanceIDs, int64(sqlInstanceID))
 		}
-
-		sort.Slice(sqlInstanceIds, func(i, j int) bool {
-			return sqlInstanceIds[i] < sqlInstanceIds[j]
-		})
+		kvNodeIDs = queryLevelStats.KVNodeIDs
 	}
 
+	startTime := phaseTimes.GetSessionPhaseTime(sessionphase.PlannerStartExecStmt).ToUTC()
 	recordedStmtStats := sqlstats.RecordedStmtStats{
 		SessionID:            ex.planner.extendedEvalCtx.SessionID,
 		StatementID:          stmt.QueryID,
 		AutoRetryCount:       automaticRetryCount,
+		Failed:               stmtErr != nil,
 		AutoRetryReason:      ex.state.mu.autoRetryReason,
 		RowsAffected:         rowsAffected,
 		IdleLatencySec:       idleLatSec,
@@ -202,23 +186,30 @@ func (ex *connExecutor) recordStatementSummary(
 		BytesRead:            stats.bytesRead,
 		RowsRead:             stats.rowsRead,
 		RowsWritten:          stats.rowsWritten,
-		Nodes:                sqlInstanceIds,
+		Nodes:                sqlInstanceIDs,
+		KVNodeIDs:            kvNodeIDs,
 		StatementType:        stmt.AST.StatementType(),
 		Plan:                 planner.instrumentation.PlanForStats(ctx),
 		PlanGist:             planner.instrumentation.planGist.String(),
 		StatementError:       stmtErr,
 		IndexRecommendations: idxRecommendations,
 		Query:                stmt.StmtNoConstants,
-		StartTime:            phaseTimes.GetSessionPhaseTime(sessionphase.PlannerStartExecStmt),
-		EndTime:              phaseTimes.GetSessionPhaseTime(sessionphase.PlannerStartExecStmt).Add(svcLatRaw),
+		StartTime:            startTime,
+		EndTime:              startTime.Add(svcLatRaw),
 		FullScan:             fullScan,
 		ExecStats:            queryLevelStats,
-		Indexes:              planner.instrumentation.indexesUsed,
-		Database:             planner.SessionData().Database,
+		// TODO(mgartner): Use a slice of struct{uint64, uint64} instead of
+		// converting to strings.
+		Indexes:  planner.instrumentation.indexesUsed.Strings(),
+		Database: planner.SessionData().Database,
 	}
 
 	stmtFingerprintID, err :=
 		ex.statsCollector.RecordStatement(ctx, recordedStmtStatsKey, recordedStmtStats)
+
+	// TODO(xinhaoz): This can be set directly within statsCollector once
+	// https://github.com/cockroachdb/cockroach/pull/123698 is merged.
+	ex.statsCollector.SetStatementFingerprintID(stmtFingerprintID)
 
 	if err != nil {
 		if log.V(1) {
@@ -244,6 +235,7 @@ func (ex *connExecutor) recordStatementSummary(
 
 		if queryLevelStats.ContentionTime > 0 {
 			ex.planner.DistSQLPlanner().distSQLSrv.Metrics.ContendedQueriesCount.Inc(1)
+			ex.planner.DistSQLPlanner().distSQLSrv.Metrics.CumulativeContentionNanos.Inc(queryLevelStats.ContentionTime.Nanoseconds())
 		}
 
 		err = ex.statsCollector.RecordStatementExecStats(recordedStmtStatsKey, *queryLevelStats)
@@ -252,6 +244,10 @@ func (ex *connExecutor) recordStatementSummary(
 				log.Warningf(ctx, "unable to record statement exec stats: %s", err)
 			}
 		}
+	}
+
+	if stmtFingerprintID != 0 {
+		ex.statsCollector.ObserveStatement(stmtFingerprintID, recordedStmtStats)
 	}
 
 	// Do some transaction level accounting for the transaction this statement is
@@ -293,7 +289,48 @@ func (ex *connExecutor) recordStatementSummary(
 			sessionAge,
 		)
 	}
+
 	return stmtFingerprintID
+}
+
+func (ex *connExecutor) recordStatementLatencyMetrics(
+	stmt *Statement,
+	flags planFlags,
+	automaticRetryCount int,
+	runLatRaw time.Duration,
+	svcLatRaw time.Duration,
+) {
+	shouldIncludeInLatencyMetrics := shouldIncludeStmtInLatencyMetrics(stmt)
+	if automaticRetryCount == 0 {
+		ex.updateOptCounters(flags)
+		m := &ex.metrics.EngineMetrics
+
+		m.StatementFingerprintCount.Add([]byte(stmt.StmtNoConstants))
+
+		labels := map[string]string{}
+		if detailedLatencyMetrics.Get(&ex.server.cfg.Settings.SV) {
+			labels = map[string]string{
+				detailedLatencyMetricLabel: stmt.StmtNoConstants,
+			}
+		}
+		if flags.IsDistributed() {
+			if _, ok := stmt.AST.(*tree.Select); ok {
+				m.DistSQLSelectCount.Inc(1)
+				if flags.IsSet(planFlagDistributedExecution) {
+					m.DistSQLSelectDistributedCount.Inc(1)
+				}
+			}
+			if shouldIncludeInLatencyMetrics {
+				m.DistSQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
+				m.DistSQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
+			}
+		}
+		if shouldIncludeInLatencyMetrics {
+			m.SQLExecLatencyDetail.Observe(labels, float64(runLatRaw.Nanoseconds()))
+			m.SQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
+			m.SQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
+		}
+	}
 }
 
 func (ex *connExecutor) updateOptCounters(planFlags planFlags) {

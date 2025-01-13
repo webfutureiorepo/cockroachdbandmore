@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -19,7 +14,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -91,7 +87,7 @@ type LockTableIteratorOptions struct {
 	MatchMinStr lock.Strength
 	// ReadCategory is used to map to a user-understandable category string, for
 	// stats aggregation and metrics, and a Pebble-understandable QoS.
-	ReadCategory ReadCategory
+	ReadCategory fs.ReadCategory
 }
 
 // validate validates the LockTableIteratorOptions.
@@ -514,7 +510,7 @@ const defaultLockTableItersBeforeSeek = 5
 // shared locks on a single user key before seeking past them. This is used to
 // avoid iterating over all shared locks on a key when not necessary, given the
 // filtering criteria.
-var lockTableItersBeforeSeek = util.ConstantWithMetamorphicTestRange(
+var lockTableItersBeforeSeek = metamorphic.ConstantWithTestRange(
 	"lock-table-iters-before-seek",
 	defaultLockTableItersBeforeSeek, /* defaultValue */
 	0,                               /* min */

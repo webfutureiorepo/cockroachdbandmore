@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logstore
 
@@ -17,13 +12,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 // StateLoader gives access to read or write the state of the Raft log. It
@@ -59,7 +55,7 @@ func (sl StateLoader) LoadLastIndex(
 	// NB: raft log has no intents.
 	iter, err := reader.NewMVCCIterator(
 		ctx, storage.MVCCKeyIterKind, storage.IterOptions{
-			LowerBound: prefix, ReadCategory: storage.ReplicationReadCategory})
+			LowerBound: prefix, ReadCategory: fs.ReplicationReadCategory})
 	if err != nil {
 		return 0, err
 	}
@@ -99,7 +95,7 @@ func (sl StateLoader) LoadRaftTruncatedState(
 	var truncState kvserverpb.RaftTruncatedState
 	if _, err := storage.MVCCGetProto(
 		ctx, reader, sl.RaftTruncatedStateKey(), hlc.Timestamp{}, &truncState,
-		storage.MVCCGetOptions{ReadCategory: storage.ReplicationReadCategory},
+		storage.MVCCGetOptions{ReadCategory: fs.ReplicationReadCategory},
 	); err != nil {
 		return kvserverpb.RaftTruncatedState{}, err
 	}
@@ -130,7 +126,7 @@ func (sl StateLoader) LoadHardState(
 ) (raftpb.HardState, error) {
 	var hs raftpb.HardState
 	found, err := storage.MVCCGetProto(ctx, reader, sl.RaftHardStateKey(),
-		hlc.Timestamp{}, &hs, storage.MVCCGetOptions{ReadCategory: storage.ReplicationReadCategory})
+		hlc.Timestamp{}, &hs, storage.MVCCGetOptions{ReadCategory: fs.ReplicationReadCategory})
 
 	if !found || err != nil {
 		return raftpb.HardState{}, err
@@ -173,6 +169,11 @@ func (sl StateLoader) SynthesizeHardState(
 		return errors.Newf("can't decrease HardState.Commit from %d to %d",
 			redact.Safe(oldHS.Commit), redact.Safe(newHS.Commit))
 	}
+
+	// TODO(arul): This function can be called with an empty OldHS. In all other
+	// cases, where a term is included, we should be able to assert that the term
+	// isn't regressing (i.e. oldHS.Term >= newHS.Term).
+
 	if oldHS.Term > newHS.Term {
 		// The existing HardState is allowed to be ahead of us, which is
 		// relevant in practice for the split trigger. We already checked above
@@ -180,9 +181,12 @@ func (sl StateLoader) SynthesizeHardState(
 		// updated votes yet.
 		newHS.Term = oldHS.Term
 	}
-	// If the existing HardState voted in this term, remember that.
+	// If the existing HardState voted in this term and knows who the leader is,
+	// remember that.
 	if oldHS.Term == newHS.Term {
 		newHS.Vote = oldHS.Vote
+		newHS.Lead = oldHS.Lead
+		newHS.LeadEpoch = oldHS.LeadEpoch
 	}
 	err := sl.SetHardState(ctx, readWriter, newHS)
 	return errors.Wrapf(err, "writing HardState %+v", &newHS)
@@ -210,7 +214,7 @@ func (sl StateLoader) LoadRaftReplicaID(
 ) (*kvserverpb.RaftReplicaID, error) {
 	var replicaID kvserverpb.RaftReplicaID
 	found, err := storage.MVCCGetProto(ctx, reader, sl.RaftReplicaIDKey(),
-		hlc.Timestamp{}, &replicaID, storage.MVCCGetOptions{ReadCategory: storage.ReplicationReadCategory})
+		hlc.Timestamp{}, &replicaID, storage.MVCCGetOptions{ReadCategory: fs.ReplicationReadCategory})
 	if err != nil {
 		return nil, err
 	}

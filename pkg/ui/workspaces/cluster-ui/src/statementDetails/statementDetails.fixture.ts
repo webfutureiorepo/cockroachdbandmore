@@ -1,19 +1,16 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import moment from "moment-timezone";
-import Long from "long";
 import { createMemoryHistory } from "history";
-import { noop } from "lodash";
-import { StatementDetailsProps } from "./statementDetails";
+import noop from "lodash/noop";
+import Long from "long";
+import moment from "moment-timezone";
+
 import { StatementDetailsResponse } from "../api";
+
+import { StatementDetailsProps } from "./statementDetails";
 
 const lastUpdated = moment("Nov 28 2022 01:30:00 GMT");
 
@@ -26,13 +23,13 @@ const statementDetailsNoData: StatementDetailsResponse = {
       stmt_type: "",
       implicit_txn: false,
       dist_sql_count: new Long(0),
-      failed_count: new Long(0),
       full_scan_count: new Long(0),
       vec_count: new Long(0),
       total_count: new Long(0),
     },
     stats: {
       count: new Long(0),
+      failure_count: new Long(0),
       first_attempt_count: new Long(0),
       max_retries: new Long(0),
       legacy_last_err: "",
@@ -77,7 +74,6 @@ const statementDetailsData: StatementDetailsResponse = {
       query: "SELECT * FROM crdb_internal.node_build_info",
       app_names: ["$ cockroach sql", "newname"],
       dist_sql_count: new Long(2),
-      failed_count: new Long(2),
       implicit_txn: true,
       vec_count: new Long(2),
       full_scan_count: new Long(2),
@@ -89,6 +85,7 @@ const statementDetailsData: StatementDetailsResponse = {
     },
     stats: {
       count: new Long(5),
+      failure_count: new Long(2),
       first_attempt_count: new Long(5),
       max_retries: new Long(0),
       legacy_last_err: "",
@@ -183,6 +180,7 @@ const statementDetailsData: StatementDetailsResponse = {
         nanos: 111613000,
       },
       nodes: [new Long(1)],
+      kv_node_ids: [2],
       plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
     },
   },
@@ -284,6 +282,7 @@ const statementDetailsData: StatementDetailsResponse = {
           nanos: 111613000,
         },
         nodes: [new Long(1)],
+        kv_node_ids: [2],
         plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
       },
       aggregated_ts: {
@@ -388,6 +387,7 @@ const statementDetailsData: StatementDetailsResponse = {
           nanos: 111613000,
         },
         nodes: [new Long(1)],
+        kv_node_ids: [2],
         plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
       },
       aggregated_ts: {
@@ -492,6 +492,7 @@ const statementDetailsData: StatementDetailsResponse = {
           nanos: 111613000,
         },
         nodes: [new Long(1)],
+        kv_node_ids: [2],
         plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
       },
       aggregated_ts: {
@@ -596,6 +597,7 @@ const statementDetailsData: StatementDetailsResponse = {
           nanos: 111613000,
         },
         nodes: [new Long(1)],
+        kv_node_ids: [2],
         plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
       },
       aggregated_ts: {
@@ -702,10 +704,11 @@ const statementDetailsData: StatementDetailsResponse = {
           nanos: 111613000,
         },
         nodes: [new Long(1)],
+        kv_node_ids: [2],
         plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
       },
       explain_plan: "• virtual table\n  table: @primary",
-      plan_hash: new Long(14192395335876201826),
+      plan_hash: Long.fromString("14192395335876201826"),
     },
     {
       stats: {
@@ -804,10 +807,11 @@ const statementDetailsData: StatementDetailsResponse = {
           nanos: 111613000,
         },
         nodes: [new Long(1)],
+        kv_node_ids: [2],
         plan_gists: ["Ah0GAg=="],
       },
       explain_plan: "• virtual table\n  table: @primary\nFULL SCAN",
-      plan_hash: new Long(14192395335876212345),
+      plan_hash: Long.fromString("14192395335876212345"),
     },
   ],
   internal_app_name_prefix: "$ internal",

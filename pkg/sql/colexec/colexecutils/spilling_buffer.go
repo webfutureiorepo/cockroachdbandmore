@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecutils
 
@@ -61,7 +56,7 @@ type SpillingBuffer struct {
 	diskQueue       colcontainer.RewindableQueue
 	fdSemaphore     semaphore.Semaphore
 	diskAcc         *mon.BoundAccount
-	converterMemAcc *mon.BoundAccount
+	diskQueueMemAcc *mon.BoundAccount
 
 	dequeueScratch            coldata.Batch
 	lastDequeuedBatchMemUsage int64
@@ -104,9 +99,14 @@ func NewSpillingBuffer(
 	fdSemaphore semaphore.Semaphore,
 	inputTypes []*types.T,
 	diskAcc *mon.BoundAccount,
-	converterMemAcc *mon.BoundAccount,
+	diskQueueMemAcc *mon.BoundAccount,
 	colIdxs ...int,
 ) *SpillingBuffer {
+	if unlimitedAllocator.Acc() == diskQueueMemAcc {
+		colexecerror.InternalError(errors.AssertionFailedf(
+			"memory accounts for allocator and disk queue must be different",
+		))
+	}
 	if colIdxs == nil {
 		colIdxs = make([]int, len(inputTypes))
 		for i := range colIdxs {
@@ -138,7 +138,7 @@ func NewSpillingBuffer(
 		diskQueueCfg:       diskQueueCfg,
 		fdSemaphore:        fdSemaphore,
 		diskAcc:            diskAcc,
-		converterMemAcc:    converterMemAcc,
+		diskQueueMemAcc:    diskQueueMemAcc,
 	}
 }
 
@@ -182,7 +182,7 @@ func (b *SpillingBuffer) AppendTuples(
 			}
 		}
 		if b.diskQueue, err = colcontainer.NewRewindableDiskQueue(
-			ctx, b.storedTypes, b.diskQueueCfg, b.diskAcc, b.converterMemAcc,
+			ctx, b.storedTypes, b.diskQueueCfg, b.diskAcc, b.diskQueueMemAcc,
 		); err != nil {
 			colexecerror.InternalError(err)
 		}
@@ -226,7 +226,7 @@ func (b *SpillingBuffer) AppendTuples(
 // made.
 func (b *SpillingBuffer) GetVecWithTuple(
 	ctx context.Context, colIdx, idx int,
-) (_ coldata.Vec, rowIdx int, length int) {
+) (_ *coldata.Vec, rowIdx int, length int) {
 	var err error
 	if idx < 0 || idx >= b.Length() {
 		colexecerror.InternalError(

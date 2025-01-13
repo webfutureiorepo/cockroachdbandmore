@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigreconcilerccl
 
@@ -23,9 +20,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigtestutils"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigtestutils/spanconfigtestcluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/sqllivenesstestutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -84,7 +83,8 @@ import (
 // must be cleared out.
 func TestDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
+	skip.UnderRace(t, "descriptor ID generation is not deterministic under race")
+	skip.UnderDeadlock(t, "descriptor ID generation is not deterministic under deadlock")
 	ctx := context.Background()
 	datadriven.Walk(t, datapathutils.TestDataPath(t), func(t *testing.T, path string) {
 		defer log.Scope(t).Close(t)
@@ -106,6 +106,9 @@ func TestDataDriven(t *testing.T) {
 				Knobs: base.TestingKnobs{
 					JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(), // speeds up test
 					SpanConfig:       scKnobs,
+					SQLExecutor: &sql.ExecutorTestingKnobs{
+						UseTransactionalDescIDGenerator: true,
+					},
 				},
 			},
 		})
@@ -141,8 +144,7 @@ func TestDataDriven(t *testing.T) {
 
 			switch d.Cmd {
 			case "initialize":
-				secondaryTenant := spanConfigTestCluster.InitializeTenant(ctx, tenantID)
-				spanConfigTestCluster.EnsureTenantCanSetZoneConfigurationsOrFatal(t, secondaryTenant)
+				spanConfigTestCluster.InitializeTenant(ctx, tenantID)
 
 			case "exec-sql":
 				// Run under an explicit transaction -- we rely on having a

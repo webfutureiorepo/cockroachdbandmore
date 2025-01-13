@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package screl
 
@@ -117,14 +112,26 @@ func VersionSupportsElementUse(el scpb.Element, version clusterversion.ClusterVe
 		return true
 	case *scpb.DatabaseData, *scpb.TableData, *scpb.IndexData, *scpb.TablePartitioning,
 		*scpb.Function, *scpb.FunctionName, *scpb.FunctionVolatility, *scpb.FunctionLeakProof,
-		*scpb.FunctionNullInputBehavior, *scpb.FunctionBody, *scpb.FunctionParamDefaultExpression,
+		*scpb.FunctionNullInputBehavior, *scpb.FunctionBody,
 		*scpb.ColumnNotNull, *scpb.CheckConstraintUnvalidated, *scpb.UniqueWithoutIndexConstraintUnvalidated,
 		*scpb.ForeignKeyConstraintUnvalidated, *scpb.IndexZoneConfig, *scpb.TableSchemaLocked, *scpb.CompositeType,
 		*scpb.CompositeTypeAttrType, *scpb.CompositeTypeAttrName:
 		// These elements need v23.1 so they can be used without checking any version gates.
 		return true
 	case *scpb.SequenceOption:
-		return version.IsActive(clusterversion.V23_2)
+		// These elements need v23.2 so they can be used without checking any version gates.
+		return true
+	case *scpb.TypeComment, *scpb.DatabaseZoneConfig:
+		// These elements need v24.2 so they can be used without checking any version gates.
+		return true
+	case *scpb.ColumnComputeExpression, *scpb.FunctionSecurity, *scpb.LDRJobIDs,
+		*scpb.PartitionZoneConfig, *scpb.Trigger, *scpb.TriggerName,
+		*scpb.TriggerEnabled, *scpb.TriggerTiming, *scpb.TriggerEvents, *scpb.TriggerTransition,
+		*scpb.TriggerWhen, *scpb.TriggerFunctionCall, *scpb.TriggerDeps:
+		// These elements need v24.3 so they can be used without checking any version gates.
+		return true
+	case *scpb.NamedRangeZoneConfig:
+		return version.IsActive(clusterversion.V25_1)
 	default:
 		panic(errors.AssertionFailedf("unknown element %T", el))
 	}

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
@@ -49,11 +44,11 @@ func TestMergeStatistics(t *testing.T) {
 		{
 			// Multiple buckets at extremes.
 			initial: &testStat{
-				at: 1, row: 5, dist: 3, null: 0, size: 2,
+				at: 1, row: 5, dist: 5, null: 0, size: 2,
 				hist: testHistogram{
 					{1, 0, 0, 2},
-					{1, 1, 0, 4},
-					{1, 1, 0, 6},
+					{1, 1, 1, 4},
+					{1, 1, 1, 6},
 				},
 			},
 			partial: &testStat{
@@ -66,13 +61,13 @@ func TestMergeStatistics(t *testing.T) {
 				},
 			},
 			expected: &testStat{
-				at: 2, row: 13, dist: 7, null: 0, size: 2,
+				at: 2, row: 13, dist: 9, null: 0, size: 2,
 				hist: testHistogram{
 					{2, 0, 0, 0},
 					{2, 0, 0, 1},
 					{1, 0, 0, 2},
-					{1, 1, 0, 4},
-					{1, 1, 0, 6},
+					{1, 1, 1, 4},
+					{1, 1, 1, 6},
 					{2, 0, 0, 7},
 					{2, 0, 0, 8},
 				},
@@ -228,7 +223,7 @@ func TestMergedStatistics(t *testing.T) {
 			// Simplest case, one newer partial stat for each new full stat.
 			full: []*testStat{
 				{
-					at: 5, row: 14, dist: 13, null: 4, size: 1, colID: 1,
+					at: 5, row: 18, dist: 13, null: 4, size: 1, colID: 1,
 					hist: testHistogram{{1, 3, 3, 30}, {1, 9, 7, 40}},
 				},
 				{

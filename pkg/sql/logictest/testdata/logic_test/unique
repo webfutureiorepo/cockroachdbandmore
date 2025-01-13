@@ -1,3 +1,7 @@
+# LogicTest: !weak-iso-level-configs
+# READ COMMITTED and REPEATABLE READ do not work with UNIQUE WITHOUT INDEX
+# constraints. See https://github.com/cockroachdb/cockroach/issues/110873.
+
 statement ok
 SET experimental_enable_unique_without_index_constraints = true
 
@@ -1047,4 +1051,41 @@ INSERT INTO t115377 VALUES (2, 0, 0, 'east')
 statement error pgcode 23505 duplicate key value violates unique constraint \"unique_k\"
 INSERT INTO t115377 VALUES (2, 1, 1, 'east')
 
+# Regression test for #126988.
+statement ok
+CREATE TABLE t126988 (
+  k INT PRIMARY KEY,
+  j INT,
+  i INT,
+  v INT AS (i) VIRTUAL,
+  UNIQUE WITHOUT INDEX (i, j),
+  INDEX (j, v) STORING (i)
+)
+
+statement ok
+INSERT INTO t126988 VALUES (1, 10, 200)
+
+statement error pgcode 23505 duplicate key value violates unique constraint \"unique_i_j\"\nDETAIL: Key \(10, 200\) already exists.
+INSERT INTO t126988 VALUES (1, 10, 200)
+
 subtest end
+
+# Regression test for hitting a nil pointer in the insert fast path when seeing
+# a bool expression in the VALUES clause (#123103).
+statement ok
+CREATE TABLE t123103 (
+	id STRING DEFAULT gen_random_uuid()::STRING NOT NULL,
+	r  region NOT NULL DEFAULT 'us-east'::region,
+	a  STRING NOT NULL,
+	b  BOOL NOT NULL,
+	CONSTRAINT tab_pkey PRIMARY KEY (r ASC, id ASC),
+	CONSTRAINT tab_id_key UNIQUE WITHOUT INDEX (id ASC),
+	CONSTRAINT tab_r_a_b_key UNIQUE (r ASC, a ASC, b ASC),
+	CONSTRAINT tab_a_b_key UNIQUE WITHOUT INDEX (a ASC, b ASC)
+);
+INSERT INTO t123103 (id, a, b) VALUES ('1234567890', 'foo', true);
+
+query TTB
+SELECT id, a, b FROM t123103;
+----
+1234567890  foo  true

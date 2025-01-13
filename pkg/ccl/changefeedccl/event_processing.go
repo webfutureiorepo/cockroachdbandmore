@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -19,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -29,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -65,6 +64,7 @@ type kvEventToRowConsumer struct {
 	topicNamer           *TopicNamer
 
 	metrics *sliMetrics
+	sv      *settings.Values
 
 	// This pacer is used to incorporate event consumption to elastic CPU
 	// control. This helps ensure that event encoding/decoding does not throttle
@@ -100,7 +100,7 @@ func newEventConsumer(
 
 	makeConsumer := func(s EventSink, frontier frontier) (eventConsumer, error) {
 		var err error
-		encoder, err := getEncoder(encodingOpts, feed.Targets, spec.Select.Expr != "",
+		encoder, err := getEncoder(ctx, encodingOpts, feed.Targets, spec.Select.Expr != "",
 			makeExternalConnectionProvider(ctx, cfg.DB), sliMetrics)
 		if err != nil {
 			return nil, err
@@ -252,6 +252,7 @@ func newKVEventToRowConsumer(
 		encodingOpts:         encodingOpts,
 		metrics:              metrics,
 		pacer:                pacer,
+		sv:                   cfg.SV(),
 	}, nil
 }
 
@@ -391,11 +392,10 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 	// being tracked by the local span frontier. The poller should not be forwarding
 	// r updates that have timestamps less than or equal to any resolved timestamp
 	// it's forwarded before.
-	// TODO(dan): This should be an assertion once we're confident this can never
-	// happen under any circumstance.
 	if schemaTS.LessEq(c.frontier.Frontier()) && !schemaTS.Equal(c.cursor) {
-		log.Errorf(ctx, "cdc ux violation: detected timestamp %s that is less than "+
-			"or equal to the local frontier %s.", schemaTS, c.frontier.Frontier())
+		logcrash.ReportOrPanic(ctx, c.sv,
+			"cdc ux violation: detected timestamp %s that is less than or equal to the local frontier %s.",
+			schemaTS, c.frontier.Frontier())
 		return nil
 	}
 
@@ -418,6 +418,7 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 		}
 	}
 
+	stop := c.metrics.Timers.Encode.Start()
 	if c.encodingOpts.Format == changefeedbase.OptFormatParquet {
 		return c.encodeForParquet(
 			ctx, updatedRow, prevRow, topic, schemaTS, updatedRow.MvccTimestamp,
@@ -441,10 +442,18 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 	// Since we're done processing/converting this event, and will not use much more
 	// than len(key)+len(bytes) worth of resources, adjust allocation to match.
 	alloc.AdjustBytesToTarget(ctx, int64(len(keyCopy)+len(valueCopy)))
+	stop()
 
-	if err := c.sink.EmitRow(
-		ctx, topic, keyCopy, valueCopy, schemaTS, updatedRow.MvccTimestamp, alloc,
-	); err != nil {
+	c.metrics.Timers.EmitRow.Time(func() {
+		err = c.sink.EmitRow(
+			ctx, topic, keyCopy, valueCopy, schemaTS, updatedRow.MvccTimestamp, alloc,
+		)
+	})
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			log.Warningf(ctx, `sink failed to emit row: %v`, err)
+			c.metrics.SinkErrors.Inc(1)
+		}
 		return err
 	}
 	if log.V(3) {

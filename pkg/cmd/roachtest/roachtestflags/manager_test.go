@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachtestflags
 
@@ -55,9 +50,10 @@ func TestManager(t *testing.T) {
 		m.AddFlagsToCommand(listCmdID, listCmd.Flags())
 		require.NoError(t, listCmd.ParseFlags([]string{"--some-int", "123"}))
 		require.Equal(t, 123, tv.intVal)
-		require.True(t, m.Changed(&tv.intVal))
-		require.False(t, m.Changed(&tv.boolVal))
-		require.False(t, m.Changed(&tv.stringVal))
+		require.True(t, m.Changed(&tv.intVal) != nil)
+		require.Equal(t, "some-int", m.Changed(&tv.intVal).Name)
+		require.False(t, m.Changed(&tv.boolVal) != nil)
+		require.False(t, m.Changed(&tv.stringVal) != nil)
 	})
 
 	t.Run("list2", func(t *testing.T) {
@@ -67,9 +63,11 @@ func TestManager(t *testing.T) {
 		require.NoError(t, listCmd.ParseFlags([]string{"--some-int", "123", "--some-string", "foo"}))
 		require.Equal(t, 123, tv.intVal)
 		require.Equal(t, "foo", tv.stringVal)
-		require.True(t, m.Changed(&tv.intVal))
-		require.False(t, m.Changed(&tv.boolVal))
-		require.True(t, m.Changed(&tv.stringVal))
+		require.True(t, m.Changed(&tv.intVal) != nil)
+		require.Equal(t, "some-int", m.Changed(&tv.intVal).Name)
+		require.False(t, m.Changed(&tv.boolVal) != nil)
+		require.True(t, m.Changed(&tv.stringVal) != nil)
+		require.Equal(t, "some-string", m.Changed(&tv.stringVal).Name)
 	})
 
 	t.Run("run", func(t *testing.T) {
@@ -78,9 +76,10 @@ func TestManager(t *testing.T) {
 		m.AddFlagsToCommand(runCmdID, runCmd.Flags())
 		require.NoError(t, runCmd.ParseFlags([]string{"-b"}))
 		require.True(t, tv.boolVal)
-		require.False(t, m.Changed(&tv.intVal))
-		require.True(t, m.Changed(&tv.boolVal))
-		require.False(t, m.Changed(&tv.stringVal))
+		require.False(t, m.Changed(&tv.intVal) != nil)
+		require.True(t, m.Changed(&tv.boolVal) != nil)
+		require.Equal(t, "b", m.Changed(&tv.boolVal).Shorthand)
+		require.False(t, m.Changed(&tv.stringVal) != nil)
 	})
 
 	t.Run("run_and_bench", func(t *testing.T) {
@@ -92,9 +91,11 @@ func TestManager(t *testing.T) {
 		require.NoError(t, runCmd.ParseFlags([]string{"--some-bool=false", "-s", "foo"}))
 		require.False(t, tv.boolVal)
 		require.Equal(t, "foo", tv.stringVal)
-		require.False(t, m.Changed(&tv.intVal))
-		require.True(t, m.Changed(&tv.boolVal))
-		require.True(t, m.Changed(&tv.stringVal))
+		require.False(t, m.Changed(&tv.intVal) != nil)
+		require.True(t, m.Changed(&tv.boolVal) != nil)
+		require.Equal(t, "some-bool", m.Changed(&tv.boolVal).Name)
+		require.True(t, m.Changed(&tv.stringVal) != nil)
+		require.Equal(t, "s", m.Changed(&tv.stringVal).Shorthand)
 	})
 }
 

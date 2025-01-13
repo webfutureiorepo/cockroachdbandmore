@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package circuit
 
@@ -20,7 +15,7 @@ type EventHandler interface {
 	OnTrip(_ *Breaker, prev, cur error)
 	OnProbeLaunched(*Breaker)
 	OnProbeDone(*Breaker)
-	OnReset(*Breaker)
+	OnReset(_ *Breaker, prev error)
 }
 
 // EventLogger is an implementation of EventHandler that relays to a logging
@@ -61,7 +56,7 @@ func (d *EventLogger) OnProbeDone(b *Breaker) {
 }
 
 // OnReset implements EventHandler. It logs a message.
-func (d *EventLogger) OnReset(b *Breaker) {
+func (d *EventLogger) OnReset(b *Breaker, prev error) {
 	var buf redact.StringBuilder
 	EventFormatter{}.OnReset(b, &buf)
 	d.maybeLog(buf)

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -38,7 +33,8 @@ func registerLiquibase(r registry.Registry) {
 		t.Status("setting up cockroach")
 		startOpts := option.DefaultStartOpts()
 		startOpts.RoachprodOpts.SQLPort = config.DefaultSQLPort
-		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
+		// TODO(darrylwong): if https://github.com/liquibase/liquibase-test-harness/pull/724 is merged, enable secure mode
+		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(install.SecureOption(false)), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -98,6 +94,7 @@ func registerLiquibase(r registry.Registry) {
 		if err = c.RunE(ctx, option.WithNodes(node), `sudo mkdir /cockroach && sudo ln -sf /home/ubuntu/cockroach /cockroach/cockroach.sh`); err != nil {
 			t.Fatal(err)
 		}
+		// TODO(darrylwong): once secure mode is enabled, add --certs-dir=install.CockroachNodeCertsDir
 		if err = c.RunE(ctx, option.WithNodes(node), `/mnt/data1/liquibase-test-harness/src/test/resources/docker/setup_db.sh localhost`); err != nil {
 			t.Fatal(err)
 		}
@@ -112,6 +109,7 @@ func registerLiquibase(r registry.Registry) {
 			resultsPath = repoDir + "/target/surefire-reports/TEST-liquibase.harness.LiquibaseHarnessSuiteTest.xml"
 		)
 
+		// TODO(darrylwong): once secure mode is enabled, add -DdbUsername=roach -DdbPassword=system
 		cmd := fmt.Sprintf("cd /mnt/data1/liquibase-test-harness/ && "+
 			"mvn surefire-report:report-only test -Dtest=LiquibaseHarnessSuiteTest "+
 			"-DdbName=cockroachdb -DdbVersion=20.2 -DoutputDirectory=%s", repoDir)

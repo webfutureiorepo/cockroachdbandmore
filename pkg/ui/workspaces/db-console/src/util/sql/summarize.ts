@@ -1,14 +1,10 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import startsWith from "lodash/startsWith";
+import toLower from "lodash/toLower";
 
 export interface StatementSummary {
   statement?: string;
@@ -29,7 +25,7 @@ const keywords: { [key: string]: RegExp } = {
 // of the query.
 export function summarize(statement: string): StatementSummary {
   for (const keyword in keywords) {
-    if (_.startsWith(_.toLower(statement), _.toLower(keyword))) {
+    if (startsWith(toLower(statement), toLower(keyword))) {
       const tablePattern = keywords[keyword];
       const tableMatch = tablePattern.exec(statement);
 

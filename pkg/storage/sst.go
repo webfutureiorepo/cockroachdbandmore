@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -19,8 +14,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
@@ -33,7 +29,7 @@ var (
 	// adjust stats for point keys masked by range keys, but when we disable this
 	// masking we expect accurate stats and can assert this in various tests
 	// (notably kvnemesis).
-	DisableCheckSSTRangeKeyMasking = util.ConstantWithMetamorphicTestBool(
+	DisableCheckSSTRangeKeyMasking = metamorphic.ConstantWithTestBool(
 		"disable-checksstconflicts-range-key-masking", false)
 )
 
@@ -114,7 +110,7 @@ func CheckSSTConflicts(
 	disallowShadowing bool,
 	disallowShadowingBelow hlc.Timestamp,
 	sstTimestamp hlc.Timestamp,
-	maxLockConflicts int64,
+	maxLockConflicts, targetLockConflictBytes int64,
 	usePrefixSeek bool,
 ) (enginepb.MVCCStats, error) {
 
@@ -150,7 +146,7 @@ func CheckSSTConflicts(
 		nonPrefixIter, err := reader.NewMVCCIterator(ctx, MVCCKeyAndIntentsIterKind, IterOptions{
 			KeyTypes:     IterKeyTypePointsAndRanges,
 			UpperBound:   end.Key,
-			ReadCategory: BatchEvalReadCategory,
+			ReadCategory: fs.BatchEvalReadCategory,
 		})
 		if err != nil {
 			return statsDiff, err
@@ -165,7 +161,7 @@ func CheckSSTConflicts(
 
 	// Check for any overlapping locks, and return them to be resolved.
 	if locks, err := ScanLocks(
-		ctx, reader, start.Key, end.Key, maxLockConflicts, 0, BatchEvalReadCategory); err != nil {
+		ctx, reader, start.Key, end.Key, maxLockConflicts, targetLockConflictBytes); err != nil {
 		return enginepb.MVCCStats{}, err
 	} else if len(locks) > 0 {
 		return enginepb.MVCCStats{}, &kvpb.LockConflictError{Locks: locks}
@@ -199,7 +195,7 @@ func CheckSSTConflicts(
 	rkIter, err = reader.NewMVCCIterator(ctx, MVCCKeyIterKind, IterOptions{
 		UpperBound:   rightPeekBound,
 		KeyTypes:     IterKeyTypeRangesOnly,
-		ReadCategory: BatchEvalReadCategory,
+		ReadCategory: fs.BatchEvalReadCategory,
 	})
 	if err != nil {
 		return enginepb.MVCCStats{}, err
@@ -244,7 +240,7 @@ func CheckSSTConflicts(
 		RangeKeyMaskingBelow: sstTimestamp,
 		Prefix:               usePrefixSeek,
 		useL6Filters:         true,
-		ReadCategory:         BatchEvalReadCategory,
+		ReadCategory:         fs.BatchEvalReadCategory,
 	})
 	if err != nil {
 		return enginepb.MVCCStats{}, err
@@ -345,8 +341,7 @@ func CheckSSTConflicts(
 			allowShadow := !disallowShadowingBelow.IsEmpty() &&
 				disallowShadowingBelow.LessEq(extKey.Timestamp) && bytes.Equal(extValueRaw, sstValueRaw)
 			if !allowShadow {
-				return errors.Errorf(
-					"ingested key collides with an existing one: %s", sstKey.Key)
+				return kvpb.NewKeyCollisionError(sstKey.Key, sstValueRaw)
 			}
 		}
 

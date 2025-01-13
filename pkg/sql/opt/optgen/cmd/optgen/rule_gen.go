@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -894,7 +889,7 @@ func (g *newRuleGen) genBoundStatements(e lang.Expr) {
 // that genNestedExpr can generate references to those statements.
 func (g *newRuleGen) genNestedExpr(e lang.Expr) {
 	if label, ok := g.boundStmts[e]; ok {
-		g.w.write(label)
+		g.w.write("%s", label)
 		return
 	}
 
@@ -915,10 +910,10 @@ func (g *newRuleGen) genNestedExpr(e lang.Expr) {
 			// untyped version.
 			varName = typed
 		}
-		g.w.write(varName)
+		g.w.write("%s", varName)
 
 	case *lang.LetExpr:
-		g.w.write(string(t.Result.Label))
+		g.w.write("%s", string(t.Result.Label))
 
 	case *lang.StringExpr:
 		// Literal string expressions construct DString datums.

@@ -1,14 +1,15 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { EventInfo, getDroppedObjectsText } from "src/util/events";
+import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
+
+import {
+  EventInfo,
+  getDroppedObjectsText,
+  getEventDescription,
+} from "src/util/events";
 
 describe("getDroppedObjectsText", function () {
   // The key indicating which objects were dropped in a DROP_DATABASE event has been
@@ -39,6 +40,51 @@ describe("getDroppedObjectsText", function () {
 
     versions.forEach(eventInfoVersion => {
       expect(expected).toEqual(getDroppedObjectsText(eventInfoVersion));
+    });
+  });
+});
+
+describe("getEventDescription", function () {
+  it("ignores the options field when empty for role changes", function () {
+    interface TestCase {
+      event: Partial<clusterUiApi.EventColumns>;
+      expected: string;
+    }
+    const tcs: TestCase[] = [
+      {
+        event: {
+          eventType: "alter_role",
+          info: '{"User": "abc", "RoleName": "123"}',
+        },
+        expected: "Role Altered: User abc altered role 123",
+      },
+      {
+        event: {
+          eventType: "alter_role",
+          info: '{"User": "abc", "RoleName": "123", "SetInfo": ["DEFAULTSETTINGS"]}',
+        },
+        expected:
+          "Role Altered: User abc altered default settings for role 123",
+      },
+      {
+        event: {
+          eventType: "alter_role",
+          info: '{"User": "abc", "RoleName": "123", "Options": []}',
+        },
+        expected: "Role Altered: User abc altered role 123",
+      },
+      {
+        event: {
+          eventType: "alter_role",
+          info: '{"User": "abc", "RoleName": "123", "Options": ["o1", "o2"]}',
+        },
+        expected: "Role Altered: User abc altered role 123 with options o1,o2",
+      },
+    ];
+    tcs.forEach(tc => {
+      expect(
+        getEventDescription(tc.event as clusterUiApi.EventColumns),
+      ).toEqual(tc.expected);
     });
   });
 });

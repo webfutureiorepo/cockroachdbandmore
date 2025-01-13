@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package workloadccl
 
@@ -15,16 +12,18 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/cockroachdb/cockroach-go/v2/crdb"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
@@ -281,7 +280,7 @@ func MakeFixture(
 	for _, t := range gen.Tables() {
 		t := t
 		g.Go(func() error {
-			q := fmt.Sprintf(`BACKUP "%s"."%s" TO $1`, dbName, t.Name)
+			q := fmt.Sprintf(`BACKUP "%s"."%s" INTO $1`, dbName, t.Name)
 			output := config.ObjectPathToURI(filepath.Join(fixtureFolder, t.Name))
 			log.Infof(ctx, "Backing %s up to %q...", t.Name, output)
 			_, err := sqlDB.Exec(q, output)
@@ -328,22 +327,11 @@ func (l ImportDataLoader) InitialDataLoad(
 
 // Specify an explicit empty prefix for crdb_internal to avoid an error if
 // the database we're connected to does not exist.
-const numNodesQuery = `SELECT count(node_id) FROM "".crdb_internal.gossip_liveness`
-const numNodesQuerySQLInstances = `SELECT count(1) FROM system.sql_instances WHERE addr IS NOT NULL`
+const numNodesQuery = `SELECT count(1) FROM system.sql_instances WHERE addr IS NOT NULL`
 
 func getNodeCount(ctx context.Context, sqlDB *gosql.DB) (int, error) {
 	var numNodes int
 	if err := sqlDB.QueryRow(numNodesQuery).Scan(&numNodes); err != nil {
-		// If the query is unsupported because we're in
-		// multi-tenant mode, use the sql_instances table.
-		if !strings.Contains(err.Error(), errorutil.UnsupportedUnderClusterVirtualizationMessage) {
-			return 0, err
-
-		}
-	} else {
-		return numNodes, nil
-	}
-	if err := sqlDB.QueryRow(numNodesQuerySQLInstances).Scan(&numNodes); err != nil {
 		return 0, err
 	}
 	return numNodes, nil
@@ -397,17 +385,43 @@ func ImportFixture(
 	// references). If create table is done in parallel with IMPORT, some IMPORT
 	// jobs may fail because the type is being modified concurrently with the
 	// IMPORT. Removing the need to pre-create is being tracked with #70987.
-	for _, table := range tables {
-		err := createFixtureTable(sqlDB, dbName, table)
-		if err != nil {
-			return 0, errors.Wrapf(err, `creating table %s`, table.Name)
+	const maxTableBatchSize = 5000
+	currentTable := 0
+	for currentTable < len(tables) {
+		batchEnd := min(currentTable+maxTableBatchSize, len(tables))
+		nextBatch := tables[currentTable:batchEnd]
+		if err := crdb.ExecuteTx(ctx, sqlDB, &gosql.TxOptions{}, func(tx *gosql.Tx) error {
+			for _, table := range nextBatch {
+				err := createFixtureTable(tx, dbName, table)
+				if err != nil {
+					return errors.Wrapf(err, `creating table %s`, table.Name)
+				}
+			}
+			return nil
+		}); err != nil {
+			return 0, err
 		}
+		currentTable += maxTableBatchSize
 	}
 
+	// Default to unbounded unless a flag exists for it.
+	concurrencyLimit := math.MaxInt
+	if flagser, ok := gen.(workload.Flagser); ok {
+		importLimit, err := flagser.Flags().GetInt("import-concurrency-limit")
+		if err == nil {
+			concurrencyLimit = importLimit
+		}
+	}
+	concurrentImportLimit := limit.MakeConcurrentRequestLimiter("workload_import", concurrencyLimit)
 	for _, t := range tables {
 		table := t
 		paths := csvServerPaths(pathPrefix, gen, table, numNodes*filesPerNode)
 		g.GoCtx(func(ctx context.Context) error {
+			res, err := concurrentImportLimit.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer res.Release()
 			tableBytes, err := importFixtureTable(
 				ctx, sqlDB, dbName, table, paths, `` /* output */, injectStats)
 			atomic.AddInt64(&bytesAtomic, tableBytes)
@@ -420,13 +434,21 @@ func ImportFixture(
 	return atomic.LoadInt64(&bytesAtomic), nil
 }
 
-func createFixtureTable(sqlDB *gosql.DB, dbName string, table workload.Table) error {
+func createFixtureTable(tx *gosql.Tx, dbName string, table workload.Table) error {
 	qualifiedTableName := makeQualifiedTableName(dbName, &table)
+	if table.ObjectPrefix != nil && table.ObjectPrefix.ExplicitCatalog {
+		// Switch databases if one is explicitly specified for multi-region
+		// configurations with multiple databases.
+		_, err := tx.Exec("USE $1", table.ObjectPrefix.Catalog())
+		if err != nil {
+			return err
+		}
+	}
 	createTable := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s %s`,
 		qualifiedTableName,
 		table.Schema)
-	_, err := sqlDB.Exec(createTable)
+	_, err := tx.Exec(createTable)
 	return err
 }
 
@@ -572,7 +594,12 @@ func injectStatistics(qualifiedTableName string, table *workload.Table, sqlDB *g
 // database name and table.
 func makeQualifiedTableName(dbName string, table *workload.Table) string {
 	if dbName == "" {
-		return fmt.Sprintf(`"%s"`, table.Name)
+		name := table.GetResolvedName()
+		if name.ObjectNamePrefix.ExplicitCatalog ||
+			name.ObjectNamePrefix.ExplicitSchema {
+			return name.FQString()
+		}
+		return fmt.Sprintf(`"%s"`, name.ObjectName)
 	}
 	return fmt.Sprintf(`"%s"."%s"`, dbName, table.Name)
 }
@@ -581,8 +608,7 @@ func makeQualifiedTableName(dbName string, table *workload.Table) string {
 // license is required to have been set in the cluster.
 func RestoreFixture(
 	ctx context.Context, sqlDB *gosql.DB, fixture Fixture, database string, injectStats bool,
-) (int64, error) {
-	var bytesAtomic int64
+) error {
 	g := ctxgroup.WithContext(ctx)
 	genName := fixture.Generator.Meta().Name
 	tables := fixture.Generator.Tables()
@@ -599,9 +625,9 @@ func RestoreFixture(
 		table := table
 		g.GoCtx(func(ctx context.Context) error {
 			start := timeutil.Now()
-			restoreStmt := fmt.Sprintf(`RESTORE %s.%s FROM $1 WITH into_db=$2, unsafe_restore_incompatible_version`, genName, table.TableName)
+			restoreStmt := fmt.Sprintf(`RESTORE %s.%s FROM LATEST IN $1 WITH into_db=$2, unsafe_restore_incompatible_version`, genName, table.TableName)
 			log.Infof(ctx, "Restoring from %s", table.BackupURI)
-			var rows, index, tableBytes int64
+			var rows int64
 			var discard interface{}
 			res, err := sqlDB.Query(restoreStmt, table.BackupURI, database)
 			if err != nil {
@@ -614,33 +640,20 @@ func RestoreFixture(
 				}
 				return gosql.ErrNoRows
 			}
-			resCols, err := res.Columns()
-			if err != nil {
+			if err := res.Scan(
+				&discard, &discard, &discard, &rows,
+			); err != nil {
 				return err
 			}
-			if len(resCols) == 7 {
-				if err := res.Scan(
-					&discard, &discard, &discard, &rows, &index, &discard, &tableBytes,
-				); err != nil {
-					return err
-				}
-			} else {
-				if err := res.Scan(
-					&discard, &discard, &discard, &rows, &index, &tableBytes,
-				); err != nil {
-					return err
-				}
-			}
-			atomic.AddInt64(&bytesAtomic, tableBytes)
+
 			elapsed := timeutil.Since(start)
-			log.Infof(ctx, `loaded %s table %s in %s (%d rows, %d index entries, %s)`,
-				humanizeutil.IBytes(tableBytes), table.TableName, elapsed, rows, index,
-				humanizeutil.IBytes(int64(float64(tableBytes)/elapsed.Seconds())))
+			log.Infof(ctx, `loaded table %s in %s (%d rows)`,
+				table.TableName, elapsed, rows)
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return 0, err
+		return err
 	}
 	if injectStats {
 		for i := range tables {
@@ -648,12 +661,12 @@ func RestoreFixture(
 			if len(t.Stats) > 0 {
 				qualifiedTableName := makeQualifiedTableName(genName, t)
 				if err := injectStatistics(qualifiedTableName, t, sqlDB); err != nil {
-					return 0, err
+					return err
 				}
 			}
 		}
 	}
-	return atomic.LoadInt64(&bytesAtomic), nil
+	return nil
 }
 
 func listDir(

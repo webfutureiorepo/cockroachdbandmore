@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colflow
 
@@ -29,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -277,9 +272,8 @@ func TestVectorizedFlowTempDirectory(t *testing.T) {
 	// We use an on-disk engine for this test since we're testing FS interactions
 	// and want to get the same behavior as a non-testing environment.
 	tempPath, dirCleanup := testutils.TempDir(t)
-	ngn, err := storage.Open(ctx, storage.Filesystem(tempPath), cluster.MakeClusterSettings(), storage.CacheSize(0))
-	require.NoError(t, err)
-	defer ngn.Close()
+	env := fs.MustInitPhysicalTestingEnv(tempPath)
+	defer env.Close()
 	defer dirCleanup()
 
 	newVectorizedFlow := func(queriesSpilled *metric.Counter) *vectorizedFlow {
@@ -287,7 +281,8 @@ func TestVectorizedFlowTempDirectory(t *testing.T) {
 			&flowinfra.FlowBase{
 				FlowCtx: execinfra.FlowCtx{
 					Cfg: &execinfra.ServerConfig{
-						TempFS:          ngn,
+						Settings:        st,
+						TempFS:          env,
 						TempStoragePath: tempPath,
 						VecFDSemaphore:  &colexecop.TestingSemaphore{},
 						Metrics: &execinfra.DistSQLMetrics{
@@ -303,12 +298,12 @@ func TestVectorizedFlowTempDirectory(t *testing.T) {
 		).(*vectorizedFlow)
 	}
 
-	dirs, err := ngn.List(tempPath)
+	dirs, err := env.List(tempPath)
 	require.NoError(t, err)
 	numDirsTheTestStartedWith := len(dirs)
 	checkDirs := func(t *testing.T, numExtraDirs int) {
 		t.Helper()
-		dirs, err := ngn.List(tempPath)
+		dirs, err := env.List(tempPath)
 		require.NoError(t, err)
 		expectedNumDirs := numDirsTheTestStartedWith + numExtraDirs
 		require.Equal(t, expectedNumDirs, len(dirs), "expected %d directories but found %d: %s", expectedNumDirs, len(dirs), dirs)
@@ -372,12 +367,12 @@ func TestVectorizedFlowTempDirectory(t *testing.T) {
 		errCh := make(chan error)
 		go func() {
 			createTempDir(ctx)
-			errCh <- ngn.MkdirAll(filepath.Join(vf.GetPath(ctx), "async"), os.ModePerm)
+			errCh <- env.MkdirAll(filepath.Join(vf.GetPath(ctx), "async"), os.ModePerm)
 		}()
 		createTempDir(ctx)
 		// Both goroutines should be able to create their subdirectories within the
 		// flow's temporary directory.
-		require.NoError(t, ngn.MkdirAll(filepath.Join(vf.GetPath(ctx), "main_goroutine"), os.ModePerm))
+		require.NoError(t, env.MkdirAll(filepath.Join(vf.GetPath(ctx), "main_goroutine"), os.ModePerm))
 		require.NoError(t, <-errCh)
 		vf.Cleanup(ctx)
 		checkDirs(t, 0)

@@ -1,41 +1,39 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { PayloadAction } from "@reduxjs/toolkit";
-import { generateTableID } from "../../util";
 import Long from "long";
-import RecommendationType = cockroach.sql.IndexRecommendation.RecommendationType;
+import { expectSaga } from "redux-saga-test-plan";
+import * as matchers from "redux-saga-test-plan/matchers";
 import {
   EffectProviders,
   StaticProvider,
   throwError,
 } from "redux-saga-test-plan/providers";
-import * as matchers from "redux-saga-test-plan/matchers";
+
 import {
   getIndexStats,
   resetIndexStats,
   TableIndexStatsRequest,
 } from "../../api/indexDetailsApi";
-import { expectSaga } from "redux-saga-test-plan";
-import {
-  refreshIndexStatsSaga,
-  requestIndexStatsSaga,
-  resetIndexStatsSaga,
-} from "./indexStats.sagas";
+import { generateTableID } from "../../util";
+
 import {
   actions,
   IndexStatsReducerState,
   reducer,
   ResetIndexUsageStatsPayload,
 } from "./indexStats.reducer";
+import {
+  refreshIndexStatsSaga,
+  requestIndexStatsSaga,
+  resetIndexStatsSaga,
+} from "./indexStats.sagas";
+
+import RecommendationType = cockroach.sql.IndexRecommendation.RecommendationType;
 
 describe("IndexStats sagas", () => {
   const database = "test_db";
@@ -79,6 +77,7 @@ describe("IndexStats sagas", () => {
           created_at: null,
         },
       ],
+      database_id: 10,
       last_reset: null,
       index_recommendations: [
         {

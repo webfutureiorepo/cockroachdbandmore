@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -181,13 +176,12 @@ func TestCommentOnAlteredColumn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	runCommentOnTests(t, func(db *gosql.DB) {
+	runCommentOnTestsDeclarativeOnly(t, func(db *gosql.DB) {
 		expectedComment := "expected comment"
 
 		if _, err := db.Exec(`
 		CREATE DATABASE d;
 		SET DATABASE = d;
-		SET enable_experimental_alter_column_type_general = true;
 		CREATE TABLE t (c INT);
 	`); err != nil {
 			t.Fatal(err)
@@ -221,13 +215,19 @@ func runCommentOnTests(t *testing.T, testFunc func(db *gosql.DB)) {
 		`SET use_declarative_schema_changer = 'on'`,
 		`SET use_declarative_schema_changer = 'off'`,
 	} {
-		func() {
-			params, _ := createTestServerParams()
-			s, db, _ := serverutils.StartServer(t, params)
-			defer s.Stopper().Stop(context.Background())
-			_, err := db.Exec(setupQuery)
-			require.NoError(t, err)
-			testFunc(db)
-		}()
+		runOneCommentOnTest(t, setupQuery, testFunc)
 	}
+}
+
+func runCommentOnTestsDeclarativeOnly(t *testing.T, testFunc func(db *gosql.DB)) {
+	runOneCommentOnTest(t, "SET use_declarative_schema_changer = 'on'", testFunc)
+}
+
+func runOneCommentOnTest(t *testing.T, setupQuery string, testFunc func(db *gosql.DB)) {
+	params, _ := createTestServerParams()
+	s, db, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.Background())
+	_, err := db.Exec(setupQuery)
+	require.NoError(t, err)
+	testFunc(db)
 }

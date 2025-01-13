@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowcontainer
 
@@ -54,10 +49,12 @@ type DiskBackedNumberedRowContainer struct {
 // Arguments:
 //   - deDup is true if it should de-duplicate.
 //   - types is the schema of rows that will be added to this container.
-//   - evalCtx defines the context.
+//   - evalCtx defines the context. It will **not** be mutated.
 //   - engine is the underlying store that rows are stored on when the container
 //     spills to disk.
 //   - memoryMonitor is used to monitor this container's memory usage.
+//   - unlimitedMemMonitor is used to monitor the memory usage of the disk row
+//     containers if spilling to disk occurs.
 //   - diskMonitor is used to monitor this container's disk usage.
 func NewDiskBackedNumberedRowContainer(
 	deDup bool,
@@ -65,6 +62,7 @@ func NewDiskBackedNumberedRowContainer(
 	evalCtx *eval.Context,
 	engine diskmap.Factory,
 	memoryMonitor *mon.BytesMonitor,
+	unlimitedMemMonitor *mon.BytesMonitor,
 	diskMonitor *mon.BytesMonitor,
 ) *DiskBackedNumberedRowContainer {
 	d := &DiskBackedNumberedRowContainer{
@@ -73,7 +71,7 @@ func NewDiskBackedNumberedRowContainer(
 		rowIterMemAcc: memoryMonitor.MakeBoundAccount(),
 	}
 	d.rc = &DiskBackedRowContainer{}
-	d.rc.Init(nil /*ordering*/, types, evalCtx, engine, memoryMonitor, diskMonitor)
+	d.rc.Init(nil /* ordering */, types, evalCtx, engine, memoryMonitor, unlimitedMemMonitor, diskMonitor)
 	if deDup {
 		ordering := make(colinfo.ColumnOrdering, len(types))
 		for i := range types {
@@ -81,7 +79,7 @@ func NewDiskBackedNumberedRowContainer(
 			ordering[i].Direction = encoding.Ascending
 		}
 		deduper := &DiskBackedRowContainer{}
-		deduper.Init(ordering, types, evalCtx, engine, memoryMonitor, diskMonitor)
+		deduper.Init(ordering, types, evalCtx, engine, memoryMonitor, unlimitedMemMonitor, diskMonitor)
 		deduper.DoDeDuplicate()
 		d.deduper = deduper
 	}

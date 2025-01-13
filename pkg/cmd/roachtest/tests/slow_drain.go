@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -76,7 +71,7 @@ func runSlowDrain(ctx context.Context, t test.Test, c cluster.Cluster, duration 
 		run(db, fmt.Sprintf(`ALTER DATABASE system CONFIGURE ZONE USING num_replicas=%d`, replicationFactor))
 
 		// Wait for initial up-replication.
-		err := WaitForReplication(ctx, t, db, replicationFactor, atLeastReplicationFactor)
+		err := roachtestutil.WaitForReplication(ctx, t.L(), db, replicationFactor, roachtestutil.AtLeastReplicationFactor)
 		require.NoError(t, err)
 
 		// Ensure that leases are sent away from pinned node to avoid situation
@@ -119,13 +114,9 @@ func runSlowDrain(ctx context.Context, t test.Test, c cluster.Cluster, duration 
 		m.Go(func(ctx context.Context) error {
 			drain := func(id int) error {
 				t.Status(fmt.Sprintf("draining node %d", id))
-				pgurl, err := roachtestutil.DefaultPGUrl(ctx, c, t.L(), c.Node(id))
-				if err != nil {
-					t.Fatal(err)
-				}
 				return c.RunE(ctx,
 					option.WithNodes(c.Node(id)),
-					fmt.Sprintf("./cockroach node drain %d --insecure --drain-wait=%s --url=%s", id, duration.String(), pgurl),
+					fmt.Sprintf("./cockroach node drain %d --drain-wait=%s --certs-dir=%s --port={pgport:%d}", id, duration.String(), install.CockroachNodeCertsDir, id),
 				)
 			}
 			return drain(id)

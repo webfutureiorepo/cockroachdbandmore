@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package raftlog
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -28,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 const rangeID = 1
@@ -98,7 +93,8 @@ func mkBenchEnt(b *testing.B) (_ raftpb.Entry, metaB []byte) {
 	cmd := mkRaftCommand(100, 1800, 2000)
 	cmdB, err := protoutil.Marshal(cmd)
 	require.NoError(b, err)
-	data := EncodeCommandBytes(EntryEncodingStandardWithoutAC, "cmd12345", cmdB)
+	data := EncodeCommandBytes(
+		EntryEncodingStandardWithoutAC, "cmd12345", cmdB, 0 /* pri */)
 
 	ent := raftpb.Entry{
 		Term:  1,

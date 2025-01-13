@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
@@ -19,7 +14,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -33,13 +27,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slbase"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/startup"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil/singleflight"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -57,16 +54,24 @@ type storage struct {
 	regionPrefix            *atomic.Value
 	sessionBasedLeasingMode sessionBasedLeasingModeReader
 	sysDBCache              *catkv.SystemDatabaseCache
+	livenessProvider        sqlliveness.Provider
 
 	// group is used for all calls made to acquireNodeLease to prevent
 	// concurrent lease acquisitions from the store.
 	group *singleflight.Group
 
-	outstandingLeases                 *metric.Gauge
-	sessionBasedLeasesWaitingToExpire *metric.Gauge
-	sessionBasedLeasesExpired         *metric.Gauge
-	testingKnobs                      StorageTestingKnobs
-	writer                            writer
+	leasingMetrics
+	testingKnobs StorageTestingKnobs
+	writer       writer
+}
+
+type leasingMetrics struct {
+	outstandingLeases                          *metric.Gauge
+	sessionBasedLeasesWaitingToExpire          *metric.Gauge
+	sessionBasedLeasesExpired                  *metric.Gauge
+	longWaitForOneVersionsActive               *metric.Gauge
+	longWaitForNoVersionsActive                *metric.Gauge
+	longTwoVersionInvariantViolationWaitActive *metric.Gauge
 }
 
 type leaseFields struct {
@@ -84,8 +89,8 @@ type writer interface {
 }
 
 type sessionBasedLeasingModeReader interface {
-	sessionBasedLeasingModeAtLeast(minimumMode SessionBasedLeasingMode) bool
-	getSessionBasedLeasingMode() SessionBasedLeasingMode
+	sessionBasedLeasingModeAtLeast(ctx context.Context, minimumMode SessionBasedLeasingMode) bool
+	getSessionBasedLeasingMode(ctx context.Context) SessionBasedLeasingMode
 }
 
 // LeaseRenewalDuration controls the default time before a lease expires when
@@ -138,7 +143,6 @@ func (s storage) acquire(
 	prefix = s.getRegionPrefix()
 	var sessionID []byte
 	acquireInTxn := func(ctx context.Context, txn *kv.Txn) (err error) {
-
 		// Run the descriptor read as high-priority, thereby pushing any intents out
 		// of its way. We don't want schema changes to prevent lease acquisitions;
 		// we'd rather force them to refresh. Also this prevents deadlocks in cases
@@ -179,10 +183,14 @@ func (s storage) acquire(
 			// a monotonically increasing expiration.
 			expiration = minExpiration.Add(int64(time.Millisecond), 0)
 		}
-		desc, err = s.mustGetDescriptorByID(ctx, txn, id)
+		// Read into a temporary variable in case our read runs into
+		// any retryable error. If we run into an error then the delete
+		// above may need to be executed again.
+		latestDesc, err := s.mustGetDescriptorByID(ctx, txn, id)
 		if err != nil {
 			return err
 		}
+		desc = latestDesc
 		if err := catalog.FilterAddingDescriptor(desc); err != nil {
 			return err
 		}
@@ -224,14 +232,40 @@ func (s storage) acquire(
 		return s.writer.insertLease(ctx, txn, lf)
 	}
 
+	// Compute the maximum time we will retry ambiguous replica errors before
+	// disabling the SQL liveness heartbeat. The time chosen will guarantee that
+	// the sqlliveness TTL expires once the lease duration has surpassed.
+	maxTimeToDisableLiveness := s.jitteredLeaseDuration()
+	defaultTTLForLiveness := slbase.DefaultTTL.Get(&s.settings.SV)
+	if maxTimeToDisableLiveness > defaultTTLForLiveness {
+		maxTimeToDisableLiveness -= defaultTTLForLiveness
+	} else {
+		// If the TTL time is somehow bigger than the lease duration, then immediately
+		// after the first retry sqlliveness will renewals will be disabled.
+		maxTimeToDisableLiveness = 0
+	}
+	acquireStart := timeutil.Now()
+	extensionsBlocked := false
+	defer func() {
+		if extensionsBlocked {
+			s.livenessProvider.UnpauseLivenessHeartbeat(ctx)
+		}
+	}()
 	// Run a retry loop to deal with AmbiguousResultErrors. All other error types
 	// are propagated up to the caller.
 	for r := retry.StartWithCtx(ctx, retry.Options{}); r.Next(); {
 		err := s.db.KV().Txn(ctx, acquireInTxn)
-		var pErr *kvpb.AmbiguousResultError
 		switch {
-		case errors.As(err, &pErr):
-			log.Infof(ctx, "ambiguous error occurred during lease acquisition for %v, retrying: %v", id, err)
+		case startup.IsRetryableReplicaError(err):
+			// If we keep encountering the retryable replica error for more then
+			// the lease expiry duration we can no longer keep updating the liveness.
+			// i.e. This node is no longer productive at this point since it can't
+			// acquire or release releases potentially blocking schema changes.
+			if !extensionsBlocked && timeutil.Since(acquireStart) > maxTimeToDisableLiveness {
+				s.livenessProvider.PauseLivenessHeartbeat(ctx)
+				extensionsBlocked = true
+			}
+			log.Infof(ctx, "retryable replica error occurred during lease acquisition for %v, retrying: %v", id, err)
 			continue
 		case pgerror.GetPGCode(err) == pgcode.UniqueViolation:
 			log.Infof(ctx, "uniqueness violation occurred due to concurrent lease"+
@@ -261,6 +295,25 @@ func (s storage) release(
 	retryOptions := base.DefaultRetryOptions()
 	retryOptions.Closer = stopper.ShouldQuiesce()
 
+	// Compute the maximum time we will retry ambiguous replica errors before
+	// disabling the SQL liveness heartbeat. The time chosen will guarantee that
+	// the sqlliveness TTL expires once the lease duration has surpassed.
+	maxTimeToDisableLiveness := s.jitteredLeaseDuration()
+	defaultTTLForLiveness := slbase.DefaultTTL.Get(&s.settings.SV)
+	if maxTimeToDisableLiveness > defaultTTLForLiveness {
+		maxTimeToDisableLiveness -= defaultTTLForLiveness
+	} else {
+		// If the TTL time is somehow bigger than the lease duration, then immediately
+		// after the first retry sqlliveness will renewals will be disabled.
+		maxTimeToDisableLiveness = 0
+	}
+	acquireStart := timeutil.Now()
+	extensionsBlocked := false
+	defer func() {
+		if extensionsBlocked {
+			s.livenessProvider.UnpauseLivenessHeartbeat(ctx)
+		}
+	}()
 	// This transaction is idempotent; the retry was put in place because of
 	// NodeUnavailableErrors.
 	for r := retry.StartWithCtx(ctx, retryOptions); r.Next(); {
@@ -282,6 +335,17 @@ func (s storage) release(
 			log.Warningf(ctx, "error releasing lease %q: %s", lease, err)
 			if grpcutil.IsConnectionRejected(err) {
 				return
+			}
+			if startup.IsRetryableReplicaError(err) {
+				// If we keep encountering the retryable replica error for more then
+				// the lease expiry duration we can no longer keep updating the liveness.
+				// i.e. This node is no longer productive at this point since it can't
+				// acquire or release releases potentially blocking schema changes across
+				// a cluster.
+				if !extensionsBlocked && timeutil.Since(acquireStart) > maxTimeToDisableLiveness {
+					s.livenessProvider.PauseLivenessHeartbeat(ctx)
+					extensionsBlocked = true
+				}
 			}
 			continue
 		}

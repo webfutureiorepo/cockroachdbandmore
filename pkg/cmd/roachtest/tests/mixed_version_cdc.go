@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -32,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -49,7 +43,7 @@ const (
 
 	// kafkaBufferMessageSize is the number of messages from kafka
 	// we allow to be buffered in memory before validating them.
-	kafkaBufferMessageSize = 8192
+	kafkaBufferMessageSize = 1 << 16 // 64 KiB
 )
 
 var (
@@ -71,11 +65,11 @@ func registerCDCMixedVersions(r registry.Registry) {
 	r.Add(registry.TestSpec{
 		Name:             "cdc/mixed-versions",
 		Owner:            registry.OwnerCDC,
-		Cluster:          r.MakeClusterSpec(5, spec.GCEZones(teamcityAgentZone), spec.Arch(vm.ArchAMD64)),
-		Timeout:          60 * time.Minute,
+		Cluster:          r.MakeClusterSpec(5, spec.WorkloadNode(), spec.GCEZones(teamcityAgentZone), spec.Arch(vm.ArchAMD64)),
+		Timeout:          3 * time.Hour,
 		CompatibleClouds: registry.OnlyGCE,
-		Suites:           registry.Suites(registry.Nightly),
-		RequiresLicense:  true,
+		Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
+		Randomized:       true,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			runCDCMixedVersions(ctx, t, c)
 		},
@@ -126,20 +120,13 @@ type cdcMixedVersionTester struct {
 	fprintV   *cdctest.FingerprintValidator
 }
 
-func newCDCMixedVersionTester(
-	ctx context.Context, t test.Test, c cluster.Cluster,
-) cdcMixedVersionTester {
-	crdbNodes := c.Range(1, c.Spec().NodeCount-1)
-	lastNode := c.Node(c.Spec().NodeCount)
-
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload", lastNode)
-
+func newCDCMixedVersionTester(ctx context.Context, c cluster.Cluster) cdcMixedVersionTester {
 	return cdcMixedVersionTester{
 		ctx:           ctx,
 		c:             c,
-		crdbNodes:     crdbNodes,
-		workloadNodes: lastNode,
-		kafkaNodes:    lastNode,
+		crdbNodes:     c.CRDBNodes(),
+		workloadNodes: c.WorkloadNode(),
+		kafkaNodes:    c.WorkloadNode(),
 		workloadInit:  make(chan struct{}),
 	}
 }
@@ -156,7 +143,7 @@ func (cmvt *cdcMixedVersionTester) StartKafka(t test.Test, c cluster.Cluster) (c
 	}
 	cmvt.kafka.manager = manager
 
-	consumer, err := cmvt.kafka.manager.newConsumer(cmvt.ctx, targetTable)
+	consumer, err := cmvt.kafka.manager.newConsumer(cmvt.ctx, targetTable, nil /* stopper */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +153,7 @@ func (cmvt *cdcMixedVersionTester) StartKafka(t test.Test, c cluster.Cluster) (c
 	cmvt.kafka.consumer = consumer
 
 	return func() {
-		cmvt.kafka.consumer.Close()
+		consumer.close()
 		tearDown()
 	}
 }
@@ -185,7 +172,7 @@ func (cmvt *cdcMixedVersionTester) waitAndValidate(
 		cmvt.timestampsResolved.Lock()
 		defer cmvt.timestampsResolved.Unlock()
 
-		cmvt.timestampsResolved.C = make(chan hlc.Timestamp)
+		cmvt.timestampsResolved.C = make(chan hlc.Timestamp, resolvedTimestampsPerState)
 	}()
 
 	var numResolved int
@@ -230,7 +217,7 @@ func (cmvt *cdcMixedVersionTester) setupValidator(
 	// The fingerprint validator will save this db connection and use it
 	// when we submit rows for validation. This can be changed later using
 	// `(*FingerprintValidator) DBFunc`.
-	_, db := h.RandomDB(r, cmvt.crdbNodes)
+	_, db := h.RandomDB(r)
 	fprintV, err := cdctest.NewFingerprintValidator(db, tableName, `fprint`,
 		cmvt.kafka.consumer.partitions, 0)
 	if err != nil {
@@ -241,7 +228,7 @@ func (cmvt *cdcMixedVersionTester) setupValidator(
 		fprintV,
 	}
 
-	cmvt.validator = cdctest.MakeCountValidator(validators)
+	cmvt.validator = cdctest.NewCountValidator(validators)
 	cmvt.fprintV = fprintV
 	return nil
 }
@@ -252,21 +239,15 @@ func (cmvt *cdcMixedVersionTester) setupValidator(
 func (cmvt *cdcMixedVersionTester) runKafkaConsumer(
 	ctx context.Context, l *logger.Logger, r *rand.Rand, h *mixedversion.Helper,
 ) error {
-	everyN := log.Every(30 * time.Second)
+	everyN := roachtestutil.Every(30 * time.Second)
 
 	// This runs until the test finishes, which will be signaled via
 	// context cancellation. We rely on consumer.Next() to check
 	// the context.
 	for {
-		m := cmvt.kafka.consumer.Next(ctx)
-		if m == nil {
-			// this is expected to happen once the test has finished and
-			// Kafka is being shut down. If it happens in the middle of
-			// the test, it will eventually time out, and this message
-			// should allow us to see that the validator finished
-			// earlier than it should have
-			l.Printf("end of changefeed")
-			return nil
+		m, err := cmvt.kafka.consumer.next(ctx)
+		if err != nil {
+			return err
 		}
 
 		// Forward resolved timetsamps to "heartbeat" that the changefeed is running.
@@ -275,7 +256,7 @@ func (cmvt *cdcMixedVersionTester) runKafkaConsumer(
 			if err != nil {
 				return errors.Wrap(err, "failed to parse timestamps from message")
 			}
-			cmvt.timestampResolved(resolved)
+			cmvt.timestampResolved(l, resolved)
 
 			if everyN.ShouldLog() {
 				l.Printf("latest resolved timestamp %s behind realtime", timeutil.Since(resolved.GoTime()).String())
@@ -303,7 +284,7 @@ func (cmvt *cdcMixedVersionTester) validate(
 	ctx context.Context, l *logger.Logger, r *rand.Rand, h *mixedversion.Helper,
 ) error {
 	// Choose a random node to run the validation on.
-	n, db := h.RandomDB(r, cmvt.crdbNodes)
+	n, db := h.RandomDB(r)
 	l.Printf("running validation on node %d", n)
 	cmvt.fprintV.DBFunc(func(f func(*gosql.DB) error) error {
 		return f(db)
@@ -342,12 +323,15 @@ func (cmvt *cdcMixedVersionTester) validate(
 
 // timestampsResolved updates the underlying channel if set (i.e., if
 // we are waiting for resolved timestamps events)
-func (cmvt *cdcMixedVersionTester) timestampResolved(resolved hlc.Timestamp) {
+func (cmvt *cdcMixedVersionTester) timestampResolved(l *logger.Logger, resolved hlc.Timestamp) {
 	cmvt.timestampsResolved.Lock()
 	defer cmvt.timestampsResolved.Unlock()
 
-	if cmvt.timestampsResolved.C != nil {
-		cmvt.timestampsResolved.C <- resolved
+	select {
+	case cmvt.timestampsResolved.C <- resolved:
+		l.Printf("sent resolved timestamp %s", resolved)
+	default:
+		// If the channel is full or nil, we drop the resolved timestamp.
 	}
 }
 
@@ -362,8 +346,9 @@ func (cmvt *cdcMixedVersionTester) createChangeFeed(
 		return ctx.Err()
 	case <-cmvt.workloadInit:
 	}
-	node, db := h.RandomDB(r, cmvt.crdbNodes)
-	l.Printf("starting changefeed on node %d", node)
+	node, db := h.RandomDB(r)
+	systemNode, systemDB := h.System.RandomDB(r)
+	l.Printf("starting changefeed on node %d (updating system settings via node %d)", node, systemNode)
 
 	options := map[string]string{
 		"updated":  "",
@@ -371,6 +356,14 @@ func (cmvt *cdcMixedVersionTester) createChangeFeed(
 	}
 
 	var ff cdcFeatureFlags
+	rangefeedSchedulerSupported, err := cmvt.rangefeedSchedulerSupported(r, h)
+	if err != nil {
+		return err
+	}
+	if !rangefeedSchedulerSupported {
+		ff.RangeFeedScheduler.v = &featureUnset
+	}
+
 	distributionStrategySupported, err := cmvt.distributionStrategySupported(r, h)
 	if err != nil {
 		return err
@@ -379,7 +372,7 @@ func (cmvt *cdcMixedVersionTester) createChangeFeed(
 		ff.DistributionStrategy.v = &featureUnset
 	}
 
-	jobID, err := newChangefeedCreator(db, l, r, fmt.Sprintf("%s.%s", targetDB, targetTable),
+	jobID, err := newChangefeedCreator(db, systemDB, l, r, fmt.Sprintf("%s.%s", targetDB, targetTable),
 		cmvt.kafka.manager.sinkURL(ctx), ff).
 		With(options).
 		Create()
@@ -405,11 +398,16 @@ func (cmvt *cdcMixedVersionTester) runWorkloadCmd(r *rand.Rand) *roachtestutil.C
 func (cmvt *cdcMixedVersionTester) initWorkload(
 	ctx context.Context, l *logger.Logger, r *rand.Rand, h *mixedversion.Helper,
 ) error {
+	if err := enableTenantSplitScatter(l, r, h); err != nil {
+		return err
+	}
+
 	bankInit := roachtestutil.NewCommand("%s workload init bank", test.DefaultCockroachPath).
 		Flag("seed", r.Int63()).
 		Arg("{pgurl%s}", cmvt.crdbNodes)
 
-	if err := cmvt.c.RunE(ctx, option.WithNodes(option.NodeListOption{h.RandomNode(r, cmvt.workloadNodes)}), bankInit.String()); err != nil {
+	initNode := cmvt.workloadNodes[r.Intn(len(cmvt.workloadNodes))]
+	if err := cmvt.c.RunE(ctx, option.WithNodes(option.NodeListOption{initNode}), bankInit.String()); err != nil {
 		return err
 	}
 	close(cmvt.workloadInit)
@@ -422,21 +420,18 @@ func (cmvt *cdcMixedVersionTester) muxRangeFeedSupported(
 	// changefeed.mux_rangefeed.enabled was added in 22.2 and deleted in 24.1.
 	return canMixedVersionUseDeletedClusterSetting(h,
 		clusterupgrade.MustParseVersion("v22.2.0"),
-		clusterupgrade.MustParseVersion("v24.1.0-alpha.00000000"),
+		clusterupgrade.MustParseVersion("v24.1.0"),
 	)
 }
 
+const v232CV = "23.2"
 const v241CV = "24.1"
 
 func (cmvt *cdcMixedVersionTester) rangefeedSchedulerSupported(
-	h *mixedversion.Helper,
-) (bool, option.NodeListOption, error) {
-	// kv.rangefeed.scheduler.enabled only exists in 23.2. In 24.1, it is enabled
-	// unconditionally.
-	return canMixedVersionUseDeletedClusterSetting(h,
-		clusterupgrade.MustParseVersion("v23.2.0"),
-		clusterupgrade.MustParseVersion("v24.1.0-alpha.00000000"),
-	)
+	r *rand.Rand, h *mixedversion.Helper,
+) (bool, error) {
+	// kv.rangefeed.scheduler.enabled only exists since 23.2.
+	return h.ClusterVersionAtLeast(r, v232CV)
 }
 
 func (cmvt *cdcMixedVersionTester) distributionStrategySupported(
@@ -445,16 +440,17 @@ func (cmvt *cdcMixedVersionTester) distributionStrategySupported(
 	return h.ClusterVersionAtLeast(r, v241CV)
 }
 
-// canMixedVersionUseDeletedClusterSetting returns whether a mixed-version
-// cluster can use a deleted cluster setting. If it returns true, it will
-// also return the subset of nodes that understand the setting.
+// canMixedVersionUseDeletedClusterSetting returns whether a
+// mixed-version cluster can use a deleted (system) cluster
+// setting. If it returns true, it will also return the subset of
+// nodes that understand the setting.
 func canMixedVersionUseDeletedClusterSetting(
 	h *mixedversion.Helper,
 	addedVersion *clusterupgrade.Version,
 	deletedVersion *clusterupgrade.Version,
 ) (bool, option.NodeListOption, error) {
-	fromVersion := h.Context.FromVersion
-	toVersion := h.Context.ToVersion
+	fromVersion := h.System.FromVersion
+	toVersion := h.System.ToVersion
 
 	// Cluster setting was deleted at or before the from version so no nodes
 	// know about the setting.
@@ -467,7 +463,7 @@ func canMixedVersionUseDeletedClusterSetting(
 	// all the nodes on that version will know about the setting.
 	if toVersion.AtLeast(deletedVersion) {
 		if fromVersion.AtLeast(addedVersion) {
-			fromVersionNodes := h.Context.NodesInPreviousVersion()
+			fromVersionNodes := h.System.NodesInPreviousVersion()
 			if len(fromVersionNodes) > 0 {
 				return true, fromVersionNodes, nil
 			}
@@ -479,11 +475,11 @@ func canMixedVersionUseDeletedClusterSetting(
 	// at least the added version will know about the setting.
 
 	if fromVersion.AtLeast(addedVersion) {
-		return true, h.Context.CockroachNodes, nil
+		return true, h.System.Descriptor.Nodes, nil
 	}
 
 	if toVersion.AtLeast(addedVersion) {
-		toVersionNodes := h.Context.NodesInNextVersion()
+		toVersionNodes := h.System.NodesInNextVersion()
 		if len(toVersionNodes) > 0 {
 			return true, toVersionNodes, nil
 		}
@@ -494,21 +490,19 @@ func canMixedVersionUseDeletedClusterSetting(
 }
 
 func runCDCMixedVersions(ctx context.Context, t test.Test, c cluster.Cluster) {
-	tester := newCDCMixedVersionTester(ctx, t, c)
+	tester := newCDCMixedVersionTester(ctx, c)
 
-	// NB: We rely on the testing framework to choose a random predecessor
-	// to upgrade from.
 	mvt := mixedversion.NewTest(
 		ctx, t, t.L(), c, tester.crdbNodes,
-		// For now, we perform at most 2 upgrades in this test so that the
-		// lowest version we start from is 22.2. The reason for this is
-		// that, in 22.1, node draining errors were common and led to
-		// changefeeds failing. See #106878.
-		//
-		// TODO(renato): remove this restriction by not failing the test
-		// if the changefeed failed due to "node draining" errors while
-		// still in 22.1 or older.
-		mixedversion.MaxUpgrades(2),
+		// We set the minimum supported version to 23.2 in this test as it
+		// relies on the `kv.rangefeed.enabled` cluster setting. This
+		// setting is, confusingly, labeled as `TenantWritable` in
+		// 23.1. That mistake was then fixed (#110676) but, to simplify
+		// this test, we only create changefeeds in more recent versions.
+		mixedversion.MinimumSupportedVersion("v23.2.0"),
+		// We limit the total number of plan steps to 80, which is roughly 60% of all plan lengths.
+		// See https://github.com/cockroachdb/cockroach/pull/137963#discussion_r1906256740 for more details.
+		mixedversion.MaxNumPlanSteps(80),
 	)
 
 	cleanupKafka := tester.StartKafka(t, c)
@@ -523,21 +517,24 @@ func runCDCMixedVersions(ctx context.Context, t test.Test, c cluster.Cluster) {
 		if supported {
 			coin := r.Int()%2 == 0
 			l.PrintfCtx(ctx, "Setting changefeed.mux_rangefeed.enabled=%t ", coin)
-			return h.ExecWithGateway(r, gatewayNodes, "SET CLUSTER SETTING changefeed.mux_rangefeed.enabled=$1", coin)
+			return h.System.ExecWithGateway(
+				r, gatewayNodes, "SET CLUSTER SETTING changefeed.mux_rangefeed.enabled=$1", coin,
+			)
 		}
 		return nil
 	}
 
 	// Rangefeed scheduler available in 23.2
 	setRangeFeedSchedulerEnabled := func(ctx context.Context, l *logger.Logger, r *rand.Rand, h *mixedversion.Helper) error {
-		supported, gatewayNodes, err := tester.rangefeedSchedulerSupported(h)
+		supported, err := tester.rangefeedSchedulerSupported(r, h)
 		if err != nil {
 			return err
 		}
+		l.Printf("kv.rangefeed.scheduler.enabled=%t", supported)
 		if supported {
 			coin := r.Int()%2 == 0
 			l.PrintfCtx(ctx, "Setting kv.rangefeed.scheduler.enabled=%t", coin)
-			return h.ExecWithGateway(r, gatewayNodes, "SET CLUSTER SETTING kv.rangefeed.scheduler.enabled=$1", coin)
+			return h.System.Exec(r, "SET CLUSTER SETTING kv.rangefeed.scheduler.enabled=$1", coin)
 		}
 		return nil
 	}

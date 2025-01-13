@@ -1,32 +1,29 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { TimeScale, toRoundedDateRange, util } from "@cockroachlabs/cluster-ui";
+import * as H from "history";
+import merge from "lodash/merge";
 import Long from "long";
 import moment from "moment-timezone";
 import { RouteComponentProps } from "react-router-dom";
-import * as H from "history";
-import { merge } from "lodash";
 
 import "src/protobufInit";
 import * as protos from "src/js/protos";
+import { AdminUIState, createAdminUIStore } from "src/redux/state";
 import {
   appAttr,
   appNamesAttr,
   statementAttr,
   unset,
 } from "src/util/constants";
-import { selectLastReset } from "./statementsPage";
+
 import { selectStatementDetails } from "./statementDetails";
+import { selectLastReset } from "./statementsPage";
+
 import ISensitiveInfo = protos.cockroach.sql.ISensitiveInfo;
-import { AdminUIState, createAdminUIStore } from "src/redux/state";
-import { TimeScale, toRoundedDateRange, util } from "@cockroachlabs/cluster-ui";
 
 const { generateStmtDetailsToID, longToInt } = util;
 
@@ -99,9 +96,9 @@ describe("selectStatement", () => {
 
     expect(result.metadata.query).toEqual(stmtA.key.key_data.query);
     expect(result.stats.count.toNumber()).toEqual(stmtA.stats.count.toNumber());
+    expect(longToInt(result.stats.failure_count)).toBe(0);
     expect(result.metadata.app_names).toEqual([stmtA.key.key_data.app]);
     expect(longToInt(result.metadata.dist_sql_count)).toBe(0);
-    expect(longToInt(result.metadata.failed_count)).toBe(0);
     expect(longToInt(result.metadata.full_scan_count)).toBe(0);
     expect(longToInt(result.metadata.vec_count)).toBe(0);
     expect(longToInt(result.metadata.total_count)).toBe(1);
@@ -133,9 +130,9 @@ describe("selectStatement", () => {
 
     expect(result.metadata.query).toEqual(stmtA.key.key_data.query);
     expect(result.stats.count.toNumber()).toEqual(stmtA.stats.count.toNumber());
+    expect(longToInt(result.stats.failure_count)).toBe(0);
     expect(result.metadata.app_names).toEqual([stmtA.key.key_data.app]);
     expect(longToInt(result.metadata.dist_sql_count)).toBe(0);
-    expect(longToInt(result.metadata.failed_count)).toBe(0);
     expect(longToInt(result.metadata.full_scan_count)).toBe(0);
     expect(longToInt(result.metadata.vec_count)).toBe(0);
     expect(longToInt(result.metadata.total_count)).toBe(1);
@@ -162,9 +159,9 @@ describe("selectStatement", () => {
 
     expect(result.metadata.query).toEqual(stmtA.key.key_data.query);
     expect(result.stats.count.toNumber()).toEqual(stmtA.stats.count.toNumber());
+    expect(longToInt(result.stats.failure_count)).toBe(0);
     expect(result.metadata.app_names).toEqual([stmtA.key.key_data.app]);
     expect(longToInt(result.metadata.dist_sql_count)).toBe(0);
-    expect(longToInt(result.metadata.failed_count)).toBe(0);
     expect(longToInt(result.metadata.full_scan_count)).toBe(0);
     expect(longToInt(result.metadata.vec_count)).toBe(0);
     expect(longToInt(result.metadata.total_count)).toBe(1);
@@ -195,10 +192,10 @@ describe("selectStatement", () => {
 
     expect(result.metadata.query).toEqual(stmtA.key.key_data.query);
     expect(result.stats.count.toNumber()).toEqual(stmtA.stats.count.toNumber());
+    expect(longToInt(result.stats.failure_count)).toBe(0);
     // Statements with internal app prefix should have "$ internal" as app name
     expect(result.metadata.app_names).toEqual(["$ internal_stmnt_app"]);
     expect(longToInt(result.metadata.dist_sql_count)).toBe(0);
-    expect(longToInt(result.metadata.failed_count)).toBe(0);
     expect(longToInt(result.metadata.full_scan_count)).toBe(0);
     expect(longToInt(result.metadata.vec_count)).toBe(0);
     expect(longToInt(result.metadata.total_count)).toBe(1);
@@ -207,11 +204,11 @@ describe("selectStatement", () => {
 
 function makeFingerprint(
   id: number,
-  app: string = "",
-  nodeId: number = 1,
-  distSQL: boolean = false,
-  failed: boolean = false,
-  vec: boolean = false,
+  app = "",
+  nodeId = 1,
+  distSQL = false,
+  failed = false,
+  vec = false,
 ) {
   return {
     key: {
@@ -240,9 +237,6 @@ function makeDetails(
           query: statement.key.key_data.query,
           app_names: [statement.key.key_data.app],
           dist_sql_count: statement.key.key_data.distSQL
-            ? new Long(1)
-            : new Long(0),
-          failed_count: statement.key.key_data.failed
             ? new Long(1)
             : new Long(0),
           full_scan_count: statement.key.key_data.full_scan
@@ -286,7 +280,9 @@ function makeStats(): Required<StatementStatistics> {
       nanos: 111613000,
     },
     nodes: [Long.fromInt(1), Long.fromInt(2), Long.fromInt(3)],
+    kv_node_ids: [1, 2, 3],
     regions: ["gcp-us-east1"],
+    used_follower_read: false,
     plan_gists: ["Ais="],
     index_recommendations: [],
     indexes: ["123@456"],
@@ -298,6 +294,7 @@ function makeStats(): Required<StatementStatistics> {
       p99: 1.1,
     },
     last_error_code: "",
+    failure_count: Long.fromNumber(0),
   };
 }
 

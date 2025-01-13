@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package errors
 
@@ -29,16 +24,17 @@ type Error interface {
 // Exit codes for the errors
 const (
 	cmdExitCode          = 20
-	sshExitCode          = 10
+	transientExitCode    = 10
 	unclassifiedExitCode = 1
+
+	sshProblemCause = "ssh_problem"
+	aptProblemCause = "apt_problem"
 )
 
-// ErrSSH255 is a reference error used to mark an SSH error with an exit
-// code of 255. This could be indicative of an SSH flake.
-var ErrSSH255 = errors.New("SSH error occurred with exit code 255")
-
 const (
-	SegmentationFaultExitCode = 139
+	IllegalInstructionExitCode = 132
+	AssertionFailureExitCode   = 134
+	SegmentationFaultExitCode  = 139
 )
 
 // Cmd wraps errors that result from a command run against the cluster.
@@ -66,28 +62,63 @@ func (e Cmd) Unwrap() error {
 	return e.Err
 }
 
-// SSH wraps ssh-specific errors from connections to remote hosts.
-type SSH struct {
-	Err error
+type TransientError struct {
+	Err   error
+	Cause string
 }
 
-func (e SSH) Error() string {
-	return fmt.Sprintf("SSH_PROBLEM: %s", e.Err.Error())
+// TransientFailure is used to label errors that are known to be
+// transient. Callers (notably, roachtest) can choose to deal with
+// these errors in different ways, such as not creating an issue for
+// test failures due to these errors.
+func TransientFailure(err error, label string) TransientError {
+	return TransientError{err, label}
 }
 
-// ExitCode gives the process exit code to return for SSH errors.
-func (e SSH) ExitCode() int {
-	return sshExitCode
+func (te TransientError) Error() string {
+	return fmt.Sprintf("TRANSIENT_ERROR(%s): %s", te.Cause, te.Err)
 }
 
-// Format passes formatting responsibilities to cockroachdb/errors
-func (e SSH) Format(s fmt.State, verb rune) {
-	errors.FormatError(e, s, verb)
+func (te TransientError) Format(s fmt.State, verb rune) {
+	errors.FormatError(te, s, verb)
 }
 
-// Unwrap the wrapped SSH error.
-func (e SSH) Unwrap() error {
-	return e.Err
+func (te TransientError) Is(other error) bool {
+	return errors.Is(te.Err, other)
+}
+
+func (te TransientError) Unwrap() error {
+	return te.Err
+}
+
+func (te TransientError) ExitCode() int {
+	return transientExitCode
+}
+
+// IsTransient allows callers to check if a given error is a roachprod
+// transient error.
+func IsTransient(err error) bool {
+	var ref TransientError
+	return errors.As(err, &ref)
+}
+
+// NewSSHError returns a transient error for SSH-related issues.
+func NewSSHError(err error) TransientError {
+	return TransientFailure(err, sshProblemCause)
+}
+
+// AptError returns a transient error for apt-related issues.
+func AptError(err error) TransientError {
+	return TransientFailure(err, aptProblemCause)
+}
+
+func IsSSHError(err error) bool {
+	var transientErr TransientError
+	if errors.As(err, &transientErr) {
+		return transientErr.Cause == sshProblemCause
+	}
+
+	return false
 }
 
 // Unclassified wraps roachprod and unclassified errors.
@@ -124,7 +155,10 @@ func ClassifyCmdError(err error) Error {
 
 	if exitCode, ok := GetExitCode(err); ok {
 		if exitCode == 255 {
-			return SSH{errors.Mark(err, ErrSSH255)}
+			return NewSSHError(err)
+		}
+		if exitCode == 100 {
+			return AptError(err)
 		}
 		return Cmd{err}
 	}

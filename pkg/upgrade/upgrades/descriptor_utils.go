@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
@@ -20,20 +15,49 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descidgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/errors"
 )
 
 // createSystemTable is a function to inject a new system table. If the table
-// already exists, ths function is a no-op.
+// already exists, ths function is a no-op. If the setGlobalLocality flag is
+// true this system table will be setup as a global table on multi-region clusters,
+// otherwise the locality needs to be configured by the caller.
 func createSystemTable(
 	ctx context.Context,
-	db *kv.DB,
+	db descs.DB,
 	settings *cluster.Settings,
 	codec keys.SQLCodec,
 	desc catalog.TableDescriptor,
+	tableLocality tree.LocalityLevel,
 ) error {
-	return db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		_, _, err := CreateSystemTableInTxn(ctx, settings, txn, codec, desc)
+	return db.DescsTxn(ctx, func(ctx context.Context, txn descs.Txn) error {
+		dbDesc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Database(ctx, keys.SystemDatabaseID)
+		if err != nil {
+			return err
+		}
+		// For locality by row extra work is needed, and we will leave it to the caller.
+		if tableLocality == tree.LocalityLevelRow {
+			return errors.AssertionFailedf("only global and by region are implemented.")
+		}
+		if dbDesc.IsMultiRegion() {
+			primaryRegion, err := dbDesc.PrimaryRegionName()
+			if err != nil {
+				return err
+			}
+			tableDescBuilder := tabledesc.NewBuilder(desc.TableDesc())
+			mutableDesc := tableDescBuilder.BuildExistingMutableTable()
+			if tableLocality == tree.LocalityLevelGlobal {
+				mutableDesc.SetTableLocalityGlobal()
+			} else {
+				// Locality by table.
+				mutableDesc.SetTableLocalityRegionalByTable(tree.Name(primaryRegion))
+			}
+			desc = mutableDesc
+		}
+		_, _, err = CreateSystemTableInTxn(ctx, settings, txn.KV(), codec, desc)
 		return err
 	})
 }
@@ -75,7 +99,7 @@ func CreateSystemTableInTxn(
 	b.CPut(tKey, desc.GetID(), nil)
 	b.CPut(catalogkeys.MakeDescMetadataKey(codec, desc.GetID()), desc.DescriptorProto(), nil)
 	if desc.IsSequence() {
-		b.InitPut(codec.SequenceKey(uint32(desc.GetID())), desc.GetSequenceOpts().Start, false /* failOnTombstones */)
+		b.CPut(codec.SequenceKey(uint32(desc.GetID())), desc.GetSequenceOpts().Start, nil /* expValue */)
 	}
 	if err := txn.Run(ctx, b); err != nil {
 		return descpb.InvalidID, false, err

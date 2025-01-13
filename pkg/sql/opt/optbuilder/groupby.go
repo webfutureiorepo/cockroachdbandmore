@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -898,6 +893,8 @@ func (b *Builder) constructAggregate(name string, args []opt.ScalarExpr) opt.Sca
 		return b.factory.ConstructMergeStatementStats(args[0])
 	case "merge_transaction_stats":
 		return b.factory.ConstructMergeTransactionStats(args[0])
+	case "merge_aggregated_stmt_metadata":
+		return b.factory.ConstructMergeAggregatedStmtMetadata(args[0])
 	}
 
 	panic(errors.AssertionFailedf("unhandled aggregate: %s", name))
@@ -992,7 +989,7 @@ func (b *Builder) allowImplicitGroupingColumn(colID opt.ColumnID, g *groupby) bo
 	// Check UNIQUE INDEX constraints.
 	for i := 1; i < tab.IndexCount(); i++ {
 		index := tab.Index(i)
-		if !index.IsUnique() || index.IsInverted() {
+		if !index.IsUnique() || index.IsInverted() || index.IsVector() {
 			continue
 		}
 		// If any of the key columns is nullable, uniqueCols is suffixed with the

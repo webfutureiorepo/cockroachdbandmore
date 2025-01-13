@@ -1,21 +1,42 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 import { Dispatch } from "redux";
 
+import { SqlStatsSortType, StatementsRequest } from "src/api/statementsApi";
 import { AppState, uiConfigActions } from "src/store";
 import { actions as nodesActions } from "src/store/nodes";
 import { actions as sqlStatsActions } from "src/store/sqlStats";
 import { actions as txnStatsActions } from "src/store/transactionStats";
+
+import { Filters } from "../queryFilter";
+import { actions as analyticsActions } from "../store/analytics";
+import {
+  actions as localStorageActions,
+  updateTxnsPageLimitAction,
+  updateTxnsPageReqSortAction,
+} from "../store/localStorage";
+import { nodeRegionsByIDSelector } from "../store/nodes";
+import { selectHasAdminRole, selectIsTenant } from "../store/uiConfig";
+import {
+  selectTxnsPageLimit,
+  selectTxnsPageReqSort,
+  selectTimeScale,
+} from "../store/utils/selectors";
+import { TimeScale } from "../timeScaleDropdown";
+
+import {
+  mapStateToActiveTransactionsPageProps,
+  mapDispatchToActiveTransactionsPageProps,
+} from "./activeTransactionsPage.selectors";
+import {
+  ActiveTransactionsViewStateProps,
+  ActiveTransactionsViewDispatchProps,
+} from "./activeTransactionsView";
 import {
   TransactionsPageStateProps,
   TransactionsPageDispatchProps,
@@ -27,34 +48,10 @@ import {
   selectSearch,
   selectRequestTime,
 } from "./transactionsPage.selectors";
-import { selectHasAdminRole, selectIsTenant } from "../store/uiConfig";
-import { nodeRegionsByIDSelector } from "../store/nodes";
-import {
-  selectTxnsPageLimit,
-  selectTxnsPageReqSort,
-  selectTimeScale,
-} from "../store/utils/selectors";
-import { SqlStatsSortType, StatementsRequest } from "src/api/statementsApi";
-import {
-  actions as localStorageActions,
-  updateTxnsPageLimitAction,
-  updateTxnsPageReqSortAction,
-} from "../store/localStorage";
-import { Filters } from "../queryFilter";
-import { actions as analyticsActions } from "../store/analytics";
-import { TimeScale } from "../timeScaleDropdown";
 import {
   TransactionsPageRoot,
   TransactionsPageRootProps,
 } from "./transactionsPageRoot";
-import {
-  mapStateToActiveTransactionsPageProps,
-  mapDispatchToActiveTransactionsPageProps,
-} from "./activeTransactionsPage.selectors";
-import {
-  ActiveTransactionsViewStateProps,
-  ActiveTransactionsViewDispatchProps,
-} from "./activeTransactionsView";
 
 type StateProps = {
   fingerprintsPageProps: TransactionsPageStateProps & RouteComponentProps;
@@ -71,7 +68,8 @@ export const TransactionsPageConnected = withRouter(
     StateProps,
     DispatchProps,
     RouteComponentProps,
-    TransactionsPageRootProps
+    TransactionsPageRootProps,
+    AppState
   >(
     (state: AppState, props) => ({
       fingerprintsPageProps: {

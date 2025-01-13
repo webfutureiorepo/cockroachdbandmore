@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuild_test
 
@@ -56,6 +51,8 @@ func TestBuildDataDriven(t *testing.T) {
 
 	ctx := context.Background()
 
+	skip.UnderRace(t, "expensive and can easily extend past test timeout")
+
 	datadriven.Walk(t, datapathutils.TestDataPath(t), func(t *testing.T, path string) {
 		for _, depsType := range []struct {
 			name                string
@@ -94,12 +91,13 @@ func TestBuildDataDriven(t *testing.T) {
 								sctestdeps.ReadSessionDataFromDB(
 									t,
 									tdb,
-									func(sd *sessiondata.SessionData) {
+									func(sd *sessiondata.SessionData, localData sessiondatapb.LocalOnlySessionData) {
 										// For setting up a builder inside tests we will ensure that the new schema
 										// changer will allow non-fully implemented operations.
-										sd.NewSchemaChangerMode = sessiondatapb.UseNewSchemaChangerUnsafe
+										sd.NewSchemaChangerMode = sessiondatapb.UseNewSchemaChangerUnsafeAlways
 										sd.ApplicationName = ""
 										sd.EnableUniqueWithoutIndexConstraints = true
+										sd.SerialNormalizationMode = localData.SerialNormalizationMode
 									},
 								),
 							),
@@ -166,12 +164,14 @@ func run(
 			}
 		}
 		var output scpb.CurrentState
+		var logSchemaChangesFn scbuild.LogSchemaChangerEventsFn
 		withDependencies(t, s, nodeID, tdb, func(deps scbuild.Dependencies) {
 			stmts, err := parser.Parse(d.Input)
 			require.NoError(t, err)
 			for i := range stmts {
-				output, err = scbuild.Build(ctx, deps, output, stmts[i].AST, nil /* memAcc */)
+				output, logSchemaChangesFn, err = scbuild.Build(ctx, deps, output, stmts[i].AST, mon.NewStandaloneUnlimitedAccount())
 				require.NoErrorf(t, err, "%s: %s", d.Pos, stmts[i].SQL)
+				require.NoError(t, logSchemaChangesFn(ctx))
 			}
 		})
 		return marshalState(t, output)
@@ -183,7 +183,7 @@ func run(
 			require.NotEmpty(t, stmts)
 
 			for _, stmt := range stmts {
-				_, err = scbuild.Build(ctx, deps, scpb.CurrentState{}, stmt.AST, nil /* memAcc */)
+				_, _, err = scbuild.Build(ctx, deps, scpb.CurrentState{}, stmt.AST, mon.NewStandaloneUnlimitedAccount())
 				expected := scerrors.NotImplementedError(nil)
 				require.Errorf(t, err, "%s: expected %T instead of success for", stmt.SQL, expected)
 				require.Truef(t, scerrors.HasNotImplemented(err), "%s: expected %T instead of %v", stmt.SQL, expected, err)
@@ -292,7 +292,7 @@ func TestBuildIsMemoryMonitored(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderDeadlock(t, "takes too long")
+	skip.UnderDuress(t, "takes too long; creates thousands of tables")
 
 	ctx := context.Background()
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
@@ -311,21 +311,16 @@ func TestBuildIsMemoryMonitored(t *testing.T) {
 	tdb.Exec(t, `select crdb_internal.generate_test_objects('test',  5000);`)
 	tdb.Exec(t, `use system;`)
 
-	monitor := mon.NewMonitor(
-		"test-sc-build-mon",
-		mon.MemoryResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		s.ClusterSettings(),
-	)
+	monitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-sc-build-mon"),
+		Settings: s.ClusterSettings(),
+	})
 	monitor.Start(ctx, nil, mon.NewStandaloneBudget(5*1024*1024 /* 5MiB */))
 	memAcc := monitor.MakeBoundAccount()
 	sctestutils.WithBuilderDependenciesFromTestServer(s.ApplicationLayer(), s.NodeID(), func(dependencies scbuild.Dependencies) {
 		stmt, err := parser.ParseOne(`DROP DATABASE defaultdb CASCADE`)
 		require.NoError(t, err)
-		_, err = scbuild.Build(ctx, dependencies, scpb.CurrentState{}, stmt.AST, &memAcc)
+		_, _, err = scbuild.Build(ctx, dependencies, scpb.CurrentState{}, stmt.AST, &memAcc)
 		require.ErrorContainsf(t, err, `test-sc-build-mon: memory budget exceeded:`, "got a memory usage of: %d", memAcc.Allocated())
 	})
 }

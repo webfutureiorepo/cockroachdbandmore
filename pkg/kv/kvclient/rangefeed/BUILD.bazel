@@ -1,5 +1,4 @@
-load("@bazel_gomock//:gomock.bzl", "gomock")
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test", "gomock")
 
 go_library(
     name = "rangefeed",
@@ -21,7 +20,6 @@ go_library(
         "//pkg/roachpb",
         "//pkg/settings",
         "//pkg/settings/cluster",
-        "//pkg/util",
         "//pkg/util/admission/admissionpb",
         "//pkg/util/ctxgroup",
         "//pkg/util/hlc",
@@ -62,10 +60,6 @@ go_test(
         ":mock_rangefeed",  # keep
     ],
     embed = [":rangefeed"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/keys",
@@ -90,15 +84,16 @@ go_test(
         "//pkg/testutils/sqlutils",
         "//pkg/testutils/storageutils",
         "//pkg/testutils/testcluster",
-        "//pkg/util",
         "//pkg/util/ctxgroup",
         "//pkg/util/encoding",
-        "//pkg/util/future",
         "//pkg/util/hlc",
         "//pkg/util/leaktest",
         "//pkg/util/log",
+        "//pkg/util/metamorphic",
         "//pkg/util/mon",
+        "//pkg/util/randutil",
         "//pkg/util/retry",
+        "//pkg/util/span",
         "//pkg/util/stop",
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests_test
 
@@ -25,8 +20,10 @@ import (
 	kv2 "github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
@@ -42,6 +39,13 @@ type kvInterface interface {
 	done()
 }
 
+// disableBackgroundWork disables background work in the cluster settings to
+// make the benchmarks more predictable.
+func disableBackgroundWork(st *cluster.Settings) {
+	ts.TimeseriesStorageEnabled.Override(context.Background(), &st.SV, false)
+	stats.AutomaticStatisticsClusterMode.Override(context.Background(), &st.SV, false)
+}
+
 // kvNative uses the native client package to implement kvInterface.
 type kvNative struct {
 	db     *kv2.DB
@@ -51,7 +55,9 @@ type kvNative struct {
 }
 
 func newKVNative(b *testing.B) kvInterface {
-	s, _, db := serverutils.StartServer(b, base.TestServerArgs{})
+	st := cluster.MakeTestingClusterSettings()
+	disableBackgroundWork(st)
+	s, _, db := serverutils.StartServer(b, base.TestServerArgs{Settings: st})
 
 	// Note that using the local client.DB isn't a strictly fair
 	// comparison with SQL as we want these client requests to be sent
@@ -64,9 +70,9 @@ func newKVNative(b *testing.B) kvInterface {
 	}
 }
 
-func newKVNativeAndEngine(tb testing.TB, valueBlocks bool) (*kvNative, storage.Engine) {
+func newKVNativeAndEngine(tb testing.TB) (*kvNative, storage.Engine) {
 	st := cluster.MakeTestingClusterSettings()
-	storage.ValueBlocksEnabled.Override(context.Background(), &st.SV, valueBlocks)
+	disableBackgroundWork(st)
 	s, _, db := serverutils.StartServer(tb, base.TestServerArgs{Settings: st})
 	engines := s.Engines()
 	if len(engines) != 1 {
@@ -186,7 +192,9 @@ type kvSQL struct {
 }
 
 func newKVSQL(b *testing.B) kvInterface {
-	s, db, _ := serverutils.StartServer(b, base.TestServerArgs{UseDatabase: "bench"})
+	st := cluster.MakeTestingClusterSettings()
+	disableBackgroundWork(st)
+	s, db, _ := serverutils.StartServer(b, base.TestServerArgs{Settings: st, UseDatabase: "bench"})
 
 	if _, err := db.Exec(`CREATE DATABASE IF NOT EXISTS bench`); err != nil {
 		b.Fatal(err)
@@ -493,35 +501,31 @@ func BenchmarkKVAndStorageMultipleVersions(b *testing.B) {
 					continue
 				}
 				b.Run(fmt.Sprintf("last-is-tombstone=%t", lastVersionIsTombstone), func(b *testing.B) {
-					for _, valueBlocks := range []bool{false, true} {
-						b.Run(fmt.Sprintf("value-blocks=%t", valueBlocks), func(b *testing.B) {
-							kv, eng := newKVNativeAndEngine(b, valueBlocks)
-							defer kv.done()
-							if err := kv.prepWithAdditionalLength(numRows, additionalLen); err != nil {
-								b.Fatal(err)
-							}
-							for i := 1; i < numVersions-1; i++ {
-								require.NoError(b, kv.Update(numRows, 0))
-							}
-							expectedRows := numRows
-							if numVersions > 1 {
-								if lastVersionIsTombstone {
-									require.NoError(b, kv.Delete(numRows, 0))
-									expectedRows = 0
-								} else {
-									require.NoError(b, kv.Update(numRows, 0))
-								}
-							}
-							require.NoError(b, eng.Flush())
-							b.ResetTimer()
-							for i := 0; i < b.N; i++ {
-								if err := kv.scanWithRowCountExpectation(numRows, expectedRows); err != nil {
-									b.Fatal(err)
-								}
-							}
-							b.StopTimer()
-						})
+					kv, eng := newKVNativeAndEngine(b)
+					defer kv.done()
+					if err := kv.prepWithAdditionalLength(numRows, additionalLen); err != nil {
+						b.Fatal(err)
 					}
+					for i := 1; i < numVersions-1; i++ {
+						require.NoError(b, kv.Update(numRows, 0))
+					}
+					expectedRows := numRows
+					if numVersions > 1 {
+						if lastVersionIsTombstone {
+							require.NoError(b, kv.Delete(numRows, 0))
+							expectedRows = 0
+						} else {
+							require.NoError(b, kv.Update(numRows, 0))
+						}
+					}
+					require.NoError(b, eng.Flush())
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						if err := kv.scanWithRowCountExpectation(numRows, expectedRows); err != nil {
+							b.Fatal(err)
+						}
+					}
+					b.StopTimer()
 				})
 			}
 		})

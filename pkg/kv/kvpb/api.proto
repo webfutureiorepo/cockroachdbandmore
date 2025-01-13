@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.roachpb;
@@ -96,73 +91,22 @@ enum ResumeReason {
   RESUME_ELASTIC_CPU_LIMIT = 5;
 }
 
-// RequestHeaderPure is not to be used directly. It's generated only for use of
-// its marshaling methods by RequestHeader. See the comment there.
-message RequestHeaderPure {
-  bytes key = 3 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
-  bytes end_key = 4 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
-  int32 sequence = 5 [
-    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/storage/enginepb.TxnSeq"];
-}
-
-// RequestHeaderPure is not to be used directly. It's generated only for use of
-// its marshaling methods by RequestHeader. See the comment there.
-message RequestHeaderCrdbTest {
-  message Empty{};
-  Empty kvnemesis_seq = 6 [
-    (gogoproto.customname) = "KVNemesisSeq",
-    (gogoproto.nullable) = false,
-    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/kv/kvnemesis/kvnemesisutil.Container"];
-  bytes key = 3 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
-  bytes end_key = 4 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
-  int32 sequence = 5 [
-    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/storage/enginepb.TxnSeq"];
-}
-
 // RequestHeader is supplied with every storage node request.
-//
-// This message has some trickery attached to it to allow it to carry a
-// testing-only field (KVNemesisSeq) in a way that avoids overhead in production
-// code. The field is nominally an empty Message, but is cast to a Go type that
-// is an int64 when under the crdb_test tag, and an empty struct otherwise. This
-// ensures that production code does not have to pay for the increased struct
-// size that would result from having the field always present. Additionally, we
-// want to avoid encoding extra bytes on the wire; (gogoproto.nullable) will
-// still encode the field tag even when the referenced field is empty. To work
-// around this, we don't auto-generate the Size() and various marshal methods
-// for RequestHeader. Instead, we have two sibling messages, RequestHeaderPure
-// and RequestHeaderCrdbTest. The former is RequestHeader without the
-// KVNemesisSeq field, and the latter is identical to RequestHeader but does
-// have the generated Size and Marshal methods. We then implement the
-// corresponding methods on RequestHeader by delegating to either, making sure
-// to only delegate to RequestHeaderCrdbTest when we're under the crdb_test
-// build tag *and* the KVNemesisSeq is nonzero. This effectively simulates a
-// version of (gogoproto.nullable) in which the zero value is not represented on
-// the wire. No change to unmarshalling code is necessary, as the generated
-// unmarshaler on RequestHeader can deal with the presence of the field just
-// fine.
-//
-// NB: unfortunately there isn't a way to have the {Pure,CrdbTest} messages
-// unexported.
-//
-// NB: ensure that RequestHeader{,Pure,CrdbTest} stay in sync when adding
-// or removing fields.
 message RequestHeader {
-  option (gogoproto.marshaler) = false;
-  option (gogoproto.sizer) = false;
-
   reserved 1, 2;
   message Empty{};
-  // Empty is zero-size in production. It's an int64 under the crdb_test build tag.
-  // This is used to enable kvnemesis testing, which builds on uniqueness of values
-  // in the MVCC history. Deletions don't have a user-definable value, so we need
-  // an extra identifier, which is provided by this field.
+  // Empty is zero-size in production and doesn't generate any encoded bytes
+  // (thanks to gogoproto.omitempty). It's an int64 under the crdb_test build
+  // tag. This is used to enable kvnemesis testing, which builds on uniqueness
+  // of values in the MVCC history. Deletions don't have a user-definable value,
+  // so we need an extra identifier, which is provided by this field.
   //
   // NB: it's important that this isn't at the end of the message, see:
   // https://dave.cheney.net/2015/10/09/padding-is-hard
   Empty kvnemesis_seq = 6 [
     (gogoproto.customname) = "KVNemesisSeq",
     (gogoproto.nullable) = false,
+    (gogoproto.omitempty) = true,
     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/kv/kvnemesis/kvnemesisutil.Container"];
 
   // The key for request. If the request operates on a range, this
@@ -263,6 +207,18 @@ message GetRequest {
   // transactions that need guaranteed locks for correctness (read:
   // read-committed or snapshot isolation transactions).
   kv.kvserver.concurrency.lock.Durability key_locking_durability = 3;
+
+  // ReturnRawMVCCValues indicates that the returned roachpb.Values
+  // should contain the full bytes of the underlying MVCCValue,
+  // including the MVCCValueHeader. If the MVCCValueHeader is
+  // non-empty, the returned value will be encoded using the extended
+  // encoding with MVCC_EXTENDED_ENCODING_SENTINEL value type as its
+  // tag. If the MVCCValueHeader is empty, the default, simple
+  // encoding will be used.
+  //
+  // This option is not compatible for reads over inline values (see
+  // https://github.com/cockroachdb/cockroach/issues/131667)
+  bool return_raw_mvcc_values = 4 [(gogoproto.customname) = "ReturnRawMVCCValues"];
 }
 
 // A GetResponse is the return value from the Get() method.
@@ -382,6 +338,39 @@ message ConditionalPutRequest {
   // timestamp. This option should be used with care as it precludes
   // the use of this value with transactions.
   bool inline = 7;
+
+  // OriginTimestamp, if set, indicates that the ConditionalPut should
+  // only succeed if the provided timestamp is greater than the
+  // OriginTimestamp field in the MVCCValueHeader of the existing
+  // value (if the value has a non-zero OriginTimestamp) or the MVCC
+  // timestamp of the existing value. If there is no existing value,
+  // the timestamp check succeeds.
+  //
+  // The conditional put request will only succeed if this timestamp
+  // comparison is successful and the expected bytes matches the
+  // actual bytes.
+  //
+  // On success, this timestamp will also be stored in the
+  // OriginTimestamp field of the the MVCCValueHeader for the newly
+  // written value.
+  //
+  // In the proposed use case, the OriginTimestamp is the MVCC version
+  // timestamp of the row on the source cluster and the semantics lead
+  // to idempotent last-write-wins semantics against the "original
+  // MVCC timestamp" of the value on the destination, which is its
+  // MVCC timestamp or, if set, the OriginTimestamp (reflecting that
+  // this value originated from the source cluster).
+  //
+  // Used by logical data replication.
+  util.hlc.Timestamp origin_timestamp = 8 [(gogoproto.nullable) = false];
+
+  // ShouldWinOriginTimestampTie, if true, indicates that if the "comparison
+  // timestamp" (see comment on OriginTimestamp) and OriginTimestamp are equal,
+  // then the ConditionalPut should succeed (assuming the expected and actual
+  // bytes also match).
+  //
+  // This must only be used in conjunction with OriginTimestamp.
+  bool should_win_origin_timestamp_tie = 9;
 }
 
 // A ConditionalPutResponse is the return value from the
@@ -396,6 +385,8 @@ message ConditionalPutResponse {
 // - If key exists, returns a ConditionFailedError if value != existing value
 //   If failOnTombstones is set to true, tombstone values count as mismatched
 //   values and will cause a ConditionFailedError.
+// TODO(yuzefovich): this can be removed once the compatibility with 24.3 is no
+// longer needed.
 message InitPutRequest {
   RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
   Value value = 2 [(gogoproto.nullable) = false];
@@ -498,6 +489,10 @@ message DeleteRangeRequest {
 //
 // To pass DeleteRangePredicates, the client must also pass UseRangeTombstone.
 message DeleteRangePredicates {
+  // ImportEpoch specifies that all keys with a non-zero
+  // MVCCValueHeader.ImportEpoch == ImportEmpoch should be deleted.
+  uint32 import_epoch = 1;
+
   // StartTime specifies an exclusive lower bound to surface keys
   // for deletion. If specified, DeleteRange will only issue tombstones to keys
   // within the span [startKey, endKey) that also have MVCC versions with
@@ -665,6 +660,18 @@ message ScanRequest {
   // transactions that need guaranteed locks for correctness (read:
   // read-committed or snapshot isolation transactions).
   kv.kvserver.concurrency.lock.Durability key_locking_durability = 6;
+
+  // ReturnRawMVCCValues indicates that the returned roachpb.Values
+  // should contain the full bytes of the underlying MVCCValue,
+  // including the MVCCValueHeader. If the MVCCValueHeader is
+  // non-empty, the returned value will be encoded using the extended
+  // encoding with MVCC_EXTENDED_ENCODING_SENTINEL value type as its
+  // tag. If the MVCCValueHeader is empty, the default, simple
+  // encoding will be used.
+  //
+  // This option is not compatible for reads over inline values (see
+  // https://github.com/cockroachdb/cockroach/issues/131667)
+  bool return_raw_mvcc_values = 7 [(gogoproto.customname) = "ReturnRawMVCCValues"];
 }
 
 // A ScanResponse is the return value from the Scan() method.
@@ -753,6 +760,18 @@ message ReverseScanRequest {
   // transactions that need guaranteed locks for correctness (read:
   // read-committed or snapshot isolation transactions).
   kv.kvserver.concurrency.lock.Durability key_locking_durability = 6;
+
+  // ReturnRawMVCCValues indicates that the returned roachpb.Values
+  // should contain the full bytes of the underlying MVCCValue,
+  // including the MVCCValueHeader. If the MVCCValueHeader is
+  // non-empty, the returned value will be encoded using the extended
+  // encoding with MVCC_EXTENDED_ENCODING_SENTINEL value type as its
+  // tag. If the MVCCValueHeader is empty, the default, simple
+  // encoding will be used.
+  //
+  // This option is not compatible for reads over inline values (see
+  // https://github.com/cockroachdb/cockroach/issues/131667)
+  bool return_raw_mvcc_values = 7 [(gogoproto.customname) = "ReturnRawMVCCValues"];
 }
 
 // A ReverseScanResponse is the return value from the ReverseScan() method.
@@ -962,6 +981,16 @@ message EndTxnRequest {
   // from the TxnCoordSender on a failed heartbeat. It should only be set to
   // true when commit=false.
   bool poison = 9;
+  // Prepare, if true, causes the end transaction to proceed as though
+  // committing, but the transaction state is set to PREPARED instead of
+  // COMMITTED on success. If true, commit must be set to true as well.
+  //
+  // Prepare cannot be used in conjunction with the InFlightWrites field.
+  // All in-flight writes must be confirmed to have succeeded before the
+  // transaction can be prepared.
+  //
+  // The field is used to support the XA two-phase commit protocol.
+  bool prepare = 12;
 
   reserved 7, 8, 10;
 }
@@ -1373,8 +1402,8 @@ message QueryTxnRequest {
 // A QueryTxnResponse is the return value from the QueryTxn() method.
 message QueryTxnResponse {
   ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
-  // Contains the current state of the queried transaction. If the queried
-  // transaction record does not exist, this will be empty.
+  // Contains the current state of the queried transaction. If a transaction
+  // record is not found, one will be synthesized and returned.
   Transaction queried_txn = 2 [(gogoproto.nullable) = false];
   // txn_record_exists is set if the queried_txn comes from a transaction record
   // read from the database. If not set, then the txn record was "synthesized".
@@ -1432,6 +1461,19 @@ message QueryIntentRequest {
   // If true, return an IntentMissingError if no matching intent (neither a
   // "partial match" nor a "full match") is found.
   bool error_if_missing = 3;
+
+  // The strength with which the lock being queried was acquired at. To ensure
+  // the supplied protection was provided, we check whether the lock was held
+  // with the supplied lock strength or something stronger at the sequence
+  // number.
+  kv.kvserver.concurrency.lock.Strength strength = 4;
+
+  // The list of sequence numbers that have been ignored by the transaction that
+  // acquired the lock. Any locks found at sequence numbers which are considered
+  // ignored will be treated as "not found"; that's because they can be removed
+  // at any time.
+  repeated storage.enginepb.IgnoredSeqNumRange ignored_seqnums = 5
+    [(gogoproto.nullable) = false, (gogoproto.customname) = "IgnoredSeqNums"];
 }
 
 // A QueryIntentResponse is the return value from the QueryIntent() method.
@@ -1613,8 +1655,6 @@ message TruncateLogRequest {
   // that is not equal to ExpectedFirstIndex. This is an optimization that
   // typically allows the potentially expensive computation of the bytes being
   // discarded from the raft log to be performed once, at the leaseholder.
-  //
-  // Populated starting at cluster version LooselyCoupledRaftLogTruncation.
   uint64 expected_first_index = 4  [(gogoproto.casttype) = "RaftIndex"];
 }
 
@@ -1632,11 +1672,13 @@ message RequestLeaseRequest {
   // The previous lease is specified by the caller to verify
   // it has not changed when executing this command.
   Lease prev_lease = 3 [(gogoproto.nullable) = false];
-  // The MinLeaseProposedTS of the proposing replica to make sure that leases
-  // issued after a node restart receive a new sequence number (instead of
-  // counting as a lease extension). See #23204.
-  util.hlc.Timestamp min_proposed_ts = 4 [(gogoproto.customname) = "MinProposedTS",
-    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/util/hlc.ClockTimestamp"];
+  reserved 4;
+  // RevokePrevAndForwardExpiration indicates that the previous lease should be
+  // explicitly revoked when acquiring the new lease. Then, after doing so, the
+  // expiration of the next lease should be forwarded beyond the expiration of
+  // the previous lease. This is used to prevent expiration regressions during
+  // lease type switches.
+  bool revoke_prev_and_forward_expiration = 5;
 }
 
 // A TransferLeaseRequest represents the arguments to the TransferLease()
@@ -1831,7 +1873,14 @@ message ExportRequest {
 
   FingerprintOptions fingerprint_options = 15 [(gogoproto.nullable) = false];
 
-  // Next ID: 16
+  // IncludeMVCCValueHeader controls whether the MVCCValueHeader is
+  // included in exported bytes. Callers should only set this when all
+  // readers of the returned SST are prepared to parse full a
+  // MVCCValue. Even when set, only fields appropriate for export are
+  // included. See storage.EncodeMVCCValueForExport for details.
+  bool include_mvcc_value_header = 16 [(gogoproto.customname) = "IncludeMVCCValueHeader"];
+
+  // Next ID: 17
 }
 
 message FingerprintOptions {
@@ -1846,19 +1895,7 @@ message BulkOpSummary {
   int64 data_size = 1;
   // SSTDataSize is the size of the SST, post compression, sent to KV.
   int64 sst_data_size = 6 [(gogoproto.customname) = "SSTDataSize"];
-  // DeprecatedRows contained the row count when "rows" were always defined as
-  // entries in the index with ID 1, however since 20.1 and the introduction of
-  // PK changes, the low-level counters that produce BulkOpSummaries are unable
-  // to assume which index is primary and thus cannot distinguish "rows" vs
-  // "index entries". Callers wishing to get a "row count" from a BulkOpSummary
-  // should use EntryCounts instead, fetching the count for the table/index that
-  // corresponds to the PK.
-  int64 deprecated_rows = 2;
-  // DeprecatedIndexEntries contained the index entry count prior to 20.1. See
-  // the comment on DeprecatedRows for details.
-  int64 deprecated_index_entries = 3;
-
-  reserved 4;
+  reserved 2, 3, 4;
   // EntryCounts contains the number of keys processed for each tableID/indexID
   // pair, stored under the key (tableID << 32) | indexID. This EntryCount key
   // generation logic is also available in the BulkOpSummaryID helper. It does
@@ -1876,7 +1913,7 @@ message ExportResponse {
         (gogoproto.nullable) = false,
         (gogoproto.customname) = "EndKeyTS"
     ];
-    string path = 2;
+    reserved 2;
 
     BulkOpSummary exported = 6 [(gogoproto.nullable) = false];
 
@@ -2116,40 +2153,6 @@ message AddSSTableRequest {
   // is likely non-empty. See AddSSTableResponse.FollowingLikelyNonEmptySpanStart.
   bool return_following_likely_non_empty_span_start = 9;
 
-  // RemoteFile indicates that the span indicated by the request start and end
-  // key of the file specified should be added. Data cannot be set if RemoteFile
-  // is non-empty, and many other request parameters such as collision/shadow
-  // checking, write-at-request-timestamp, or ingest-as-writes are unsupported.
-  //
-  // TODO(dt, msbutler, bilal): This is unsupported.
-  // TODO(dt, msbutler, bilal): support sst_timestamp_to_request_timestamp.
-  // TODO(msbutler): rename to ExternalFile.
-  message  RemoteFile {
-    string locator = 1;
-    string path = 2;
-    uint64 backing_file_size = 3;
-    uint64 approximate_physical_size = 4;
-  }
-  RemoteFile remote_file = 10 [(gogoproto.nullable) = false];
-
-  // AddSSTableRequest_PrefixReplacement is used to represent a prefix to be
-  // replaced and the prefix with which to replace it.
-  message PrefixReplacement {
-    bytes from = 1;
-    bytes to = 2;
-  }
-
-  // PrefixReplacement is used to that keys in the sst with the prefix specified
-  // in "from" should instead appear to have that prefix replaced by "to", when
-  // during iteration, seeking, or other reads. For example, an SST containing
-  // keys a1, a2, and a3 when added with PrefixReplacement={From: a, To:x} would
-  // produce the same results for subsequent operations as adding an SST with
-  // the keys x1, x2, x3 instead. The implementaiton may however elect to defer
-  // these replacements until the file is read.
-  //
-  // TODO(dt,msbutler,bilal): This is unsupported.
-  PrefixReplacement prefix_replacement = 11 [(gogoproto.nullable) = false];
-
   // IgnoreKeysAboveTimestamp is used when ingesting an SSTable that contains
   // keys, including mvcc revisions of keys, captured over a time range, to
   // indicate that readers of that sstable should read it "as of" a the fixed
@@ -2157,6 +2160,8 @@ message AddSSTableRequest {
   //
   // TODO(dt,msbutler,bilal): This is unsupported.
   util.hlc.Timestamp ignore_keys_above_timestamp = 12 [(gogoproto.nullable) = false];
+
+  reserved 10, 11;
 }
 
 // AddSSTableResponse is the response to a AddSSTable() operation.
@@ -2184,6 +2189,36 @@ message AddSSTableResponse {
   // picked using cheaper, inconsistentent reads so it should be used only for
   // estimations of how ingested data and spans may overlap.
   bytes following_likely_non_empty_span_start = 4 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
+}
+
+// LinkExternalSSTableRequest contains arguments to the LinkExternalSSTable
+// method, which links an External SST file into the Pebble log-structured
+// merge-tree. The External SST must point to a backup file which contains
+// versioned values with non-zero MVCC timestamps (no intents or inline values).
+// It cannot be used in a transaction, cannot be split across ranges, and must
+// be alone in a batch.
+message LinkExternalSSTableRequest {
+    RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+
+  message  ExternalFile {
+    string locator = 1;
+    string path = 2;
+    uint64 backing_file_size = 3;
+    uint64 approximate_physical_size = 4;
+    bytes synthetic_prefix = 5;
+    bool use_synthetic_suffix = 6;
+
+    // MVCCStats are estimated MVCCStats for the contents of this Extrenal SSTable
+    // and is used as-is during evaluation of the command to update the range
+    // MVCCStats, instead of computing the stats for the SSTable by iterating it.
+    storage.enginepb.MVCCStats mvcc_stats = 7 [(gogoproto.customname) = "MVCCStats"];
+  }
+  ExternalFile external_file = 4 [(gogoproto.nullable) = false];
+}
+
+// LinkExternalSSTableResponse is the response to a LinkExternalSSTable() operation.
+message LinkExternalSSTableResponse {
+    ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
 // RefreshRequest is arguments to the Refresh() method, which verifies that no
@@ -2530,6 +2565,7 @@ message RequestUnion {
     BarrierRequest barrier = 53;
     ProbeRequest probe = 54;
     IsSpanEmptyRequest is_span_empty = 56;
+    LinkExternalSSTableRequest link_external_sstable = 57;
   }
   reserved 8, 15, 23, 25, 27, 31, 34, 52;
 }
@@ -2585,6 +2621,7 @@ message ResponseUnion {
     BarrierResponse barrier = 53;
     ProbeResponse probe = 54;
     IsSpanEmptyResponse is_span_empty = 56;
+    LinkExternalSSTableResponse link_external_sstable = 57;
   }
   reserved 8, 15, 23, 25, 27, 28, 31, 34, 52;
 }
@@ -2849,9 +2886,10 @@ message Header {
   // current batch. When set, it allows the server to handle pushes and write
   // too old conditions locally.
   bool can_forward_read_timestamp = 16;
-  // gateway_node_id is the ID of the gateway node where the request originated.
-  // For requests from tenants, this is set to the NodeID of the KV node handling
-  // the BatchRequest.
+  // gateway_node_id is the ID of the gateway node where the request
+  // originated. For requests from a shared-process cluster, this is set to the
+  // NodeID of the KV node which created the BatchRequest. For requests from a
+  // separate-process SQL Pod or a CLI, this is set to 0.
   int32 gateway_node_id = 11 [(gogoproto.customname) = "GatewayNodeID",
                               (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
   // client_range_info represents the kvclient's knowledge about the state of
@@ -2930,9 +2968,52 @@ message Header {
   // in a mixed-version state after a new value got added), DEFAULT is assumed.
   cockroach.rpc.ConnectionClass connection_class = 33;
 
+  // ProxyRangeInfo, if set, indicates the RangeInfo information a client had
+  // when it sent this request. This information is passed to an intermediate
+  // proxy node which can then forward the request to the final destination.
+  // If this field is set, then the node which receives the BatchRequest should
+  // first try and evaluate the request locally. If local evaluation fails with
+  // a NotLeaseHolderError, it should act on behalf of the original client and
+  // forward the original request, with this field cleared, to the leaseholder
+  // as determined by the ProxyRangeInfo header.
+  //
+  // If the kv.dist_sender.proxy.enabled parameter is set to false, the client
+  // will never set this header and proxying will be disabled.
+  //
+  // NB: This field is only used in 24.1+ systems. A mixed mode system with at
+  // least one node not on 24.1 will exhibit the following behavior.
+  // * A client older than 24.1 will never set this field.
+  // * A proxy node older than 24.1 will ignore this field being set and return an
+  // error after local evaluation like it does in older systems.
+  // * A destination node older than 24.1 will not see this field.
+  RangeInfo proxy_range_info = 34;
+
   reserved 7, 10, 12, 14, 20;
 
-  // Next ID: 34
+  WriteOptions write_options = 35;
+
+  // DeadlockTimeout specifies the amount of time that a request will wait on a
+  // lock before pushing the lock holder transaction to detect deadlocks.
+  //
+  // DeadlockTimeout, if set, takes precedence over the
+  // kv.lock_table.deadlock_detection_push_delay cluster setting. If unset,
+  // the cluster setting is used instead.
+  //
+  // This differs from kv.lock_table.deadlock_detection_push_delay in that it
+  // gets applied at a finer granularity, where
+  // kv.lock_table.deadlock_detection_push_delay is a a cluster wide setting.
+  google.protobuf.Duration deadlock_timeout = 36 [(gogoproto.nullable) = false,
+    (gogoproto.stdduration) = true];
+
+  // Next ID: 37
+}
+
+message WriteOptions {
+  uint32 origin_id = 1[(gogoproto.customname) = "OriginID"];
+  // OriginTimestamp is bound to the MVCCValueHeader of written key in the
+  // batch. Note that a kv client cannot set this if they use CPut's origin
+  // timestamp arg.
+  util.hlc.Timestamp origin_timestamp = 2 [(gogoproto.nullable) = false];
 }
 
 // BoundedStalenessHeader contains configuration values pertaining to bounded
@@ -3165,6 +3246,16 @@ message RangeFeedRequest {
   // OmitInRangefeeds = true, the write will not be emitted on the rangefeed.
   // WithFiltering should NOT be set for system-table rangefeeds.
   bool with_filtering = 7;
+
+  // WithMatchingOriginIDs specifies if the rangefeed server should emit events
+  // originating from specific clusters during Logical Data Replication. If this
+  // field is empty, all events are emitted.
+  repeated uint32 with_matching_origin_ids = 8 [(gogoproto.customname) = "WithMatchingOriginIDs"];
+
+  // ConsumerID is set by the caller to identify itself.
+  int64 consumer_id = 9 [(gogoproto.customname) = "ConsumerID"];
+
+  // NextID = 10;
 }
 
 // RangeFeedValue is a variant of RangeFeedEvent that represents an update to
@@ -3226,6 +3317,18 @@ message RangeFeedDeleteRange {
   util.hlc.Timestamp timestamp   = 2 [(gogoproto.nullable) = false];
 }
 
+// RangefeedMetadata is a variant of RangefeedEvent that contains metadata about
+// a newly spawned partial rangefeed.
+message RangeFeedMetadata {
+  // Span is the span of the newly spawned partial rangefeed.
+  Span               span               = 1 [(gogoproto.nullable) = false];
+  // FromManualSplit is true when this rangefeed spawned due to the parent
+  // rangefeed retrying after a manual split.
+  bool               from_manual_split  = 2;
+  // ParentStartKey is the start key of the retried parent rangefeed.
+  bytes              parent_start_key = 3 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
+}
+
 // RangeFeedEvent is a union of all event types that may be returned on a
 // RangeFeed response stream.
 message RangeFeedEvent {
@@ -3236,6 +3339,7 @@ message RangeFeedEvent {
   RangeFeedError       error        = 3;
   RangeFeedSSTable     sst          = 4 [(gogoproto.customname) = "SST"];
   RangeFeedDeleteRange delete_range = 5;
+  RangeFeedMetadata    metadata     = 6;
 }
 
 // MuxRangeFeedEvent is a response generated by MuxRangeFeed RPC.  It tags
@@ -3425,7 +3529,15 @@ message TenantSettingsEvent {
   // can't do that yet due to a dependency cycle. We should break the cycle.
   uint32 service_mode = 9;
 
-  // NEXT ID: 10
+  // ClusterInitGracePeriodEndTS is the timestamp (in seconds since the Unix epoch)
+  // marking the end of the grace period for clusters without a license. After this
+  // timestamp, if no license is installed, the cluster will be subject to throttling.
+  // Since secondary tenants cannot access the KV store where this is saved, the value
+  // is propagated through the tenant settings. This is only set when the event type is
+  // METADATA_EVENT.
+  int64 ClusterInitGracePeriodEndTS = 10;
+
+  // NEXT ID: 11
 }
 
 // TenantSetting contains the setting key and value of a tenant setting.
@@ -3450,7 +3562,15 @@ message TenantConsumption {
   uint64 external_io_ingress_bytes = 9 [(gogoproto.customname) = "ExternalIOIngressBytes"];
   uint64 external_io_egress_bytes = 10 [(gogoproto.customname) = "ExternalIOEgressBytes"];
   double cross_region_network_r_u = 13;
+  double estimated_cpu_seconds = 14 [(gogoproto.customname) = "EstimatedCPUSeconds"];
   // Note: if any fields are changed, the Sub and Add methods must be updated.
+}
+
+// TenantConsumptionRates specifies rates of consumption for tenant metrics that
+// are used in the cost model.
+message TenantConsumptionRates {
+  double write_batch_rate = 1;
+  double estimated_cpu_rate = 2 [(gogoproto.customname) = "EstimatedCPURate"];
 }
 
 // TokenBucketRequest is used by tenants to obtain Request Units and report
@@ -3458,6 +3578,10 @@ message TenantConsumption {
 message TokenBucketRequest {
   // Consumption that occurred since this node's last request.
   TenantConsumption consumption_since_last_request = 1 [(gogoproto.nullable) = false];
+
+  // ConsumptionPeriod is the period over which the consumption was measured.
+  google.protobuf.Duration consumption_period = 9 [(gogoproto.nullable) = false,
+                                                   (gogoproto.stdduration) = true];
 
   uint64 tenant_id = 2 [(gogoproto.customname) = "TenantID"];
 
@@ -3493,8 +3617,8 @@ message TokenBucketRequest {
   // sequence number than the last request is ignored.
   int64 seq_num = 7;
 
-  // RequestedRU is the number of requested tokens (RUs).
-  double requested_r_u = 5;
+  // RequestedTokens is the number of requested tokens.
+  double requested_tokens = 5;
 
   // TargetRequestPeriod is the approximate frequency of requests, used to limit
   // TrickleDuration in the response.
@@ -3508,11 +3632,11 @@ message TokenBucketResponse {
   // RPC errors.
   errorspb.EncodedError error = 1 [(gogoproto.nullable) = false];
 
-  // GrantedTokens is the amount of RUs granted. In most cases, this is equal to
-  // the requested RUs; the only exception is when TrickleDuration would
-  // otherwise exceed TargetRequestPeriod, in which case the number of granted
-  // RUs is reduced.
-  double granted_r_u = 2;
+  // GrantedTokens is the number of tokens granted by the server. In most cases,
+  // this is equal to the requested tokens; the only exception is when
+  // TrickleDuration would otherwise exceed TargetRequestPeriod, in which case
+  // the number of granted tokens is reduced.
+  double granted_tokens = 2;
 
   // TrickleDuration describes how the granted tokens can be consumed.
   //
@@ -3526,10 +3650,15 @@ message TokenBucketResponse {
   google.protobuf.Duration trickle_duration = 3 [(gogoproto.nullable) = false,
                                                  (gogoproto.stdduration) = true];
 
-  // FallbackRate indicates a rate (in RU/s) that the instance will use once it
-  // runs out of tokens and a problem prevents TokenBucket requests from
+  // FallbackRate indicates a rate (in tokens/s) that the instance will use once
+  // it runs out of tokens and a problem prevents TokenBucket requests from
   // completing.
   double fallback_rate = 4;
+
+  // ConsumptionRates contains the rate of consumption of tenant metrics that
+  // are used by the cost model. These rates are calculated across all SQL pods
+  // for the tenant.
+  TenantConsumptionRates consumption_rates = 5 [(gogoproto.nullable) = false];
 }
 
 // JoinNodeRequest is used to specify to the server node what the client's
@@ -3551,27 +3680,30 @@ message JoinNodeResponse {
 
 // Batch and RangeFeed service implemented by nodes for KV API requests.
 service Internal {
-  rpc Batch              (BatchRequest)              returns (BatchResponse)                  {}
+  rpc Batch (BatchRequest) returns (BatchResponse) {}
+
+  // BatchStream is a streaming variant of Batch. There is a 1:1 correspondence
+  // between requests and responses. The method is used to facilitate pooling of
+  // gRPC streams to avoid the overhead of creating and discarding a new stream
+  // for each unary Batch RPC invocation. See rpc.BatchStreamPool.
+  rpc BatchStream (stream BatchRequest) returns (stream BatchResponse) {}
+
   rpc RangeLookup        (RangeLookupRequest)        returns (RangeLookupResponse)            {}
-  // RangeFeed RPC is deprecated. Use MuxRangeFeed instead.
-  // This should be removed when support is no longer needed in
-  // mixed-version clusters, possibly in 24.2.
-  rpc RangeFeed          (RangeFeedRequest)          returns (stream RangeFeedEvent)          {}
-  rpc MuxRangeFeed       (stream RangeFeedRequest)   returns (stream MuxRangeFeedEvent) {}
+  rpc MuxRangeFeed       (stream RangeFeedRequest)   returns (stream MuxRangeFeedEvent)       {}
   rpc GossipSubscription (GossipSubscriptionRequest) returns (stream GossipSubscriptionEvent) {}
   rpc ResetQuorum        (ResetQuorumRequest)        returns (ResetQuorumResponse)            {}
 
   // TokenBucket is used by tenants to obtain Request Units and report
   // consumption.
-  rpc TokenBucket        (TokenBucketRequest)        returns (TokenBucketResponse)            {}
+  rpc TokenBucket (TokenBucketRequest) returns (TokenBucketResponse) {}
 
   // Join a bootstrapped cluster. If the target node is itself not part of a
   // bootstrapped cluster, an appropriate error is returned.
-  rpc Join(JoinNodeRequest) returns (JoinNodeResponse) { }
+  rpc Join (JoinNodeRequest) returns (JoinNodeResponse) {}
 
   // GetSpanConfigs is used to fetch the span configurations over a given
   // keyspan.
-  rpc GetSpanConfigs (GetSpanConfigsRequest) returns (GetSpanConfigsResponse) { }
+  rpc GetSpanConfigs (GetSpanConfigsRequest) returns (GetSpanConfigsResponse) {}
 
   // GetAllSystemSpanConfigsThatApply is used to fetch all system span
   // configurations that apply over a tenant's ranges.
@@ -3579,20 +3711,19 @@ service Internal {
 
   // UpdateSpanConfigs is used to update the span configurations over given
   // keyspans.
-  rpc UpdateSpanConfigs (UpdateSpanConfigsRequest) returns (UpdateSpanConfigsResponse) { }
+  rpc UpdateSpanConfigs (UpdateSpanConfigsRequest) returns (UpdateSpanConfigsResponse) {}
 
   // SpanConfigConformance is used to determine whether ranges backing the given
   // keyspans conform to span configs that apply over them.
-  rpc SpanConfigConformance (SpanConfigConformanceRequest) returns (SpanConfigConformanceResponse) { }
+  rpc SpanConfigConformance (SpanConfigConformanceRequest) returns (SpanConfigConformanceResponse) {}
 
   // TenantSettings is used by tenants to obtain and stay up to date with tenant
   // setting overrides.
-  rpc TenantSettings (TenantSettingsRequest) returns (stream TenantSettingsEvent) { }
-
+  rpc TenantSettings (TenantSettingsRequest) returns (stream TenantSettingsEvent) {}
 
   // GetRangeDescriptors is used by tenants to get range descriptors for their
   // own ranges.
- rpc GetRangeDescriptors (GetRangeDescriptorsRequest) returns (stream GetRangeDescriptorsResponse) { }
+ rpc GetRangeDescriptors (GetRangeDescriptorsRequest) returns (stream GetRangeDescriptorsResponse) {}
 }
 
 // GetRangeDescriptorsRequest is used to fetch range descriptors.
@@ -3661,4 +3792,14 @@ message ScanStats {
   uint64 num_gets = 17;
   uint64 num_scans = 18;
   uint64 num_reverse_scans = 19;
+
+  // NodeID is the NodeID of the KV server that evaluated the request.
+  int32 node_id = 21 [(gogoproto.customname) = "NodeID",
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
+  // Region, if set, is the region of the KV server that evaluated the request.
+  string region = 22;
 }
+
+// UsedFollowerRead indicates whether at least some reads were served by the
+// follower replicas.
+message UsedFollowerRead {}

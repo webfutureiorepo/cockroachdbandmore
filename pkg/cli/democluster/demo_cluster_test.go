@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package democluster
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlclustersettings"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils/regionlatency"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -54,7 +50,7 @@ func TestTestServerArgsForTransientCluster(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	stickyVFSRegistry := server.NewStickyVFSRegistry()
+	stickyVFSRegistry := fs.NewStickyRegistry()
 
 	testCases := []struct {
 		serverIdx         int
@@ -88,6 +84,7 @@ func TestTestServerArgsForTransientCluster(t *testing.T) {
 						StickyVFSRegistry: stickyVFSRegistry,
 					},
 				},
+				ExternalIODir: "nodelocal/n1",
 			},
 		},
 		{
@@ -114,6 +111,7 @@ func TestTestServerArgsForTransientCluster(t *testing.T) {
 						StickyVFSRegistry: stickyVFSRegistry,
 					},
 				},
+				ExternalIODir: "nodelocal/n3",
 			},
 		},
 	}
@@ -170,28 +168,29 @@ func TestTransientClusterSimulateLatencies(t *testing.T) {
 		}
 	}()
 
-	ctx := context.Background()
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
 
 	// Setup the transient cluster.
 	c := transientCluster{
 		demoCtx:           demoCtx,
 		stopper:           stop.NewStopper(),
 		demoDir:           certsDir,
-		stickyVFSRegistry: server.NewStickyVFSRegistry(),
+		stickyVFSRegistry: fs.NewStickyRegistry(),
 		infoLog:           log.Infof,
 		warnLog:           log.Warningf,
 		shoutLog:          log.Ops.Shoutf,
 	}
+
+	// Ensure the context gets canceled when the stopper terminates.
+	ctx, _ = c.stopper.WithCancelOnQuiesce(ctx)
+
+	require.NoError(t, c.Start(ctx))
+
 	// Stop the cluster when the test exits, including when it fails.
 	// This also calls the Stop() method on the stopper, and thus
 	// cancels everything controlled by the stopper.
 	defer c.Close(ctx)
-
-	// Also ensure the context gets canceled when the stopper
-	// terminates above.
-	ctx, _ = c.stopper.WithCancelOnQuiesce(ctx)
-
-	require.NoError(t, c.Start(ctx))
 
 	c.SetSimulatedLatency(true)
 
@@ -289,7 +288,7 @@ func TestTransientClusterMultitenant(t *testing.T) {
 		demoCtx:           demoCtx,
 		stopper:           stop.NewStopper(),
 		demoDir:           certsDir,
-		stickyVFSRegistry: server.NewStickyVFSRegistry(),
+		stickyVFSRegistry: fs.NewStickyRegistry(),
 		infoLog:           log.Infof,
 		warnLog:           log.Warningf,
 		shoutLog:          log.Ops.Shoutf,
@@ -353,7 +352,7 @@ func TestTenantCapabilities(t *testing.T) {
 		demoCtx:           demoCtx,
 		stopper:           stop.NewStopper(),
 		demoDir:           certsDir,
-		stickyVFSRegistry: server.NewStickyVFSRegistry(),
+		stickyVFSRegistry: fs.NewStickyRegistry(),
 		infoLog:           log.Infof,
 		warnLog:           log.Warningf,
 		shoutLog:          log.Ops.Shoutf,
@@ -407,7 +406,7 @@ func TestTenantCapabilities(t *testing.T) {
 		if cap == tenantcapabilities.TenantSpanConfigBounds {
 			capValue = `{}`
 		}
-		expectedRows = append(expectedRows, []string{`2`, demoTenantName, `ready`, `shared`, cap.String(), capValue})
+		expectedRows = append(expectedRows, []string{`3`, demoTenantName, `ready`, `shared`, cap.String(), capValue})
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
 		t.Fatalf("expected:\n%v\ngot:\n%v", expectedRows, rows)

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -98,7 +93,7 @@ func TestVariadicFunctions(t *testing.T) {
 type testOverload struct {
 	paramTypes ParamTypes
 	retType    *types.T
-	pref       bool
+	OverloadPreference
 }
 
 func (to *testOverload) params() TypeList {
@@ -109,12 +104,20 @@ func (to *testOverload) returnType() ReturnTyper {
 	return FixedReturnType(to.retType)
 }
 
-func (to testOverload) preferred() bool {
-	return to.pref
+func (to testOverload) preference() OverloadPreference {
+	return to.OverloadPreference
 }
 
-func (to testOverload) withPreferred(pref bool) *testOverload {
-	to.pref = pref
+func (to *testOverload) outParamInfo() (RoutineType, []int32, TypeList) {
+	return BuiltinRoutine, nil, nil
+}
+
+func (to *testOverload) defaultExprs() Exprs {
+	return nil
+}
+
+func (to testOverload) preferred() *testOverload {
+	to.OverloadPreference = OverloadPreferencePreferred
 	return &to
 }
 
@@ -163,14 +166,14 @@ func TestTypeCheckOverloadedExprs(t *testing.T) {
 	}
 
 	unaryIntFn := makeTestOverload(types.Int, types.Int)
-	unaryIntFnPref := makeTestOverload(types.Int, types.Int).withPreferred(true)
+	unaryIntFnPref := makeTestOverload(types.Int, types.Int).preferred()
 	unaryFloatFn := makeTestOverload(types.Float, types.Float)
 	unaryDecimalFn := makeTestOverload(types.Decimal, types.Decimal)
 	unaryStringFn := makeTestOverload(types.String, types.String)
 	unaryIntervalFn := makeTestOverload(types.Interval, types.Interval)
 	unaryTimestampFn := makeTestOverload(types.Timestamp, types.Timestamp)
 	binaryIntFn := makeTestOverload(types.Int, types.Int, types.Int)
-	binaryIntFnPref := makeTestOverload(types.Int, types.Int, types.Int).withPreferred(true)
+	binaryIntFnPref := makeTestOverload(types.Int, types.Int, types.Int).preferred()
 	binaryFloatFn := makeTestOverload(types.Float, types.Float, types.Float)
 	binaryDecimalFn := makeTestOverload(types.Decimal, types.Decimal, types.Decimal)
 	binaryStringFn := makeTestOverload(types.String, types.String, types.String)
@@ -274,10 +277,8 @@ func TestTypeCheckOverloadedExprs(t *testing.T) {
 	ctx := context.Background()
 	for i, d := range testData {
 		t.Run(fmt.Sprintf("%v/%v", d.exprs, d.overloads), func(t *testing.T) {
-			semaCtx := MakeSemaContext()
-			if err := semaCtx.Placeholders.Init(2 /* numPlaceholders */, nil /* typeHints */); err != nil {
-				t.Fatal(err)
-			}
+			semaCtx := MakeSemaContext(nil /* resolver */)
+			semaCtx.Placeholders.Init(2 /* numPlaceholders */, nil /* typeHints */)
 			desired := types.Any
 			if d.desired != nil {
 				desired = d.desired

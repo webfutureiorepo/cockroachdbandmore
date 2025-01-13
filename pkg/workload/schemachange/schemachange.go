@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package schemachange implements the schemachange workload.
 package schemachange
@@ -20,11 +15,11 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -34,9 +29,13 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // This workload executes batches of schema changes asynchronously. Each
@@ -69,10 +68,15 @@ const (
 	defaultDeclarativeSchemaMaxStmtsPerTxn = 1
 )
 
+type schemaChangeCounter struct {
+	// success and error keep track of the number of
+	// successful and erroneous schema transactions.
+	success, error prometheus.Counter
+}
+
 type schemaChange struct {
 	flags                           workload.Flags
 	connFlags                       *workload.ConnFlags
-	dbOverride                      string
 	maxOpsPerWorker                 int
 	errorRate                       int
 	enumPct                         int
@@ -90,6 +94,9 @@ type schemaChange struct {
 	declarativeSchemaChangerPct     int
 	declarativeSchemaMaxStmtsPerTxn int
 	traceFilePath                   string
+	schemaWorkloadResultAnnotator   *schemaWorkloadResultAnnotator
+	reg                             *histogram.Registry
+	scCounter                       schemaChangeCounter
 }
 
 var schemaChangeMeta = workload.Meta{
@@ -99,8 +106,6 @@ var schemaChangeMeta = workload.Meta{
 	New: func() workload.Generator {
 		s := &schemaChange{}
 		s.flags.FlagSet = pflag.NewFlagSet(`schemachange`, pflag.ContinueOnError)
-		s.flags.StringVar(&s.dbOverride, `db`, ``,
-			`Override for the SQL database to use. If empty, defaults to the generator name`)
 		s.flags.IntVar(&s.maxOpsPerWorker, `max-ops-per-worker`, defaultMaxOpsPerWorker,
 			`Number of operations to execute in a single transaction`)
 		s.flags.IntVar(&s.errorRate, `error-rate`, defaultErrorRate,
@@ -137,20 +142,39 @@ func init() {
 	workload.Register(schemaChangeMeta)
 }
 
-// Meta implements the workload.Generator interface.
-func (s *schemaChange) Meta() workload.Meta {
-	return schemaChangeMeta
+func setupSchemaChangePromCounter(reg prometheus.Registerer) schemaChangeCounter {
+	f := promauto.With(reg)
+	return schemaChangeCounter{
+		success: f.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: histogram.PrometheusNamespace,
+				Subsystem: schemaChangeMeta.Name,
+				Name:      "schema_change_success",
+				Help:      "The total number of successful schema change transactions.",
+			},
+		),
+		error: f.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: histogram.PrometheusNamespace,
+				Subsystem: schemaChangeMeta.Name,
+				Name:      "schema_change_errors",
+				Help:      "The total number of unexpected failures.",
+			},
+		),
+	}
 }
+
+// Meta implements the workload.Generator interface.
+func (s *schemaChange) Meta() workload.Meta { return schemaChangeMeta }
 
 // Flags implements the workload.Flagser interface.
-func (s *schemaChange) Flags() workload.Flags {
-	return s.flags
-}
+func (s *schemaChange) Flags() workload.Flags { return s.flags }
+
+// ConnFlags implements the ConnFlagser interface.
+func (s *schemaChange) ConnFlags() *workload.ConnFlags { return s.connFlags }
 
 // Tables implements the workload.Generator interface.
-func (s *schemaChange) Tables() []workload.Table {
-	return nil
-}
+func (s *schemaChange) Tables() []workload.Table { return nil }
 
 // Ops implements the workload.Opser interface.
 func (s *schemaChange) Ops(
@@ -160,10 +184,19 @@ func (s *schemaChange) Ops(
 	// managing the life cycle of this workload so we keep tracing localized to
 	// this function.
 	tracerProvider, err := s.initTracerProvider()
+	// Initialize workload result annotator to compute trace metrics on the workload performance.
+	s.schemaWorkloadResultAnnotator = &schemaWorkloadResultAnnotator{}
+	// Initialize prometheus counters to export metrics for schema change workload.
+	if s.reg == nil {
+		// Check for nil to ensure idempotency - Ops might be invoked multiple times with the same
+		// registry. We should set up counters only once.
+		s.reg = reg
+		s.scCounter = setupSchemaChangePromCounter(reg.Registerer())
+	}
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
-
+	tracerProvider.RegisterSpanProcessor(s.schemaWorkloadResultAnnotator)
 	tracer := tracerProvider.Tracer("schemachange")
 
 	// NB: The schemaChange.Ops span ends when this function returns, NOT when
@@ -171,10 +204,6 @@ func (s *schemaChange) Ops(
 	ctx, span := tracer.Start(ctx, "schemaChange.Ops")
 	defer func() { EndSpan(span, err) }()
 
-	sqlDatabase, err := workload.SanitizeUrls(s, s.dbOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	cfg := workload.NewMultiConnPoolCfgFromFlags(s.connFlags)
 	// We will need double the concurrency, since we need watch
 	// dog connections. There is a danger of the pool emptying on
@@ -192,26 +221,30 @@ func (s *schemaChange) Ops(
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
+	watchDogPool, err := workload.NewMultiConnPool(ctx, cfg, urls...)
+	if err != nil {
+		return workload.QueryLoad{}, err
+	}
 	if err := s.setClusterSettings(ctx, pool); err != nil {
 		return workload.QueryLoad{}, err
 	}
 	stdoutLog := makeAtomicLog(os.Stdout)
-	rng, seed := randutil.NewTestRand()
+	// Use NewPseudoRand here because we want to print out the global seed used by
+	// the workload. Using NewTestRand() here would only let us see the per-test
+	// seed that is derived from the global seed.
+	_, seed := randutil.NewPseudoRand()
 	stdoutLog.printLn(fmt.Sprintf("using random seed: %d", seed))
-	ops := newDeck(rng, opWeights...)
-	// A separate deck is constructed of only schema changes supported
-	// by the declarative schema changer. This deck has equal weights,
-	// only for supported schema changes.
+	// A separate weighting is constructed of only schema changes supported by the
+	// declarative schema changer. This will be used to make a per-worker deck
+	// that has equal weights, only for supported schema changes.
 	declarativeOpWeights := make([]int, len(opWeights))
 	for idx, weight := range opWeights {
 		if _, ok := opDeclarativeVersion[opType(idx)]; ok {
 			declarativeOpWeights[idx] = weight
 		}
 	}
-	declarativeOps := newDeck(rng, declarativeOpWeights...)
 
 	ql := workload.QueryLoad{
-		SQLDatabase: sqlDatabase,
 		Close: func(_ context.Context) error {
 			// Create a new context for shutting down the tracer provider. The
 			// provided context may be cancelled depending on why the workload is
@@ -221,9 +254,11 @@ func (s *schemaChange) Ops(
 			defer cancel()
 
 			pool.Close()
+			watchDogPool.Close()
+
 			closeErr := s.closeJSONLogFile()
 			shutdownErr := tracerProvider.Shutdown(ctx)
-
+			s.schemaWorkloadResultAnnotator.logWorkloadStats(stdoutLog)
 			return errors.CombineErrors(closeErr, shutdownErr)
 		},
 	}
@@ -245,12 +280,15 @@ func (s *schemaChange) Ops(
 		// operations.
 		workerRng := randutil.NewTestRandWithSeed(seed + int64(i))
 
-		// Each worker needs its own sequence number generator so that the names of
-		// generated objects are deterministic across runs.
+		// Each worker needs its own sequence number generator and operation deck so
+		// that the names of generated objects and operations are deterministic
+		// across runs.
 		seqNum, err := s.initSeqNum(ctx, pool, i)
 		if err != nil {
 			return workload.QueryLoad{}, err
 		}
+		ops := newDeck(workerRng, opWeights...)
+		declarativeOps := newDeck(workerRng, declarativeOpWeights...)
 
 		opGeneratorParams := operationGeneratorParams{
 			workerID:           i,
@@ -272,6 +310,7 @@ func (s *schemaChange) Ops(
 			dryRun:          s.dryRun,
 			maxOpsPerWorker: s.maxOpsPerWorker,
 			pool:            pool,
+			watchDogPool:    watchDogPool,
 			hists:           reg.GetHandle(),
 			opGen:           makeOperationGenerator(&opGeneratorParams),
 			logger: &logger{
@@ -286,6 +325,8 @@ func (s *schemaChange) Ops(
 				artifactsLog: artifactsLog,
 			},
 			isHoldingEntryLocks: false,
+			tracer:              tracer,
+			scCounter:           &s.scCounter,
 		}
 
 		s.workers = append(s.workers, w)
@@ -298,8 +339,16 @@ func (s *schemaChange) Ops(
 // setClusterSettings configures any settings required for the workload ahead
 // of starting workers.
 func (s *schemaChange) setClusterSettings(ctx context.Context, pool *workload.MultiConnPool) error {
-	_, err := pool.Get().Exec(ctx, `SET CLUSTER SETTING sql.defaults.super_regions.enabled = 'on'`)
-	return errors.WithStack(err)
+	for _, stmt := range []string{
+		`SET CLUSTER SETTING sql.defaults.super_regions.enabled = 'on'`,
+		`SET CLUSTER SETTING sql.log.all_statements.enabled = 'on'`,
+	} {
+		_, err := pool.Get().Exec(ctx, stmt)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	return nil
 }
 
 // initSeqName returns the smallest available sequence number to be
@@ -346,10 +395,13 @@ type schemaChangeWorker struct {
 	dryRun              bool
 	maxOpsPerWorker     int
 	pool                *workload.MultiConnPool
+	watchDogPool        *workload.MultiConnPool
 	hists               *histogram.Histograms
 	opGen               *operationGenerator
 	isHoldingEntryLocks bool
 	logger              *logger
+	tracer              trace.Tracer
+	scCounter           *schemaChangeCounter
 }
 
 var (
@@ -357,15 +409,23 @@ var (
 	errRunInTxnRbkSentinel   = errors.New("txn needs to rollback")
 )
 
-// LogEntry and its fields must be public so that the json package can encode this struct.
+// LogEntry is used to log information about the operations performed, expected errors,
+// the worker ID, the corresponding timestamp, and any additional messages or error states.
+// Note: LogEntry and its fields must be public so that the json package can encode this struct.
 type LogEntry struct {
-	WorkerID             int           `json:"workerId"`
-	ClientTimestamp      string        `json:"clientTimestamp"`
-	Ops                  []interface{} `json:"ops"`
-	ExpectedExecErrors   string        `json:"expectedExecErrors"`
-	ExpectedCommitErrors string        `json:"expectedCommitErrors"`
+	// WorkerID identifies the worker executing the operations.
+	WorkerID int `json:"workerId"`
+	// ClientTimestamp tracks when the operation was executed.
+	ClientTimestamp string `json:"clientTimestamp"`
+	// Ops a collection of the various types of operations performed.
+	Ops []interface{} `json:"ops"`
+	// ExpectedExecErrors errors which occur as soon as you run the statement.
+	ExpectedExecErrors string `json:"expectedExecErrors"`
+	// ExpectedCommitErrors errors which occur only during commit.
+	ExpectedCommitErrors string `json:"expectedCommitErrors"`
 	// Optional message for errors or if a hook was called.
-	Message    string      `json:"message"`
+	Message string `json:"message"`
+	// ErrorState holds information on the error's state when an error occurs.
 	ErrorState *ErrorState `json:"errorState,omitempty"`
 }
 
@@ -401,16 +461,19 @@ func (w *schemaChangeWorker) WrapWithErrorState(err error) error {
 }
 
 func (w *schemaChangeWorker) runInTxn(
-	ctx context.Context, tx pgx.Tx, useDeclarativeSchemaChanger bool,
+	ctx context.Context,
+	tx pgx.Tx,
+	useDeclarativeSchemaChanger bool,
+	workloadMetrics map[string]attribute.Value,
 ) error {
 	w.logger.startLog(w.id)
 	w.logger.writeLog("BEGIN")
-	opsNum := 1 + w.opGen.randIntn(w.maxOpsPerWorker)
-	if useDeclarativeSchemaChanger && opsNum > w.workload.declarativeSchemaMaxStmtsPerTxn {
-		opsNum = w.workload.declarativeSchemaMaxStmtsPerTxn
+	numOps := 1 + w.opGen.randIntn(w.maxOpsPerWorker)
+	if useDeclarativeSchemaChanger && numOps > w.workload.declarativeSchemaMaxStmtsPerTxn {
+		numOps = w.workload.declarativeSchemaMaxStmtsPerTxn
 	}
 
-	for i := 0; i < opsNum; i++ {
+	for i := 0; i < numOps; i++ {
 		// Terminating this loop early if there are expected commit errors prevents unexpected commit behavior from being
 		// hidden by subsequent operations. Consider the case where there are expected commit errors.
 		// It is possible that committing the transaction now will fail the workload because the error does not occur
@@ -419,10 +482,11 @@ func (w *schemaChangeWorker) runInTxn(
 		// will not fail. To prevent the covering up of unexpected behavior as outlined above, no further ops
 		// should be generated if there are any errors in the expected commit errors set.
 		if !w.opGen.expectedCommitErrors.empty() {
+			incWorkloadMetric(numSchemaOpsExpectedFailed, workloadMetrics)
 			break
 		}
 
-		op, err := w.opGen.randOp(ctx, tx, useDeclarativeSchemaChanger)
+		op, err := w.opGen.randOp(ctx, tx, useDeclarativeSchemaChanger, numOps)
 		if pgErr := new(pgconn.PgError); errors.As(err, &pgErr) &&
 			pgcode.MakeCode(pgErr.Code) == pgcode.SerializationFailure {
 			return errors.Mark(err, errRunInTxnRbkSentinel)
@@ -461,16 +525,28 @@ func (w *schemaChangeWorker) runInTxn(
 						errRunInTxnRbkSentinel,
 					)
 				}
+				// Command is too large errors are allowed on DML operations since,
+				// some of the tables can be pretty wide in this test.
+				if op.queryType == OpStmtDML && pgcode.MakeCode(pgErr.Code) == pgcode.Uncategorized &&
+					strings.Contains(pgErr.Error(), "command is too large") {
+					return errors.Mark(
+						err,
+						errRunInTxnRbkSentinel,
+					)
+				}
 				return err
 			}
+			incWorkloadMetric(numSchemaOpsSucceeded, workloadMetrics)
 			w.recordInHist(timeutil.Since(start), operationOk)
 		}
+		incWorkloadMetric(numSchemaOps, workloadMetrics)
 	}
 	return nil
 }
 
 func (w *schemaChangeWorker) run(ctx context.Context) error {
-	conn, err := w.pool.Get().Acquire(ctx)
+	connPool := w.pool.Get()
+	conn, err := connPool.Acquire(ctx)
 	if err != nil {
 		return errors.Wrap(err, "cannot get a connection")
 	}
@@ -485,38 +561,51 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 			return err
 		}
 	}
+
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return errors.Wrap(err, "cannot get a connection and begin a txn")
 	}
 
+	// Initialize workload metrics.
+	workloadMetrics := initWorkloadMetrics()
+	_, workerSpan := w.tracer.Start(ctx, schemaWorkerSpanName)
+	// The worker span is for a single schema change worker and captures workload
+	// metrics specific for the schema operations run by the worker.
+	defer func() { endSchemaWorkerSpan(workerSpan, workloadMetrics) }()
+
 	// Enable extra schema changes, if they are available this moment.
 	if !w.workload.declarativeStatementsEnabled.Load() {
-		cannotEnableSchemaChanges, err := isClusterVersionLessThan(ctx, tx, clusterversion.V23_2.Version())
+		// Transaction confirmed we are on a new enough version, so set the
+		// cluster setting.
+		err := tx.Rollback(ctx)
 		if err != nil {
-			return errors.Wrap(err, "cannot to get active")
+			return errors.Wrap(err, "could not rollback before cluster setting")
 		}
-		if !cannotEnableSchemaChanges {
-			_, err = w.pool.Get().Exec(ctx, `SET CLUSTER SETTING sql.schema.force_declarative_statements="+CREATE SCHEMA, +CREATE SEQUENCE"`)
-			if err != nil {
-				return errors.Wrap(err, "cannot to enable extra schema changes")
-			}
-			w.workload.declarativeStatementsEnabled.Store(true)
+		_, err = conn.Exec(ctx, `SET CLUSTER SETTING sql.schema.force_declarative_statements="+CREATE SCHEMA, +CREATE SEQUENCE"`)
+		if err != nil {
+			return errors.Wrap(err, "cannot enable extra schema changes")
 		}
+		// Restart the txn after the update.
+		tx, err = conn.Begin(ctx)
+		if err != nil {
+			return errors.Wrap(err, "cannot get a connection and begin a txn")
+		}
+		w.workload.declarativeStatementsEnabled.Store(true)
 	}
 
 	// Release log entry locks if holding all.
 	defer w.releaseLocksIfHeld()
 
 	// Run between 1 and maxOpsPerWorker schema change operations.
-	watchDog := newSchemaChangeWatchDog(w.pool.Get(), w.logger)
+	watchDog := newSchemaChangeWatchDog(w.watchDogPool.Get(), w.logger)
 	if err := watchDog.Start(ctx, tx); err != nil {
 		return errors.Wrapf(err, "unable to start watch dog")
 	}
 	defer watchDog.Stop()
 	start := timeutil.Now()
 	w.opGen.resetTxnState()
-	err = w.runInTxn(ctx, tx, useDeclarativeSchemaChanger)
+	err = w.runInTxn(ctx, tx, useDeclarativeSchemaChanger, workloadMetrics)
 
 	if err != nil {
 		// Rollback in all cases to release the txn object and its conn pool. Wrap the original
@@ -531,7 +620,7 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 			}
 		}
 
-		w.logger.flushLogWithError(tx, err)
+		w.logger.flushLogWithError(err)
 		switch {
 		case errors.Is(err, errRunInTxnFatalSentinel):
 			w.preErrorHook()
@@ -559,7 +648,7 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 				errors.Wrap(err, "***UNEXPECTED COMMIT ERROR; Received a non pg error"),
 				errRunInTxnFatalSentinel,
 			)
-			w.logger.flushLogWithError(tx, err)
+			w.logger.flushLogWithError(err)
 			w.preErrorHook()
 			return err
 		}
@@ -568,7 +657,7 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 		// to rollback.
 		if pgcode.MakeCode(pgErr.Code) == pgcode.SerializationFailure {
 			w.recordInHist(timeutil.Since(start), txnCommitError)
-			w.logger.flushLog(tx, fmt.Sprintf("TXN RETRY ERROR; %v", pgErr))
+			w.logger.flushLog(fmt.Sprintf("TXN RETRY ERROR; %v", pgErr))
 			return nil
 		}
 
@@ -590,26 +679,28 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 					errors.Wrapf(err, "***UNEXPECTED COMMIT ERROR; Received an unexpected commit error")),
 				errRunInTxnFatalSentinel,
 			)
-			w.logger.flushLogWithError(tx, err)
+			w.logger.flushLogWithError(err)
 			w.preErrorHook()
 			return err
 		}
 
 		// Error was anticipated, so it is acceptable.
 		w.recordInHist(timeutil.Since(start), txnCommitError)
-		w.logger.flushLog(tx, "COMMIT; Successfully got expected commit error")
+		w.logger.flushLog("COMMIT; Successfully got expected commit error")
 		return nil
 	}
 	if !w.opGen.expectedCommitErrors.empty() {
 		err := w.WrapWithErrorState(errors.Newf("***FAIL; Failed to receive a commit error when at least one commit error was expected"))
-		w.logger.flushLogWithError(tx, err)
+		w.logger.flushLogWithError(err)
 		w.preErrorHook()
 		return errors.Mark(err, errRunInTxnFatalSentinel)
 	}
 
 	// If there were no errors while committing the txn.
-	w.logger.flushLog(tx, "")
+	w.logger.flushLog("")
 	w.recordInHist(timeutil.Since(start), txnOk)
+	workloadMetrics[txnCommitted] = attribute.BoolValue(true)
+	w.scCounter.success.Inc()
 	return nil
 }
 
@@ -627,11 +718,14 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 func (w *schemaChangeWorker) preErrorHook() {
 	w.workload.dumpLogsOnce.Do(func() {
 		for _, worker := range w.workload.workers {
-			worker.logger.flushLogAndLock(nil, "Flushed by pre-error hook", false)
+			worker.logger.flushLogAndLock("Flushed by pre-error hook", false)
 			worker.logger.artifactsLog = nil
 		}
 		_ = w.workload.closeJSONLogFile()
 		w.isHoldingEntryLocks = true
+		// preErrorHook is called for all unexpected errors. So we can use this hook to
+		// increase the unexpected error count.
+		w.scCounter.error.Inc()
 	})
 }
 
@@ -701,7 +795,7 @@ func (l *logger) addExpectedErrors(execErrors errorCodeSet, commitErrors errorCo
 // flushLogWithError outputs the currentLogEntry of the schemaChangeWorker, with
 // an error message (any available error state information is also added).
 // It is a noop if l.verbose < 0.
-func (l *logger) flushLogWithError(tx pgx.Tx, err error) {
+func (l *logger) flushLogWithError(err error) {
 	if l.verbose < 1 {
 		return
 	}
@@ -718,23 +812,23 @@ func (l *logger) flushLogWithError(tx pgx.Tx, err error) {
 		}
 	}()
 
-	l.flushLogAndLock(tx, err.Error(), true)
+	l.flushLogAndLock(err.Error(), true)
 	defer l.currentLogEntry.mu.Unlock()
 }
 
 // flushLog outputs the currentLogEntry of the schemaChangeWorker.
 // It is a noop if l.verbose < 0.
-func (l *logger) flushLog(tx pgx.Tx, message string) {
+func (l *logger) flushLog(message string) {
 	if l.verbose < 1 {
 		return
 	}
-	l.flushLogAndLock(tx, message, true)
+	l.flushLogAndLock(message, true)
 	defer l.currentLogEntry.mu.Unlock()
 }
 
 // flushLogAndLock prints the currentLogEntry of the schemaChangeWorker and does not release
 // the lock for w.currentLogEntry upon returning. The lock will not be acquired if l.verbose < 1.
-func (l *logger) flushLogAndLock(_ pgx.Tx, message string, stdout bool) {
+func (l *logger) flushLogAndLock(message string, stdout bool) {
 	if l.verbose < 1 {
 		return
 	}

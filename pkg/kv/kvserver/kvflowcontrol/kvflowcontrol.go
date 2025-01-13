@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package kvflowcontrol provides flow control for replication traffic in KV.
 // It's part of the integration layer between KV and admission control.
@@ -14,19 +9,26 @@ package kvflowcontrol
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowcontrolpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
+	"github.com/cockroachdb/cockroach/pkg/util/ctxutil"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/redact"
-	"github.com/dustin/go-humanize"
 )
 
 // Enabled determines whether we use flow control for replication traffic in KV.
+//
+// TODO(sumeer): changing this to false does not affect requests that are
+// already waiting for tokens for eval in RACv1. Consider fixing and
+// back-porting.
 var Enabled = settings.RegisterBoolSetting(
 	settings.SystemOnly,
 	"kvadmission.flow_control.enabled",
@@ -40,15 +42,12 @@ var Mode = settings.RegisterEnumSetting(
 	settings.SystemOnly,
 	"kvadmission.flow_control.mode",
 	"determines the 'mode' of flow control we use for replication traffic in KV, if enabled",
-	util.ConstantWithMetamorphicTestChoice(
-		"kv.snapshot.ingest_as_write_threshold",
-		modeDict[ApplyToElastic], /* default value */
-		modeDict[ApplyToAll],     /* other value */
-	).(string),
-	map[int64]string{
-		int64(ApplyToElastic): modeDict[ApplyToElastic],
-		int64(ApplyToAll):     modeDict[ApplyToAll],
-	},
+	metamorphic.ConstantWithTestChoice(
+		"kvadmission.flow_control.mode",
+		modeDict[ApplyToAll],     /* default value */
+		modeDict[ApplyToElastic], /* other value */
+	),
+	modeDict,
 )
 
 var modeDict = map[ModeT]string{
@@ -76,12 +75,106 @@ func (m ModeT) String() string {
 }
 
 // SafeFormat implements the redact.SafeFormatter interface.
-func (m ModeT) SafeFormat(p redact.SafePrinter, verb rune) {
+func (m ModeT) SafeFormat(p redact.SafePrinter, _ rune) {
 	if s, ok := modeDict[m]; ok {
-		p.Print(s)
+		p.SafeString(redact.SafeString(s))
 		return
 	}
-	p.Print("unknown-mode")
+	p.SafeString("unknown-mode")
+}
+
+// RegularTokensPerStream determines the flow tokens available for regular work
+// on a per-stream basis.
+var RegularTokensPerStream = settings.RegisterByteSizeSetting(
+	settings.SystemOnly,
+	"kvadmission.flow_controller.regular_tokens_per_stream",
+	"flow tokens available for regular work on a per-stream basis",
+	16<<20, // 16 MiB
+	validateTokenRange,
+)
+
+// ElasticTokensPerStream determines the flow tokens available for elastic work
+// on a per-stream basis.
+var ElasticTokensPerStream = settings.RegisterByteSizeSetting(
+	settings.SystemOnly,
+	"kvadmission.flow_controller.elastic_tokens_per_stream",
+	"flow tokens available for elastic work on a per-stream basis",
+	8<<20, // 8 MiB
+	validateTokenRange,
+)
+
+const (
+	minTokensPerStream Tokens = 1 << 20  // 1 MiB
+	maxTokensPerStream Tokens = 64 << 20 // 64 MiB
+)
+
+var validateTokenRange = settings.WithValidateInt(func(b int64) error {
+	t := Tokens(b)
+	if t < minTokensPerStream {
+		return fmt.Errorf("minimum flowed tokens allowed is %s, got %s", minTokensPerStream, t)
+	}
+	if t > maxTokensPerStream {
+		return fmt.Errorf("maximum flow tokens allowed is %s, got %s", maxTokensPerStream, t)
+	}
+	return nil
+})
+
+// TokenCounterResetEpoch is an escape hatch for administrators that should
+// never be needed. By incrementing this epoch (or changing it to a value
+// different than before), an administrator can restore all RACv2 token
+// counters to their default (full) state. This can be used to counteract a
+// token leakage bug, but note that if there is indeed a bug, the leakage may
+// resume, and tokens may again be exhausted. So it is expected that this will
+// be used together with disabling replication admission control by setting
+// kvadmission.flow_control.enabled=false. Note that disabling replication
+// admission control should be sufficient, since it should unblock work that
+// is waiting-for-eval. But in case there is another bug that is preventing
+// such work from unblocking, this setting may be useful.
+var TokenCounterResetEpoch = settings.RegisterIntSetting(
+	settings.SystemOnly,
+	"kvadmission.flow_controller.token_reset_epoch",
+	"escape hatch for administrators to reset all token counters to their default (full) state",
+	0)
+
+// V2EnabledWhenLeaderLevel captures the level at which RACv2 is enabled when
+// this replica is the leader.
+//
+// State transitions are V2NotEnabledWhenLeader =>
+// V2EnabledWhenLeaderV1Encoding => V2EnabledWhenLeaderV2Encoding, i.e., the
+// level will never regress.
+type V2EnabledWhenLeaderLevel = uint32
+
+const (
+	V2NotEnabledWhenLeader V2EnabledWhenLeaderLevel = iota
+	V2EnabledWhenLeaderV1Encoding
+	V2EnabledWhenLeaderV2Encoding
+)
+
+// GetV2EnabledWhenLeaderLevel returns the level at which RACV2 is enabled when
+// this replica is the leader.
+//
+// The level is determined by the cluster version, and is ratcheted up as the
+// cluster version advances. The level is used to determine:
+//
+//  1. Whether the leader should use the RACv2 protocol.
+//  2. Whether the leader should use the V1 or V2 entry encoding iff (1) is
+//     true.
+//
+// Upon the leader first seeing V24_3_UseRACV2WithV1EntryEncoding, it will
+// create a RangeController and use the V1 entry encoding, operating in Push
+// mode. Upon the leader first seeing V24_3_UseRACV2Full, it will continue
+// using the RACV2 protocol, but will switch to the V2 entry encoding. Note the
+// necessary migration for V2NotEnabledWhenLeader =>
+// V2EnabledWhenLeaderV1Encoding occurs before anything else in
+// kvserver.handleRaftReadyRaftMuLocked.
+func GetV2EnabledWhenLeaderLevel(
+	ctx context.Context, st *cluster.Settings, knobs *TestingKnobs,
+) V2EnabledWhenLeaderLevel {
+	if knobs != nil && knobs.OverrideV2EnabledWhenLeaderLevel != nil {
+		return knobs.OverrideV2EnabledWhenLeaderLevel()
+	}
+	// Full RACv2 can be enabled: RACv2 protocol with V2 entry encoding.
+	return V2EnabledWhenLeaderV2Encoding
 }
 
 // Stream models the stream over which we replicate data traffic, the
@@ -116,6 +209,7 @@ type Tokens int64
 // Controller provides flow control for replication traffic in KV, held at the
 // node-level.
 type Controller interface {
+	InspectController
 	// Admit seeks admission to replicate data, regardless of size, for work with
 	// the given priority, create-time, and over the given stream. This blocks
 	// until there are flow tokens available or the stream disconnects, subject to
@@ -133,9 +227,6 @@ type Controller interface {
 	// expected to have been deducted earlier with the same priority provided
 	// here.
 	ReturnTokens(context.Context, admissionpb.WorkPriority, Tokens, Stream)
-	// Inspect returns a snapshot of all underlying streams and their available
-	// {regular,elastic} tokens. It's used to power /inspectz.
-	Inspect(context.Context) []kvflowinspectpb.Stream
 	// InspectStream returns a snapshot of a specific underlying stream and its
 	// available {regular,elastic} tokens. It's used to power /inspectz.
 	InspectStream(context.Context, Stream) kvflowinspectpb.Stream
@@ -145,6 +236,34 @@ type Controller interface {
 	// replication to a specific store is paused due to follower-pausing.
 	// That'll have to show up between the Handler and the Controller somehow.
 	// See I2, I3a and [^7] in kvflowcontrol/doc.go.
+}
+
+type InspectController interface {
+	// Inspect returns a snapshot of all underlying streams and their available
+	// {regular,elastic} tokens. It's used to power /inspectz.
+	Inspect(context.Context) []kvflowinspectpb.Stream
+}
+
+// ReplicationAdmissionHandle abstracts waiting for admission across RACv1 and RACv2.
+type ReplicationAdmissionHandle interface {
+	// Admit seeks admission to replicate data, regardless of size, for work
+	// with the given priority and create-time. This blocks until there are flow
+	// tokens available for connected streams. This returns true if the request
+	// was admitted through flow control. Ignore the first return type if err !=
+	// nil. admitted == false && err == nil is a valid return, when something
+	// caused the callee to not care whether flow tokens were available. This
+	// can happen for at least the following reasons:
+	// - Configuration specifies the given WorkPriority is not subject to
+	//   replication AC.
+	// - The callee doesn't think it is the leader or has been closed/destroyed.
+	//
+	// The latter can happen in the midst of a transition from RACv1 => RACv2.
+	// In this case if the callee waited on at least one connectedStream and was
+	// admitted, it will return (true, nil). This includes the case where the
+	// connectedStream was closed while waiting. If there were no
+	// connectedStreams (because they were already closed) it will return
+	// (false, nil).
+	Admit(context.Context, admissionpb.WorkPriority, time.Time) (admitted bool, _ error)
 }
 
 // Handle is used to interface with replication flow control; it's typically
@@ -161,14 +280,8 @@ type Controller interface {
 // given priority, takes log position into account -- see
 // kvflowcontrolpb.AdmittedRaftLogEntries for more details).
 type Handle interface {
-	// Admit seeks admission to replicate data, regardless of size, for work with
-	// the given priority and create-time. This blocks until there are flow tokens
-	// available for all connected streams. This returns true if the request was
-	// admitted through flow control. Ignore the first return type if err != nil.
-	// admitted == false && err == nil is a valid return, when something (e.g.
-	// configuration) caused the callee to not care whether flow tokens were
-	// available.
-	Admit(context.Context, admissionpb.WorkPriority, time.Time) (admitted bool, _ error)
+	ReplicationAdmissionHandle
+	InspectHandle
 	// DeductTokensFor deducts (without blocking) flow tokens for replicating
 	// work with given priority along connected streams. The deduction is
 	// tracked with respect to the specific raft log position it's expecting it
@@ -218,9 +331,6 @@ type Handle interface {
 	// Admit(). It's only used when cluster settings change, settings that
 	// affect all work waiting for flow tokens.
 	ResetStreams(ctx context.Context)
-	// Inspect returns a serialized form of the underlying handle. It's used to
-	// power /inspectz.
-	Inspect(context.Context) kvflowinspectpb.Handle
 	// Close closes the handle and returns all held tokens back to the
 	// underlying controller. Typically used when the replica loses its lease
 	// and/or raft leadership, or ends up getting GC-ed (if it's being
@@ -228,10 +338,17 @@ type Handle interface {
 	Close(context.Context)
 }
 
+type InspectHandle interface {
+	// Inspect returns a serialized form of the underlying handle. It's used to
+	// power /inspectz.
+	Inspect(context.Context) kvflowinspectpb.Handle
+}
+
 // Handles represent a set of flow control handles. Note that handles are
 // typically held on replicas initiating replication traffic, so on a given node
 // they're uniquely identified by their range ID.
 type Handles interface {
+	InspectHandles
 	// Lookup the kvflowcontrol.Handle for the specific range (or rather, the
 	// replica of the specific range that's locally held).
 	Lookup(roachpb.RangeID) (Handle, bool)
@@ -239,9 +356,6 @@ type Handles interface {
 	// kvflowcontrol.Handles, i.e. disconnect and reconnect each one. It
 	// effectively unblocks all requests waiting in Admit().
 	ResetStreams(ctx context.Context)
-	// Inspect returns the set of ranges that have an embedded
-	// kvflowcontrol.Handle. It's used to power /inspectz.
-	Inspect() []roachpb.RangeID
 	// TODO(irfansharif): When fixing I1 and I2 from kvflowcontrol/node.go,
 	// we'll want to disconnect all streams for a specific node. Expose
 	// something like the following to disconnect all replication streams bound
@@ -251,6 +365,21 @@ type Handles interface {
 	// part of #95563.
 	//
 	//   Iterate(roachpb.StoreID, func(context.Context, Handle, Stream))
+
+	// LookupReplicationAdmissionHandle looks up the ReplicationAdmissionHandle
+	// for the specific range (or rather, the replica of the specific range
+	// that's locally held). The bool is false if no handle was found, in which
+	// case the caller must use the pre-replication-admission-control path.
+	LookupReplicationAdmissionHandle(roachpb.RangeID) (ReplicationAdmissionHandle, bool)
+}
+
+type InspectHandles interface {
+	// LookupInspect the serialized form of a handle for the specific range (or
+	// rather, the replica of the specific range that's locally held).
+	LookupInspect(roachpb.RangeID) (kvflowinspectpb.Handle, bool)
+	// Inspect returns the set of ranges that have an embedded
+	// kvflowcontrol.Handle. It's used to power /inspectz.
+	Inspect() []roachpb.RangeID
 }
 
 // HandleFactory is used to construct new Handles.
@@ -291,13 +420,12 @@ func (t Tokens) String() string {
 }
 
 // SafeFormat implements the redact.SafeFormatter interface.
-func (t Tokens) SafeFormat(p redact.SafePrinter, verb rune) {
-	sign := "+"
+func (t Tokens) SafeFormat(p redact.SafePrinter, _ rune) {
 	if t < 0 {
-		sign = "-"
-		t = -t
+		p.SafeString(humanizeutil.IBytes(int64(t)))
+		return
 	}
-	p.Printf("%s%s", sign, humanize.IBytes(uint64(t)))
+	p.Printf("+%s", humanizeutil.IBytes(int64(t)))
 }
 
 func (s Stream) String() string {
@@ -305,15 +433,15 @@ func (s Stream) String() string {
 }
 
 // SafeFormat implements the redact.SafeFormatter interface.
-func (s Stream) SafeFormat(p redact.SafePrinter, verb rune) {
+func (s Stream) SafeFormat(p redact.SafePrinter, _ rune) {
 	tenantSt := s.TenantID.String()
 	if s.TenantID.IsSystem() {
 		tenantSt = "1"
 	}
-	p.Printf("t%s/s%s", tenantSt, s.StoreID.String())
+	p.Printf("t%s/s%s", redact.SafeString(tenantSt), s.StoreID)
 }
 
-type raftAdmissionMetaKey struct{}
+var raftAdmissionMetaKey = ctxutil.RegisterFastValueKey()
 
 // ContextWithMeta returns a Context wrapping the supplied raft admission meta,
 // if any.
@@ -322,7 +450,7 @@ type raftAdmissionMetaKey struct{}
 // #104154.
 func ContextWithMeta(ctx context.Context, meta *kvflowcontrolpb.RaftAdmissionMeta) context.Context {
 	if meta != nil {
-		ctx = context.WithValue(ctx, raftAdmissionMetaKey{}, meta)
+		ctx = ctxutil.WithFastValue(ctx, raftAdmissionMetaKey, meta)
 	}
 	return ctx
 }
@@ -330,7 +458,7 @@ func ContextWithMeta(ctx context.Context, meta *kvflowcontrolpb.RaftAdmissionMet
 // MetaFromContext returns the raft admission meta embedded in the Context, if
 // any.
 func MetaFromContext(ctx context.Context) *kvflowcontrolpb.RaftAdmissionMeta {
-	val := ctx.Value(raftAdmissionMetaKey{})
+	val := ctxutil.FastValue(ctx, raftAdmissionMetaKey)
 	h, ok := val.(*kvflowcontrolpb.RaftAdmissionMeta)
 	if !ok {
 		return nil

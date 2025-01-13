@@ -1,21 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package zonepb
 
 import (
 	"fmt"
-	"runtime/debug"
 	"sort"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/proto"
 	"gopkg.in/yaml.v2"
@@ -55,13 +50,13 @@ var _ yaml.Unmarshaler = &ConstraintsConjunction{}
 // MarshalYAML implements yaml.Marshaler.
 func (c ConstraintsConjunction) MarshalYAML() (interface{}, error) {
 	return nil, fmt.Errorf(
-		"MarshalYAML should never be called directly on Constraints (%v): %v", c, debug.Stack())
+		"MarshalYAML should never be called directly on Constraints (%v): %v", c, debugutil.Stack())
 }
 
 // UnmarshalYAML implements yaml.Marshaler.
 func (c *ConstraintsConjunction) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return fmt.Errorf(
-		"UnmarshalYAML should never be called directly on Constraints: %v", debug.Stack())
+		"UnmarshalYAML should never be called directly on Constraints: %v", debugutil.Stack())
 }
 
 // ConstraintsList is an alias for a slice of Constraints that can be

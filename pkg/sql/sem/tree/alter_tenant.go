@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -22,9 +17,9 @@ type AlterTenantReplication struct {
 	Command                     JobCommand
 	Cutover                     *ReplicationCutoverTime
 	ReplicationSourceTenantName *TenantSpec
-	// ReplicationSourceAddress is the address of the source cluster that we are
-	// replicating data from.
-	ReplicationSourceAddress Expr
+	// ReplicationSourceConnUri is a connection uri of the source cluster that we
+	// are replicating data from.
+	ReplicationSourceConnUri Expr
 
 	Options TenantReplicationOptions
 }
@@ -48,11 +43,11 @@ func (n *AlterTenantReplication) Format(ctx *FmtCtx) {
 		ctx.WriteString("START REPLICATION OF ")
 		ctx.FormatNode(n.ReplicationSourceTenantName)
 		ctx.WriteString(" ON ")
-		_, canOmitParentheses := n.ReplicationSourceAddress.(alreadyDelimitedAsSyntacticDExpr)
+		_, canOmitParentheses := n.ReplicationSourceConnUri.(alreadyDelimitedAsSyntacticDExpr)
 		if !canOmitParentheses {
 			ctx.WriteByte('(')
 		}
-		ctx.FormatNode(n.ReplicationSourceAddress)
+		ctx.FormatNode(n.ReplicationSourceConnUri)
 		if !canOmitParentheses {
 			ctx.WriteByte(')')
 		}

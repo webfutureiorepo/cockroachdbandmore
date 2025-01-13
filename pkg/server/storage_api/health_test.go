@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage_api_test
 
@@ -49,7 +44,16 @@ func TestHealthAPI(t *testing.T) {
 			return srvtestutils.GetAdminJSONProto(ts, "health", &resp)
 		})
 
-		// Make the SQL listener appear unavailable. Verify that health fails after that.
+		// Before we start the test, ensure that the health check succeeds. This is
+		// contingent on the Server heartbeating its liveness record, which can race
+		// with this check here.
+		testutils.SucceedsSoon(t, func() error {
+			var resp serverpb.HealthResponse
+			return srvtestutils.GetAdminJSONProto(ts, "health?ready=1", &resp)
+		})
+
+		// Make the SQL listener appear unavailable. Verify that health fails after
+		// that.
 		ts.SetReady(false)
 		var resp serverpb.HealthResponse
 		err := srvtestutils.GetAdminJSONProto(ts, "health?ready=1", &resp)
@@ -75,6 +79,13 @@ func TestHealthAPI(t *testing.T) {
 		if err := srvtestutils.GetAdminJSONProto(s, "health", &resp); err != nil {
 			t.Fatal(err)
 		}
+
+		// Before we start the test, ensure that the health check succeeds. This is
+		// contingent on the Server heartbeating its liveness record, and we want
+		// that to happen before we pause heartbeats.
+		testutils.SucceedsSoon(t, func() error {
+			return srvtestutils.GetAdminJSONProto(s, "health?ready=1", &resp)
+		})
 
 		// Expire this node's liveness record by pausing heartbeats and advancing the
 		// server's clock.

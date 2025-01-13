@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cluster
 
@@ -15,8 +10,10 @@ import (
 	gosql "database/sql"
 	"os"
 
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/grafana"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
+	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/prometheus"
@@ -32,9 +29,11 @@ type Cluster interface {
 	// Selecting nodes.
 
 	All() option.NodeListOption
+	CRDBNodes() option.NodeListOption
 	Range(begin, end int) option.NodeListOption
 	Nodes(ns ...int) option.NodeListOption
 	Node(i int) option.NodeListOption
+	WorkloadNode() option.NodeListOption
 
 	// Uploading and downloading from/to nodes.
 
@@ -53,6 +52,10 @@ type Cluster interface {
 	// used by builds with runtime assertions enabled.
 	SetRandomSeed(seed int64)
 
+	// SetDefaultVirtualCluster changes the virtual cluster tests
+	// connect to by default.
+	SetDefaultVirtualCluster(string)
+
 	// Starting and stopping CockroachDB.
 
 	StartE(ctx context.Context, l *logger.Logger, startOpts option.StartOpts, settings install.ClusterSettings, opts ...option.Option) error
@@ -61,13 +64,17 @@ type Cluster interface {
 	Stop(ctx context.Context, l *logger.Logger, stopOpts option.StopOpts, opts ...option.Option)
 	SignalE(ctx context.Context, l *logger.Logger, sig int, opts ...option.Option) error
 	Signal(ctx context.Context, l *logger.Logger, sig int, opts ...option.Option)
-	StopCockroachGracefullyOnNode(ctx context.Context, l *logger.Logger, node int) error
 	NewMonitor(context.Context, ...option.Option) Monitor
 
 	// Starting virtual clusters.
 
-	StartServiceForVirtualClusterE(ctx context.Context, l *logger.Logger, externalNodes option.NodeListOption, startOpts option.StartOpts, settings install.ClusterSettings, opts ...option.Option) error
-	StartServiceForVirtualCluster(ctx context.Context, l *logger.Logger, externalNodes option.NodeListOption, startOpts option.StartOpts, settings install.ClusterSettings, opts ...option.Option)
+	StartServiceForVirtualClusterE(ctx context.Context, l *logger.Logger, startOpts option.StartOpts, settings install.ClusterSettings) error
+	StartServiceForVirtualCluster(ctx context.Context, l *logger.Logger, startOpts option.StartOpts, settings install.ClusterSettings)
+
+	// Stopping virtual clusters.
+
+	StopServiceForVirtualClusterE(ctx context.Context, l *logger.Logger, stopOpts option.StopOpts) error
+	StopServiceForVirtualCluster(ctx context.Context, l *logger.Logger, stopOpts option.StopOpts)
 
 	// Hostnames and IP addresses of the nodes.
 
@@ -79,18 +86,18 @@ type Cluster interface {
 
 	// SQL connection strings.
 
-	InternalPGUrl(ctx context.Context, l *logger.Logger, node option.NodeListOption, tenant string, sqlInstance int) ([]string, error)
-	ExternalPGUrl(ctx context.Context, l *logger.Logger, node option.NodeListOption, tenant string, sqlInstance int) ([]string, error)
+	InternalPGUrl(ctx context.Context, l *logger.Logger, node option.NodeListOption, opts roachprod.PGURLOptions) ([]string, error)
+	ExternalPGUrl(ctx context.Context, l *logger.Logger, node option.NodeListOption, opts roachprod.PGURLOptions) ([]string, error)
 
 	// SQL clients to nodes.
 
-	Conn(ctx context.Context, l *logger.Logger, node int, opts ...func(*option.ConnOption)) *gosql.DB
-	ConnE(ctx context.Context, l *logger.Logger, node int, opts ...func(*option.ConnOption)) (*gosql.DB, error)
+	Conn(ctx context.Context, l *logger.Logger, node int, opts ...option.OptionFunc) *gosql.DB
+	ConnE(ctx context.Context, l *logger.Logger, node int, opts ...option.OptionFunc) (*gosql.DB, error)
 
 	// URLs and Ports for the Admin UI.
 
-	InternalAdminUIAddr(ctx context.Context, l *logger.Logger, node option.NodeListOption) ([]string, error)
-	ExternalAdminUIAddr(ctx context.Context, l *logger.Logger, node option.NodeListOption) ([]string, error)
+	InternalAdminUIAddr(ctx context.Context, l *logger.Logger, node option.NodeListOption, opts ...option.OptionFunc) ([]string, error)
+	ExternalAdminUIAddr(ctx context.Context, l *logger.Logger, node option.NodeListOption, opts ...option.OptionFunc) ([]string, error)
 	AdminUIPorts(ctx context.Context, l *logger.Logger, node option.NodeListOption, tenant string, sqlInstance int) ([]int, error)
 
 	// Running commands on nodes.
@@ -128,7 +135,7 @@ type Cluster interface {
 
 	Spec() spec.ClusterSpec
 	Name() string
-	Cloud() string
+	Cloud() spec.Cloud
 	IsLocal() bool
 	// IsSecure returns true iff the cluster uses TLS.
 	IsSecure() bool
@@ -137,8 +144,8 @@ type Cluster interface {
 
 	// Deleting CockroachDB data and logs on nodes.
 
-	WipeE(ctx context.Context, l *logger.Logger, preserveCerts bool, opts ...option.Option) error
-	Wipe(ctx context.Context, preserveCerts bool, opts ...option.Option)
+	WipeE(ctx context.Context, l *logger.Logger, opts ...option.Option) error
+	Wipe(ctx context.Context, opts ...option.Option)
 
 	// DNS
 
@@ -165,6 +172,8 @@ type Cluster interface {
 
 	StartGrafana(ctx context.Context, l *logger.Logger, promCfg *prometheus.Config) error
 	StopGrafana(ctx context.Context, l *logger.Logger, dumpDir string) error
+	AddGrafanaAnnotation(ctx context.Context, l *logger.Logger, req grafana.AddAnnotationRequest) error
+	AddInternalGrafanaAnnotation(ctx context.Context, l *logger.Logger, req grafana.AddAnnotationRequest) error
 
 	// Volume snapshot related APIs.
 	//
@@ -198,4 +207,7 @@ type Cluster interface {
 
 	// GetPreemptedVMs gets any VMs that were part of the cluster but preempted by cloud vendor.
 	GetPreemptedVMs(ctx context.Context, l *logger.Logger) ([]vm.PreemptedVM, error)
+
+	// CaptureSideEyeSnapshot triggers a side-eye snapshot if side-eye is enabled in the enviroment.
+	CaptureSideEyeSnapshot(ctx context.Context) string
 }

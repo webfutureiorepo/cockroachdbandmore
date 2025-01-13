@@ -1,3 +1,8 @@
+// Copyright 2022 The Cockroach Authors.
+//
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
 @import "../core/index.module";
 
 .popup-content {
@@ -11,7 +16,7 @@
     padding-bottom: 10px;
 
     a {
-      // Matches the color of .ant-dropdown, needed to override default anchor color. A cleaner way would be to install
+      // Matches the color of .crl-ant-dropdown, needed to override default anchor color. A cleaner way would be to install
       // and set up antd-scss-theme-plugin, and use the antd text-color variable.
       color: rgba(0, 0, 0, 0.65);
     }
@@ -25,21 +30,8 @@
     height: 12px;
   }
 
-  :global(.ant-calendar-picker) {
-    width: 290px;
+  :global(.crl-ant-picker) {
     margin-right: 14px;
-    input {
-      padding-left: 34px;
-    }
-  }
-
-  :global(.ant-time-picker-icon),
-  :global(.ant-calendar-picker-icon) {
-    left: 12px;
-  }
-
-  :global(.ant-time-picker) {
-    width: 150px;
   }
 }
 
@@ -49,4 +41,18 @@
   button {
     margin-left: 8px;
   }
+}
+
+.date-picker {
+  height: $spacing-x-large;
+  width: 290px;
+}
+
+.time-picker {
+  height: $spacing-x-large;
+  width: 150px;
+}
+
+.alert {
+  margin-top: $spacing-smaller;
 }

@@ -1,18 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colflow_test
 
 import (
 	"context"
-	"math"
 	"strings"
 	"testing"
 
@@ -41,15 +35,11 @@ func TestDrainingAfterRemoteError(t *testing.T) {
 	// Create a disk monitor for the temp storage only with 1 byte of space.
 	// This ensures that the query will run into "out of temporary storage"
 	// error.
-	diskMonitor := mon.NewMonitor(
-		"test-disk",
-		mon.DiskResource,
-		nil, /* curCount */
-		nil, /* maxHist */
-		-1,  /* increment: use default block size */
-		math.MaxInt64,
-		st,
-	)
+	diskMonitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-disk"),
+		Res:      mon.DiskResource,
+		Settings: st,
+	})
 	diskMonitor.Start(ctx, nil /* pool */, mon.NewStandaloneBudget(1))
 
 	// Set up a two node cluster.

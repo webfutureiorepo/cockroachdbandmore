@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigmanager
 
@@ -144,7 +139,7 @@ func (m *Manager) run(ctx context.Context) {
 
 	// Periodically check if the span config reconciliation job exists and start
 	// it if it doesn't.
-	timer := timeutil.NewTimer()
+	var timer timeutil.Timer
 	defer timer.Stop()
 
 	triggerJobCheck()
@@ -182,7 +177,7 @@ func (m *Manager) createAndStartJobIfNoneExists(ctx context.Context) (bool, erro
 
 	var job *jobs.Job
 	if err := m.db.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
-		exists, err := jobs.RunningJobExists(ctx, jobspb.InvalidJobID, txn, m.settings.Version,
+		exists, err := jobs.RunningJobExists(ctx, jobspb.InvalidJobID, txn,
 			jobspb.TypeAutoSpanConfigReconciliation)
 		if err != nil {
 			return err

@@ -1,27 +1,24 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import classNames from "classnames";
 import React from "react";
 import { connect } from "react-redux";
 import { Link } from "react-router-dom";
-import classNames from "classnames";
 
-import { allNodesHaveLocality } from "src/util/localities";
+import nodeMapScreenshot from "assets/nodeMapSteps/3-seeMap.png";
+import questionMap from "assets/questionMap.svg";
 import {
   instructionsBoxCollapsedSelector,
   setInstructionsBoxCollapsed,
 } from "src/redux/alerts";
-import { AdminUIState, AppDispatch } from "src/redux/state";
-import { nodeStatusesSelector } from "src/redux/nodes";
 import { LocalityTier } from "src/redux/localities";
+import { nodeStatusesSelector } from "src/redux/nodes";
+import { AdminUIState, AppDispatch } from "src/redux/state";
 import * as docsURL from "src/util/docs";
-import nodeMapScreenshot from "assets/nodeMapSteps/3-seeMap.png";
-import questionMap from "assets/questionMap.svg";
+import { allNodesHaveLocality } from "src/util/localities";
 import "./instructionsBox.styl";
 
 interface InstructionsBoxProps {

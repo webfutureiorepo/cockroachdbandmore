@@ -1,19 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecovery
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -21,12 +19,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/loqrecovery/loqrecoverypb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 type CollectionStats struct {
@@ -35,54 +33,76 @@ type CollectionStats struct {
 	Descriptors int
 }
 
+// CollectRemoteReplicaInfo retrieves information about:
+//  1. range descriptors contained in cluster meta ranges if meta ranges
+//     are readable;
+//  2. replica information from all live nodes that have connection to
+//     the target node.
+//
+// maxConcurrency is the maximum parallelism that will be used when fanning out
+// RPCs to nodes in the cluster. A value of 0 disables concurrency. A negative
+// value configures no limit for concurrency.
+// If logOutput is not nil, this function will write when a node is visited,
+// and when a node needs to be revisited.
 func CollectRemoteReplicaInfo(
-	ctx context.Context, c serverpb.AdminClient,
+	ctx context.Context, c serverpb.AdminClient, maxConcurrency int, logOutput io.Writer,
 ) (loqrecoverypb.ClusterReplicaInfo, CollectionStats, error) {
-	cc, err := c.RecoveryCollectReplicaInfo(ctx, &serverpb.RecoveryCollectReplicaInfoRequest{})
+	cc, err := c.RecoveryCollectReplicaInfo(ctx, &serverpb.RecoveryCollectReplicaInfoRequest{
+		MaxConcurrency: int32(maxConcurrency),
+	})
 	if err != nil {
 		return loqrecoverypb.ClusterReplicaInfo{}, CollectionStats{}, err
 	}
 	stores := make(map[roachpb.StoreID]struct{})
 	nodes := make(map[roachpb.NodeID]struct{})
+	replInfoMap := make(map[roachpb.NodeID][]loqrecoverypb.ReplicaInfo)
 	var descriptors []roachpb.RangeDescriptor
-	var clusterReplInfo []loqrecoverypb.NodeReplicaInfo
-	var nodeReplicas []loqrecoverypb.ReplicaInfo
-	var currentNode roachpb.NodeID
 	var metadata loqrecoverypb.ClusterMetadata
 	for {
 		info, err := cc.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if len(nodeReplicas) > 0 {
-					clusterReplInfo = append(clusterReplInfo, loqrecoverypb.NodeReplicaInfo{Replicas: nodeReplicas})
-				}
 				break
 			}
 			return loqrecoverypb.ClusterReplicaInfo{}, CollectionStats{}, err
 		}
 		if r := info.GetReplicaInfo(); r != nil {
-			if currentNode != r.NodeID {
-				currentNode = r.NodeID
-				if len(nodeReplicas) > 0 {
-					clusterReplInfo = append(clusterReplInfo, loqrecoverypb.NodeReplicaInfo{Replicas: nodeReplicas})
-					nodeReplicas = nil
-				}
-			}
-			nodeReplicas = append(nodeReplicas, *r)
 			stores[r.StoreID] = struct{}{}
 			nodes[r.NodeID] = struct{}{}
+
+			if _, ok := replInfoMap[r.NodeID]; !ok && logOutput != nil {
+				_, _ = fmt.Fprintf(logOutput, "Started getting replica info for node_id:%d.\n", r.NodeID)
+			}
+			replInfoMap[r.NodeID] = append(replInfoMap[r.NodeID], *r)
 		} else if d := info.GetRangeDescriptor(); d != nil {
 			descriptors = append(descriptors, *d)
 		} else if s := info.GetNodeStreamRestarted(); s != nil {
 			// If server had to restart a fan-out work because of error and retried,
 			// then we discard partial data for the node.
-			if s.NodeID == currentNode {
-				nodeReplicas = nil
+			delete(replInfoMap, s.NodeID)
+			if logOutput != nil {
+				_, _ = fmt.Fprintf(logOutput, "Discarding replica info for node_id:%d."+
+					"The node will be revisted.\n", s.NodeID)
 			}
+
 		} else if m := info.GetMetadata(); m != nil {
 			metadata = *m
+		} else {
+			return loqrecoverypb.ClusterReplicaInfo{}, CollectionStats{}, errors.AssertionFailedf(
+				"unknown info type: %T", info.GetInfo())
 		}
 	}
+	// Collapse the ReplicaInfos map into a slice, sorted by node ID.
+	replInfos := make([]loqrecoverypb.NodeReplicaInfo, 0, len(replInfoMap))
+	for _, replInfo := range replInfoMap {
+		if len(replInfo) == 0 {
+			continue
+		}
+		replInfos = append(replInfos, loqrecoverypb.NodeReplicaInfo{Replicas: replInfo})
+	}
+	slices.SortFunc(replInfos, func(a, b loqrecoverypb.NodeReplicaInfo) int {
+		return cmp.Compare(a.Replicas[0].NodeID, b.Replicas[0].NodeID)
+	})
 	// We don't want to process data outside of safe version range for this CLI
 	// binary. RPC allows us to communicate with a cluster that is newer than
 	// the binary, but it will not version gate the data to binary version so we
@@ -94,7 +114,7 @@ func CollectRemoteReplicaInfo(
 	return loqrecoverypb.ClusterReplicaInfo{
 			ClusterID:   metadata.ClusterID,
 			Descriptors: descriptors,
-			LocalInfo:   clusterReplInfo,
+			LocalInfo:   replInfos,
 			Version:     metadata.Version,
 		}, CollectionStats{
 			Nodes:       len(nodes),
@@ -185,10 +205,7 @@ func visitStoreReplicas(
 			return err
 		}
 
-		var localIsLeaseholder bool
-		if targetVersion.IsActive(clusterversion.V23_1) {
-			localIsLeaseholder = rstate.Lease != nil && rstate.Lease.Replica.StoreID == storeID
-		}
+		localIsLeaseholder := rstate.Lease != nil && rstate.Lease.Replica.StoreID == storeID
 
 		return send(loqrecoverypb.ReplicaInfo{
 			StoreID:                  storeID,

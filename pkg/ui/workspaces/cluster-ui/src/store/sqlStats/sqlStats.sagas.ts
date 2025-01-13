@@ -1,27 +1,26 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { PayloadAction } from "@reduxjs/toolkit";
 import { all, call, put, takeLatest, takeEvery } from "redux-saga/effects";
+
+import { resetSQLStats } from "src/api/sqlStatsApi";
 import {
   getCombinedStatements,
   StatementsRequest,
 } from "src/api/statementsApi";
-import { resetSQLStats } from "src/api/sqlStatsApi";
 import { actions as localStorageActions } from "src/store/localStorage";
+
+import { maybeError } from "../../util";
+import { actions as sqlDetailsStatsActions } from "../statementDetails/statementDetails.reducer";
+import { actions as txnStatsActions } from "../transactionStats";
+
 import {
   actions as sqlStatsActions,
   UpdateTimeScalePayload,
 } from "./sqlStats.reducer";
-import { actions as txnStatsActions } from "../transactionStats";
-import { actions as sqlDetailsStatsActions } from "../statementDetails/statementDetails.reducer";
 
 export function* refreshSQLStatsSaga(action: PayloadAction<StatementsRequest>) {
   yield put(sqlStatsActions.request(action.payload));
@@ -34,7 +33,7 @@ export function* requestSQLStatsSaga(
     const result = yield call(getCombinedStatements, action.payload);
     yield put(sqlStatsActions.received(result));
   } catch (e) {
-    yield put(sqlStatsActions.failed(e));
+    yield put(sqlStatsActions.failed(maybeError(e)));
   }
 }
 
@@ -58,7 +57,7 @@ export function* resetSQLStatsSaga() {
       put(txnStatsActions.invalidated()),
     ]);
   } catch (e) {
-    yield put(sqlStatsActions.failed(e));
+    yield put(sqlStatsActions.failed(maybeError(e)));
   }
 }
 

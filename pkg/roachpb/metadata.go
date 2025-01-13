@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachpb
 
@@ -98,13 +93,6 @@ func (r RangeID) String() string {
 
 // SafeValue implements the redact.SafeValue interface.
 func (r RangeID) SafeValue() {}
-
-// RangeIDSlice implements sort.Interface.
-type RangeIDSlice []RangeID
-
-func (r RangeIDSlice) Len() int           { return len(r) }
-func (r RangeIDSlice) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
-func (r RangeIDSlice) Less(i, j int) bool { return r[i] < r[j] }
 
 // ReplicaID is a custom type for a range replica ID.
 type ReplicaID int32
@@ -228,7 +216,7 @@ func (r *RangeDescriptor) Replicas() ReplicaSet {
 // SetReplicas overwrites the set of nodes/stores on which replicas of this
 // range are stored.
 func (r *RangeDescriptor) SetReplicas(replicas ReplicaSet) {
-	r.InternalReplicas = replicas.AsProto()
+	r.InternalReplicas = replicas.Descriptors()
 }
 
 // SetReplicaType changes the type of the replica with the given ID to the given
@@ -1017,4 +1005,19 @@ func (h *GCHint) advanceGCTimestamp(gcThreshold hlc.Timestamp) bool {
 	// If threshold >= max, erase both min and max.
 	h.GCTimestamp, h.GCTimestampNext = hlc.Timestamp{}, hlc.Timestamp{}
 	return true
+}
+
+type RangeDescriptorsByStartKey []RangeDescriptor
+
+func (r RangeDescriptorsByStartKey) Len() int {
+	return len(r)
+}
+func (r RangeDescriptorsByStartKey) Less(i, j int) bool {
+	return r[i].StartKey.AsRawKey().Less(r[j].StartKey.AsRawKey())
+}
+
+func (r RangeDescriptorsByStartKey) Swap(i, j int) {
+	tmp := r[i]
+	r[i] = r[j]
+	r[j] = tmp
 }

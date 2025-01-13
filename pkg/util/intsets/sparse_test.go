@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package intsets
 
@@ -31,10 +26,6 @@ func TestSparse(t *testing.T) {
 			if maxVal <= minVal {
 				continue
 			}
-			// We are using Parallel, we need to make local instances of the
-			// loop variables.
-			minVal := minVal
-			maxVal := maxVal
 			t.Run(fmt.Sprintf("%d_%d", minVal, maxVal), func(t *testing.T) {
 				t.Parallel() // SAFE FOR TESTING (this comment is for the linter)
 				rng, _ := randutil.NewTestRand()
@@ -80,10 +71,6 @@ func TestSparseSetOps(t *testing.T) {
 			if maxVal <= minVal {
 				continue
 			}
-			// We are using Parallel, we need to make local instances of the
-			// loop variables.
-			minVal := minVal
-			maxVal := maxVal
 			t.Run(fmt.Sprintf("%d_%d", minVal, maxVal), func(t *testing.T) {
 				t.Parallel() // SAFE FOR TESTING (this comment is for the linter)
 				rng, _ := randutil.NewTestRand()

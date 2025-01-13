@@ -1,19 +1,13 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package concurrency
 
 import (
 	"context"
 	"fmt"
-	"runtime/debug"
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -27,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -142,8 +137,9 @@ type Config struct {
 	Stopper        *stop.Stopper
 	IntentResolver IntentResolver
 	// Metrics.
-	TxnWaitMetrics *txnwait.Metrics
-	SlowLatchGauge *metric.Gauge
+	TxnWaitMetrics     *txnwait.Metrics
+	SlowLatchGauge     *metric.Gauge
+	LatchWaitDurations metric.IHistogram
 	// Configs + Knobs.
 	MaxLockTableSize  int64
 	DisableTxnPushing bool
@@ -172,6 +168,8 @@ func NewManager(cfg Config) Manager {
 			m: spanlatch.Make(
 				cfg.Stopper,
 				cfg.SlowLatchGauge,
+				cfg.Settings,
+				cfg.LatchWaitDurations,
 			),
 		},
 		lt: lt,
@@ -241,7 +239,7 @@ func (m *managerImpl) SequenceReq(
 	resp, err := m.sequenceReqWithGuard(ctx, g, branch)
 	if resp != nil || err != nil {
 		// Ensure that we release the guard if we return a response or an error.
-		m.FinishReq(g)
+		m.FinishReq(ctx, g)
 		return nil, resp, err
 	}
 	return g, nil, nil
@@ -304,7 +302,7 @@ func (m *managerImpl) sequenceReqWithGuard(
 				panic(redact.Safe(fmt.Sprintf("must not be holding latches\n"+
 					"this is tracked in github.com/cockroachdb/cockroach/issues/77663; please comment if seen\n"+
 					"eval_kind=%d, holding_latches=%t, branch=%d, first_iteration=%t, stack=\n%s",
-					g.EvalKind, g.HoldingLatches(), branch, firstIteration, string(debug.Stack()))))
+					g.EvalKind, g.HoldingLatches(), branch, firstIteration, debugutil.Stack())))
 			}
 			log.Event(ctx, "optimistic failed, so waiting for latches")
 			g.lg, err = m.lm.WaitUntilAcquired(ctx, g.lg)
@@ -344,7 +342,7 @@ func (m *managerImpl) sequenceReqWithGuard(
 		// true if ScanOptimistic was called above. Therefore it will also never
 		// be true if latchManager.AcquireOptimistic was called.
 		if g.ltg.ShouldWait() {
-			m.lm.Release(g.moveLatchGuard())
+			m.lm.Release(ctx, g.moveLatchGuard())
 
 			log.Event(ctx, "waiting in lock wait-queues")
 			if err := m.ltw.WaitOn(ctx, g.Req, g.ltg); err != nil {
@@ -428,7 +426,7 @@ func (m *managerImpl) PoisonReq(g *Guard) {
 }
 
 // FinishReq implements the RequestSequencer interface.
-func (m *managerImpl) FinishReq(g *Guard) {
+func (m *managerImpl) FinishReq(ctx context.Context, g *Guard) {
 	// NOTE: we release latches _before_ exiting lock wait-queues deliberately.
 	// Either order would be correct, but the order here avoids non-determinism in
 	// cases where a request A holds both latches and has claimed some keys by
@@ -447,7 +445,7 @@ func (m *managerImpl) FinishReq(g *Guard) {
 	// signaler wakes up (if anyone) will never bump into its mutex immediately
 	// upon resumption.
 	if lg := g.moveLatchGuard(); lg != nil {
-		m.lm.Release(lg)
+		m.lm.Release(ctx, lg)
 	}
 	if ltg := g.moveLockTableGuard(); ltg != nil {
 		m.lt.Dequeue(ltg)
@@ -503,13 +501,13 @@ func (m *managerImpl) HandleLockConflictError(
 	// not releasing lockWaitQueueGuards. We expect the caller of this method to
 	// then re-sequence the Request by calling SequenceReq with the un-latched
 	// Guard. This is analogous to iterating through the loop in SequenceReq.
-	m.lm.Release(g.moveLatchGuard())
+	m.lm.Release(ctx, g.moveLatchGuard())
 
 	// If the discovery process collected a set of intents to resolve before the
 	// next evaluation attempt, do so.
 	if toResolve := g.ltg.ResolveBeforeScanning(); len(toResolve) > 0 {
 		if err := m.ltw.ResolveDeferredIntents(ctx, g.Req.AdmissionHeader, toResolve); err != nil {
-			m.FinishReq(g)
+			m.FinishReq(ctx, g)
 			return nil, err
 		}
 	}
@@ -528,7 +526,7 @@ func (m *managerImpl) HandleTransactionPushError(
 	// caller of this method to then re-sequence the Request by calling
 	// SequenceReq with the un-latched Guard. This is analogous to iterating
 	// through the loop in SequenceReq.
-	m.lm.Release(g.moveLatchGuard())
+	m.lm.Release(ctx, g.moveLatchGuard())
 	return g
 }
 

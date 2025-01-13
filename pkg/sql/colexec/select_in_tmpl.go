@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -22,6 +17,8 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/apd/v3"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
@@ -56,6 +53,7 @@ var (
 // {{/*
 
 type _GOTYPESLICE interface{}
+type _GOTYPE_UPCAST_INT interface{}
 type _GOTYPE interface{}
 type _TYPE interface{}
 
@@ -81,6 +79,7 @@ const (
 )
 
 func GetInProjectionOperator(
+	ctx context.Context,
 	evalCtx *eval.Context,
 	allocator *colmem.Allocator,
 	t *types.T,
@@ -104,16 +103,17 @@ func GetInProjectionOperator(
 				outputIdx:      resultIdx,
 				negate:         negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(ctx, evalCtx, t, datumTuple)
 			return obj, nil
 			// {{end}}
 		}
 		// {{end}}
 	}
-	return nil, errors.Errorf("unhandled type: %s", t.Name())
+	return nil, errors.AssertionFailedf("unhandled type: %s", t.Name())
 }
 
 func GetInOperator(
+	ctx context.Context,
 	evalCtx *eval.Context,
 	t *types.T,
 	input colexecop.Operator,
@@ -132,13 +132,13 @@ func GetInOperator(
 				colIdx:         colIdx,
 				negate:         negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(ctx, evalCtx, t, datumTuple)
 			return obj, nil
 			// {{end}}
 		}
 		// {{end}}
 	}
-	return nil, errors.Errorf("unhandled type: %s", t.Name())
+	return nil, errors.AssertionFailedf("unhandled type: %s", t.Name())
 }
 
 // {{range .}}
@@ -146,7 +146,7 @@ func GetInOperator(
 
 type selectInOp_TYPE struct {
 	colexecop.OneInputHelper
-	filterRow []_GOTYPE
+	filterRow []_GOTYPE_UPCAST_INT
 	colIdx    int
 	hasNulls  bool
 	negate    bool
@@ -157,7 +157,7 @@ var _ colexecop.Operator = &selectInOp_TYPE{}
 type projectInOp_TYPE struct {
 	colexecop.OneInputHelper
 	allocator *colmem.Allocator
-	filterRow []_GOTYPE
+	filterRow []_GOTYPE_UPCAST_INT
 	colIdx    int
 	outputIdx int
 	hasNulls  bool
@@ -167,20 +167,25 @@ type projectInOp_TYPE struct {
 var _ colexecop.Operator = &projectInOp_TYPE{}
 
 func fillDatumRow_TYPE(
-	evalCtx *eval.Context, t *types.T, datumTuple *tree.DTuple,
-) ([]_GOTYPE, bool) {
+	ctx context.Context, evalCtx *eval.Context, t *types.T, datumTuple *tree.DTuple,
+) ([]_GOTYPE_UPCAST_INT, bool) {
 	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
+	datumTuple.Normalize(ctx, evalCtx)
 
+	// {{if or (eq .VecMethod "Int16") (eq .VecMethod "Int32")}}
+	// Ensure that we always upcast all integer types.
+	conv := colconv.GetDatumToPhysicalFn(types.Int)
+	//{{else}}
 	conv := colconv.GetDatumToPhysicalFn(t)
-	var result []_GOTYPE
+	// {{end}}
+	var result []_GOTYPE_UPCAST_INT
 	hasNulls := false
 	for _, d := range datumTuple.D {
 		if d == tree.DNull {
 			hasNulls = true
 		} else {
 			convRaw := conv(d)
-			converted := convRaw.(_GOTYPE)
+			converted := convRaw.(_GOTYPE_UPCAST_INT)
 			result = append(result, converted)
 		}
 	}
@@ -188,7 +193,7 @@ func fillDatumRow_TYPE(
 }
 
 func cmpIn_TYPE(
-	targetElem _GOTYPE, targetCol _GOTYPESLICE, filterRow []_GOTYPE, hasNulls bool,
+	targetElem _GOTYPE, targetCol _GOTYPESLICE, filterRow []_GOTYPE_UPCAST_INT, hasNulls bool,
 ) comparisonResult {
 	// Filter row input was already sorted in fillDatumRow_TYPE, so we can
 	// perform a binary search.

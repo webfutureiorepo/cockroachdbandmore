@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package randgen
 
@@ -89,7 +84,7 @@ outer:
 	sort.Slice(sobjIDs, func(i, j int) bool { return sobjIDs[i] < sobjIDs[j] })
 
 	// Look up the descriptors from the IDs.
-	descs, err := g.ext.coll.ByID(g.ext.txn).WithoutNonPublic().Get().Descs(ctx, sobjIDs)
+	descs, err := g.ext.coll.ByIDWithoutLeased(g.ext.txn).WithoutNonPublic().Get().Descs(ctx, sobjIDs)
 	if err != nil {
 		panic(genError{errors.Wrap(err, "retrieving template descriptors")})
 	}

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2017 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euxo pipefail
 
 write_teamcity_config() {
@@ -31,6 +37,8 @@ echo "deb https://packages.microsoft.com/repos/azure-cli/ $(lsb_release -cs) mai
 # Some images come with apt autoupgrade job running at start, let's give it a few minutes to finish to avoid races.
 echo "Sleeping for 3 minutes to allow apt daily cronjob to finish..."
 sleep 3m
+
+add-apt-repository ppa:git-core/ppa
 apt-get update
 
 # Installing gnome-keyring prevents the error described in
@@ -44,11 +52,11 @@ apt-get install --yes \
   docker-ce \
   docker-compose \
   flex \
+  git \
   gnome-keyring \
   google-cloud-sdk \
   google-cloud-cli-gke-gcloud-auth-plugin \
   gnupg2 \
-  git \
   jq \
   openjdk-11-jre-headless \
   pass \
@@ -63,8 +71,10 @@ apt-get install --yes \
 apt-get install --yes qemu binfmt-support qemu-user-static
 
 # Verify that both of the platforms we support Docker for can be built.
-docker run --attach=stdout --attach=stderr --platform=linux/amd64 --rm --pull=always registry.access.redhat.com/ubi9/ubi-minimal uname -p
-docker run --attach=stdout --attach=stderr --platform=linux/arm64 --rm --pull=always registry.access.redhat.com/ubi9/ubi-minimal uname -p
+if [[ $ARCH = x86_64 ]]; then
+    docker run --attach=stdout --attach=stderr --platform=linux/amd64 --rm --pull=always registry.access.redhat.com/ubi9/ubi-minimal uname -p
+    docker run --attach=stdout --attach=stderr --platform=linux/arm64 --rm --pull=always registry.access.redhat.com/ubi9/ubi-minimal uname -p
+fi
 
 case $ARCH in
     x86_64) WHICH=x86_64; SHASUM=97bf730372f9900b2dfb9206fccbcf92f5c7f3b502148b832e77451aa0f9e0e6 ;;

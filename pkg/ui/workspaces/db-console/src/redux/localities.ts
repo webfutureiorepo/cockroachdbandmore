@@ -1,14 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import groupBy from "lodash/groupBy";
+import isEmpty from "lodash/isEmpty";
+import mapValues from "lodash/mapValues";
+import partition from "lodash/partition";
 import { createSelector } from "reselect";
 
 import { selectCommissionedNodeStatuses } from "src/redux/nodes";
@@ -17,26 +15,26 @@ import { INodeStatus } from "src/util/proto";
 function buildLocalityTree(nodes: INodeStatus[] = [], depth = 0): LocalityTree {
   const exceedsDepth = (node: INodeStatus) =>
     node.desc.locality.tiers.length > depth;
-  const [subsequentNodes, thisLevelNodes] = _.partition(nodes, exceedsDepth);
+  const [subsequentNodes, thisLevelNodes] = partition(nodes, exceedsDepth);
 
-  const localityKeyGroups = _.groupBy(
+  const localityKeyGroups = groupBy(
     subsequentNodes,
     node => node.desc.locality.tiers[depth].key,
   );
 
-  const localityValueGroups = _.mapValues(
+  const localityValueGroups = mapValues(
     localityKeyGroups,
     (group: INodeStatus[]) =>
-      _.groupBy(group, node => node.desc.locality.tiers[depth].value),
+      groupBy(group, node => node.desc.locality.tiers[depth].value),
   );
 
-  const childLocalities = _.mapValues(localityValueGroups, groups =>
-    _.mapValues(groups, (group: INodeStatus[]) =>
+  const childLocalities = mapValues(localityValueGroups, groups =>
+    mapValues(groups, (group: INodeStatus[]) =>
       buildLocalityTree(group, depth + 1),
     ),
   );
 
-  const tiers = _.isEmpty(nodes)
+  const tiers = isEmpty(nodes)
     ? []
     : <LocalityTier[]>nodes[0].desc.locality.tiers.slice(0, depth);
 

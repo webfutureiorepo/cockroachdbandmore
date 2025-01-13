@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 package schemachange
 
 import (
@@ -72,8 +67,8 @@ const (
 		schema_id,
 		tables.id AS table_id,
 		tables.name AS table_name,
-		tables.descriptor AS table_descriptor,
-		json_array_elements(descriptor->'columns') AS column
+		tables.descriptor->'table' AS table_descriptor,
+		json_array_elements(descriptor->'table'->'columns') AS col
 	FROM tables`
 
 	// enumDescsQuery returns the JSONified version of all enum descriptors in
@@ -100,6 +95,14 @@ const (
 	functionDescsQuery = `SELECT id, schema_id, name, descriptor->'function' AS descriptor FROM descriptors WHERE descriptor ? 'function'`
 
 	regionsFromClusterQuery = `SELECT * FROM [SHOW REGIONS FROM CLUSTER]`
+
+	functionDepsQuery = `SELECT
+	objid AS from_oid, refobjid AS to_oid
+FROM
+	pg_depend AS d
+WHERE
+	d.classid = 'pg_catalog.pg_proc'::REGCLASS::INT8
+	AND d.refclassid = 'pg_catalog.pg_proc'::REGCLASS::INT8`
 )
 
 func regionsFromDatabaseQuery(database string) string {
@@ -164,13 +167,13 @@ func CollectOne[T any](
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		var zero T
-		return zero, errors.Wrapf(err, "CollectOne: Query: %q %q", query, args)
+		return zero, errors.Wrapf(err, "CollectOne: Query: %s Args: %s ", query, args)
 	}
 
 	result, err := pgx.CollectOneRow[T](rows, fn)
 	if err != nil {
 		var zero T
-		return zero, errors.Wrapf(err, "CollectOne: CollectOneRow: %q %q", query, args)
+		return zero, errors.Wrapf(err, "CollectOne: CollectOneRow: Query: %s Args: %s", query, args)
 	}
 
 	og.LogQueryResults(query, result, args...)
@@ -191,12 +194,12 @@ func Collect[T any](
 ) (result []T, err error) {
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return nil, errors.Wrapf(err, "Collect: Query: %q %q", query, args)
+		return nil, errors.Wrapf(err, "Collect: Query: %s Args: %s", query, args)
 	}
 
 	results, err := pgx.CollectRows(rows, fn)
 	if err != nil {
-		return nil, errors.Wrapf(err, "Collect: CollectRows: %q %q", query, args)
+		return nil, errors.Wrapf(err, "Collect: CollectRows: Query: %s Args: %s", query, args)
 	}
 
 	og.LogQueryResults(query, results, args...)

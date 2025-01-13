@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -273,12 +268,18 @@ func (mb *mutationBuilder) inferArbitersFromConflictOrds(
 // anti-join wraps the current mb.outScope.expr (which produces the insert rows)
 // and removes rows that would conflict with existing rows.
 //
+//   - texpr is the target table for the insert.
 //   - conflictOrds is the set of table column ordinals that the arbiter
 //     guarantees uniqueness of.
 //   - pred is the partial index or constraint predicate. If the arbiter is
 //     not a partial index or constraint, pred is nil.
 func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
-	inScope *scope, conflictOrds intsets.Fast, pred tree.Expr, uniqueWithoutIndex bool, uniqueOrd int,
+	inScope *scope,
+	texpr tree.TableExpr,
+	conflictOrds intsets.Fast,
+	pred tree.Expr,
+	uniqueWithoutIndex bool,
+	uniqueOrd int,
 ) {
 	locking := noRowLocking
 	// If we're using a weaker isolation level, we must lock the right side of the
@@ -303,16 +304,23 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 						Strength:   tree.ForShare,
 						Targets:    []tree.TableName{tree.MakeUnqualifiedTableName(mb.tab.Name())},
 						WaitPolicy: tree.LockWaitBlock,
-						// Unique arbiters must ensure the non-existence of certain rows, so
-						// we use predicate locks instead of record locks to prevent
-						// insertion of new rows into the locked span(s) by other concurrent
-						// transactions.
-						Form: tree.LockPredicate,
 					},
 				},
 			}
 		}
 	}
+
+	var indexFlags *tree.IndexFlags
+	if source, ok := texpr.(*tree.AliasedTableExpr); ok {
+		indexFlags = source.IndexFlags
+	}
+	if mb.b.evalCtx.SessionData().AvoidFullTableScansInMutations {
+		if indexFlags == nil {
+			indexFlags = &tree.IndexFlags{}
+		}
+		indexFlags.AvoidFullScan = true
+	}
+
 	// Build the right side of the anti-join. Use a new metadata instance
 	// of the mutation table so that a different set of column IDs are used for
 	// the two tables in the self-join.
@@ -323,7 +331,7 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 			includeSystem:    false,
 			includeInverted:  false,
 		}),
-		nil, /* indexFlags */
+		indexFlags,
 		locking,
 		inScope,
 		true, /* disableNotVisibleIndex */
@@ -395,6 +403,7 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 // left-joins each insert row to the target table, using the given conflict
 // columns as the join condition.
 //
+//   - texpr is the target table for the upsert.
 //   - conflictOrds is the set of table column ordinals that the arbiter
 //     guarantees uniqueness of.
 //   - pred is the partial index predicate. If the arbiter is not a partial
@@ -405,7 +414,12 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 //   - uniqueWithoutIndex is true if the arbiter is a unique constraint without
 //     an enforcing index.
 func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
-	inScope *scope, conflictOrds intsets.Fast, pred tree.Expr, uniqueWithoutIndex bool, uniqueOrd int,
+	inScope *scope,
+	texpr tree.TableExpr,
+	conflictOrds intsets.Fast,
+	pred tree.Expr,
+	uniqueWithoutIndex bool,
+	uniqueOrd int,
 ) {
 	locking := noRowLocking
 	// If we're using a weaker isolation level, we must lock the right side of the
@@ -426,16 +440,23 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 						Strength:   tree.ForUpdate,
 						Targets:    []tree.TableName{tree.MakeUnqualifiedTableName(mb.tab.Name())},
 						WaitPolicy: tree.LockWaitBlock,
-						// Unique arbiters must ensure the non-existence of certain rows, so
-						// we use predicate locks instead of record locks to prevent
-						// insertion of new rows into the locked span(s) by other concurrent
-						// transactions.
-						Form: tree.LockPredicate,
 					},
 				},
 			}
 		}
 	}
+
+	var indexFlags *tree.IndexFlags
+	if source, ok := texpr.(*tree.AliasedTableExpr); ok {
+		indexFlags = source.IndexFlags
+	}
+	if mb.b.evalCtx.SessionData().AvoidFullTableScansInMutations {
+		if indexFlags == nil {
+			indexFlags = &tree.IndexFlags{}
+		}
+		indexFlags.AvoidFullScan = true
+	}
+
 	// Build the right side of the left outer join. Use a different instance of
 	// table metadata so that col IDs do not overlap.
 	//
@@ -449,7 +470,7 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 			includeSystem:    true,
 			includeInverted:  false,
 		}),
-		nil, /* indexFlags */
+		indexFlags,
 		locking,
 		inScope,
 		true, /* disableNotVisibleIndex */
@@ -652,7 +673,7 @@ func (h *arbiterPredicateHelper) init(mb *mutationBuilder, arbiterPredicate tree
 		tabMeta:          mb.md.TableMeta(mb.tabID),
 		arbiterPredicate: arbiterPredicate,
 	}
-	h.im.Init(mb.b.factory, mb.md, mb.b.evalCtx)
+	h.im.Init(mb.b.ctx, mb.b.factory, mb.md, mb.b.evalCtx)
 }
 
 // tableScope returns a scope that can be used to build predicate expressions.
@@ -743,6 +764,8 @@ func (h *arbiterPredicateHelper) predicateIsImpliedByArbiterPredicate(pred memo.
 		return false
 	}
 
-	_, ok = h.im.FiltersImplyPredicate(arbiterFilters, pred)
+	// TODO(mgartner): Determine if we should pass the computed columns map
+	// here.
+	_, ok = h.im.FiltersImplyPredicate(arbiterFilters, pred, nil /* computedCols */)
 	return ok
 }

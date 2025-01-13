@@ -1,14 +1,10 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { RouteComponentProps } from "react-router";
+
 import {
   getMatchParamByName,
   executionIdAttr,
@@ -16,6 +12,9 @@ import {
   statementAttr,
   txnFingerprintIdAttr,
 } from "src/util";
+
+import { StmtInsightEvent } from "../insights";
+import { AppState } from "../store";
 
 // The functions in this file are agnostic to the different shape of each
 // state in db-console and cluster-ui. This file contains selector functions
@@ -46,3 +45,6 @@ export const selectTransactionFingerprintID = (
   _state: unknown,
   props: RouteComponentProps,
 ): string | null => getMatchParamByName(props.match, txnFingerprintIdAttr);
+
+export const selectStmtInsights = (state: AppState): StmtInsightEvent[] =>
+  state.adminUI?.stmtInsights?.data?.results;

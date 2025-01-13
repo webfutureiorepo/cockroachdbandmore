@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -70,7 +65,7 @@ func NewRelativeRankOperator(
 		fdSemaphore:     args.FdSemaphore,
 		inputTypes:      args.InputTypes,
 		diskAcc:         args.DiskAcc,
-		converterMemAcc: args.ConverterMemAcc,
+		diskQueueMemAcc: args.DiskQueueMemAcc,
 	}
 	switch windowFn {
 	case execinfrapb.WindowerSpec_PERCENT_RANK:
@@ -92,7 +87,7 @@ func NewRelativeRankOperator(
 			relativeRankInitFields: rrInitFields,
 		}, nil
 	default:
-		return nil, errors.Errorf("unsupported relative rank type %s", windowFn)
+		return nil, errors.AssertionFailedf("unsupported relative rank type %s", windowFn)
 	}
 }
 
@@ -208,7 +203,7 @@ type relativeRankInitFields struct {
 	inputTypes   []*types.T
 
 	diskAcc         *mon.BoundAccount
-	converterMemAcc *mon.BoundAccount
+	diskQueueMemAcc *mon.BoundAccount
 }
 
 type relativeRankSizesState struct {
@@ -284,7 +279,7 @@ func (r *_RELATIVE_RANK_STRINGOp) Init(ctx context.Context) {
 			DiskQueueCfg:       r.diskQueueCfg,
 			FDSemaphore:        r.fdSemaphore,
 			DiskAcc:            r.diskAcc,
-			ConverterMemAcc:    r.converterMemAcc,
+			DiskQueueMemAcc:    r.diskQueueMemAcc,
 		},
 	)
 	r.partitionsState.runningSizes = r.allocator.NewMemBatchWithFixedCapacity([]*types.T{types.Int}, coldata.BatchSize())
@@ -299,7 +294,7 @@ func (r *_RELATIVE_RANK_STRINGOp) Init(ctx context.Context) {
 			DiskQueueCfg:       r.diskQueueCfg,
 			FDSemaphore:        r.fdSemaphore,
 			DiskAcc:            r.diskAcc,
-			ConverterMemAcc:    r.converterMemAcc,
+			DiskQueueMemAcc:    r.diskQueueMemAcc,
 		},
 	)
 	r.peerGroupsState.runningSizes = r.allocator.NewMemBatchWithFixedCapacity([]*types.T{types.Int}, coldata.BatchSize())
@@ -313,7 +308,7 @@ func (r *_RELATIVE_RANK_STRINGOp) Init(ctx context.Context) {
 			DiskQueueCfg:       r.diskQueueCfg,
 			FDSemaphore:        r.fdSemaphore,
 			DiskAcc:            r.diskAcc,
-			ConverterMemAcc:    r.converterMemAcc,
+			DiskQueueMemAcc:    r.diskQueueMemAcc,
 		},
 	)
 	r.output = r.allocator.NewMemBatchWithFixedCapacity(append(r.inputTypes, types.Float), coldata.BatchSize())

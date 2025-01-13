@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package zone
 
@@ -18,8 +13,14 @@ import (
 
 // ZoneConfigWithRawBytes wraps a zone config together with its expected
 // raw bytes. For cached modified zone configs, the raw bytes should be the
-// deserialized bytes from the zone config proto. Though, the raw bytes should
-// be the raw value read from kv when it's first read from storage.
+// deserialized bytes from the zone config proto. When performing a CPut,
+// raw bytes should represent the same bytes that we expect to read from kv
+// when it's first read from storage. This is to ensure that the existing
+// value hasn't changed since we last read it.
+//
+// N.B. if we don't expect any bytes to be read from storage (i.e. we are
+// inserting a new zone config -- not updating an existing one), then the value
+// of raw bytes should be nil.
 type ZoneConfigWithRawBytes struct {
 	zc *zonepb.ZoneConfig
 	rb []byte

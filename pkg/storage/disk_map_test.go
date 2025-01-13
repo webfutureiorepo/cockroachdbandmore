@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/diskmap"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage/disk"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -30,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 // Helper function to run a datadriven test for a provided diskMap
@@ -180,7 +177,7 @@ func TestPebbleMap(t *testing.T) {
 	e, _, err := NewPebbleTempEngine(ctx, base.TempStorageConfig{
 		Path:     dir,
 		Settings: cluster.MakeClusterSettings(),
-	}, base.StoreSpec{})
+	}, base.StoreSpec{}, disk.NewWriteStatsManager(vfs.Default))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +196,7 @@ func TestPebbleMultiMap(t *testing.T) {
 	e, _, err := NewPebbleTempEngine(ctx, base.TempStorageConfig{
 		Path:     dir,
 		Settings: cluster.MakeClusterSettings(),
-	}, base.StoreSpec{})
+	}, base.StoreSpec{}, disk.NewWriteStatsManager(vfs.Default))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +215,7 @@ func TestPebbleMapClose(t *testing.T) {
 	e, _, err := newPebbleTempEngine(ctx, base.TempStorageConfig{
 		Path:     dir,
 		Settings: cluster.MakeClusterSettings(),
-	}, base.StoreSpec{})
+	}, base.StoreSpec{}, disk.NewWriteStatsManager(vfs.Default))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +322,7 @@ func BenchmarkPebbleMapWrite(b *testing.B) {
 	tempEngine, _, err := NewPebbleTempEngine(ctx, base.TempStorageConfig{
 		Path:     dir,
 		Settings: cluster.MakeClusterSettings(),
-	}, base.DefaultTestStoreSpec)
+	}, base.DefaultTestStoreSpec, disk.NewWriteStatsManager(vfs.Default))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -366,7 +363,7 @@ func BenchmarkPebbleMapIteration(b *testing.B) {
 	tempEngine, _, err := NewPebbleTempEngine(ctx, base.TempStorageConfig{
 		Path:     dir,
 		Settings: cluster.MakeClusterSettings(),
-	}, base.DefaultTestStoreSpec)
+	}, base.DefaultTestStoreSpec, disk.NewWriteStatsManager(vfs.Default))
 	if err != nil {
 		b.Fatal(err)
 	}

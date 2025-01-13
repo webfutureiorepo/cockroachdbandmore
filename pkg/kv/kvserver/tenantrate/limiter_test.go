@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantrate_test
 
@@ -33,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/metrictestutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
+	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
@@ -52,15 +48,15 @@ func TestCloser(t *testing.T) {
 	start := timeutil.Now()
 	timeSource := timeutil.NewManualTime(start)
 	factory := tenantrate.NewLimiterFactory(&st.SV, &tenantrate.TestingKnobs{
-		TimeSource: timeSource,
+		QuotaPoolOptions: []quotapool.Option{quotapool.WithTimeSource(timeSource)},
 	}, fakeAuthorizer{})
 	tenant := roachpb.MustMakeTenantID(2)
 	closer := make(chan struct{})
 	limiter := factory.GetTenant(ctx, tenant, closer)
 	// First Wait call will not block.
-	require.NoError(t, limiter.Wait(ctx, tenantcostmodel.TestingRequestInfo(1, 1, 1, 1)))
+	require.NoError(t, limiter.Wait(ctx, tenantcostmodel.BatchInfo{WriteCount: 1, WriteBytes: 1}))
 	errCh := make(chan error, 1)
-	go func() { errCh <- limiter.Wait(ctx, tenantcostmodel.TestingRequestInfo(1, 1, 1<<33, 1)) }()
+	go func() { errCh <- limiter.Wait(ctx, tenantcostmodel.BatchInfo{WriteCount: 1, WriteBytes: 1 << 33}) }()
 	testutils.SucceedsSoon(t, func() error {
 		if timers := timeSource.Timers(); len(timers) != 1 {
 			return errors.Errorf("expected 1 timer, found %d", len(timers))
@@ -89,10 +85,8 @@ func TestUseAfterRelease(t *testing.T) {
 	// block ~forever. We scale it a bit to stay away from overflow.
 	const n = math.MaxInt64 / 50
 
-	rq := tenantcostmodel.TestingRequestInfo(
-		2 /* writeReplicas */, n /* writeCount */, n /* writeBytes */, 1 /* *writeMultiplier */)
-	rs := tenantcostmodel.TestingResponseInfo(
-		true /* isRead */, n /* readCount */, n /* readBytes */, 1 /* readMultiplier */)
+	rq := tenantcostmodel.BatchInfo{WriteCount: n, WriteBytes: n}
+	rs := tenantcostmodel.BatchInfo{ReadCount: n, ReadBytes: n}
 
 	// Acquire once to exhaust the burst. The bucket is now deeply in the red.
 	require.NoError(t, lim.Wait(ctx, rq))
@@ -122,10 +116,10 @@ func TestUseAfterRelease(t *testing.T) {
 	// The read bytes are still recorded to the parent, even though the limiter
 	// was already released at that point. This isn't required behavior, what's
 	// more important is that we don't crash.
-	require.Equal(t, rs.ReadBytes(), factory.Metrics().ReadBytesAdmitted.Count())
+	require.Equal(t, rs.ReadBytes, factory.Metrics().ReadBytesAdmitted.Count())
 	// Write bytes got admitted only once because second attempt got aborted
 	// during Wait().
-	require.Equal(t, rq.WriteBytes(), factory.Metrics().WriteBytesAdmitted.Count())
+	require.Equal(t, rq.WriteBytes, factory.Metrics().WriteBytesAdmitted.Count())
 	// This is a Gauge and we want to make sure that we don't leak an increment to
 	// it, i.e. the Wait call both added and removed despite interleaving with the
 	// gauge being unlinked from the aggregating parent.
@@ -222,7 +216,7 @@ func (ts *testState) init(t *testing.T, d *datadriven.TestData) string {
 
 	parseSettings(t, d, &ts.config, ts.capabilities)
 	ts.rl = tenantrate.NewLimiterFactory(&ts.settings.SV, &tenantrate.TestingKnobs{
-		TimeSource: ts.clock,
+		QuotaPoolOptions: []quotapool.Option{quotapool.WithTimeSource(ts.clock)},
 	}, ts)
 	ts.rl.UpdateConfig(ts.config)
 	ts.m = metric.NewRegistry()
@@ -298,10 +292,10 @@ func (ts *testState) launch(t *testing.T, d *datadriven.TestData) string {
 		}
 		go func() {
 			// We'll not worry about ever releasing tenant Limiters.
-			reqInfo := tenantcostmodel.TestingRequestInfo(1, s.writeRequests, s.writeBytes, 1)
+			reqInfo := tenantcostmodel.BatchInfo{WriteCount: s.writeRequests, WriteBytes: s.writeBytes}
 			if s.writeRequests == 0 {
 				// Read-only request.
-				reqInfo = tenantcostmodel.TestingRequestInfo(0, 0, 0, 0)
+				reqInfo = tenantcostmodel.BatchInfo{}
 			}
 			s.reserveCh <- lims[0].Wait(s.ctx, reqInfo)
 		}()
@@ -398,7 +392,7 @@ func (ts *testState) recordRead(t *testing.T, d *datadriven.TestData) string {
 			d.Fatalf(t, "no outstanding limiters for %v", tid)
 		}
 		lims[0].RecordRead(
-			context.Background(), tenantcostmodel.TestingResponseInfo(true, r.ReadRequests, r.ReadBytes, 1))
+			context.Background(), tenantcostmodel.BatchInfo{ReadCount: r.ReadRequests, ReadBytes: r.ReadBytes})
 	}
 	return ts.FormatRunning()
 }
@@ -669,6 +663,10 @@ func (ts *testState) BindReader(tenantcapabilities.Reader) {}
 
 var _ tenantcapabilities.Authorizer = &testState{}
 
+func (ts *testState) HasCrossTenantRead(ctx context.Context, tenID roachpb.TenantID) bool {
+	return false
+}
+
 func (ts *testState) HasProcessDebugCapability(ctx context.Context, tenID roachpb.TenantID) error {
 	if ts.capabilities[tenID].CanDebugProcess {
 		return nil
@@ -687,6 +685,14 @@ func (ts *testState) HasNodeStatusCapability(_ context.Context, tenID roachpb.Te
 
 func (ts *testState) HasTSDBQueryCapability(_ context.Context, tenID roachpb.TenantID) error {
 	if ts.capabilities[tenID].CanViewTSDBMetrics {
+		return nil
+	} else {
+		return errors.New("unauthorized")
+	}
+}
+
+func (ts *testState) HasTSDBAllMetricsCapability(_ context.Context, tenID roachpb.TenantID) error {
+	if ts.capabilities[tenID].CanViewAllMetrics {
 		return nil
 	} else {
 		return errors.New("unauthorized")
@@ -779,10 +785,17 @@ type fakeAuthorizer struct{}
 
 var _ tenantcapabilities.Authorizer = &fakeAuthorizer{}
 
+func (fakeAuthorizer) HasCrossTenantRead(ctx context.Context, tenID roachpb.TenantID) bool {
+	return false
+}
+
 func (fakeAuthorizer) HasNodeStatusCapability(_ context.Context, tenID roachpb.TenantID) error {
 	return nil
 }
 func (fakeAuthorizer) HasTSDBQueryCapability(_ context.Context, tenID roachpb.TenantID) error {
+	return nil
+}
+func (fakeAuthorizer) HasTSDBAllMetricsCapability(_ context.Context, tenID roachpb.TenantID) error {
 	return nil
 }
 func (fakeAuthorizer) HasNodelocalStorageCapability(

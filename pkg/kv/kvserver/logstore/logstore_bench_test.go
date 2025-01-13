@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logstore
 
@@ -19,13 +14,13 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 type discardBatch struct {
@@ -38,7 +33,7 @@ func (b *discardBatch) Commit(bool) error {
 
 type noopSyncCallback struct{}
 
-func (noopSyncCallback) OnLogSync(context.Context, []raftpb.Message, storage.BatchCommitStats) {}
+func (noopSyncCallback) OnLogSync(context.Context, MsgStorageAppendDone, storage.BatchCommitStats) {}
 
 func BenchmarkLogStore_StoreEntries(b *testing.B) {
 	defer log.Scope(b).Close(b)
@@ -87,7 +82,8 @@ func runBenchmarkLogStore_StoreEntries(b *testing.B, bytes int64) {
 		Term:  1,
 		Index: 1,
 		Type:  raftpb.EntryNormal,
-		Data:  raftlog.EncodeCommandBytes(raftlog.EntryEncodingStandardWithoutAC, "deadbeef", data),
+		Data: raftlog.EncodeCommandBytes(
+			raftlog.EntryEncodingStandardWithoutAC, "deadbeef", data, 0 /* pri */),
 	})
 	stats := &AppendStats{}
 

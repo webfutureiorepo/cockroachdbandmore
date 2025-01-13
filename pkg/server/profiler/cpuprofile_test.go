@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
@@ -15,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/server/dumpstore"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -25,10 +19,8 @@ import (
 func TestCPUProfiler(t *testing.T) {
 	ctx := context.Background()
 	dumpStore := dumpstore.NewStore(t.TempDir(), nil, nil)
-	s := &cluster.Settings{}
+	s := cluster.MakeClusterSettings()
 	sv := &s.SV
-	s.Version = clusterversion.MakeVersionHandle(sv)
-	sv.Init(ctx, s.Version)
 	cpuProfileInterval.Override(ctx, sv, time.Hour)
 	cpuUsageCombined.Override(ctx, sv, 80)
 	pastTime := time.Date(2023, 1, 1, 1, 1, 1, 1, time.UTC)

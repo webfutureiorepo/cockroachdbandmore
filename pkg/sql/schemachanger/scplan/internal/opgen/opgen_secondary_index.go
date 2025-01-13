@@ -1,17 +1,11 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -190,13 +184,6 @@ func init() {
 			equiv(scpb.Status_BACKFILL_ONLY),
 			to(scpb.Status_ABSENT,
 				emit(func(this *scpb.SecondaryIndex, md *opGenContext) *scop.CreateGCJobForIndex {
-					if !md.ActiveVersion.IsActive(clusterversion.V23_1) {
-						return &scop.CreateGCJobForIndex{
-							TableID:             this.TableID,
-							IndexID:             this.IndexID,
-							StatementForDropJob: statementForDropJob(this, md),
-						}
-					}
 					return nil
 				}),
 				emit(func(this *scpb.SecondaryIndex) *scop.MakeIndexAbsent {

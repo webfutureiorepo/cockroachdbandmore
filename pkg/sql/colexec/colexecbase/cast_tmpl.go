@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -24,7 +19,6 @@ package colexecbase
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"math"
 
 	"github.com/cockroachdb/apd/v3"
@@ -44,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -106,7 +101,10 @@ func isIdentityCast(fromType, toType *types.T) bool {
 	return false
 }
 
+var errUnhandledCast = errors.New("unhandled cast")
+
 func GetCastOperator(
+	ctx context.Context,
 	allocator *colmem.Allocator,
 	input colexecop.Operator,
 	colIdx int,
@@ -182,11 +180,11 @@ func GetCastOperator(
 			// {{end}}
 		}
 	}
-	return nil, errors.Errorf(
-		"unhandled cast %s -> %s",
-		fromType.SQLStringForError(),
-		toType.SQLStringForError(),
-	)
+	err := errUnhandledCast
+	if log.ExpensiveLogEnabled(ctx, 1) {
+		err = errors.Newf("unhandled cast %s -> %s", fromType.SQLStringForError(), toType.SQLStringForError())
+	}
+	return nil, err
 }
 
 func IsCastSupported(fromType, toType *types.T) bool {
@@ -279,7 +277,7 @@ func (c *castOpNullAny) Next() coldata.Batch {
 			if vecNulls.NullAt(i) {
 				projNulls.SetNull(i)
 			} else {
-				colexecerror.InternalError(errors.Errorf("unexpected non-null at index %d", i))
+				colexecerror.InternalError(errors.AssertionFailedf("unexpected non-null at index %d", i))
 			}
 		}
 	} else {
@@ -287,7 +285,7 @@ func (c *castOpNullAny) Next() coldata.Batch {
 			if vecNulls.NullAt(i) {
 				projNulls.SetNull(i)
 			} else {
-				colexecerror.InternalError(fmt.Errorf("unexpected non-null at index %d", i))
+				colexecerror.InternalError(errors.AssertionFailedf("unexpected non-null at index %d", i))
 			}
 		}
 	}
@@ -331,7 +329,7 @@ func (c *castIdentityOp) Next() coldata.Batch {
 		return coldata.ZeroBatch
 	}
 	projVec := batch.ColVec(c.outputIdx)
-	c.allocator.PerformOperation([]coldata.Vec{projVec}, func() {
+	c.allocator.PerformOperation([]*coldata.Vec{projVec}, func() {
 		srcVec := batch.ColVec(c.colIdx)
 		if sel := batch.Selection(); sel != nil {
 			// We don't want to perform the deselection during copying, so we
@@ -371,7 +369,7 @@ func (c *castBPCharIdentityOp) Next() coldata.Batch {
 	outputNulls := outputVec.Nulls()
 	// Note that the loops below are not as optimized as in other cast operators
 	// since this operator should only be planned in tests.
-	c.allocator.PerformOperation([]coldata.Vec{outputVec}, func() {
+	c.allocator.PerformOperation([]*coldata.Vec{outputVec}, func() {
 		if sel := batch.Selection(); sel != nil {
 			for _, i := range sel[:n] {
 				if inputNulls.NullAt(i) {
@@ -413,9 +411,9 @@ func (c *castNativeToDatumOp) Next() coldata.Batch {
 	outputCol := outputVec.Datum()
 	outputNulls := outputVec.Nulls()
 	toType := outputVec.Type()
-	c.allocator.PerformOperation([]coldata.Vec{outputVec}, func() {
-		if n > c.da.AllocSize {
-			c.da.AllocSize = n
+	c.allocator.PerformOperation([]*coldata.Vec{outputVec}, func() {
+		if n > c.da.DefaultAllocSize {
+			c.da.DefaultAllocSize = n
 		}
 		if cap(c.scratch) < n {
 			c.scratch = make([]tree.Datum, n)
@@ -518,7 +516,7 @@ func (c *cast_NAMEOp) Next() coldata.Batch {
 	// Remove unused warnings.
 	_ = toType
 	c.allocator.PerformOperation(
-		[]coldata.Vec{outputVec}, func() {
+		[]*coldata.Vec{outputVec}, func() {
 			inputCol := inputVec._FROM_TYPE()
 			inputNulls := inputVec.Nulls()
 			outputCol := outputVec._TO_TYPE()

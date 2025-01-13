@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowflow
 
@@ -25,7 +20,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 type rowBasedFlow struct {
@@ -39,6 +36,10 @@ type rowBasedFlow struct {
 	// Note that due to the row exec engine infrastructure, it is too complicated to attach
 	// flow-level stats to a flow-level span, so they are added to the last outbox's span.
 	numOutboxes int32
+
+	// monitors tracks all memory and disk monitors that this flow created and
+	// is responsible for closing.
+	monitors []*mon.BytesMonitor
 }
 
 var _ flowinfra.Flow = &rowBasedFlow{}
@@ -234,7 +235,7 @@ func (f *rowBasedFlow) makeProcessorAndOutput(
 			return nil, nil, err
 		}
 	} else {
-		r, err := f.setupRouter(spec, ps.ProcessorID)
+		r, err := f.setupRouter(ctx, spec, ps.ProcessorID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -445,7 +446,7 @@ func (f *rowBasedFlow) setupOutboundStream(
 //
 // Pass-through routers are not supported; they should be handled separately.
 func (f *rowBasedFlow) setupRouter(
-	spec *execinfrapb.OutputRouterSpec, processorID int32,
+	ctx context.Context, spec *execinfrapb.OutputRouterSpec, processorID int32,
 ) (router, error) {
 	streams := make([]execinfra.RowReceiver, len(spec.Streams))
 	for i := range spec.Streams {
@@ -455,12 +456,35 @@ func (f *rowBasedFlow) setupRouter(
 			return nil, err
 		}
 	}
-	return makeRouter(spec, streams)
+	// Create monitors after successfully connecting the streams.
+	memoryMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
+	unlimitedMemMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
+	diskMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
+	for i := range spec.Streams {
+		memoryMonitors[i] = execinfra.NewLimitedMonitor(
+			ctx, f.Mon, &f.FlowCtx,
+			"router-limited-"+redact.SafeString(spec.Streams[i].StreamID.String()),
+		)
+		unlimitedMemMonitors[i] = execinfra.NewMonitor(
+			ctx, f.Mon, "router-unlimited-"+redact.SafeString(spec.Streams[i].StreamID.String()),
+		)
+		diskMonitors[i] = execinfra.NewMonitor(
+			ctx, f.DiskMonitor,
+			"router-disk-"+redact.SafeString(spec.Streams[i].StreamID.String()),
+		)
+	}
+	f.monitors = append(f.monitors, memoryMonitors...)
+	f.monitors = append(f.monitors, unlimitedMemMonitors...)
+	f.monitors = append(f.monitors, diskMonitors...)
+	return makeRouter(spec, streams, memoryMonitors, unlimitedMemMonitors, diskMonitors)
 }
 
 // Release releases this rowBasedFlow back to the pool.
 func (f *rowBasedFlow) Release() {
-	*f = rowBasedFlow{}
+	for i := range f.monitors {
+		f.monitors[i] = nil
+	}
+	*f = rowBasedFlow{monitors: f.monitors[:0]}
 	rowBasedFlowPool.Put(f)
 }
 
@@ -468,9 +492,10 @@ func (f *rowBasedFlow) Release() {
 func (f *rowBasedFlow) Cleanup(ctx context.Context) {
 	startCleanup, endCleanup := f.FlowBase.GetOnCleanupFns()
 	startCleanup()
-	defer endCleanup()
-	// Ensure that the "head" processor is always closed.
-	f.ConsumerClosedOnHeadProc()
+	defer endCleanup(ctx)
+	for i := range f.monitors {
+		f.monitors[i].Stop(ctx)
+	}
 	f.FlowBase.Cleanup(ctx)
 	f.Release()
 }

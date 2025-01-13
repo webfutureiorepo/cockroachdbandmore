@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package partition
 
@@ -17,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
+	"github.com/lib/pq/oid"
 )
 
 // ParseDatumPath parses a span key string like "/1/2/3".
@@ -57,7 +53,9 @@ func ParseDatumPath(evalCtx *eval.Context, str string, typs []types.Family) []tr
 			var dInt *tree.DInt
 			dInt, err = tree.ParseDInt(valStr)
 			if err == nil {
-				val, err = tree.IntToOid(*dInt)
+				var o oid.Oid
+				o, err = tree.IntToOid(*dInt)
+				val = tree.NewDOid(o)
 			}
 		case types.UuidFamily:
 			val, err = tree.ParseDUuidFromString(valStr)

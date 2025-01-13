@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlclient
 
@@ -619,20 +614,27 @@ func (c *sqlConn) ExecTxn(
 }
 
 func (c *sqlConn) Exec(ctx context.Context, query string, args ...interface{}) error {
+	_, err := c.ExecWithRowsAffected(ctx, query, args...)
+	return err
+}
+
+func (c *sqlConn) ExecWithRowsAffected(
+	ctx context.Context, query string, args ...interface{},
+) (int64, error) {
 	if err := c.EnsureConn(ctx); err != nil {
-		return err
+		return 0, err
 	}
 	if c.connCtx.Echo {
 		fmt.Fprintln(c.errw, ">", query)
 	}
-	_, err := c.conn.Exec(ctx, query, args...)
+	r, err := c.conn.Exec(ctx, query, args...)
 	c.flushNotices()
 	if c.conn.IsClosed() {
 		c.reconnecting = true
 		c.silentClose()
-		return MarkWithConnectionClosed(err)
+		return r.RowsAffected(), MarkWithConnectionClosed(err)
 	}
-	return err
+	return r.RowsAffected(), err
 }
 
 func (c *sqlConn) Query(ctx context.Context, query string, args ...interface{}) (Rows, error) {

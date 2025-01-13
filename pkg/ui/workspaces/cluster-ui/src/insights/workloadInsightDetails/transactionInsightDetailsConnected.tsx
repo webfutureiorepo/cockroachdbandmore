@@ -1,19 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-import {
-  TransactionInsightDetails,
-  TransactionInsightDetailsStateProps,
-  TransactionInsightDetailsDispatchProps,
-} from "./transactionInsightDetails";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
+import { Dispatch } from "redux";
+
+import { TxnInsightDetailsRequest } from "src/api";
 import { AppState, uiConfigActions } from "src/store";
 import {
   selectTransactionInsightDetails,
@@ -21,13 +14,18 @@ import {
   actions,
   selectTransactionInsightDetailsMaxSizeReached,
 } from "src/store/insightDetails/transactionInsightDetails";
-import { TimeScale } from "../../timeScaleDropdown";
-import { actions as sqlStatsActions } from "../../store/sqlStats";
-import { Dispatch } from "redux";
-import { selectTimeScale } from "../../store/utils/selectors";
-import { selectHasAdminRole } from "../../store/uiConfig";
-import { TxnInsightDetailsRequest } from "src/api";
+
 import { actions as analyticsActions } from "../../store/analytics";
+import { actions as sqlStatsActions } from "../../store/sqlStats";
+import { selectHasAdminRole } from "../../store/uiConfig";
+import { selectTimeScale } from "../../store/utils/selectors";
+import { TimeScale } from "../../timeScaleDropdown";
+
+import {
+  TransactionInsightDetails,
+  TransactionInsightDetailsStateProps,
+  TransactionInsightDetailsDispatchProps,
+} from "./transactionInsightDetails";
 
 const mapStateToProps = (
   state: AppState,
@@ -74,7 +72,8 @@ export const TransactionInsightDetailsConnected = withRouter(
   connect<
     TransactionInsightDetailsStateProps,
     TransactionInsightDetailsDispatchProps,
-    RouteComponentProps
+    RouteComponentProps,
+    AppState
   >(
     mapStateToProps,
     mapDispatchToProps,

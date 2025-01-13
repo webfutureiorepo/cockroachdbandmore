@@ -1,15 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { join } from "path";
+
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import Long from "long";
 import React, { useCallback, useEffect } from "react";
 import { RouteComponentProps } from "react-router-dom";
+
 import {
   ListTracingSnapshotsResponse,
   GetTracingSnapshotResponse,
@@ -18,17 +18,13 @@ import {
   RecordingMode,
   GetTraceResponse,
 } from "src/api/tracezApi";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { SortSetting } from "src/sortedtable";
-import { join } from "path";
-import { getMatchParamByName } from "src/util";
-import { syncHistory } from "src/util";
-
-import { SnapshotComponent } from "./snapshotComponent";
-import Long from "long";
-import { SpanComponent } from "./spanComponent";
-import { RawTraceComponent } from "./rawTraceComponent";
 import { Breadcrumbs } from "src/breadcrumbs";
+import { SortSetting } from "src/sortedtable";
+import { getMatchParamByName, syncHistory } from "src/util";
+
+import { RawTraceComponent } from "./rawTraceComponent";
+import { SnapshotComponent } from "./snapshotComponent";
+import { SpanComponent } from "./spanComponent";
 
 // This component does some manual route management and navigation.
 // This is because the data model doesn't match the ideal route form.

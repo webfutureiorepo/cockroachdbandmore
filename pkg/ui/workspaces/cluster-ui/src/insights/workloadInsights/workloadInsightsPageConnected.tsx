@@ -1,37 +1,20 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
-import { AppState } from "src/store";
-import { actions as localStorageActions } from "src/store/localStorage";
-import { actions as sqlActions } from "src/store/sqlStats";
-import {
-  TransactionInsightsViewDispatchProps,
-  TransactionInsightsViewStateProps,
-} from "./transactionInsights";
-import {
-  StatementInsightsViewDispatchProps,
-  StatementInsightsViewStateProps,
-} from "./statementInsights";
-import { WorkloadInsightEventFilters } from "../types";
-import {
-  WorkloadInsightsViewProps,
-  WorkloadInsightsRootControl,
-} from "./workloadInsightRootControl";
+import { Dispatch } from "redux";
+
+import { StmtInsightsReq, TxnInsightsRequest } from "src/api";
+import { selectStmtInsights } from "src/selectors/common";
 import { SortSetting } from "src/sortedtable";
+import { AppState } from "src/store";
 import {
   actions as statementInsights,
   selectColumns,
   selectInsightTypes,
-  selectStmtInsights,
   selectStmtInsightsError,
   selectStmtInsightsLoading,
   selectStmtInsightsMaxApiReached,
@@ -45,12 +28,26 @@ import {
   selectTransactionInsightsLoading,
   selectTransactionInsightsMaxApiReached,
 } from "src/store/insights/transactionInsights";
-import { Dispatch } from "redux";
-import { TimeScale } from "../../timeScaleDropdown";
-import { StmtInsightsReq, TxnInsightsRequest } from "src/api";
-import { selectTimeScale } from "../../store/utils/selectors";
+import { actions as localStorageActions } from "src/store/localStorage";
+import { actions as sqlActions } from "src/store/sqlStats";
+
 import { actions as analyticsActions } from "../../store/analytics";
-import { selectUseObsService } from "../../store/uiConfig";
+import { selectTimeScale } from "../../store/utils/selectors";
+import { TimeScale } from "../../timeScaleDropdown";
+import { WorkloadInsightEventFilters } from "../types";
+
+import {
+  StatementInsightsViewDispatchProps,
+  StatementInsightsViewStateProps,
+} from "./statementInsights";
+import {
+  TransactionInsightsViewDispatchProps,
+  TransactionInsightsViewStateProps,
+} from "./transactionInsights";
+import {
+  WorkloadInsightsViewProps,
+  WorkloadInsightsRootControl,
+} from "./workloadInsightRootControl";
 
 const transactionMapStateToProps = (
   state: AppState,
@@ -83,7 +80,6 @@ const statementMapStateToProps = (
   timeScale: selectTimeScale(state),
   isLoading: selectStmtInsightsLoading(state),
   maxSizeApiReached: selectStmtInsightsMaxApiReached(state),
-  useObsService: selectUseObsService(state),
 });
 
 const TransactionDispatchProps = (
@@ -229,7 +225,8 @@ export const WorkloadInsightsPageConnected = withRouter(
     StateProps,
     DispatchProps,
     RouteComponentProps,
-    WorkloadInsightsViewProps
+    WorkloadInsightsViewProps,
+    AppState
   >(
     (state: AppState, props: RouteComponentProps) => ({
       transactionInsightsViewStateProps: transactionMapStateToProps(

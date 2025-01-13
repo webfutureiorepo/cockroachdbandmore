@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colserde
 
@@ -578,11 +573,9 @@ func getValueBytesAndOffsets(
 	return valueBytes, offsets[:batchLength+1]
 }
 
-// Release should be called once the converter is no longer needed so that its
+// Close should be called once the converter is no longer needed so that its
 // memory could be GCed.
-// TODO(yuzefovich): consider renaming this to Close in order to not be confused
-// with execreleasable.Releasable interface.
-func (c *ArrowBatchConverter) Release(ctx context.Context) {
+func (c *ArrowBatchConverter) Close(ctx context.Context) {
 	if c.acc != nil {
 		c.acc.Shrink(ctx, c.accountedFor)
 	}

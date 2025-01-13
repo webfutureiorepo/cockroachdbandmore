@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scanner
 
@@ -69,6 +64,9 @@ type Scanner struct {
 	// quoted. Used to distinguish between quoted and non-quoted in
 	// Inspect.
 	quoted bool
+	// retainComments indicates that comments should be collected in the
+	// Comments field. If it is false, they are discarded.
+	retainComments bool
 }
 
 // SQLScanner is a scanner with a SQL specific scan function
@@ -88,16 +86,26 @@ func (s *Scanner) Pos() int {
 
 // Init initializes a new Scanner that will process str.
 func (s *Scanner) Init(str string) {
-	s.in = str
-	s.pos = 0
-	// Preallocate some buffer space for identifiers etc.
-	s.bytesPrealloc = make([]byte, len(str))
+	*s = Scanner{
+		in:  str,
+		pos: 0,
+		// Preallocate some buffer space for identifiers etc.
+		bytesPrealloc: make([]byte, len(str)),
+	}
+}
+
+// RetainComments instructs the scanner to collect SQL comments in the Comments
+// field.
+func (s *Scanner) RetainComments() {
+	s.retainComments = true
 }
 
 // Cleanup is used to avoid holding on to memory unnecessarily (for the cases
 // where we reuse a Scanner).
 func (s *Scanner) Cleanup() {
 	s.bytesPrealloc = nil
+	s.Comments = nil
+	s.retainComments = false
 }
 
 func (s *Scanner) allocBytes(length int) []byte {
@@ -315,12 +323,32 @@ func (s *SQLScanner) Scan(lval ScanSymType) {
 			return
 		case '=': // <=
 			s.pos++
+			switch s.peek() {
+			case '>': // <=>
+				s.pos++
+				lval.SetID(lexbase.COS_DISTANCE)
+				return
+			}
 			lval.SetID(lexbase.LESS_EQUALS)
 			return
 		case '@': // <@
 			s.pos++
 			lval.SetID(lexbase.CONTAINED_BY)
 			return
+		case '-': // <-
+			switch s.peekN(1) {
+			case '>': // <->
+				s.pos += 2
+				lval.SetID(lexbase.DISTANCE)
+				return
+			}
+		case '#': // <#
+			switch s.peekN(1) {
+			case '>': // <#>
+				s.pos += 2
+				lval.SetID(lexbase.NEG_INNER_PRODUCT)
+				return
+			}
 		}
 		return
 
@@ -508,8 +536,10 @@ func (s *Scanner) skipWhitespace(lval ScanSymType, allowComments bool) (newline,
 			if present, cok := s.ScanComment(lval); !cok {
 				return false, false
 			} else if present {
-				// Mark down the comments that we found.
-				s.Comments = append(s.Comments, s.in[startPos:s.pos])
+				if s.retainComments {
+					// Mark down the comments that we found.
+					s.Comments = append(s.Comments, s.in[startPos:s.pos])
+				}
 				continue
 			}
 		}

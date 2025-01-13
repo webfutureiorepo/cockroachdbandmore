@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 
 package kvserver
@@ -20,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/echotest"
@@ -30,7 +27,6 @@ import (
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 func TestReplicaRaftOverload_computeExpendableOverloadedFollowers(t *testing.T) {
@@ -108,12 +104,12 @@ func TestReplicaRaftOverload_computeExpendableOverloadedFollowers(t *testing.T) 
 				}
 			}
 
-			getProgressMap := func(ctx context.Context) map[uint64]tracker.Progress {
+			getProgressMap := func(ctx context.Context) map[raftpb.PeerID]tracker.Progress {
 				log.Eventf(ctx, "getProgressMap was called")
 
 				// First, set up a progress map in which all replicas are tracked and are live.
-				m := map[uint64]tracker.Progress{}
-				for _, replDesc := range replDescs.AsProto() {
+				m := map[raftpb.PeerID]tracker.Progress{}
+				for _, replDesc := range replDescs.Descriptors() {
 					pr := tracker.Progress{
 						State:        tracker.StateReplicate,
 						Match:        match[replDesc.ReplicaID],
@@ -121,17 +117,17 @@ func TestReplicaRaftOverload_computeExpendableOverloadedFollowers(t *testing.T) 
 						IsLearner:    replDesc.Type == roachpb.LEARNER || replDesc.Type == roachpb.NON_VOTER,
 						Inflights:    tracker.NewInflights(1, 0), // avoid NPE
 					}
-					m[uint64(replDesc.ReplicaID)] = pr
+					m[raftpb.PeerID(replDesc.ReplicaID)] = pr
 				}
 				// Mark replicas as down or needing snapshot as configured.
 				for replicaID := range downMap {
-					id := uint64(replicaID)
+					id := raftpb.PeerID(replicaID)
 					pr := m[id]
 					pr.RecentActive = false
 					m[id] = pr
 				}
 				for replicaID := range snapshotMap {
-					id := uint64(replicaID)
+					id := raftpb.PeerID(replicaID)
 					pr := m[id]
 					pr.State = tracker.StateSnapshot
 					m[id] = pr

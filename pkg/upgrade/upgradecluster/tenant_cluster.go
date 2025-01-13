@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgradecluster
 
@@ -277,14 +272,9 @@ func annotateDialError(err error) error {
 // tenant upgrade interlock which prevent those new SQL servers from starting if
 // they're at an incompatible binary version (at the time of writing, in
 // SQLServer.preStart).
-func (t *TenantCluster) UntilClusterStable(ctx context.Context, fn func() error) error {
-	retryOpts := retry.Options{
-		InitialBackoff: 1 * time.Second,
-		MaxBackoff:     1 * time.Second,
-		Multiplier:     1.0,
-		MaxRetries:     60, // retry for 60 seconds
-	}
-
+func (t *TenantCluster) UntilClusterStable(
+	ctx context.Context, retryOpts retry.Options, fn func() error,
+) error {
 	instances, err := t.InstanceReader.GetAllInstancesNoCache(ctx)
 	if err != nil {
 		return err

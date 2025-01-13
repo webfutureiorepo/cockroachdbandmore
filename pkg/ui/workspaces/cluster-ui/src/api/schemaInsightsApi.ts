@@ -1,13 +1,16 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import {
+  InsightRecommendation,
+  InsightType,
+  recommendDropUnusedIndex,
+} from "../insights";
+import { HexStringToInt64String, indexUnusedDuration } from "../util";
+
+import { QuoteIdentifier } from "./safesql";
 import {
   SqlExecutionRequest,
   SqlTxnResult,
@@ -18,13 +21,6 @@ import {
   SqlApiResponse,
   formatApiResult,
 } from "./sqlApi";
-import {
-  InsightRecommendation,
-  InsightType,
-  recommendDropUnusedIndex,
-} from "../insights";
-import { HexStringToInt64String, indexUnusedDuration } from "../util";
-import { QuoteIdentifier } from "./safesql";
 
 // Export for db-console import from clusterUiApi.
 export type { InsightRecommendation } from "../insights";
@@ -65,11 +61,11 @@ type SchemaInsightQuery<RowType> = {
 };
 
 function clusterIndexUsageStatsToSchemaInsight(
-  txn_result: SqlTxnResult<ClusterIndexUsageStatistic>,
+  txnResult: SqlTxnResult<ClusterIndexUsageStatistic>,
 ): InsightRecommendation[] {
   const results: Record<string, InsightRecommendation> = {};
 
-  txn_result.rows.forEach(row => {
+  txnResult.rows.forEach(row => {
     const result = recommendDropUnusedIndex(row);
     if (result.recommend) {
       const key = row.table_id.toString() + row.index_id.toString();
@@ -98,11 +94,11 @@ function clusterIndexUsageStatsToSchemaInsight(
 }
 
 function createIndexRecommendationsToSchemaInsight(
-  txn_result: SqlTxnResult<CreateIndexRecommendationsResponse>,
+  txnResult: SqlTxnResult<CreateIndexRecommendationsResponse>,
 ): InsightRecommendation[] {
   const results: InsightRecommendation[] = [];
 
-  txn_result.rows.forEach(row => {
+  txnResult.rows.forEach(row => {
     row.index_recommendations.forEach(rec => {
       if (!rec.includes(" : ")) {
         return;
@@ -207,10 +203,10 @@ WHERE
     toSchemaInsight: createIndexRecommendationsToSchemaInsight,
   };
 
-const schemaInsightQueries: SchemaInsightQuery<SchemaInsightResponse>[] = [
-  dropUnusedIndexQuery,
-  createIndexRecommendationsQuery,
-];
+const schemaInsightQueries: Array<
+  | SchemaInsightQuery<ClusterIndexUsageStatistic>
+  | SchemaInsightQuery<CreateIndexRecommendationsResponse>
+> = [dropUnusedIndexQuery, createIndexRecommendationsQuery];
 
 function getQuery(
   csIndexUnusedDuration: string,
@@ -245,12 +241,14 @@ export async function getSchemaInsights(
       "retrieving insights information",
     );
   }
-  result.execution.txn_results.map(txn_result => {
+  result.execution.txn_results.map(txnResult => {
     // Note: txn_result.statement values begin at 1, not 0.
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
     const insightQuery: SchemaInsightQuery<SchemaInsightResponse> =
-      schemaInsightQueries[txn_result.statement - 1];
-    if (txn_result.rows) {
-      results.push(...insightQuery.toSchemaInsight(txn_result));
+      schemaInsightQueries[txnResult.statement - 1];
+    if (txnResult.rows) {
+      results.push(...insightQuery.toSchemaInsight(txnResult));
     }
   });
   return formatApiResult<InsightRecommendation[]>(

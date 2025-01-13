@@ -1,26 +1,22 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { Location, createPath } from "history";
 import { Action } from "redux";
 import { ThunkAction } from "redux-thunk";
 import { createSelector } from "reselect";
 
-import { userLogin, userLogout } from "src/util/api";
+import { cockroach } from "src/js/protos";
 import { AdminUIState } from "src/redux/state";
 import { LOGIN_PAGE, LOGOUT_PAGE } from "src/routes/login";
-import { cockroach } from "src/js/protos";
+import { userLogin, userLogout } from "src/util/api";
 import { getDataFromServer } from "src/util/dataFromServer";
 
+import { clearTenantCookie } from "./cookies";
+
 import UserLoginRequest = cockroach.server.serverpb.UserLoginRequest;
-import { maybeClearTenantCookie } from "./cookies";
 
 const dataFromServer = getDataFromServer();
 
@@ -190,7 +186,7 @@ const logoutBeginAction = {
 export function doLogin(
   username: string,
   password: string,
-): ThunkAction<Promise<void>, AdminUIState, void, Action> {
+): ThunkAction<Promise<void>, AdminUIState, unknown, Action> {
   return dispatch => {
     dispatch(loginBeginAction);
 
@@ -212,12 +208,14 @@ export function doLogin(
 export function doLogout(): ThunkAction<
   Promise<void>,
   AdminUIState,
-  void,
+  unknown,
   Action
 > {
   return dispatch => {
     dispatch(logoutBeginAction);
-    maybeClearTenantCookie();
+    // Clearing the tenant cookie on logout is necessary in order to
+    // avoid routing login requests to that specific tenant.
+    clearTenantCookie();
     // Make request to log out, reloading the page whether it succeeds or not.
     // If there was a successful log out but the network dropped the response somehow,
     // you'll get the login page on reload. If The logout actually didn't work, you'll

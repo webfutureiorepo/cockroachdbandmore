@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /*
 Package lang implements a language called Optgen, short for "optimizer
@@ -454,6 +449,28 @@ refers to the name of the node bound to that variable:
 
 In this pattern, Join is a tag that refers to a group of nodes. The replace
 expression will construct a node having the same name as the matched join node.
+
+# Accessing Relational Properties of Root Expression
+
+The built-in "Root" function returns the root of the group that is currently
+being explored. This allows exploration rules to access the relational
+properties of the group during matching.
+
+	[AssociateJoin, Explore]
+	(InnerJoin
+	  $left:(InnerJoin
+	    $innerLeft:*
+	    $innerRight:*
+	    $innerOn:*
+	  )
+	  $right:* & (ShouldReorderJoins (Root))
+	  $on:*
+	)
+	=>
+	...
+
+The "Root" function cannot be used in
+normalization rules - Optgen will fail to compile such a rule.
 
 # Name Parameters
 

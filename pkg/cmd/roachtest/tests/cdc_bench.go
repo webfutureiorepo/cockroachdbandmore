@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -14,9 +9,8 @@ import (
 	"bytes"
 	"context"
 	gosql "database/sql"
-	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"io"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -39,6 +33,7 @@ import (
 )
 
 type cdcBenchScanType string
+type cdcBenchServer string
 
 const (
 	// cdcBenchInitialScan runs an initial scan across a table, i.e. it scans and
@@ -59,11 +54,18 @@ const (
 	// do so efficiently. Ideally, this wouldn't take any time at all, but in
 	// practice it can.
 	cdcBenchColdCatchupScan cdcBenchScanType = "catchup-cold"
+
+	cdcBenchNoServer cdcBenchServer = ""
+	// The legacy processor was removed in 25.1+. In such
+	// timeseries, "processor" refers to the now defunct legacy
+	// processor.
+	cdcBenchSchedulerServer cdcBenchServer = "scheduler" // new scheduler
 )
 
 var (
 	cdcBenchScanTypes = []cdcBenchScanType{
 		cdcBenchInitialScan, cdcBenchCatchupScan, cdcBenchColdCatchupScan}
+	cdcBenchServers = []cdcBenchServer{cdcBenchSchedulerServer}
 )
 
 func registerCDCBench(r registry.Registry) {
@@ -71,7 +73,6 @@ func registerCDCBench(r registry.Registry) {
 	// Initial/catchup scan benchmarks.
 	for _, scanType := range cdcBenchScanTypes {
 		for _, ranges := range []int64{100, 100000} {
-			scanType, ranges := scanType, ranges // pin loop variables
 			const (
 				nodes  = 5 // excluding coordinator/workload node
 				cpus   = 16
@@ -86,8 +87,7 @@ func registerCDCBench(r registry.Registry) {
 				Benchmark:        true,
 				Cluster:          r.MakeClusterSpec(nodes+1, spec.CPU(cpus)),
 				CompatibleClouds: registry.AllExceptAWS,
-				Suites:           registry.Suites(registry.Nightly),
-				RequiresLicense:  true,
+				Suites:           registry.Suites(registry.Weekly),
 				Timeout:          4 * time.Hour, // Allow for the initial import and catchup scans with 100k ranges.
 				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 					runCDCBenchScan(ctx, t, c, scanType, rows, ranges, format)
@@ -97,9 +97,11 @@ func registerCDCBench(r registry.Registry) {
 	}
 
 	// Workload impact benchmarks.
-	for _, readPercent := range []int{0, 100} {
+	// TODO(#135952): Reenable readPercent 100. This benchmark historically tested
+	// kv100, but it was disabled because cdc bench can be flaky and kv100 does
+	// not provide enough value for the noise.
+	for _, readPercent := range []int{0} {
 		for _, ranges := range []int64{100, 100000} {
-			readPercent, ranges := readPercent, ranges // pin loop variables
 			const (
 				nodes  = 5 // excluding coordinator and workload nodes
 				cpus   = 16
@@ -115,30 +117,45 @@ func registerCDCBench(r registry.Registry) {
 				Benchmark:        true,
 				Cluster:          r.MakeClusterSpec(nodes+2, spec.CPU(cpus)),
 				CompatibleClouds: registry.AllExceptAWS,
-				Suites:           registry.Suites(registry.Nightly),
-				RequiresLicense:  true,
+				Suites:           registry.Suites(registry.Weekly),
 				Timeout:          time.Hour,
 				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-					runCDCBenchWorkload(ctx, t, c, ranges, readPercent, "")
+					runCDCBenchWorkload(ctx, t, c, ranges, readPercent, "", "", nullSink)
 				},
 			})
 
 			// Workloads with a concurrent changefeed running.
-			r.Add(registry.TestSpec{
-				Name: fmt.Sprintf(
-					"cdc/workload/kv%d/nodes=%d/cpu=%d/ranges=%s/server=scheduler/protocol=mux/format=%s/sink=null",
-					readPercent, nodes, cpus, formatSI(ranges), format),
-				Owner:            registry.OwnerCDC,
-				Benchmark:        true,
-				Cluster:          r.MakeClusterSpec(nodes+2, spec.CPU(cpus)),
-				CompatibleClouds: registry.AllExceptAWS,
-				Suites:           registry.Suites(registry.Nightly),
-				RequiresLicense:  true,
-				Timeout:          time.Hour,
-				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-					runCDCBenchWorkload(ctx, t, c, ranges, readPercent, format)
-				},
-			})
+			for _, server := range cdcBenchServers {
+				r.Add(registry.TestSpec{
+					Name: fmt.Sprintf(
+						"cdc/workload/kv%d/nodes=%d/cpu=%d/ranges=%s/server=%s/protocol=mux/format=%s/sink=null",
+						readPercent, nodes, cpus, formatSI(ranges), server, format),
+					Owner:            registry.OwnerCDC,
+					Benchmark:        true,
+					Cluster:          r.MakeClusterSpec(nodes+2, spec.CPU(cpus)),
+					CompatibleClouds: registry.AllExceptAWS,
+					Suites:           registry.Suites(registry.Weekly),
+					Timeout:          time.Hour,
+					Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+						runCDCBenchWorkload(ctx, t, c, ranges, readPercent, server, format, nullSink)
+					},
+				})
+
+				r.Add(registry.TestSpec{
+					Name: fmt.Sprintf(
+						"cdc/workload/kv%d/nodes=%d/cpu=%d/ranges=%s/server=%s/protocol=mux/format=%s/sink=kafka",
+						readPercent, nodes, cpus, formatSI(ranges), server, format),
+					Owner:            registry.OwnerCDC,
+					Benchmark:        true,
+					Cluster:          r.MakeClusterSpec(nodes+3, spec.CPU(cpus)),
+					CompatibleClouds: registry.AllExceptAWS,
+					Suites:           registry.Suites(registry.Weekly),
+					Timeout:          time.Hour,
+					Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+						runCDCBenchWorkload(ctx, t, c, ranges, readPercent, server, format, kafkaSink)
+					},
+				})
+			}
 		}
 	}
 }
@@ -153,10 +170,6 @@ func makeCDCBenchOptions(c cluster.Cluster) (option.StartOpts, install.ClusterSe
 	opts := option.DefaultStartOpts()
 	settings := install.MakeClusterSettings()
 	settings.ClusterSettings["kv.rangefeed.enabled"] = "true"
-
-	// Disable the stuck watcher, since it can cause continual catchup scans when
-	// ranges aren't able to keep up.
-	settings.ClusterSettings["kv.rangefeed.range_stuck_threshold"] = "0"
 
 	// Checkpoint frequently.  Some of the larger benchmarks might overload the
 	// cluster.  Producing frequent span-level checkpoints helps with recovery.
@@ -249,7 +262,7 @@ func runCDCBenchScan(
 	}
 
 	// Wait for system ranges to upreplicate.
-	require.NoError(t, WaitFor3XReplication(ctx, t, conn))
+	require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 	// Create and split the workload table. We don't import data here, because it
 	// imports before splitting, which takes a very long time.
@@ -259,7 +272,7 @@ func runCDCBenchScan(
 	t.L().Printf("creating table with %s ranges", humanize.Comma(numRanges))
 	c.Run(ctx, option.WithNodes(nCoord), fmt.Sprintf(
 		`./cockroach workload init kv --splits %d {pgurl:%d}`, numRanges, nData[0]))
-	require.NoError(t, WaitFor3XReplication(ctx, t, conn))
+	require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 	cursor := timeutil.Now() // before data is ingested
 
@@ -290,7 +303,7 @@ func runCDCBenchScan(
 	// finish time.
 	t.L().Printf("running changefeed %s scan", scanType)
 	with := fmt.Sprintf(`format = '%s', end_time = '%s'`,
-		format, timeutil.Now().Add(5*time.Second).Format(time.RFC3339))
+		format, timeutil.Now().Add(30*time.Second).Format(time.RFC3339))
 	switch scanType {
 	case cdcBenchInitialScan:
 		with += ", initial_scan = 'yes'"
@@ -326,12 +339,12 @@ func runCDCBenchScan(
 			return err
 		}
 
-		duration := info.finishedTime.Sub(info.startedTime)
+		duration := info.GetFinishedTime().Sub(info.startedTime)
 		rate := int64(float64(numRows) / duration.Seconds())
 		t.L().Printf("changefeed completed in %s (scanned %s rows per second)",
 			duration.Truncate(time.Second), humanize.Comma(rate))
 
-		// Record scan rate to stats.json.
+		// Record scan rate to stats file.
 		return writeCDCBenchStats(ctx, t, c, nCoord, "scan-rate", rate)
 	})
 
@@ -352,10 +365,12 @@ func runCDCBenchWorkload(
 	c cluster.Cluster,
 	numRanges int64,
 	readPercent int,
+	server cdcBenchServer,
 	format string,
+	sinkType sinkType,
 ) {
-	const sink = "null://"
 	var (
+		sinkURI   string
 		numNodes  = c.Spec().NodeCount
 		nData     = c.Range(1, numNodes-2)
 		nCoord    = c.Node(numNodes - 1)
@@ -367,14 +382,46 @@ func runCDCBenchWorkload(
 		insertCount  = int64(0)
 		cdcEnabled   = format != ""
 	)
+
+	switch sinkType {
+	case kafkaSink:
+		nData = c.Range(1, numNodes-3)
+		nCoord = c.Node(numNodes - 1)
+		nWorkload = c.Node(numNodes - 2)
+		nKafka := c.Node(numNodes)
+
+		kafka, cleanup := setupKafka(ctx, t, c, nKafka)
+		defer cleanup()
+		sinkURI = kafka.sinkURL(ctx)
+	case nullSink, "":
+		sinkURI = "null://"
+	default:
+		t.Fatalf("unsupported sink type %q", sinkType)
+	}
+
 	if readPercent == 100 {
 		insertCount = 1_000_000 // ingest some data to read
+	}
+	// Either of these will disable changefeeds. Make sure they're all disabled.
+	if server == "" || format == "" {
+		require.Empty(t, server)
+		require.Empty(t, format)
+		cdcEnabled = false
 	}
 
 	// Start data nodes first to place data on them. We'll start the changefeed
 	// coordinator later, since we don't want any data on it.
 	opts, settings := makeCDCBenchOptions(c)
 	settings.ClusterSettings["kv.rangefeed.enabled"] = strconv.FormatBool(cdcEnabled)
+	settings.ClusterSettings["server.child_metrics.enabled"] = "true"
+
+	switch server {
+	case cdcBenchSchedulerServer:
+		settings.ClusterSettings["kv.rangefeed.scheduler.enabled"] = "true"
+	case cdcBenchNoServer:
+	default:
+		t.Fatalf("unknown server type %q", server)
+	}
 
 	c.Start(ctx, t.L(), opts, settings, nData)
 	m := c.NewMonitor(ctx, nData.Merge(nCoord))
@@ -391,7 +438,7 @@ func runCDCBenchWorkload(
 	}
 
 	// Wait for system ranges to upreplicate.
-	require.NoError(t, WaitFor3XReplication(ctx, t, conn))
+	require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 	// Create and split the workload table.
 	//
@@ -400,7 +447,7 @@ func runCDCBenchWorkload(
 	t.L().Printf("creating table with %s ranges", humanize.Comma(numRanges))
 	c.Run(ctx, option.WithNodes(nWorkload), fmt.Sprintf(
 		`./cockroach workload init kv --splits %d {pgurl:%d}`, numRanges, nData[0]))
-	require.NoError(t, WaitFor3XReplication(ctx, t, conn))
+	require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 	// For read-only workloads, ingest some data. init --insert-count does not use
 	// the standard key generator that the read workload uses, so we have to write
@@ -435,7 +482,7 @@ func runCDCBenchWorkload(
 
 		require.NoError(t, conn.QueryRowContext(ctx, fmt.Sprintf(
 			`CREATE CHANGEFEED FOR kv.kv INTO '%s' WITH format = '%s', initial_scan = 'no'`,
-			sink, format)).
+			sinkURI, format)).
 			Scan(&jobID))
 
 		// Monitor the changefeed for failures. When the workload finishes, it will
@@ -452,7 +499,7 @@ func runCDCBenchWorkload(
 				switch jobs.Status(info.status) {
 				case jobs.StatusPending, jobs.StatusRunning:
 					doneValue := done.Load()
-					return doneValue != nil && info.highwaterTime.After(doneValue.(time.Time)), nil
+					return doneValue != nil && info.GetHighWater().After(doneValue.(time.Time)), nil
 				default:
 					return false, errors.Errorf("unexpected changefeed status %s", info.status)
 				}
@@ -460,7 +507,7 @@ func runCDCBenchWorkload(
 			if err != nil {
 				return err
 			}
-			t.L().Printf("changefeed watermark is %s", info.highwaterTime.Format(time.RFC3339))
+			t.L().Printf("changefeed watermark is %s", info.GetHighWater().Format(time.RFC3339))
 			return nil
 		})
 
@@ -472,13 +519,13 @@ func runCDCBenchWorkload(
 		info, err := waitForChangefeed(ctx, conn, jobID, t.L(), func(info changefeedInfo) (bool, error) {
 			switch jobs.Status(info.status) {
 			case jobs.StatusPending, jobs.StatusRunning:
-				return info.highwaterTime.After(now), nil
+				return info.GetHighWater().After(now), nil
 			default:
 				return false, errors.Errorf("unexpected changefeed status %s", info.status)
 			}
 		})
 		require.NoError(t, err)
-		t.L().Printf("changefeed watermark is %s", info.highwaterTime.Format(time.RFC3339))
+		t.L().Printf("changefeed watermark is %s", info.GetHighWater().Format(time.RFC3339))
 
 	} else {
 		t.L().Printf("control run, not starting changefeed")
@@ -498,10 +545,17 @@ func runCDCBenchWorkload(
 			extra += ` --tolerate-errors`
 		}
 		t.L().Printf("running workload")
+		labels := map[string]string{
+			"duration":     duration.String(),
+			"concurrency":  fmt.Sprintf("%d", concurrency),
+			"read_percent": fmt.Sprintf("%d", readPercent),
+			"insert_count": fmt.Sprintf("%d", insertCount),
+		}
+
 		err := c.RunE(ctx, option.WithNodes(nWorkload), fmt.Sprintf(
-			`./cockroach workload run kv --seed %d --histograms=%s/stats.json `+
+			`./cockroach workload run kv --seed %d %s `+
 				`--concurrency %d --duration %s --write-seq R%d --read-percent %d %s {pgurl:%d-%d}`,
-			workloadSeed, t.PerfArtifactsDir(), concurrency, duration, insertCount, readPercent, extra,
+			workloadSeed, roachtestutil.GetWorkloadHistogramArgs(t, c, labels), concurrency, duration, insertCount, readPercent, extra,
 			nData[0], nData[len(nData)-1]))
 		if err != nil {
 			return err
@@ -518,7 +572,7 @@ func runCDCBenchWorkload(
 				return err
 			}
 			t.L().Printf("waiting for changefeed watermark to reach %s (lagging by %s)",
-				now.Format(time.RFC3339), now.Sub(info.highwaterTime).Truncate(time.Second))
+				now.Format(time.RFC3339), now.Sub(info.GetHighWater()).Truncate(time.Second))
 		}
 		return nil
 	})
@@ -566,8 +620,8 @@ func waitForChangefeed(
 				return changefeedInfo{}, errors.Wrapf(err, "failed %d attempts to get changefeed info", maxLoadJobAttempts)
 			}
 			continue
-		} else if info.errMsg != "" {
-			return changefeedInfo{}, errors.Errorf("changefeed error: %s", info.errMsg)
+		} else if info.GetError() != "" {
+			return changefeedInfo{}, errors.Errorf("changefeed error: %s", info.GetError())
 		}
 		if ok, err := f(*info); err != nil {
 			return changefeedInfo{}, err
@@ -578,7 +632,7 @@ func waitForChangefeed(
 	}
 }
 
-// writeCDCBenchStats writes a single perf metric into stats.json on the
+// writeCDCBenchStats writes a single perf metric into stats file on the
 // given node, for graphing in roachperf.
 func writeCDCBenchStats(
 	ctx context.Context,
@@ -591,26 +645,24 @@ func writeCDCBenchStats(
 	// The easiest way to record a precise metric for roachperf is to cast it as a
 	// duration in seconds in the histogram's upper bound.
 	valueS := time.Duration(value) * time.Second
-	reg := histogram.NewRegistry(valueS, histogram.MockWorkloadName)
+
+	exporter := roachtestutil.CreateWorkloadHistogramExporter(t, c)
+	reg := histogram.NewRegistryWithExporter(valueS, histogram.MockWorkloadName, exporter)
+
 	bytesBuf := bytes.NewBuffer([]byte{})
-	jsonEnc := json.NewEncoder(bytesBuf)
+	writer := io.Writer(bytesBuf)
+
+	exporter.Init(&writer)
+	defer roachtestutil.CloseExporter(ctx, exporter, t, c, bytesBuf, node, "")
 
 	var err error
 	reg.GetHandle().Get(metric).Record(valueS)
 	reg.Tick(func(tick histogram.Tick) {
-		err = jsonEnc.Encode(tick.Snapshot())
+		err = tick.Exporter.SnapshotAndWrite(tick.Hist, tick.Now, tick.Elapsed, &tick.Name)
 	})
 	if err != nil {
 		return err
 	}
 
-	// Upload the perf artifacts to the given node.
-	path := filepath.Join(t.PerfArtifactsDir(), "stats.json")
-	if err := c.RunE(ctx, option.WithNodes(node), "mkdir -p "+filepath.Dir(path)); err != nil {
-		return err
-	}
-	if err := c.PutString(ctx, bytesBuf.String(), path, 0755, node); err != nil {
-		return err
-	}
 	return nil
 }

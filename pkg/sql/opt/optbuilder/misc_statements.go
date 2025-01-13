@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -148,6 +143,13 @@ func (b *Builder) buildControlSchedules(
 
 func (b *Builder) buildCreateStatistics(n *tree.CreateStats, inScope *scope) (outScope *scope) {
 	outScope = inScope.push()
+
+	// We add AS OF SYSTEM TIME '-1us' to trigger use of inconsistent
+	// scans if left unspecified. This prevents GC TTL errors.
+	if n.Options.AsOf.Expr == nil {
+		n.Options.AsOf.Expr = tree.NewStrVal("-1us")
+	}
+
 	outScope.expr = b.factory.ConstructCreateStatistics(&memo.CreateStatisticsPrivate{
 		Syntax: n,
 	})

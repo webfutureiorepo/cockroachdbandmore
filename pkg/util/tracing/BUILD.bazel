@@ -21,11 +21,13 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/settings",
-        "//pkg/util",
         "//pkg/util/allstacks",
         "//pkg/util/buildutil",
+        "//pkg/util/ctxutil",
+        "//pkg/util/debugutil",
         "//pkg/util/envutil",
         "//pkg/util/iterutil",
+        "//pkg/util/metamorphic",
         "//pkg/util/netutil/addr",
         "//pkg/util/protoutil",
         "//pkg/util/randutil",
@@ -65,10 +67,6 @@ go_test(
         "tracer_test.go",
     ],
     embed = [":tracing"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/ccl",

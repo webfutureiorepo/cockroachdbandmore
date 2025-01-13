@@ -17,6 +17,7 @@ go_library(
         "//pkg/util/timeutil",
         "//pkg/util/version",
         "//pkg/workload",
+        "@com_github_cockroachdb_cockroach_go_v2//crdb",
         "@com_github_cockroachdb_errors//:errors",
         "@org_golang_x_sync//errgroup",
         "@org_golang_x_time//rate",
@@ -32,10 +33,6 @@ go_test(
         "workloadsql_test.go",
     ],
     embed = [":workloadsql"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/security/securityassets",

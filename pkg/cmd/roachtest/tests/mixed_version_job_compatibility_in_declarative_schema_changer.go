@@ -1,17 +1,13 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 import (
 	"context"
+	gosql "database/sql"
 	"math/rand"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
@@ -31,11 +27,11 @@ func registerDeclarativeSchemaChangerJobCompatibilityInMixedVersion(r registry.R
 	// This test requires us to come back and change the stmts in executeSupportedDDLs to be those
 	// supported in the "previous" major release.
 	r.Add(registry.TestSpec{
-		Name:             "declarative_schema_changer/job-compatibility-mixed-version-V231-V232",
+		Name:             "declarative_schema_changer/job-compatibility-mixed-version-V242-V243",
 		Owner:            registry.OwnerSQLFoundations,
 		Cluster:          r.MakeClusterSpec(4),
 		CompatibleClouds: registry.AllExceptAWS,
-		Suites:           registry.Suites(registry.Nightly),
+		Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			runDeclarativeSchemaChangerJobCompatibilityInMixedVersion(ctx, t, c)
 		},
@@ -62,8 +58,8 @@ func setShortGCTTLInSystemZoneConfig(
 	return h.Exec(r, "ALTER RANGE default CONFIGURE ZONE USING gc.ttlseconds = 1;")
 }
 
-// executeSupportedDDLs tests all stmts supported in V23_1.
-// Stmts here is based on set up in testSetupResetStep.
+// executeSupportedDDLs tests all stmts which had DSC support added in the
+// previous major version.
 func executeSupportedDDLs(
 	ctx context.Context,
 	c cluster.Cluster,
@@ -72,21 +68,26 @@ func executeSupportedDDLs(
 	r *rand.Rand,
 	testingUpgradedNodes bool,
 ) error {
-	nodes := option.NodeListOption{helper.RandomNode(r, c.All())}
+	nodes := c.All().SeededRandNode(r)
 	// We are not always guaranteed to be in a mixed-version binary state.
 	// If we are, update the set of nodes; otherwise, we will choose a random
 	// node.
-	if helper.Context.MixedBinary() {
+	if helper.Context().MixedBinary() {
 		if testingUpgradedNodes {
 			// In this case, we test that older nodes are able to adopt desc. jobs from newer nodes.
-			nodes = helper.Context.NodesInNextVersion() // N.B. this is the set of upgradedNodes.
+			nodes = helper.Context().NodesInNextVersion() // N.B. this is the set of upgradedNodes.
 		} else {
 			// In this case, we test that newer nodes are able to adopt desc. jobs from older nodes.
-			nodes = helper.Context.NodesInPreviousVersion() // N.B. this is the set of oldNodes.
+			nodes = helper.Context().NodesInPreviousVersion() // N.B. this is the set of oldNodes.
 		}
 	}
-	testUtils, err := newCommonTestUtils(ctx, t, c, helper.Context.CockroachNodes, false)
-	defer testUtils.CloseConnections()
+	connectFunc := func(node int) (*gosql.DB, error) { return helper.Connect(node), nil }
+	// NOTE: we intentionally don't call `testutils.CloseConnections()`
+	// here because these connnections are managed by the mixedversion
+	// framework, which already closes them at the end of the test.
+	testUtils, err := newCommonTestUtils(
+		ctx, t, c, connectFunc, helper.DefaultService().Descriptor.Nodes, false, false,
+	)
 	if err != nil {
 		return err
 	}
@@ -97,39 +98,17 @@ func executeSupportedDDLs(
 		return err
 	}
 
-	// DDLs supported since V22_2.
-	v222DDLs := []string{
-		`COMMENT ON DATABASE testdb IS 'this is a database comment'`,
-		`COMMENT ON SCHEMA testdb.testsc IS 'this is a schema comment'`,
-		`COMMENT ON TABLE testdb.testsc.t IS 'this is a table comment'`,
-		`COMMENT ON COLUMN testdb.testsc.t.i IS 'this is a column comment'`,
-		`COMMENT ON INDEX testdb.testsc.t@idx IS 'this is a index comment'`,
-		`COMMENT ON CONSTRAINT check_j ON testdb.testsc.t IS 'this is a constraint comment'`,
-		`ALTER TABLE testdb.testsc.t ADD COLUMN k INT DEFAULT 35`,
-		`ALTER TABLE testdb.testsc.t DROP COLUMN k`,
-		`ALTER TABLE testdb.testsc.t2 ADD PRIMARY KEY (i)`,
-		`ALTER TABLE testdb.testsc.t2 ALTER PRIMARY KEY USING COLUMNS (j)`,
-	}
-
-	// DDLs supported since V23_1.
-	v231DDls := []string{
-		`CREATE FUNCTION fn(a INT) RETURNS INT AS 'SELECT a*a' LANGUAGE SQL`,
-		`CREATE INDEX ON testdb.testsc.t3 (i)`,
-		`ALTER TABLE testdb.testsc.t2 ALTER COLUMN k SET NOT NULL`,
-		`ALTER TABLE testdb.testsc.t2 ALTER PRIMARY KEY USING COLUMNS (k) USING HASH`,
-		`ALTER TABLE testdb.testsc.t3 ADD CONSTRAINT j_unique UNIQUE WITHOUT INDEX (k)`,
-		`ALTER TABLE testdb.testsc.t3 ADD CONSTRAINT j_unique_not_valid UNIQUE WITHOUT INDEX (k) NOT VALID`,
-		`ALTER TABLE testdb.testsc.t3 ADD CONSTRAINT fk FOREIGN KEY (j) REFERENCES testdb.testsc.t2 (j)`,
-		`ALTER TABLE testdb.testsc.t3 ADD CONSTRAINT fk_not_valid FOREIGN KEY (j) REFERENCES testdb.testsc.t2 (j) NOT VALID`,
-		`ALTER TABLE testdb.testsc.t3 ADD CONSTRAINT check_positive CHECK (j > 0)`,
-		`ALTER TABLE testdb.testsc.t3 ADD CONSTRAINT check_positive_not_valid CHECK (j > 0) NOT VALID`,
-		`ALTER TABLE testdb.testsc.t3 DROP CONSTRAINT check_positive`,
-		`ALTER TABLE testdb.testsc.t3 VALIDATE CONSTRAINT check_positive_not_valid`,
+	// DDLs supported in V24_2.
+	// TODO(sql-foundations): uncomment these when the final 24.2 cluster version
+	// is created.
+	v242DDLs := []string{
+		// `ALTER DATABASE testdb CONFIGURE ZONE USING gc.ttlseconds=1000`,
+		// `ALTER TABLE testdb.testsc.t CONFIGURE ZONE USING gc.ttlseconds=2000`,
+		// `COMMENT ON TYPE testdb.testsc.typ IS 'comment'`,
 	}
 
 	// Used to clean up our CREATE-d elements after we are done with them.
 	cleanup := []string{
-		// Supported since V22_2.
 		`DROP INDEX testdb.testsc.t@idx`,
 		`DROP SEQUENCE testdb.testsc.s`,
 		`DROP TYPE testdb.testsc.typ`,
@@ -140,11 +119,9 @@ func executeSupportedDDLs(
 		`DROP SCHEMA testdb.testsc`,
 		`DROP DATABASE testdb CASCADE`,
 		`DROP OWNED BY foo`,
-		// Supported since V23_1.
-		`DROP FUNCTION fn`,
 	}
 
-	ddls := append(append(v222DDLs, v231DDls...), cleanup...)
+	ddls := append(v242DDLs, cleanup...)
 
 	for _, ddl := range ddls {
 		if err := helper.ExecWithGateway(r, nodes, ddl); err != nil {
@@ -158,7 +135,11 @@ func runDeclarativeSchemaChangerJobCompatibilityInMixedVersion(
 	ctx context.Context, t test.Test, c cluster.Cluster,
 ) {
 	mvt := mixedversion.NewTest(
-		ctx, t, t.L(), c, c.All(), mixedversion.NumUpgrades(1),
+		ctx, t, t.L(), c, c.All(),
+		// Disable version skipping and limit the test to only one upgrade as the workload is only
+		// compatible with the branch it was built from and the major version before that.
+		mixedversion.NumUpgrades(1),
+		mixedversion.DisableSkipVersionUpgrades,
 	)
 
 	// Set up the testing state (e.g. create a few databases and tables) and always use declarative schema
@@ -167,7 +148,11 @@ func runDeclarativeSchemaChangerJobCompatibilityInMixedVersion(
 
 		// Ensure that the declarative schema changer is off so that we do not get failures related to unimplemented
 		// statements in the dsc.
+		// To make sure the session variables are applied correctly, we limit each
+		// connection pool to have at most 1 connection.
 		for _, node := range c.All() {
+			db := helper.Connect(node)
+			db.SetMaxOpenConns(1)
 			if err := helper.ExecWithGateway(r, option.NodeListOption{node}, "SET use_declarative_schema_changer = off"); err != nil {
 				return err
 			}
@@ -196,10 +181,6 @@ CREATE VIEW IF NOT EXISTS testdb.testsc.v AS (SELECT i*2 FROM testdb.testsc.t);
 		// buried by the fallback.
 		for _, node := range c.All() {
 			if err := helper.ExecWithGateway(r, option.NodeListOption{node}, "SET use_declarative_schema_changer = unsafe_always"); err != nil {
-				return err
-			}
-			// We also need to set experimental_enable_unique_without_index_constraints - since we will be testing this syntax.
-			if err := helper.ExecWithGateway(r, option.NodeListOption{node}, "SET experimental_enable_unique_without_index_constraints = true"); err != nil {
 				return err
 			}
 		}

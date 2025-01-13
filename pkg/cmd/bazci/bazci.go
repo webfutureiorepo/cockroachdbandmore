@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build bazel
 // +build bazel
@@ -347,17 +342,20 @@ func bazciImpl(cmd *cobra.Command, args []string) error {
 	}
 	args = append(args, fmt.Sprintf("--build_event_binary_file=%s", bepLoc))
 	args = append(args, fmt.Sprintf("--bes_backend=grpc://127.0.0.1:%d", port))
-	// Insert `--config ci` if it's not already in the args list.
-	hasCiConfig := false
-	for idx, arg := range args {
-		if arg == "--config=ci" || arg == "--config=cinolint" ||
-			(arg == "--config" && idx < len(args)-1 && (args[idx+1] == "ci" || args[idx+1] == "cinolint")) {
-			hasCiConfig = true
-			break
+	// Insert `--config=ci` if it's not already in the args list,
+	// specifically for tests.
+	if args[0] == testSubcmd || args[0] == coverageSubcmd {
+		hasCiConfig := false
+		for idx, arg := range args {
+			if arg == "--config=ci" || arg == "--config=cinolint" ||
+				(arg == "--config" && idx < len(args)-1 && (args[idx+1] == "ci" || args[idx+1] == "cinolint")) {
+				hasCiConfig = true
+				break
+			}
 		}
-	}
-	if !hasCiConfig {
-		args = append(args, "--config", "ci")
+		if !hasCiConfig {
+			args = append(args, "--config", "ci")
+		}
 	}
 	fmt.Println("running bazel w/ args: ", shellescape.QuoteCommand(args))
 	bazelCmd := exec.Command("bazel", args...)

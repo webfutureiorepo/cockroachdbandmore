@@ -1,21 +1,39 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
+import classNames from "classnames/bind";
+import React from "react";
+
+import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
+import {
+  FixFingerprintHexValue,
+  Count,
+  FixLong,
+  longToInt,
+  unset,
+  appNamesAttr,
+  propsToQueryString,
+} from "src/util";
+
+import { BarChartOptions } from "../barCharts/barChartFactory";
 import {
   SortedTable,
   ISortedTablePagination,
   longListWithTooltip,
   ColumnDescriptor,
+  SortSetting,
 } from "../sortedtable";
+import { statisticsTableTitles } from "../statsTableUtil/statsTableUtil";
+import {
+  getStatementsByFingerprintId,
+  collectStatementsText,
+  statementFingerprintIdsToText,
+  statementFingerprintIdsToSummarizedText,
+} from "../transactionsPage/utils";
+
 import {
   transactionsCountBarChart,
   transactionsBytesReadBarChart,
@@ -26,28 +44,8 @@ import {
   transactionsNetworkBytesBarChart,
   transactionsRetryBarChart,
 } from "./transactionsBarCharts";
-import { statisticsTableTitles } from "../statsTableUtil/statsTableUtil";
-import { tableClasses } from "./transactionsTableClasses";
 import { transactionLink } from "./transactionsCells";
-import {
-  FixFingerprintHexValue,
-  Count,
-  FixLong,
-  longToInt,
-  unset,
-  appNamesAttr,
-  propsToQueryString,
-} from "src/util";
-import { SortSetting } from "../sortedtable";
-import {
-  getStatementsByFingerprintId,
-  collectStatementsText,
-  statementFingerprintIdsToText,
-  statementFingerprintIdsToSummarizedText,
-} from "../transactionsPage/utils";
-import classNames from "classnames/bind";
-import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
-import { BarChartOptions } from "../barCharts/barChartFactory";
+import { tableClasses } from "./transactionsTableClasses";
 
 export type Transaction =
   protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;

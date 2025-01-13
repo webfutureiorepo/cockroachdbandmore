@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package certmgr
 
@@ -16,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 )
@@ -118,13 +114,12 @@ func (cm *CertManager) Reload(ctx context.Context) {
 		}
 	}
 	if errCount > 0 {
-		log.StructuredEvent(cm.ctx, &eventpb.CertsReload{
+		log.StructuredEvent(cm.ctx, severity.INFO, &eventpb.CertsReload{
 			Success: false,
 			ErrorMessage: fmt.Sprintf(
 				"%d certs (out of %d) failed to reload", errCount, len(cm.certs),
-			)},
-		)
+			)})
 	} else {
-		log.StructuredEvent(cm.ctx, &eventpb.CertsReload{Success: true})
+		log.StructuredEvent(cm.ctx, severity.INFO, &eventpb.CertsReload{Success: true})
 	}
 }

@@ -1,17 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanlatch
 
 import (
 	"context"
+	"math"
+	"time"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -19,12 +16,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/poison"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -62,8 +61,11 @@ type Manager struct {
 	idAlloc uint64
 	scopes  [spanset.NumSpanScope]scopedManager
 
-	stopper  *stop.Stopper
-	slowReqs *metric.Gauge
+	stopper            *stop.Stopper
+	slowReqs           *metric.Gauge
+	settings           *cluster.Settings
+	everySecondLogger  log.EveryN
+	latchWaitDurations metric.IHistogram
 }
 
 // scopedManager is a latch manager scoped to either local or global keys.
@@ -75,10 +77,18 @@ type scopedManager struct {
 
 // Make returns an initialized Manager. Using this constructor is optional as
 // the type's zero value is valid to use directly.
-func Make(stopper *stop.Stopper, slowReqs *metric.Gauge) Manager {
+func Make(
+	stopper *stop.Stopper,
+	slowReqs *metric.Gauge,
+	settings *cluster.Settings,
+	latchWaitDurations metric.IHistogram,
+) Manager {
 	return Manager{
-		stopper:  stopper,
-		slowReqs: slowReqs,
+		stopper:            stopper,
+		slowReqs:           slowReqs,
+		settings:           settings,
+		everySecondLogger:  log.Every(1 * time.Second),
+		latchWaitDurations: latchWaitDurations,
 	}
 }
 
@@ -137,7 +147,8 @@ type Guard struct {
 	latchesLens [spanset.NumSpanScope][spanset.NumSpanAccess]int32
 	// Non-nil only when AcquireOptimistic has retained the snapshot for later
 	// checking of conflicts, and waiting.
-	snap *snapshot
+	snap        *snapshot
+	acquireTime crtime.Mono
 }
 
 func (lg *Guard) latches(s spanset.SpanScope, a spanset.SpanAccess) []latch {
@@ -235,7 +246,7 @@ func (m *Manager) Acquire(
 
 	err := m.wait(ctx, lg, snap)
 	if err != nil {
-		m.Release(lg)
+		m.Release(ctx, lg)
 		return nil, err
 	}
 	return lg, nil
@@ -355,7 +366,7 @@ func (m *Manager) WaitUntilAcquired(ctx context.Context, lg *Guard) (*Guard, err
 	}()
 	err := m.wait(ctx, lg, *lg.snap)
 	if err != nil {
-		m.Release(lg)
+		m.Release(ctx, lg)
 		return nil, err
 	}
 	return lg, nil
@@ -480,8 +491,7 @@ func ignoreNothing(ts, other hlc.Timestamp) bool { return false }
 // wait waits for all interfering latches in the provided snapshot to complete
 // before returning.
 func (m *Manager) wait(ctx context.Context, lg *Guard, snap snapshot) error {
-	timer := timeutil.NewTimer()
-	timer.Reset(base.SlowRequestThreshold)
+	var timer timeutil.Timer
 	defer timer.Stop()
 
 	for s := spanset.SpanScope(0); s < spanset.NumSpanScope; s++ {
@@ -495,7 +505,7 @@ func (m *Manager) wait(ctx context.Context, lg *Guard, snap snapshot) error {
 					// Wait for writes at equal or lower timestamps.
 					a2 := spanset.SpanReadWrite
 					it := tr[a2].MakeIter()
-					if err := m.iterAndWait(ctx, timer, &it, lg.pp, a, a2, latch, ignoreLater); err != nil {
+					if err := m.iterAndWait(ctx, &timer, &it, lg.pp, a, a2, latch, ignoreLater); err != nil {
 						return err
 					}
 				case spanset.SpanReadWrite:
@@ -507,13 +517,13 @@ func (m *Manager) wait(ctx context.Context, lg *Guard, snap snapshot) error {
 					// to release their latches, so we wait on them first.
 					a2 := spanset.SpanReadWrite
 					it := tr[a2].MakeIter()
-					if err := m.iterAndWait(ctx, timer, &it, lg.pp, a, a2, latch, ignoreNothing); err != nil {
+					if err := m.iterAndWait(ctx, &timer, &it, lg.pp, a, a2, latch, ignoreNothing); err != nil {
 						return err
 					}
 					// Wait for reads at equal or higher timestamps.
 					a2 = spanset.SpanReadOnly
 					it = tr[a2].MakeIter()
-					if err := m.iterAndWait(ctx, timer, &it, lg.pp, a, a2, latch, ignoreEarlier); err != nil {
+					if err := m.iterAndWait(ctx, &timer, &it, lg.pp, a, a2, latch, ignoreEarlier); err != nil {
 						return err
 					}
 				default:
@@ -522,6 +532,7 @@ func (m *Manager) wait(ctx context.Context, lg *Guard, snap snapshot) error {
 			}
 		}
 	}
+	lg.acquireTime = crtime.NowMono()
 	return nil
 }
 
@@ -560,8 +571,15 @@ func (m *Manager) waitForSignal(
 	waitType, heldType spanset.SpanAccess,
 	wait, held *latch,
 ) error {
+	if m.latchWaitDurations != nil {
+		tBegin := crtime.NowMono()
+		defer func() {
+			m.latchWaitDurations.RecordValue(tBegin.Elapsed().Nanoseconds())
+		}()
+	}
 	log.Eventf(ctx, "waiting to acquire %s latch %s, held by %s latch %s", waitType, wait, heldType, held)
 	poisonCh := held.g.poison.signalChan()
+	t.Reset(base.SlowRequestThreshold)
 	for {
 		select {
 		case <-held.g.done.signalChan():
@@ -584,7 +602,6 @@ func (m *Manager) waitForSignal(
 			}
 		case <-t.C:
 			t.Read = true
-			defer t.Reset(base.SlowRequestThreshold)
 
 			log.Warningf(ctx, "have been waiting %s to acquire %s latch %s, held by %s latch %s",
 				base.SlowRequestThreshold, waitType, wait, heldType, held)
@@ -615,20 +632,32 @@ func (m *Manager) Poison(lg *Guard) {
 // Release releases the latches held by the provided Guard. After being called,
 // dependent latch acquisition attempts can complete if not blocked on any other
 // owned latches.
-func (m *Manager) Release(lg *Guard) {
+func (m *Manager) Release(ctx context.Context, lg *Guard) {
 	lg.done.signal()
 	if lg.snap != nil {
 		lg.snap.close()
 	}
+	m.remove(lg)
 
-	m.mu.Lock()
-	m.removeLocked(lg)
-	m.mu.Unlock()
+	var held time.Duration
+	if lg.acquireTime != 0 {
+		held = lg.acquireTime.Elapsed()
+	}
+	if held > m.longLatchHoldThreshold() {
+		const msg = "%s has held latch for %d ns. Some possible causes are " +
+			"slow disk reads, slow raft replication, and expensive request processing."
+		if m.everySecondLogger.ShouldLog() {
+			log.Warningf(ctx, msg, lg.baFmt, held)
+		} else {
+			log.VEventf(ctx, 2, msg, lg.baFmt, held)
+		}
+	}
 }
 
-// removeLocked removes the latches owned by the provided Guard from the
-// Manager. Must be called with mu held.
-func (m *Manager) removeLocked(lg *Guard) {
+// remove removes the latches owned by the provided Guard from the Manager.
+func (m *Manager) remove(lg *Guard) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for s := spanset.SpanScope(0); s < spanset.NumSpanScope; s++ {
 		sm := &m.scopes[s]
 		for a := spanset.SpanAccess(0); a < spanset.NumSpanAccess; a++ {
@@ -643,6 +672,14 @@ func (m *Manager) removeLocked(lg *Guard) {
 			}
 		}
 	}
+}
+
+// longLatchHoldThreshold returns the threshold for logging long latch holds.
+func (m *Manager) longLatchHoldThreshold() time.Duration {
+	if m.settings == nil {
+		return math.MaxInt64 // disable
+	}
+	return LongLatchHoldThreshold.Get(&m.settings.SV)
 }
 
 // Metrics holds information about the state of a Manager.

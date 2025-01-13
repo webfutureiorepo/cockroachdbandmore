@@ -1,18 +1,14 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package hlc
 
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils/zerofields"
 	"github.com/stretchr/testify/assert"
@@ -52,22 +48,6 @@ func TestCompare(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.expect, tc.a.Compare(tc.b))
 		})
-	}
-}
-
-func TestEqOrdering(t *testing.T) {
-	a := Timestamp{}
-	b := Timestamp{}
-	if !a.EqOrdering(b) {
-		t.Errorf("expected %+v == %+v", a, b)
-	}
-	b = makeTS(1, 0)
-	if a.EqOrdering(b) {
-		t.Errorf("expected %+v != %+v", a, b)
-	}
-	a = makeTS(1, 1)
-	if a.EqOrdering(b) {
-		t.Errorf("expected %+v != %+v", b, a)
 	}
 }
 
@@ -113,6 +93,44 @@ func TestIsEmpty(t *testing.T) {
 
 	nonZero := makeTS(1, 1)
 	require.NoError(t, zerofields.NoZeroField(nonZero), "please update IsEmpty as well")
+}
+
+func TestTimestampAddDuration(t *testing.T) {
+	testCases := []struct {
+		ts        Timestamp
+		dur       time.Duration
+		expAddDur Timestamp
+	}{
+		{makeTS(1, 2), 0, makeTS(1, 2)},
+		{makeTS(1, 2), 1, makeTS(2, 2)},
+		{makeTS(1, 2), 2, makeTS(3, 2)},
+		{makeTS(1, 2), -1, makeTS(0, 2)},
+	}
+	for _, c := range testCases {
+		assert.Equal(t, c.expAddDur, c.ts.AddDuration(c.dur))
+	}
+}
+
+func TestTimestampAdd(t *testing.T) {
+	testCases := []struct {
+		ts       Timestamp
+		wallTime int64
+		logical  int32
+		expAdd   Timestamp
+	}{
+		{makeTS(1, 2), 0, 0, makeTS(1, 2)},
+		{makeTS(1, 2), 0, 1, makeTS(1, 3)},
+		{makeTS(1, 2), 0, -1, makeTS(1, 1)},
+		{makeTS(1, 2), 1, 0, makeTS(2, 2)},
+		{makeTS(1, 2), 1, 1, makeTS(2, 3)},
+		{makeTS(1, 2), 1, -1, makeTS(2, 1)},
+		{makeTS(1, 2), -1, 0, makeTS(0, 2)},
+		{makeTS(1, 2), -1, 1, makeTS(0, 3)},
+		{makeTS(1, 2), -1, -1, makeTS(0, 1)},
+	}
+	for _, c := range testCases {
+		assert.Equal(t, c.expAdd, c.ts.Add(c.wallTime, c.logical))
+	}
 }
 
 func TestTimestampNext(t *testing.T) {

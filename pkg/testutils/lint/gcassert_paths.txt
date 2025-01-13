@@ -5,6 +5,7 @@ kv/kvclient/kvcoord
 kv/kvclient/rangecache
 kv/kvpb
 kv/kvserver/intentresolver
+kv/kvserver/kvflowcontrol/rac2
 kv/kvserver/rangefeed
 roachpb
 sql/catalog/descs
@@ -21,8 +22,10 @@ sql/colexec/colexecsel
 sql/colexec/colexecspan
 sql/colexec/colexecwindow
 sql/colfetcher
+sql/execinfrapb
 sql/opt
 sql/row
+sql/sem/tree
 storage
 storage/enginepb
 storage/pebbleiter
@@ -30,3 +33,6 @@ util
 util/admission
 util/hlc
 util/intsets
+util/mon
+util/num32
+util/vector

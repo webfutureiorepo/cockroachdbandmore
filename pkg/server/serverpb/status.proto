@@ -1,12 +1,7 @@
- // Copyright 2016 The Cockroach Authors.
+// Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.server.serverpb;
@@ -16,6 +11,8 @@ import "build/info.proto";
 import "errorspb/errors.proto";
 import "gossip/gossip.proto";
 import "jobs/jobspb/jobs.proto";
+import "multitenant/mtinfopb/info.proto";
+import "raft/raftpb/raft.proto";
 import "roachpb/data.proto";
 import "roachpb/index_usage_stats.proto";
 import "roachpb/span_config.proto";
@@ -27,17 +24,13 @@ import "server/status/statuspb/status.proto";
 import "sql/appstatspb/app_stats.proto";
 import "sql/contentionpb/contention.proto";
 import "sql/sqlstats/insights/insights.proto";
-import "storage/enginepb/engine.proto";
 import "storage/enginepb/mvcc.proto";
-import "storage/enginepb/rocksdb.proto";
 import "kv/kvserver/kvserverpb/lease_status.proto";
 import "kv/kvserver/kvserverpb/state.proto";
 import "kv/kvserver/liveness/livenesspb/liveness.proto";
+import "util/hlc/timestamp.proto";
 import "util/log/logpb/log.proto";
 import "util/unresolved_addr.proto";
-import "util/tracing/tracingpb/tracing.proto";
-
-import "raft/v3/raftpb/raft.proto";
 
 import "gogoproto/gogo.proto";
 import "google/api/annotations.proto";
@@ -92,6 +85,9 @@ message DetailsRequest {
   // forwarding is necessary.
   string node_id = 1;
   reserved 2;
+  // redact, if true, requests redaction of sensitive data away
+  // from the API response.
+  bool redact = 3;
 }
 
 // SystemInfo contains information about the host system.
@@ -118,7 +114,11 @@ message DetailsResponse {
 // NodesRequest requests a copy of the node information as known to gossip
 // and the KV layer.
 // API: PUBLIC ALPHA
-message NodesRequest {}
+message NodesRequest {
+  // redact, if true, requests redaction of sensitive data away
+  // from the API response.
+  bool redact = 1;
+}
 
 // NodesResponse describe the nodes in the cluster.
 // API: PUBLIC ALPHA
@@ -315,7 +315,11 @@ message RegionsResponse {
 // clusters.
 // The nodes are SQL instances in case of multi-tenant
 // clusters.
-message NodesListRequest {}
+message NodesListRequest {
+  // redact, if true, requests redaction of sensitive data away
+  // from the API response.
+  bool redact = 1;
+}
 
 message NodeDetails {
   // node_id is a unique identifier for the node. This corresponds
@@ -347,6 +351,9 @@ message NodeRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
   string node_id = 1;
+  // redact, if true, requests redaction of sensitive data away
+  // from the API response.
+  bool redact = 2;
 }
 
 // RaftState gives internal details about a Raft group's state.
@@ -362,15 +369,35 @@ message RaftState {
 
   uint64 replica_id = 1 [ (gogoproto.customname) = "ReplicaID" ];
   raftpb.HardState hard_state = 2 [ (gogoproto.nullable) = false ];
-  // Lead is part of Raft's SoftState.
-  uint64 lead = 3;
+  // Lead is part of Raft's HardState. However, it used to be part of SoftState,
+  // so we keep it here as a separate field for compatibility.
+  uint64 lead = 3  [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/raft/raftpb.PeerID"];
   // State is part of Raft's SoftState.
   // It's not an enum because this is primarily for ui consumption and there
   // are issues associated with them.
   string state = 4;
   uint64 applied = 5;
   map<uint64, Progress> progress = 6 [ (gogoproto.nullable) = false ];
-  uint64 lead_transferee = 7;
+  uint64 lead_transferee = 7  [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/raft/raftpb.PeerID"];
+  util.hlc.Timestamp lead_support_until = 8 [(gogoproto.nullable) = false];
+}
+
+// RACStatus contains the status of the Replication Admission Control component
+// of a range.
+message RACStatus {
+  uint64 next_raft_index = 1;
+  uint64 force_flush_index = 2;
+
+  message Stream {
+    uint64 index_to_send = 1;
+    uint64 next_raft_index_initial = 2;
+    uint64 next_raft_index = 3;
+    uint64 force_flush_stop_index = 4;
+
+    repeated int64 eval_tokens_held = 5;
+    repeated int64 send_tokens_held = 6;
+  }
+  map<uint64, Stream> streams = 6 [ (gogoproto.nullable) = false ];
 }
 
 // RangeProblems describes issues reported by a range. For internal use only.
@@ -392,6 +419,7 @@ message RangeProblems {
   bool raft_log_too_large = 7;
   bool circuit_breaker_error = 9;
   bool paused_followers = 10;
+  bool range_too_large = 11;
 }
 
 // RangeStatistics describes statistics reported by a range. For internal use
@@ -486,6 +514,7 @@ message TenantRangeInfo {
 message RangeInfo {
   PrettySpan span = 1 [ (gogoproto.nullable) = false ];
   RaftState raft_state = 2 [ (gogoproto.nullable) = false ];
+  RACStatus rac_status = 25 [ (gogoproto.nullable) = false, (gogoproto.customname) = "RACStatus" ];
   kv.kvserver.storagepb.RangeInfo state = 4 [ (gogoproto.nullable) = false ];
   int32 source_node_id = 5 [
     (gogoproto.customname) = "SourceNodeID",
@@ -522,6 +551,7 @@ message RangeInfo {
   Locality locality = 22;
   bool is_leaseholder = 23;
   bool lease_valid = 24;
+  // Next tag: 26
 }
 
 message RangesRequest {
@@ -539,6 +569,9 @@ message RangesRequest {
   // The pagination offset to use, if set.
   // NB: Pagination is based on ascending RangeID.
   int32 offset = 4;
+  // redact, if true, requests redaction of sensitive data away
+  // from the API response.
+  bool redact = 5;
 }
 
 message RangesResponse {
@@ -577,16 +610,9 @@ message GossipRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
   string node_id = 1;
-}
-
-message EngineStatsInfo {
-  int32 store_id = 1 [
-    (gogoproto.customname) = "StoreID",
-    (gogoproto.casttype) =
-        "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID"
-  ];
-  cockroach.storage.enginepb.TickersAndHistograms tickers_and_histograms = 2;
-  cockroach.storage.enginepb.EngineType engine_type = 3;
+  // redact, if true, requests redaction of sensitive data away
+  // from the API response.
+  bool redact = 2;
 }
 
 message EngineStatsRequest {
@@ -596,17 +622,41 @@ message EngineStatsRequest {
 }
 
 message EngineStatsResponse {
-  repeated EngineStatsInfo stats = 1 [ (gogoproto.nullable) = false ];
+  // maps store IDs to pretty-printed stats about the store's LSM.
+  map<int32, string> stats_by_store_id = 2 [
+    (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID",
+    (gogoproto.nullable) = false
+  ];
 }
 
 message DownloadSpanRequest {
   string node_id = 1 [(gogoproto.customname) = "NodeID"];
   repeated roachpb.Span spans = 2 [(gogoproto.nullable) = false];
+  bool via_backing_file_download = 3;
 }
 
 message DownloadSpanResponse {
-  // ErrorsByNodeID contains any errors that occurred during fan-out calls to other nodes.
-  map<int32, string> errors_by_node_id = 1 [
+  reserved 1;
+
+  map<int32, errorspb.EncodedError> errors = 2 [
+    (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID",
+    (gogoproto.nullable) = false
+  ];
+}
+
+message TenantServiceStatusRequest {
+  string node_id = 1 [(gogoproto.customname) = "NodeID"];
+  uint64 tenant_id = 2 [(gogoproto.customname) = "TenantID"];
+}
+
+message TenantServiceStatusResponse {
+  map<int32, cockroach.multitenant.SQLInfo> status_by_node_id = 1 [
+    (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID",
+    (gogoproto.customname) = "StatusByNodeID",
+    (gogoproto.nullable) = false
+  ];
+
+  map<int32, string> errors_by_node_id = 2 [
     (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID",
     (gogoproto.customname) = "ErrorsByNodeID",
     (gogoproto.nullable) = false
@@ -740,6 +790,7 @@ message StacksRequest {
 enum FileType {
   HEAP = 0;
   GOROUTINES = 1;
+  CPU = 2;
 }
 
 message File {
@@ -1056,6 +1107,13 @@ message Session {
 
   // The ID of the session's active trace. It will be 0 if tracing is off.
   uint64 trace_id = 20 [(gogoproto.customname) = "TraceID"];
+
+  // The ID of the session's goroutine.
+  int64 goroutine_id = 21 [(gogoproto.customname) = "GoroutineID"];
+
+  string authentication_method = 22 [
+    (gogoproto.casttype) = "github.com/cockroachdb/redact.SafeString"
+  ];
 }
 
 // An error wrapper object for ListSessionsResponse.
@@ -1275,13 +1333,18 @@ message ProblemRangesResponse {
     ];
     repeated int64 circuit_breaker_error_range_ids = 10 [
       (gogoproto.customname) = "CircuitBreakerErrorRangeIDs",
-      (gogoproto.casttype) = 
+      (gogoproto.casttype) =
           "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID"
     ];
     repeated int64 paused_replica_ids = 11 [
       (gogoproto.customname) = "PausedReplicaIDs",
       (gogoproto.casttype) =
           "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID"
+    ];
+    repeated int64 too_large_range_ids = 12 [
+      (gogoproto.customname) = "TooLargeRangeIds",
+      (gogoproto.casttype) =
+        "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID"
     ];
   }
   reserved 1 to 7;
@@ -1438,12 +1501,6 @@ message HotRangesResponseV2 {
     double qps = 3 [
       (gogoproto.customname) = "QPS"
     ];
-    // table_name indicates the SQL table that the range belongs to.
-    string table_name = 4;
-    // database_name indicates on database that has current hot range.
-    string database_name = 5;
-    // index_name indicates the index name for current range.
-    string index_name = 6;
     // replica_node_ids specifies the list of node ids that contain replicas with current hot range.
     repeated int32 replica_node_ids = 7 [
       (gogoproto.casttype) =
@@ -1478,6 +1535,15 @@ message HotRangesResponseV2 {
     // CPU time (ns) per second is the recent cpu usage per second on this
     // range.
     double cpu_time_per_second = 15 [(gogoproto.customname) = "CPUTimePerSecond"];
+    // Databases for the range.
+    repeated string databases = 16;
+    // Tables for the range
+    repeated string tables = 17;
+    // Indexes for the range
+    repeated string indexes = 18;
+
+    // previously used for database, table, and index name
+    reserved 4 to 6;
   }
   // Ranges contain list of hot ranges info that has highest number of QPS.
   repeated HotRange ranges = 1;
@@ -1575,6 +1641,11 @@ message StoreDetails {
     (gogoproto.casttype) =
         "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID"
   ];
+  int32 node_id = 7 [
+    (gogoproto.customname) = "NodeID",
+    (gogoproto.casttype) =
+        "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"
+  ];
 
   // TODO(mberhault): add a lot more information about stores. eg:
   // - path
@@ -1592,6 +1663,11 @@ message StoreDetails {
   // Files/bytes using the active data key.
   uint64 active_key_files = 5;
   uint64 active_key_bytes = 6;
+  // dir is the path to the store's data directory on the node.
+  string dir = 8;
+  // wal_failover_path encodes the path to the secondary WAL directory used for
+  // failover in the event of high write latency to the primary WAL.
+  string wal_failover_path = 9 [(gogoproto.nullable) = true];
 }
 
 message StoresResponse {
@@ -1788,6 +1864,8 @@ message StatementDiagnosticsReport {
     [ (gogoproto.nullable) = false, (gogoproto.stdduration) = true ];
   google.protobuf.Timestamp expires_at = 7
     [ (gogoproto.nullable) = false, (gogoproto.stdtime) = true ];
+  // TODO(yuzefovich): should we populate plan_gist, anti_plan_gist, and
+  // redacted fields?
 }
 
 message CreateStatementDiagnosticsReportRequest {
@@ -1846,6 +1924,8 @@ message CreateStatementDiagnosticsReportRequest {
   // AntiPlanGist, when set, indicates that any plan not matching PlanGist will
   // do.
   bool anti_plan_gist = 6;
+  // Redacted, when set, indicates that the redacted bundle is requested.
+  bool redacted = 7;
 }
 
 message CreateStatementDiagnosticsReportResponse {
@@ -1972,6 +2052,9 @@ message TableIndexStatsResponse {
   // Timestamp of the latest reset index usage statistics request.
   google.protobuf.Timestamp last_reset = 2 [(gogoproto.stdtime) = true];
   repeated cockroach.sql.IndexRecommendation index_recommendations = 3;
+
+  // database_id is the ID of the database that contains the table.
+  int32 database_id  = 4 [(gogoproto.customname) = "DatabaseID"];
 }
 
 // Request object for issuing a index usage stats reset request.
@@ -2107,23 +2190,75 @@ message RequestJobProfilerExecutionDetailsRequest {
 
 message RequestJobProfilerExecutionDetailsResponse {}
 
- message GetJobProfilerExecutionDetailRequest {
-   int64 job_id = 1;
-   string filename = 2;
- }
-
- message GetJobProfilerExecutionDetailResponse {
-   bytes data = 1;
- }
-
- message ListJobProfilerExecutionDetailsRequest {
+message GetJobProfilerExecutionDetailRequest {
   int64 job_id = 1;
- }
+  string filename = 2;
+}
 
- message ListJobProfilerExecutionDetailsResponse {
-   repeated string files = 1;
- }
+message GetJobProfilerExecutionDetailResponse {
+  bytes data = 1;
+}
 
+message ListJobProfilerExecutionDetailsRequest {
+  int64 job_id = 1;
+}
+
+message ListJobProfilerExecutionDetailsResponse {
+  repeated string files = 1;
+}
+
+message UpdateTableMetadataCacheRequest {
+  // If true, the server will attempt to send a signal to the
+  // table metadata job by notifying the channel set on the
+  // status server.
+  bool local = 1;
+}
+
+message UpdateTableMetadataCacheResponse {
+}
+
+
+message GetThrottlingMetadataRequest {
+  string node_id = 1 [(gogoproto.customname) = "NodeID"];
+}
+
+// GetThrottlingMetadataResponse contains all information necessary to
+// show throttling warnings and alerts in DB Console.
+message GetThrottlingMetadataResponse {
+  // throttled is true if at least one node in the cluster is actively
+  // being throttled.
+  bool throttled = 1;
+  // if throttled is true, this will contain a string explaning why,
+  // generated from the SQL enforcer.
+  string throttleExplanation = 2;
+
+  // hasGracePeriod is true if the cluster has an active grace period
+  // before throttling kicks in after license expiry. Enterprise
+  // licenses do not have grace periods when they expire.
+  bool hasGracePeriod = 3;
+
+  // gracePeriodEndSeconds is the unix timestamp when the grace period
+  // ends.
+  int64 gracePeriodEndSeconds = 4;
+
+  // hasTelemetryDeadline is true if this cluster requires telemetry to
+  // be delivered.
+  bool hasTelemetryDeadline = 5;
+
+  // telemetryDeadlineSeconds is the unix timestamp when the telemetry
+  // deadline must be met. After this the cluster will be throttled.
+  int64 telemetryDeadlineSeconds = 6;
+
+  // lastTelemetryReceivedSeconds is the unix timestamp when we last
+  // delivered telemetry.
+  int64 lastTelemetryReceivedSeconds = 7;
+
+  // nodeIdsWithTelemetryProblems collects a list of nodes that are
+  // delinquent with telemetry. This is useful for reporting because
+  // the cluster could have partial telemetry delivery failure and it's
+  // helpful to surface this in DB Console.
+  repeated string nodeIdsWithTelemetryProblems = 8;
+}
 
 service Status {
   // Certificates retrieves a copy of the TLS certificates.
@@ -2195,8 +2330,17 @@ service Status {
     };
   }
 
+  // TenantServiceStatus returns the current service and data state of
+  // the given tenant as known to the server orchestrator, which may
+  // differ from the database state.
+  rpc TenantServiceStatus(TenantServiceStatusRequest) returns (TenantServiceStatusResponse) {
+    option (google.api.http) = {
+      get : "/_status/tenant_service_status"
+    };
+  }
+
   // TenantRanges requests internal details about all range replicas within
-  // the tenant's keyspace.
+  // the tenant's keyspace at the time the request is processed.
   rpc TenantRanges(TenantRangesRequest) returns (TenantRangesResponse) {
     option (google.api.http) = {
       get : "/_status/tenant_ranges"
@@ -2251,14 +2395,6 @@ service Status {
     option (google.api.http) = {
       post : "/_status/cancel_query/{node_id}"
 			body: "*"
-    };
-  }
-
-  // CancelLocalQuery cancels a SQL query running on this node given its ID.
-  rpc CancelLocalQuery(CancelQueryRequest) returns (CancelQueryResponse) {
-    option (google.api.http) = {
-      post : "/_status/cancel_local_query"
-      body: "*"
     };
   }
 
@@ -2344,14 +2480,6 @@ service Status {
     option (google.api.http) = {
       post : "/_status/cancel_session/{node_id}"
 			body: "*"
-    };
-  }
-
-  // CancelLocalSession forcefully terminates a SQL session running on this node given its ID.
-  rpc CancelLocalSession(CancelSessionRequest) returns (CancelSessionResponse) {
-    option (google.api.http) = {
-      post : "/_status/cancel_local_session"
-      body: "*"
     };
   }
 
@@ -2617,6 +2745,18 @@ service Status {
     (ListJobProfilerExecutionDetailsResponse) {
     option (google.api.http) = {
       get: "/_status/list_job_profiler_execution_details/{job_id}"
+    };
+  }
+
+  rpc UpdateTableMetadataCache(UpdateTableMetadataCacheRequest) returns (UpdateTableMetadataCacheResponse) {
+  }
+
+  // GetThrottlingMetadata is used by the DB Console to retrieve
+  // information regarding current or upcoming throttling the cluster
+  // may experience.
+  rpc GetThrottlingMetadata(GetThrottlingMetadataRequest) returns (GetThrottlingMetadataResponse) {
+    option (google.api.http) = {
+      get: "/_status/throttling"
     };
   }
 }

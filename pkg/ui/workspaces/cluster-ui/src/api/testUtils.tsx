@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { cockroach, google } from "@cockroachlabs/crdb-protobuf-client";
 import Long from "long";
@@ -26,14 +21,13 @@ const latencyInfo: Required<ILatencyInfo> = {
 };
 
 const baseStmt: Partial<Stmt> = {
-  id: Long.fromInt(11871906682067483964),
+  id: Long.fromString("11871906682067483964"),
   txn_fingerprint_ids: [Long.fromInt(1)],
   key: {
     key_data: {
       query: "SELECT node_id FROM system.statement_statistics",
       app: "$ cockroach sql",
       distSQL: true,
-      failed: false,
       implicit_txn: true,
       vec: true,
       full_scan: true,
@@ -45,6 +39,7 @@ const baseStmt: Partial<Stmt> = {
   },
   stats: {
     count: Long.fromInt(1),
+    failure_count: Long.fromInt(0),
     first_attempt_count: Long.fromInt(1),
     max_retries: Long.fromInt(0),
     num_rows: {
@@ -121,12 +116,14 @@ const baseStmt: Partial<Stmt> = {
     plan_gists: ["AgFUBAAgAAAABgI="],
     indexes: ["123@456"],
     index_recommendations: [],
+    regions: ["gcp-us-east1", "gcp-us-west1"],
+    nodes: [Long.fromNumber(1)],
   },
 };
 
 const baseTxn: Partial<Txn> = {
   stats_data: {
-    statement_fingerprint_ids: [Long.fromInt(18262870370352730905)],
+    statement_fingerprint_ids: [Long.fromString("18262870370352730905")],
     app: "$ cockroach sql",
     stats: {
       count: Long.fromInt(8),
@@ -184,7 +181,7 @@ const baseTxn: Partial<Txn> = {
       },
     },
     aggregated_ts: new google.protobuf.Timestamp(),
-    transaction_fingerprint_id: Long.fromInt(5913510653911377094),
+    transaction_fingerprint_id: Long.fromString("5913510653911377094"),
   },
   node_id: 0,
 };

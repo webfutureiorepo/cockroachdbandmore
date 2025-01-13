@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.roachpb;
@@ -128,8 +123,23 @@ message SplitTrigger {
 
   RangeDescriptor left_desc = 1 [(gogoproto.nullable) = false];
   RangeDescriptor right_desc = 2 [(gogoproto.nullable) = false];
+  // Pre-computed stats for the LHS spans corresponding to user data.
+  // Used in splitTrigger to estimate the LHS range's MVCC stats.
+  storage.enginepb.MVCCStats pre_split_left_user_stats = 5 [(gogoproto.nullable) = false];
+  // Pre-computed stats for the entire range.
+  // Used in splitTrigger to fall back to accurate stats computation if these
+  // pre-computed stats differ significantly from the stats retrieved from
+  // disk while holding latches in splitTrigger.
+  storage.enginepb.MVCCStats pre_split_stats = 6 [(gogoproto.nullable) = false];
 
   reserved 3, 4;
+
+  // UseEstimatesBecauseExternalBytesArePresent is true if we should consider estimating MVCC
+  // stats when calculating them in the splitTrigger.
+  bool use_estimates_because_external_bytes_are_present = 7;
+  
+  // ManualSplit indicates that this split is manually triggered via an AdminSplitRequest by a sql client.
+  bool manualSplit = 8;
 }
 
 // A MergeTrigger is run after a successful commit of an AdminMerge
@@ -181,7 +191,7 @@ message MergeTrigger {
   // the two sides are collocated at merge time, we don't need to use the
   // read_summary and simply use this field.
   util.hlc.Timestamp right_closed_timestamp = 6 [(gogoproto.nullable) = false];
-  
+
   // RightReadSummary is a summary of the reads that have been performed on the
   // right-hand side up to the point of the Subsume request, which serializes
   // with past reads and begins blocking future reads. It is suitable for use to
@@ -307,10 +317,18 @@ enum TransactionStatus {
   option (gogoproto.goproto_enum_prefix) = false;
 
   // PENDING is the default state for a new transaction. Transactions
-  // move from PENDING to one of COMMITTED or ABORTED. Mutations made
-  // as part of a PENDING transactions are recorded as "intents" in
-  // the underlying MVCC model.
+  // move from PENDING to one of PREPARED, STAGING, COMMITTED, or
+  // ABORTED. Mutations made as part of a PENDING transactions are
+  // recorded as "intents" in the underlying MVCC model.
   PENDING = 0;
+  // PREPARED is the state for a transaction which has been prepared as
+  // part of the XA two-phase commit protocol. Transactions in state
+  // PREPARED can be subsequently moved to either state COMMITTED or
+  // ABORTED. Once a transaction is in state PREPARED, it is guaranteed
+  // to be able to commit if the coordinator node decides to do so;
+  // conflicting transactions cannot prevent it from doing so by pushing
+  // it to a higher timestamp or aborting it.
+  PREPARED = 4;
   // STAGING is the state for a transaction which has issued all of
   // its writes and is in the process of committing. Mutations made
   // as part of a transaction in this state may still be in-flight
@@ -629,6 +647,8 @@ message SequencedWrite {
   // The sequence number of the request that created the write.
   int32 sequence = 2 [
     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/storage/enginepb.TxnSeq"];
+  // The strength with which the lock was acquired at.
+  kv.kvserver.concurrency.lock.Strength strength = 3;
 }
 
 // LeaseAcquisitionType indicates the type of lease acquisition event that
@@ -658,12 +678,24 @@ message Lease {
   // The expiration is a timestamp at which the lease expires. This means that a
   // new lease can be granted for a later timestamp. This field is only set for
   // expiration-based leases.
+  //
+  // This is an exclusive value, i.e. the lease is valid in [start, expiration).
   util.hlc.Timestamp expiration = 2;
 
   // The address of the would-be lease holder.
   ReplicaDescriptor replica = 3 [(gogoproto.nullable) = false];
 
   // The start of the lease stasis period. This field is deprecated.
+  //
+  // TODO(erikgrinaker): remove this. Migration:
+  //
+  // - 2016: the field was deprecated (#10305).
+  //
+  // - 24.1: stop reading the field. 23.2 nodes compare the field below Raft in
+  //   Lease.Equal(), so we must populate the field for backwards compatibility.
+  //
+  // - 24.2 or later: remove the field when backwards compatibility with 23.2
+  //   is no longer needed.
   util.hlc.Timestamp deprecated_start_stasis = 4;
 
   // The current timestamp when this lease has been proposed. Used after a
@@ -671,12 +703,17 @@ message Lease {
   // proposed after the time of the said transfer or restart. This is nullable
   // to help with the rollout (such that a lease applied by some nodes before
   // the rollout and some nodes after the rollout is serialized the same).
-  // TODO(andrei): Make this non-nullable after the rollout.
   util.hlc.Timestamp proposed_ts  = 5 [(gogoproto.customname) = "ProposedTS",
+    (gogoproto.nullable) = false,
     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/util/hlc.ClockTimestamp"];
 
-  // The epoch of the lease holder's node liveness entry. If this value is
-  // non-zero, the expiration field is ignored.
+  // The epoch of the lease holder's node liveness record. The lease inherits
+  // the expiration of the node liveness record for as long as the node liveness
+  // record retains this epoch. The lease is invalid if the node liveness record
+  // is updated with a different epoch.
+  //
+  // This field is only set for epoch-based leases. If this value is non-zero,
+  // the expiration field and the term field must not be set.
   int64 epoch = 6;
 
   // A zero-indexed sequence number which is incremented during the acquisition
@@ -693,6 +730,25 @@ message Lease {
   // The type of acquisition event that result in this lease (transfer or
   // request).
   LeaseAcquisitionType acquisition_type = 8;
+
+  // The minimum expiration at which the lease expires, independent of any other
+  // expiry condition. This field can be used to place a floor on the expiration
+  // for epoch-based leases and leader leases to prevent expiration regressions
+  // when upgrading from an expiration-based lease. It is not supported for
+  // expiration-based leases.
+  //
+  // Like expiration above, this is an exclusive value, i.e. the lease is valid
+  // in [start, max(min_expiration, <expiration from epoch or term>)).
+  util.hlc.Timestamp min_expiration = 9 [(gogoproto.nullable) = false];
+
+  // The term of the raft leader that a leader lease is associated with. The
+  // lease is valid for as long as the raft leader has a guarantee from store
+  // liveness that it remains the leader under this term. The lease is invalid
+  // if the raft leader loses leadership (i.e. changes its term).
+  //
+  // This field is only set for leader leases. If non-zero, the expiration field
+  // and the epoch field must not be set.
+  uint64 term = 10;
 }
 
 // AbortSpanEntry contains information about a transaction which has
@@ -780,6 +836,15 @@ message LeafTxnFinalState {
 enum RangeClosedTimestampPolicy {
   option (gogoproto.goproto_enum_prefix) = false;
 
+  // NB: there is a local-only enum value of -1, see `rangecache.UnknownClosedTimestampPolicy`.
+  // This value is used for the range cache as a placeholder.
+  //
+  // Whenever we send a RangeInfo via DistSender, this unknown policy
+  // instead defaults to `kvcoord.defaultSendClosedTimestampPolicy`.
+  //
+  // If we re-did this today, we'd reserve the zero value of the enum
+  // for an UNKNOWN value.
+
   // LAG_BY_CLUSTER_SETTING indicates that the range's closed timestamp is
   // configured to lag behind present time by the value configured for the
   // `kv.closed_timestamp.target_duration` cluster setting.
@@ -804,6 +869,11 @@ enum RangeClosedTimestampPolicy {
 message ClientRangeInfo {
   int64 descriptor_generation = 1 [(gogoproto.casttype) = "RangeGeneration"];
   int64 lease_sequence = 2 [(gogoproto.casttype) = "LeaseSequence"];
+  // NB: This field may occasionally be constructed with the (wire-invalid)
+  // value of -1, corresponding to rangecache's unknownClosedTimestampPolicy.
+  // Before attaching to a request, it is coalesced to a valid enum value.
+  //
+  // See: https://github.com/cockroachdb/cockroach/issues/129981.
   RangeClosedTimestampPolicy closed_timestamp_policy = 3;
   // ExplicitlyRequested causes range info to be returned even if other fields
   // are up-to-date or empty.

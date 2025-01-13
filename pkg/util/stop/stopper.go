@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stop
 
@@ -14,18 +9,19 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"runtime/debug"
-	"sync"
+	"runtime/trace"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
@@ -46,7 +42,7 @@ func register(s *Stopper) {
 	trackedStoppers.Lock()
 	defer trackedStoppers.Unlock()
 	trackedStoppers.stoppers = append(trackedStoppers.stoppers,
-		stopperWithStack{s: s, createdAt: string(debug.Stack())})
+		stopperWithStack{s: s, createdAt: debugutil.Stack()})
 }
 
 func unregister(s *Stopper) {
@@ -64,7 +60,7 @@ func unregister(s *Stopper) {
 
 type stopperWithStack struct {
 	s         *Stopper
-	createdAt string // stack from NewStopper()
+	createdAt debugutil.SafeStack // stack from NewStopper()
 }
 
 var trackedStoppers struct {
@@ -176,7 +172,7 @@ type Stopper struct {
 		// idAlloc is incremented atomically under the read lock when adding a
 		// context to be canceled.
 		idAlloc  int64 // allocates index into qCancels
-		qCancels sync.Map
+		qCancels syncutil.Map[int64, context.CancelFunc]
 	}
 }
 
@@ -220,7 +216,7 @@ func NewStopper(options ...Option) *Stopper {
 	return s
 }
 
-// recover reports the current panic, if any, any panics again.
+// recover reports the current panic, if any, and panics again.
 //
 // Note: this function _must_ be called with `defer s.recover()`, otherwise
 // the panic recovery won't work.
@@ -278,7 +274,7 @@ func (s *Stopper) AddCloser(c Closer) {
 // Canceling this context releases resources associated with it, so code should
 // call cancel as soon as the operations running in this Context complete.
 func (s *Stopper) WithCancelOnQuiesce(ctx context.Context) (context.Context, func()) {
-	var cancel func()
+	var cancel context.CancelFunc
 	ctx, cancel = context.WithCancel(ctx)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -287,7 +283,7 @@ func (s *Stopper) WithCancelOnQuiesce(ctx context.Context) (context.Context, fun
 		return ctx, func() {}
 	}
 	id := atomic.AddInt64(&s.mu.idAlloc, 1)
-	s.mu.qCancels.Store(id, cancel)
+	s.mu.qCancels.Store(id, &cancel)
 	return ctx, func() {
 		cancel()
 		s.mu.qCancels.Delete(id)
@@ -315,9 +311,25 @@ func (s *Stopper) RunTask(ctx context.Context, taskName string, f func(context.C
 	// Call f.
 	defer s.recover(ctx)
 	defer s.runPostlude()
+	defer s.startRegion(ctx, taskName).End()
 
 	f(ctx)
 	return nil
+}
+
+type region interface {
+	End()
+}
+
+type noopRegion struct{}
+
+func (n noopRegion) End() {}
+
+func (s *Stopper) startRegion(ctx context.Context, taskName string) region {
+	if !trace.IsEnabled() {
+		return noopRegion{}
+	}
+	return trace.StartRegion(ctx, taskName)
 }
 
 // RunTaskWithErr is like RunTask(), but takes in a callback that can return an
@@ -332,6 +344,7 @@ func (s *Stopper) RunTaskWithErr(
 	// Call f.
 	defer s.recover(ctx)
 	defer s.runPostlude()
+	defer s.startRegion(ctx, taskName).End()
 
 	return f(ctx)
 }
@@ -461,9 +474,9 @@ func (s *Stopper) RunAsyncTaskEx(ctx context.Context, opt TaskOpts, f func(conte
 	var sp *tracing.Span
 	switch opt.SpanOpt {
 	case FollowsFromSpan:
-		ctx, sp = tracing.EnsureForkSpan(ctx, s.tracer, opt.TaskName)
+		ctx, sp = tracing.ForkSpan(ctx, opt.TaskName)
 	case ChildSpan:
-		ctx, sp = tracing.EnsureChildSpan(ctx, s.tracer, opt.TaskName)
+		ctx, sp = tracing.ChildSpan(ctx, opt.TaskName)
 	case SterileRootSpan:
 		ctx, sp = s.tracer.StartSpanCtx(ctx, opt.TaskName, tracing.WithSterile())
 	default:
@@ -472,8 +485,9 @@ func (s *Stopper) RunAsyncTaskEx(ctx context.Context, opt TaskOpts, f func(conte
 
 	// Call f on another goroutine.
 	taskStarted = true // Another goroutine now takes ownership of the alloc, if any.
-	go func() {
+	go func(taskName string) {
 		defer s.runPostlude()
+		defer s.startRegion(ctx, taskName).End()
 		defer sp.Finish()
 		defer s.recover(ctx)
 		if alloc != nil {
@@ -482,7 +496,7 @@ func (s *Stopper) RunAsyncTaskEx(ctx context.Context, opt TaskOpts, f func(conte
 
 		sp.UpdateGoroutineIDToCurrent()
 		f(ctx)
-	}()
+	}(opt.TaskName)
 	return nil
 }
 
@@ -573,12 +587,6 @@ func (s *Stopper) IsStopped() <-chan struct{} {
 // Quiesce moves the stopper to state quiescing and waits until all
 // tasks complete. This is used from Stop() and unittests.
 func (s *Stopper) Quiesce(ctx context.Context) {
-	defer time.AfterFunc(5*time.Second, func() {
-		log.Infof(ctx, "quiescing...")
-	}).Stop()
-	defer time.AfterFunc(2*time.Minute, func() {
-		log.DumpStacks(ctx, "slow quiesce")
-	}).Stop()
 	defer s.recover(ctx)
 
 	func() {
@@ -589,10 +597,9 @@ func (s *Stopper) Quiesce(ctx context.Context) {
 			close(s.quiescer)
 		}
 
-		s.mu.qCancels.Range(func(k, v interface{}) (wantMore bool) {
-			cancel := v.(func())
-			cancel()
-			s.mu.qCancels.Delete(k)
+		s.mu.qCancels.Range(func(id int64, cancel *context.CancelFunc) (wantMore bool) {
+			(*cancel)()
+			s.mu.qCancels.Delete(id)
 			return true
 		})
 		for _, f := range s.mu.quiescers {
@@ -600,7 +607,18 @@ func (s *Stopper) Quiesce(ctx context.Context) {
 		}
 	}()
 
+	start := timeutil.Now()
+	var loggedQuiescing, loggedSlowQuiescing bool
 	for s.NumTasks() > 0 {
+		since := timeutil.Since(start)
+		if !loggedQuiescing && since > 5*time.Second {
+			log.Infof(ctx, "quiescing...")
+			loggedQuiescing = true
+		}
+		if !loggedSlowQuiescing && since > 2*time.Minute {
+			log.DumpStacks(ctx, "slow quiesce")
+			loggedSlowQuiescing = true
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }

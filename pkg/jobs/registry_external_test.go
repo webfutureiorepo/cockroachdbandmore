@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs_test
 
@@ -372,9 +367,9 @@ func TestGCDurationControl(t *testing.T) {
 		},
 	}
 
-	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, cs *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, cs *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 	s, sqlDB, _ := serverutils.StartServer(t, args)
 	defer s.Stopper().Stop(ctx)
 	registry := s.JobRegistry().(*jobs.Registry)
@@ -437,7 +432,7 @@ func TestErrorsPopulatedOnRetry(t *testing.T) {
 		return event{id: j.ID(), resume: make(chan error)}
 	}
 	evChan := make(chan event)
-	jobs.RegisterConstructor(jobspb.TypeImport, func(j *jobs.Job, cs *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeImport, func(j *jobs.Job, cs *cluster.Settings) jobs.Resumer {
 		execFn := func(ctx context.Context) error {
 			ev := mkEvent(j)
 			select {
@@ -456,7 +451,7 @@ func TestErrorsPopulatedOnRetry(t *testing.T) {
 			OnResume:     execFn,
 			FailOrCancel: execFn,
 		}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
 		Knobs: base.TestingKnobs{
 			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
@@ -522,15 +517,7 @@ func TestErrorsPopulatedOnRetry(t *testing.T) {
 		}
 		return ret
 	}
-	tsEqual := func(t *testing.T, a, b time.Time) {
-		require.Truef(t, a.Equal(b), "%v != %v", a, b)
-	}
-	tsBefore := func(t *testing.T, a, b time.Time) {
-		require.Truef(t, a.Before(b), "%v >= %v", a, b)
-	}
 	executionErrorEqual := func(t *testing.T, a, b parsedError) {
-		tsEqual(t, a.start, b.start)
-		tsEqual(t, a.end, b.end)
 		require.Equal(t, a.instance, b.instance)
 		require.Equal(t, a.error, b.error)
 		require.Equal(t, a.status, b.status)
@@ -538,17 +525,14 @@ func TestErrorsPopulatedOnRetry(t *testing.T) {
 	waitForEvent := func(t *testing.T, id jobspb.JobID) (ev event, start time.Time) {
 		ev = <-evChan
 		require.Equal(t, id, ev.id)
-		tdb.QueryRow(t, "SELECT last_run FROM crdb_internal.jobs WHERE job_id = $1", id).Scan(&start)
+		tdb.QueryRow(t, "SELECT now() FROM crdb_internal.jobs WHERE job_id = $1", id).Scan(&start)
 		return ev, start
 	}
 	checkExecutionError := func(
-		t *testing.T, execErr parsedError, status jobs.Status, start, afterEnd time.Time, cause string,
+		t *testing.T, execErr parsedError, status jobs.Status, _, _ time.Time, cause string,
 	) {
 		require.Equal(t, base.SQLInstanceID(1), execErr.instance)
 		require.Equal(t, status, execErr.status)
-		tsEqual(t, start, execErr.start)
-		tsBefore(t, execErr.start, execErr.end)
-		tsBefore(t, execErr.end, afterEnd)
 		require.Equal(t, cause, execErr.error)
 	}
 	getExecErrors := func(t *testing.T, id jobspb.JobID) []parsedError {
@@ -753,7 +737,7 @@ func TestWaitWithRetryableError(t *testing.T) {
 		Knobs: base.TestingKnobs{
 			SQLExecutor: &sql.ExecutorTestingKnobs{
 				DisableAutoCommitDuringExec: true,
-				AfterExecute: func(ctx context.Context, stmt string, err error) {
+				AfterExecute: func(ctx context.Context, stmt string, isInternal bool, err error) {
 					if targetJobID.Load() > 0 &&
 						strings.Contains(stmt, "SELECT count(*) FROM system.jobs") &&
 						strings.Contains(stmt, fmt.Sprintf("%d", targetJobID.Load())) {
@@ -771,9 +755,9 @@ func TestWaitWithRetryableError(t *testing.T) {
 		},
 	}
 
-	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, cs *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, cs *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 	s := serverutils.StartServerOnly(t, args)
 	defer s.Stopper().Stop(ctx)
 	ts := s.ApplicationLayer()
@@ -797,7 +781,7 @@ func TestWaitWithRetryableError(t *testing.T) {
 		registry.WaitForJobs(
 			ctx, []jobspb.JobID{id},
 		))
-	if !skip.Stress() {
+	if !skip.Duress() {
 		require.Equalf(t, int64(targetNumberOfRetries), numberOfTimesDetected.Load(), "jobs query did not retry")
 	} else {
 		// For stress be lenient since we are relying on timing for leasing

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colrpc
 
@@ -378,7 +373,7 @@ func (i *Inbox) Next() coldata.Batch {
 					// to keep errors unchanged (e.g. kvpb.ErrPriority() will
 					// be called on each error in the DistSQLReceiver).
 					i.bufferedMeta = append(i.bufferedMeta, meta)
-					colexecutils.AccountForMetadata(i.allocator, i.bufferedMeta[len(i.bufferedMeta)-1:])
+					colexecutils.AccountForMetadata(i.Ctx, i.allocator.Acc(), i.bufferedMeta[len(i.bufferedMeta)-1:])
 				}
 			}
 			if receivedErr != nil {

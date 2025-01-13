@@ -10,11 +10,9 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/build",
         "//pkg/internal/client/requestbatcher",
         "//pkg/keys",
         "//pkg/kv",
-        "//pkg/kv/kvclient/rangecache",
         "//pkg/kv/kvpb",
         "//pkg/kv/kvserver/batcheval/result",
         "//pkg/kv/kvserver/kvserverbase",
@@ -23,6 +21,8 @@ go_library(
         "//pkg/settings",
         "//pkg/settings/cluster",
         "//pkg/storage/enginepb",
+        "//pkg/util/debugutil",
+        "//pkg/util/envutil",
         "//pkg/util/hlc",
         "//pkg/util/log",
         "//pkg/util/metric",
@@ -45,8 +45,8 @@ go_test(
     ],
     embed = [":intentresolver"],
     exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
+        "//build/toolchains:is_heavy": {"test.Pool": "large"},
+        "//conditions:default": {"test.Pool": "default"},
     }),
     deps = [
         "//pkg/base",

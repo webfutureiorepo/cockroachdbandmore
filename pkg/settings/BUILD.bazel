@@ -38,6 +38,7 @@ go_library(
         "@com_github_cockroachdb_redact//interfaces",
         "@com_github_gogo_protobuf//jsonpb",
         "@com_github_gogo_protobuf//proto",
+        "@org_golang_x_exp//constraints",
     ],
 )
 
@@ -52,10 +53,6 @@ go_test(
         "validation_test.go",
     ],
     embed = [":settings"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/testutils",
         "//pkg/testutils/skip",

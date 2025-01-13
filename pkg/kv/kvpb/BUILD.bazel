@@ -10,7 +10,6 @@ go_library(
     srcs = [
         "ambiguous_result_error.go",
         "api.go",
-        "api_requestheader.go",
         "batch.go",
         "data.go",
         "errors.go",
@@ -65,10 +64,6 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":kvpb"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/keys",
         "//pkg/kv/kvnemesis/kvnemesisutil",
@@ -78,6 +73,7 @@ go_test(
         "//pkg/storage/enginepb",
         "//pkg/testutils/echotest",
         "//pkg/util/buildutil",
+        "//pkg/util/encoding",
         "//pkg/util/hlc",
         "//pkg/util/protoutil",
         "//pkg/util/timeutil",
@@ -85,7 +81,7 @@ go_test(
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_redact//:redact",
         "@com_github_gogo_protobuf//proto",
-        "@com_github_golang_protobuf//proto:go_default_library",
+        "@com_github_golang_protobuf//proto",
         "@com_github_kr_pretty//:pretty",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_grpc//codes",

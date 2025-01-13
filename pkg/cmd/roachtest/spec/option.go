@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spec
 
@@ -35,6 +30,30 @@ func Arch(arch vm.CPUArch) Option {
 func CPU(n int) Option {
 	return func(spec *ClusterSpec) {
 		spec.CPUs = n
+	}
+}
+
+// WorkloadNodeCount indicates the count of last nodes in cluster to be treated
+// as workload node. Defaults to a VM with 4 CPUs if not specified by
+// WorkloadNodeCPUs.
+func WorkloadNodeCount(n int) Option {
+	return func(spec *ClusterSpec) {
+		spec.WorkloadNodeCount = n
+		spec.WorkloadNode = true
+	}
+}
+
+// TODO(GouravKumar): remove use of WorkloadNode, use WorkloadNodeCount instead
+func WorkloadNode() Option {
+	return func(spec *ClusterSpec) {
+		spec.WorkloadNode = true
+		spec.WorkloadNodeCount = 1
+	}
+}
+
+func WorkloadNodeCPU(n int) Option {
+	return func(spec *ClusterSpec) {
+		spec.WorkloadNodeCPUs = n
 	}
 }
 
@@ -267,9 +286,17 @@ func AWSZones(zones string) Option {
 	}
 }
 
-// UbuntuVersion controls what Ubuntu Version is used to create the cluster.
-func UbuntuVersion(version vm.UbuntuVersion) Option {
+// AzureZones is a node option which requests Geo-distributed nodes; only applies
+// when the test runs on Azure.
+//
+// Note that this overrides the --zones flag and is useful for tests that
+// require running on specific zones.
+//
+// TODO(darrylwong): Something is not quite right when creating
+// zones that have overlapping address spaces, i.e. eastus and westus.
+// See: https://github.com/cockroachdb/cockroach/issues/124612
+func AzureZones(zones string) Option {
 	return func(spec *ClusterSpec) {
-		spec.UbuntuVersion = version
+		spec.Azure.Zones = zones
 	}
 }

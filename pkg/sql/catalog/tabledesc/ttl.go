@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tabledesc
 
@@ -14,13 +9,11 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
 	"github.com/robfig/cron/v3"
 )
@@ -103,7 +96,7 @@ func ValidateTTLExpirationExpr(desc catalog.TableDescriptor) error {
 // ValidateTTLExpirationColumn validates that the ttl_expire_after setting, if
 // any, is in a valid state. It requires that the TTLDefaultExpirationColumn
 // exists and has DEFAULT/ON UPDATE clauses.
-func ValidateTTLExpirationColumn(desc catalog.TableDescriptor, allowDescPK bool) error {
+func ValidateTTLExpirationColumn(desc catalog.TableDescriptor) error {
 	if !desc.HasRowLevelTTL() {
 		return nil
 	}
@@ -131,20 +124,6 @@ func ValidateTTLExpirationColumn(desc catalog.TableDescriptor, allowDescPK bool)
 			catpb.TTLDefaultExpirationColumnName,
 			expectedStr,
 		)
-	}
-
-	// For row-level TTL, only ascending PKs are permitted.
-	if !allowDescPK {
-		pk := desc.GetPrimaryIndex()
-		for i := 0; i < pk.NumKeyColumns(); i++ {
-			dir := pk.GetKeyColumnDirection(i)
-			if dir != catenumpb.IndexColumn_ASC {
-				return unimplemented.NewWithIssuef(
-					76912,
-					`non-ascending ordering on PRIMARY KEYs are not supported with row-level TTL`,
-				)
-			}
-		}
 	}
 
 	return nil

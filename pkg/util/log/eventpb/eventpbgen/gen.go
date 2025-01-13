@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -84,7 +79,7 @@ type fieldInfo struct {
 	Inherited           bool
 	IsEnum              bool
 	AllowZeroValue      bool
-	Nullable            bool
+	NotNullable         bool
 }
 
 var (
@@ -464,7 +459,7 @@ func readInput(
 					MixedRedactable:     mixed,
 					IsEnum:              isEnum,
 					AllowZeroValue:      allowZeroValue,
-					Nullable:            !notNullable,
+					NotNullable:         notNullable,
 				}
 				curMsg.Fields = append(curMsg.Fields, fi)
 				curMsg.AllFields = append(curMsg.AllFields, fi)
@@ -718,7 +713,7 @@ func (m *{{.GoType}}) AppendJSONFields(printComma bool, b redact.RedactableBytes
      }
    }
    {{- else if eq .FieldType "nestedMessage"}}
-   {{ if .Nullable -}}
+   {{ if not .NotNullable -}}
    if m.{{.FieldName}} != nil {
    {{- end }}
      if printComma { b = append(b, ',')}; printComma = true
@@ -726,7 +721,7 @@ func (m *{{.GoType}}) AppendJSONFields(printComma bool, b redact.RedactableBytes
      b = append(b, '{')
      printComma, b = m.{{.FieldName}}.AppendJSONFields(false, b)
      b = append(b, '}')
-   {{ if .Nullable -}}
+   {{ if not .NotNullable -}}
    }
    {{- end }}
    {{- else}}

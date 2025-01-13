@@ -1,21 +1,17 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package raftutil
 
 import (
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 func TestReplicaIsBehind(t *testing.T) {
@@ -23,7 +19,7 @@ func TestReplicaIsBehind(t *testing.T) {
 	makeStatus := func(f func(*raft.Status)) *raft.Status {
 		st := new(raft.Status)
 		st.Commit = 10
-		st.Progress = make(map[uint64]tracker.Progress)
+		st.Progress = make(map[raftpb.PeerID]tracker.Progress)
 		f(st)
 		return st
 	}
@@ -36,28 +32,28 @@ func TestReplicaIsBehind(t *testing.T) {
 		{
 			name: "local follower",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateFollower
+				st.RaftState = raftpb.StateFollower
 			}),
 			expect: true,
 		},
 		{
 			name: "local candidate",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateCandidate
+				st.RaftState = raftpb.StateCandidate
 			}),
 			expect: true,
 		},
 		{
 			name: "local leader, no progress for peer",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 			}),
 			expect: true,
 		},
 		{
 			name: "local leader, peer leader",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate}
 				st.Lead = replicaID
 			}),
@@ -66,7 +62,7 @@ func TestReplicaIsBehind(t *testing.T) {
 		{
 			name: "local leader, peer state probe",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateProbe}
 			}),
 			expect: true,
@@ -74,7 +70,7 @@ func TestReplicaIsBehind(t *testing.T) {
 		{
 			name: "local leader, peer state snapshot",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateSnapshot}
 			}),
 			expect: true,
@@ -82,7 +78,7 @@ func TestReplicaIsBehind(t *testing.T) {
 		{
 			name: "local leader, peer state replicate, match < commit",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate, Match: 9}
 			}),
 			expect: true,
@@ -90,7 +86,7 @@ func TestReplicaIsBehind(t *testing.T) {
 		{
 			name: "local leader, peer state replicate, match == commit",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate, Match: 10}
 			}),
 			expect: false,
@@ -98,7 +94,7 @@ func TestReplicaIsBehind(t *testing.T) {
 		{
 			name: "local leader, peer state replicate, match > commit",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate, Match: 11}
 			}),
 			expect: false,
@@ -122,7 +118,7 @@ func TestReplicaMayNeedSnapshot(t *testing.T) {
 	makeStatus := func(f func(*raft.Status)) *raft.Status {
 		st := new(raft.Status)
 		st.Commit = 10
-		st.Progress = make(map[uint64]tracker.Progress)
+		st.Progress = make(map[raftpb.PeerID]tracker.Progress)
 		f(st)
 		return st
 	}
@@ -135,28 +131,28 @@ func TestReplicaMayNeedSnapshot(t *testing.T) {
 		{
 			name: "local follower",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateFollower
+				st.RaftState = raftpb.StateFollower
 			}),
 			expect: LocalReplicaNotLeader,
 		},
 		{
 			name: "local candidate",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateCandidate
+				st.RaftState = raftpb.StateCandidate
 			}),
 			expect: LocalReplicaNotLeader,
 		},
 		{
 			name: "local leader, no progress for peer",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 			}),
 			expect: ReplicaUnknown,
 		},
 		{
 			name: "local leader, peer state probe",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateProbe}
 			}),
 			expect: ReplicaStateProbe,
@@ -164,7 +160,7 @@ func TestReplicaMayNeedSnapshot(t *testing.T) {
 		{
 			name: "local leader, peer state snapshot",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateSnapshot}
 			}),
 			expect: ReplicaStateSnapshot,
@@ -172,7 +168,7 @@ func TestReplicaMayNeedSnapshot(t *testing.T) {
 		{
 			name: "local leader, peer state replicate, match+1 < firstIndex",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate, Match: 8}
 			}),
 			expect: ReplicaMatchBelowLeadersFirstIndex,
@@ -180,7 +176,7 @@ func TestReplicaMayNeedSnapshot(t *testing.T) {
 		{
 			name: "local leader, peer state replicate, match+1 == firstIndex",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate, Match: 9}
 			}),
 			expect: NoSnapshotNeeded,
@@ -188,7 +184,7 @@ func TestReplicaMayNeedSnapshot(t *testing.T) {
 		{
 			name: "local leader, peer state replicate, match+1 == firstIndex",
 			st: makeStatus(func(st *raft.Status) {
-				st.RaftState = raft.StateLeader
+				st.RaftState = raftpb.StateLeader
 				st.Progress[replicaID] = tracker.Progress{State: tracker.StateReplicate, Match: 10}
 			}),
 			expect: NoSnapshotNeeded,

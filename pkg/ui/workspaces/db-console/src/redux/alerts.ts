@@ -1,25 +1,46 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * Alerts is a collection of selectors which determine if there are any Alerts
  * to display based on the current redux state.
  */
 
-import _ from "lodash";
+import filter from "lodash/filter";
+import has from "lodash/has";
+import isEmpty from "lodash/isEmpty";
+import isNil from "lodash/isNil";
+import without from "lodash/without";
 import moment from "moment-timezone";
-import { createSelector } from "reselect";
 import { Store, Dispatch, Action, AnyAction } from "redux";
 import { ThunkAction } from "redux-thunk";
+import { createSelector } from "reselect";
 
+import {
+  singleVersionSelector,
+  numNodesByVersionsTagSelector,
+  numNodesByVersionsSelector,
+} from "src/redux/nodes";
+import * as docsURL from "src/util/docs";
+import { longToInt } from "src/util/fixLong";
+
+import { getDataFromServer } from "../util/dataFromServer";
+
+import {
+  refreshCluster,
+  refreshNodes,
+  refreshVersion,
+  refreshHealth,
+  refreshSettings,
+} from "./apiReducers";
+import {
+  selectClusterSettings,
+  selectClusterSettingVersion,
+} from "./clusterSettings";
 import { LocalSetting } from "./localsettings";
+import { AdminUIState, AppDispatch } from "./state";
 import {
   VERSION_DISMISSED_KEY,
   INSTRUCTIONS_BOX_COLLAPSED_KEY,
@@ -29,32 +50,13 @@ import {
   UIDataState,
   UIDataStatus,
 } from "./uiData";
-import {
-  refreshCluster,
-  refreshNodes,
-  refreshVersion,
-  refreshHealth,
-  refreshSettings,
-} from "./apiReducers";
-import {
-  singleVersionSelector,
-  numNodesByVersionsTagSelector,
-  numNodesByVersionsSelector,
-} from "src/redux/nodes";
-import { AdminUIState, AppDispatch } from "./state";
-import * as docsURL from "src/util/docs";
-import { getDataFromServer } from "../util/dataFromServer";
-import {
-  selectClusterSettings,
-  selectClusterSettingVersion,
-} from "./clusterSettings";
-import { longToInt } from "src/util/fixLong";
 
 export enum AlertLevel {
   NOTIFICATION,
   WARNING,
   CRITICAL,
   SUCCESS,
+  INFORMATION,
 }
 
 export interface AlertInfo {
@@ -94,7 +96,7 @@ const instructionsBoxCollapsedPersistentLoadedSelector = createSelector(
   (state: AdminUIState) => state.uiData,
   (uiData): boolean =>
     uiData &&
-    _.has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY) &&
+    has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY) &&
     uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].status === UIDataStatus.VALID,
 );
 
@@ -102,7 +104,7 @@ const instructionsBoxCollapsedPersistentSelector = createSelector(
   (state: AdminUIState) => state.uiData,
   (uiData): boolean =>
     uiData &&
-    _.has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY) &&
+    has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY) &&
     uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].status === UIDataStatus.VALID &&
     uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].data,
 );
@@ -181,7 +183,7 @@ export const staggeredVersionWarningSelector = createSelector(
 // "loaded, doesn't exist on server" without a separate selector.
 const newVersionDismissedPersistentLoadedSelector = createSelector(
   (state: AdminUIState) => state.uiData,
-  uiData => uiData && _.has(uiData, VERSION_DISMISSED_KEY),
+  uiData => uiData && has(uiData, VERSION_DISMISSED_KEY),
 );
 
 const newVersionDismissedPersistentSelector = createSelector(
@@ -631,20 +633,6 @@ export const upgradeNotFinalizedWarningSelector = createSelector(
 
 /**
  * Selector which returns an array of all active alerts which should be
- * displayed in the overview list page, these should be non-critical alerts.
- */
-
-export const overviewListAlertsSelector = createSelector(
-  staggeredVersionWarningSelector,
-  clusterPreserveDowngradeOptionOvertimeSelector,
-  upgradeNotFinalizedWarningSelector,
-  (...alerts: Alert[]): Alert[] => {
-    return _.without(alerts, null, undefined);
-  },
-);
-
-/**
- * Selector which returns an array of all active alerts which should be
  * displayed in the alerts panel, which is embedded within the cluster overview
  * page; currently, this includes all non-critical alerts.
  */
@@ -652,7 +640,7 @@ export const panelAlertsSelector = createSelector(
   newVersionNotificationSelector,
   staggeredVersionWarningSelector,
   (...alerts: Alert[]): Alert[] => {
-    return _.without(alerts, null, undefined);
+    return without(alerts, null, undefined);
   },
 );
 
@@ -665,7 +653,7 @@ export const panelAlertsSelector = createSelector(
 export const dataFromServerAlertSelector = createSelector(
   () => {},
   (): Alert => {
-    if (_.isEmpty(getDataFromServer())) {
+    if (isEmpty(getDataFromServer())) {
       return {
         level: AlertLevel.CRITICAL,
         title: "There was an error retrieving base DB Console configuration.",
@@ -684,6 +672,63 @@ export const dataFromServerAlertSelector = createSelector(
   },
 );
 
+export type LicenseType =
+  | "Evaluation"
+  | "Trial"
+  | "Enterprise"
+  | "Non-Commercial"
+  | "None"
+  | "Free";
+
+const licenseTypeNames = new Map<string, LicenseType>([
+  ["Evaluation", "Evaluation"],
+  ["Enterprise", "Enterprise"],
+  ["NonCommercial", "Non-Commercial"],
+  ["OSS", "None"],
+  ["BSD", "None"],
+  ["Free", "Free"],
+  ["Trial", "Trial"],
+]);
+
+// licenseTypeSelector returns user-friendly names of license types.
+export const licenseTypeSelector = createSelector(
+  getDataFromServer,
+  data => licenseTypeNames.get(data.LicenseType) || "None",
+);
+
+export const licenseUpdateDismissedLocalSetting = new LocalSetting(
+  "license_update_dismissed",
+  localSettingsSelector,
+  moment(0),
+);
+
+/**
+ * Selector which returns an array of all active alerts which should be
+ * displayed in the overview list page, these should be non-critical alerts.
+ */
+
+export const overviewListAlertsSelector = createSelector(
+  staggeredVersionWarningSelector,
+  clusterPreserveDowngradeOptionOvertimeSelector,
+  upgradeNotFinalizedWarningSelector,
+  (...alerts: Alert[]): Alert[] => {
+    return without(alerts, null, undefined);
+  },
+);
+
+// daysUntilLicenseExpiresSelector returns number of days remaining before license expires.
+export const daysUntilLicenseExpiresSelector = createSelector(
+  getDataFromServer,
+  data => {
+    return Math.ceil(data.SecondsUntilLicenseExpiry / 86400); // seconds in 1 day
+  },
+);
+
+export const isManagedClusterSelector = createSelector(
+  getDataFromServer,
+  data => data.IsManaged,
+);
+
 /**
  * Selector which returns an array of all active alerts which should be
  * displayed as a banner, which appears at the top of the page and overlaps
@@ -699,7 +744,7 @@ export const bannerAlertsSelector = createSelector(
   terminateQueryAlertSelector,
   dataFromServerAlertSelector,
   (...alerts: Alert[]): Alert[] => {
-    return _.without(alerts, null, undefined);
+    return without(alerts, null, undefined);
   },
 );
 
@@ -745,8 +790,8 @@ export function alertDataSync(store: Store<AdminUIState>) {
         VERSION_DISMISSED_KEY,
         INSTRUCTIONS_BOX_COLLAPSED_KEY,
       ];
-      const keysToLoad = _.filter(keysToMaybeLoad, key => {
-        return !(_.has(uiData, key) || isInFlight(state, key));
+      const keysToLoad = filter(keysToMaybeLoad, key => {
+        return !(has(uiData, key) || isInFlight(state, key));
       });
       if (keysToLoad) {
         dispatch(loadUIData(...keysToLoad));
@@ -776,7 +821,7 @@ export function alertDataSync(store: Store<AdminUIState>) {
     // ID and node statuses being loaded first and thus cannot simply run at
     // startup.
     const currentVersion = singleVersionSelector(state);
-    if (_.isNil(newerVersionsSelector(state))) {
+    if (isNil(newerVersionsSelector(state))) {
       if (cluster.data && cluster.data.cluster_id && currentVersion) {
         dispatch(
           refreshVersion({

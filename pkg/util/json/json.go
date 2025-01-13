@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package json
 
@@ -189,11 +184,6 @@ type JSON interface {
 	// AsArray returns the JSON document as an Array if it is a array type,
 	// and a boolean indicating if this JSON value is a array type.
 	AsArray() ([]JSON, bool)
-
-	// AreKeysSorted returns if the keys in a JSON Object are sorted by
-	// increasing order. It returns false if the underlying JSON value
-	// is not a JSON object.
-	AreKeysSorted() bool
 
 	// Exists implements the `?` operator: does the string exist as a top-level
 	// key within the JSON value?
@@ -782,6 +772,7 @@ const hexAlphabet = "0123456789abcdef"
 // encodeJSONString writes a string literal to buf as a JSON string.
 // Cribbed from https://github.com/golang/go/blob/7badae85f20f1bce4cc344f9202447618d45d414/src/encoding/json/encode.go.
 func encodeJSONString(buf *bytes.Buffer, s string) {
+	buf.Grow(len(s) + 2)
 	buf.WriteByte('"')
 	start := 0
 	for i := 0; i < len(s); {
@@ -923,38 +914,6 @@ func (j jsonArray) AsArray() ([]JSON, bool) {
 
 func (j jsonNumber) AsArray() ([]JSON, bool) {
 	return nil, false
-}
-
-func (j jsonNull) AreKeysSorted() bool {
-	return false
-}
-
-func (j jsonString) AreKeysSorted() bool {
-	return false
-}
-
-func (j jsonFalse) AreKeysSorted() bool {
-	return false
-}
-
-func (j jsonTrue) AreKeysSorted() bool {
-	return false
-}
-
-func (j jsonNumber) AreKeysSorted() bool {
-	return false
-}
-
-func (j jsonArray) AreKeysSorted() bool {
-	return false
-}
-
-func (j jsonObject) AreKeysSorted() bool {
-	keys := make([]string, 0, j.Len())
-	for _, a := range j {
-		keys = append(keys, a.k.String())
-	}
-	return sort.StringsAreSorted(keys)
 }
 
 // parseJSONGoStd parses json using encoding/json library.
@@ -2022,7 +1981,11 @@ func (j jsonObject) EncodeForwardIndex(buf []byte, dir encoding.Direction) ([]by
 	buf = encoding.EncodeJSONValueLength(buf, dir, int64(len(j)))
 
 	if buildutil.CrdbTestBuild {
-		if ordered := j.AreKeysSorted(); !ordered {
+		keys := make([]string, 0, j.Len())
+		for _, a := range j {
+			keys = append(keys, string(a.k))
+		}
+		if !sort.StringsAreSorted(keys) {
 			return nil, errors.AssertionFailedf("unexpectedly unordered keys in jsonObject %s", j)
 		}
 	}

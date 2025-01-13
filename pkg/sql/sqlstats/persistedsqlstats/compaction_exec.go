@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package persistedsqlstats
 
@@ -20,7 +15,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -114,7 +108,7 @@ func (c *StatsCompactor) getRowCountForShard(
 	row, err := c.db.Executor().QueryRowEx(ctx,
 		"scan-row-count",
 		nil,
-		sessiondata.NodeUserSessionDataOverride,
+		sessiondata.NodeUserWithLowUserPrioritySessionDataOverride,
 		stmt,
 		shardIdx,
 	)
@@ -208,14 +202,10 @@ func (c *StatsCompactor) removeStaleRowsForShard(
 func (c *StatsCompactor) executeDeleteStmt(
 	ctx context.Context, delStmt string, qargs []interface{},
 ) (lastRow tree.Datums, rowsDeleted int64, err error) {
-	qosLevel := sessiondatapb.UserLow
 	it, err := c.db.Executor().QueryIteratorEx(ctx,
 		"delete-old-sql-stats",
 		nil, /* txn */
-		sessiondata.InternalExecutorOverride{
-			User:             sessiondata.NodeUserSessionDataOverride.User,
-			QualityOfService: &qosLevel,
-		},
+		sessiondata.NodeUserWithLowUserPrioritySessionDataOverride,
 		delStmt,
 		qargs...,
 	)

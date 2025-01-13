@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
@@ -109,7 +104,7 @@ func (t *descriptorState) findForTimestamp(
 		// Check to see if the ModificationTime is valid.
 		if desc := t.mu.active.data[i]; desc.GetModificationTime().LessEq(timestamp) {
 			latest := i+1 == len(t.mu.active.data)
-			if !desc.hasExpired(timestamp) {
+			if !desc.hasExpired(ctx, timestamp) {
 				// Existing valid descriptor version.
 				desc.incRefCount(ctx, expensiveLogEnabled)
 				return desc, latest, nil
@@ -177,6 +172,10 @@ func (t *descriptorState) upsertLeaseLocked(
 	}
 	if session != nil {
 		s.mu.lease.sessionID = session.ID().UnsafeBytes()
+		// When using session based leasing, if we end up acquiring the same lease again
+		// nothing needs to be cleaned up or updated. This is because the system.lease
+		// table does not store any expiry inside the table.
+		toRelease.sessionID = nil
 	}
 	if log.ExpensiveLogEnabled(ctx, 2) {
 		log.VEventf(ctx, 2, "replaced lease: %s with %s", toRelease, s.mu.lease)
@@ -185,7 +184,9 @@ func (t *descriptorState) upsertLeaseLocked(
 	// is subsumed we have nothing to delete. In dual-write mode clearing
 	// this guarantees only the old expiry based lease is cleaned up. In
 	// Session only clearing this means the release is a no-op.
-	toRelease.sessionID = nil
+	if toRelease != nil {
+		toRelease.sessionID = nil
+	}
 	return nil, toRelease, nil
 }
 

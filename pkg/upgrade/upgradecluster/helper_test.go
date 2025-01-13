@@ -1,19 +1,14 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgradecluster
 
 import (
 	"context"
-	"fmt"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"google.golang.org/grpc"
 )
@@ -51,7 +47,13 @@ func TestHelperEveryNode(t *testing.T) {
 			Dialer:       NoopDialer{},
 		})
 		opCount := 0
-		err := h.UntilClusterStable(ctx, func() error {
+		err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -84,7 +86,13 @@ func TestHelperEveryNode(t *testing.T) {
 			Dialer:       NoopDialer{},
 		})
 		opCount := 0
-		err := h.UntilClusterStable(ctx, func() error {
+		err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -117,9 +125,16 @@ func TestHelperEveryNode(t *testing.T) {
 			NodeLiveness: tc,
 			Dialer:       NoopDialer{},
 		})
-		expRe := fmt.Sprintf("n%d required, but unavailable", downedNode)
+		expRe := "cluster not stable, nodes: n\\{1,2,3\\}, unavailable: n\\{2\\}"
 		opCount := 0
-		if err := h.UntilClusterStable(ctx, func() error {
+
+		if err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -137,7 +152,13 @@ func TestHelperEveryNode(t *testing.T) {
 		}
 
 		tc.RestartNode(downedNode)
-		if err := h.UntilClusterStable(ctx, func() error {
+		if err := h.UntilClusterStable(ctx, retry.Options{
+			// Speed up testing, run for at most 10 retries over a second.
+			InitialBackoff: 100 * time.Millisecond,
+			MaxBackoff:     100 * time.Millisecond,
+			Multiplier:     1.0,
+			MaxRetries:     10,
+		}, func() error {
 			return h.ForEveryNodeOrServer(ctx, "dummy-op", func(
 				context.Context, serverpb.MigrationClient,
 			) error {
@@ -157,9 +178,13 @@ func TestClusterNodes(t *testing.T) {
 
 	t.Run("retrieves-all", func(t *testing.T) {
 		nl := livenesspb.TestCreateNodeVitality(1, 2, 3)
-		ns, err := NodesFromNodeLiveness(ctx, nl)
+		ns, unavailable, err := NodesFromNodeLiveness(ctx, nl)
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		if len(unavailable) > 0 {
+			t.Fatalf("expected no unavailable nodes, found %d", len(unavailable))
 		}
 
 		if got := len(ns); got != numNodes {
@@ -182,7 +207,7 @@ func TestClusterNodes(t *testing.T) {
 		const decommissionedNode = 3
 		nl.Decommissioned(decommissionedNode, false)
 
-		ns, err := NodesFromNodeLiveness(ctx, nl)
+		ns, _, err := NodesFromNodeLiveness(ctx, nl)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -206,10 +231,12 @@ func TestClusterNodes(t *testing.T) {
 		const downedNode = 3
 		nl.DownNode(downedNode)
 
-		_, err := NodesFromNodeLiveness(ctx, nl)
-		expRe := fmt.Sprintf("n%d required, but unavailable", downedNode)
-		if !testutils.IsError(err, expRe) {
-			t.Fatalf("expected error %q, got %q", expRe, err)
+		_, unavailable, err := NodesFromNodeLiveness(ctx, nl)
+		if len(unavailable) != 1 {
+			t.Fatalf("expected 1 unavailable node, found %d", len(unavailable))
+		}
+		if err != nil {
+			t.Fatal(err)
 		}
 	})
 }

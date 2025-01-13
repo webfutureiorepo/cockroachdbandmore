@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -40,8 +35,9 @@ func TestCheckSSTConflictsMaxLockConflicts(t *testing.T) {
 	start, end := "a", "z"
 
 	testcases := []struct {
-		maxLockConflicts    int64
-		expectLockConflicts []string
+		maxLockConflicts        int64
+		targetLockConflictBytes int64
+		expectLockConflicts     []string
 	}{
 		{maxLockConflicts: 0, expectLockConflicts: []string{"a", "b", "c", "d", "e"}}, // 0 means no limit
 		{maxLockConflicts: 1, expectLockConflicts: []string{"a"}},
@@ -50,12 +46,15 @@ func TestCheckSSTConflictsMaxLockConflicts(t *testing.T) {
 		{maxLockConflicts: 4, expectLockConflicts: []string{"a", "b", "c", "d"}},
 		{maxLockConflicts: 5, expectLockConflicts: []string{"a", "b", "c", "d", "e"}},
 		{maxLockConflicts: 6, expectLockConflicts: []string{"a", "b", "c", "d", "e"}},
+		// each intent has the size of 50 bytes
+		{maxLockConflicts: 6, targetLockConflictBytes: 195, expectLockConflicts: []string{"a", "b", "c", "d"}},
+		{maxLockConflicts: 6, targetLockConflictBytes: 215, expectLockConflicts: []string{"a", "b", "c", "d", "e"}},
 	}
 
 	// Create SST with keys equal to intents at txn2TS.
 	cs := cluster.MakeTestingClusterSettings()
 	var sstFile bytes.Buffer
-	sstWriter := MakeBackupSSTWriter(context.Background(), cs, &sstFile)
+	sstWriter := MakeTransportSSTWriter(context.Background(), cs, &sstFile)
 	defer sstWriter.Close()
 	for _, k := range intents {
 		key := MVCCKey{Key: roachpb.Key(k), Timestamp: txn2TS}
@@ -68,7 +67,7 @@ func TestCheckSSTConflictsMaxLockConflicts(t *testing.T) {
 	sstWriter.Close()
 
 	ctx := context.Background()
-	engine, err := Open(context.Background(), InMemory(), cs, MaxSize(1<<20))
+	engine, err := Open(context.Background(), InMemory(), cs, MaxSizeBytes(1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +90,7 @@ func TestCheckSSTConflictsMaxLockConflicts(t *testing.T) {
 		if i%2 != 0 {
 			str = lock.Exclusive
 		}
-		require.NoError(t, MVCCAcquireLock(ctx, batch, txn1, str, roachpb.Key(key), nil, 0))
+		require.NoError(t, MVCCAcquireLock(ctx, batch, txn1, str, roachpb.Key(key), nil, 0, 0))
 	}
 	require.NoError(t, batch.Commit(true))
 	batch.Close()
@@ -104,7 +103,7 @@ func TestCheckSSTConflictsMaxLockConflicts(t *testing.T) {
 					// Provoke and check LockConflictError.
 					startKey, endKey := MVCCKey{Key: roachpb.Key(start)}, MVCCKey{Key: roachpb.Key(end)}
 					_, err := CheckSSTConflicts(ctx, sstFile.Bytes(), engine, startKey, endKey, startKey.Key, endKey.Key.Next(),
-						false /*disallowShadowing*/, hlc.Timestamp{} /*disallowShadowingBelow*/, hlc.Timestamp{} /* sstReqTS */, tc.maxLockConflicts, usePrefixSeek)
+						false /*disallowShadowing*/, hlc.Timestamp{} /*disallowShadowingBelow*/, hlc.Timestamp{} /* sstReqTS */, tc.maxLockConflicts, tc.targetLockConflictBytes, usePrefixSeek)
 					require.Error(t, err)
 					lcErr := &kvpb.LockConflictError{}
 					require.ErrorAs(t, err, &lcErr)

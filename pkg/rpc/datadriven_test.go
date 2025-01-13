@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rpc
 
@@ -227,7 +222,8 @@ func (env *ddEnv) lookupServerWithSkip(nodeID roachpb.NodeID, skip int) *ddServe
 }
 
 func (env *ddEnv) dial(srv *ddServer, class ConnectionClass) *Connection {
-	return env.client.GRPCDialNode(srv.addr, srv.nodeID, class)
+	// TODO(baptist): Fix the locality for tests.
+	return env.client.GRPCDialNode(srv.addr, srv.nodeID, roachpb.Locality{}, class)
 }
 
 func (env *ddEnv) handleDial(to *ddServer, class ConnectionClass) {

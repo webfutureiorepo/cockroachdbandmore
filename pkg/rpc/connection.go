@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rpc
 
@@ -39,17 +34,26 @@ type Connection struct {
 	// It always has to be signaled eventually, regardless of the stopper
 	// draining, etc, since callers might be blocking on it.
 	connFuture connFuture
+	// batchStreamPool holds a pool of BatchStreamClient streams established on
+	// the connection. The pool can be used to avoid the overhead of unary Batch
+	// RPCs.
+	//
+	// The pool is only initialized once the ClientConn is resolved.
+	batchStreamPool BatchStreamPool
 }
 
 // newConnectionToNodeID makes a Connection for the given node, class, and nontrivial Signal
 // that should be queried in Connect().
-func newConnectionToNodeID(k peerKey, breakerSignal func() circuit.Signal) *Connection {
+func newConnectionToNodeID(
+	opts *ContextOptions, k peerKey, breakerSignal func() circuit.Signal,
+) *Connection {
 	c := &Connection{
 		breakerSignalFn: breakerSignal,
 		k:               k,
 		connFuture: connFuture{
 			ready: make(chan struct{}),
 		},
+		batchStreamPool: makeStreamPool(opts.Stopper, newBatchStream),
 	}
 	return c
 }
@@ -121,6 +125,10 @@ func (s *neverTripSignal) C() <-chan struct{} {
 	return nil
 }
 
+func (s *neverTripSignal) IsTripped() bool {
+	return false
+}
+
 // ConnectNoBreaker is like Connect but bypasses the circuit breaker, meaning
 // that it will latch onto (or start) an existing connection attempt even if
 // previous attempts have not succeeded. This may be preferable to Connect
@@ -157,6 +165,13 @@ func (c *Connection) Signal() circuit.Signal {
 	return c.breakerSignalFn()
 }
 
+func (c *Connection) BatchStreamPool() *BatchStreamPool {
+	if !c.connFuture.Resolved() {
+		panic("BatchStreamPool called on unresolved connection")
+	}
+	return &c.batchStreamPool
+}
+
 type connFuture struct {
 	ready chan struct{}
 	cc    *grpc.ClientConn
@@ -172,6 +187,10 @@ func (s *connFuture) C() <-chan struct{} {
 // Err must only be called after C() has been closed.
 func (s *connFuture) Err() error {
 	return s.err
+}
+
+func (s *connFuture) IsTripped() bool {
+	return s.Resolved()
 }
 
 // Conn must only be called after C() has been closed.

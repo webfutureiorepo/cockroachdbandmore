@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -152,10 +147,14 @@ func newInvTableNameError(n fmt.Stringer) error {
 type DesiredObjectKind byte
 
 const (
+	_ DesiredObjectKind = iota
 	// TableObject is used when a table-like object is desired from resolution.
-	TableObject DesiredObjectKind = iota
+	TableObject
 	// TypeObject is used when a type-like object is desired from resolution.
 	TypeObject
+	// AnyObject is used when any object is acceptable. This is primary used when
+	// looking for name conflicts.
+	AnyObject
 )
 
 // RequiredTableKind controls what kind of TableDescriptor backed object is

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rand
 
@@ -35,6 +30,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// NOTE: the caller is expected to pass the same seed on `init` and
+// `run` when using this workload.
 var RandomSeed = workload.NewInt64RandomSeed()
 
 type random struct {
@@ -87,6 +84,9 @@ func (w *random) Meta() workload.Meta {
 // Flags implements the Flagser interface.
 func (w *random) Flags() workload.Flags { return w.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (w *random) ConnFlags() *workload.ConnFlags { return w.connFlags }
+
 // Hooks implements the Hookser interface.
 func (w *random) Hooks() workload.Hooks {
 	return workload.Hooks{}
@@ -97,7 +97,7 @@ func (w *random) Tables() []workload.Table {
 	tables := make([]workload.Table, w.tables)
 	rng := rand.New(rand.NewSource(RandomSeed.Seed()))
 	for i := 0; i < w.tables; i++ {
-		createTable := randgen.RandCreateTable(rng, "table", rng.Int(), false /* isMultiRegion */)
+		createTable := randgen.RandCreateTable(context.Background(), rng, "table", rng.Int(), randgen.TableOptNone)
 		ctx := tree.NewFmtCtx(tree.FmtParsable)
 		createTable.FormatBody(ctx)
 		tables[i] = workload.Table{
@@ -147,10 +147,6 @@ func typeForOid(db *gosql.DB, typeOid oid.Oid, tableName, columnName string) (*t
 func (w *random) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (ql workload.QueryLoad, retErr error) {
-	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -286,7 +282,7 @@ AND    i.indisprimary`, relid)
 		}
 	}
 
-	fmt.Fprintf(&buf, `%s INTO %s.%s (`, dmlMethod, tree.NameString(sqlDatabase), tree.NameString(tableName))
+	fmt.Fprintf(&buf, `%s INTO %s (`, dmlMethod, tree.NameString(tableName))
 	for i, c := range nonComputedCols {
 		if i > 0 {
 			buf.WriteString(",")
@@ -317,7 +313,7 @@ AND    i.indisprimary`, relid)
 		return workload.QueryLoad{}, err
 	}
 
-	ql = workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql = workload.QueryLoad{}
 
 	for i := 0; i < w.connFlags.Concurrency; i++ {
 		op := randOp{
@@ -434,6 +430,8 @@ func DatumToGoSQL(d tree.Datum) (interface{}, error) {
 	case *tree.DTSQuery:
 		return d.String(), nil
 	case *tree.DTSVector:
+		return d.String(), nil
+	case *tree.DPGVector:
 		return d.String(), nil
 	}
 	return nil, errors.Errorf("unhandled datum type: %s", reflect.TypeOf(d))

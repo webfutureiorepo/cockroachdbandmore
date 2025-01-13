@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecdisk
 
@@ -47,7 +42,16 @@ type partitionerToOperator struct {
 	batch        coldata.Batch
 }
 
-var _ colexecop.Operator = &partitionerToOperator{}
+var _ colexecop.ResettableOperator = &partitionerToOperator{}
+
+func (p *partitionerToOperator) Reset(ctx context.Context) {
+	// When resetting we simply want to update the context - this will allow us
+	// to make Init a no-op and reuse already allocated batch. If Init hasn't
+	// been called yet, then Reset is a no-op.
+	if p.Ctx != nil {
+		p.Ctx = ctx
+	}
+}
 
 func (p *partitionerToOperator) Init(ctx context.Context) {
 	if !p.InitHelper.Init(ctx) {

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
@@ -21,17 +16,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils/storageutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/stretchr/testify/require"
 )
 
 // smallEngineBlocks configures Pebble with a block size of 1 byte, to provoke
 // bugs in time-bound iterators.
-var smallEngineBlocks = util.ConstantWithMetamorphicTestBool("small-engine-blocks", false)
+var smallEngineBlocks = metamorphic.ConstantWithTestBool("small-engine-blocks", false)
 
 // TODO(erikgrinaker): This should be migrated to a data-driven test harness for
 // end-to-end rangefeed testing, with more exhaustive test cases. See:
@@ -164,7 +160,7 @@ func TestCatchupScan(t *testing.T) {
 				require.NoError(t, iter.CatchUpScan(ctx, func(e *kvpb.RangeFeedEvent) error {
 					events = append(events, *e.Val)
 					return nil
-				}, withDiff, withFiltering))
+				}, withDiff, withFiltering, false /* withOmitRemote */))
 				if !(withFiltering && omitInRangefeeds) {
 					require.Equal(t, 7, len(events))
 				} else {
@@ -200,6 +196,61 @@ func TestCatchupScan(t *testing.T) {
 	})
 }
 
+func TestCatchupScanOriginID(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	eng := storage.NewDefaultInMemForTesting(storage.If(smallEngineBlocks, storage.BlockSize(1)))
+	defer eng.Close()
+
+	exclusiveStartTime := hlc.Timestamp{WallTime: 1}
+	a1 := storageutils.PointKV("a", 2, "a1")
+	b1 := storageutils.PointKV("b", 2, "b1")
+
+	val := func(val []byte) roachpb.Value {
+		return roachpb.Value{RawBytes: val}
+	}
+
+	checkEquality := func(
+		kv storage.MVCCKeyValue, event kvpb.RangeFeedValue) {
+		require.Equal(t, string(kv.Key.Key), string(event.Key))
+		require.Equal(t, kv.Key.Timestamp, event.Value.Timestamp)
+		require.Equal(t, string(kv.Value), string(event.Value.RawBytes))
+	}
+
+	_, err := storage.MVCCPut(
+		ctx, eng, a1.Key.Key, a1.Key.Timestamp, val(a1.Value), storage.MVCCWriteOptions{},
+	)
+	require.NoError(t, err)
+	_, err = storage.MVCCPut(
+		ctx, eng, b1.Key.Key, b1.Key.Timestamp, val(b1.Value), storage.MVCCWriteOptions{OriginID: 1},
+	)
+	require.NoError(t, err)
+
+	testutils.RunTrueAndFalse(t, "withOmitRmote", func(t *testing.T, omitRemote bool) {
+		span := roachpb.Span{Key: a1.Key.Key, EndKey: roachpb.KeyMax}
+		iter, err := NewCatchUpIterator(ctx, eng, span, exclusiveStartTime, nil, nil)
+		require.NoError(t, err)
+		defer iter.Close()
+		var events []kvpb.RangeFeedValue
+		// ts1 here is exclusive, so we do not want the versions at ts1.
+		require.NoError(t, iter.CatchUpScan(ctx, func(e *kvpb.RangeFeedEvent) error {
+			events = append(events, *e.Val)
+			return nil
+		}, false /* withDiff */, false /* withFiltering */, omitRemote))
+		if omitRemote {
+			require.Equal(t, 1, len(events))
+		} else {
+			require.Equal(t, 2, len(events))
+		}
+		checkEquality(a1, events[0])
+		if !omitRemote {
+			checkEquality(b1, events[1])
+		}
+	})
+}
+
 func TestCatchupScanInlineError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -218,7 +269,7 @@ func TestCatchupScanInlineError(t *testing.T) {
 	require.NoError(t, err)
 	defer iter.Close()
 
-	err = iter.CatchUpScan(ctx, nil, false /* withDiff */, false /* withFiltering */)
+	err = iter.CatchUpScan(ctx, nil, false /* withDiff */, false /* withFiltering */, false /* withOmitRemote */)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected inline value")
 }
@@ -266,7 +317,7 @@ func TestCatchupScanSeesOldIntent(t *testing.T) {
 	require.NoError(t, iter.CatchUpScan(ctx, func(e *kvpb.RangeFeedEvent) error {
 		keys[string(e.Val.Key)] = struct{}{}
 		return nil
-	}, true /* withDiff */, false /* withFiltering */))
+	}, true /* withDiff */, false /* withFiltering */, false /* withOmitRemote */))
 	require.Equal(t, map[string]struct{}{
 		"b": {},
 		"e": {},

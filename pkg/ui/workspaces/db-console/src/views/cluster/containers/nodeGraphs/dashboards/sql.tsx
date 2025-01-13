@@ -1,26 +1,22 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { AxisUnits } from "@cockroachlabs/cluster-ui";
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import map from "lodash/map";
 import React from "react";
-import _ from "lodash";
 
 import LineGraph from "src/views/cluster/components/linegraph";
-import { Metric, Axis } from "src/views/shared/components/metricQuery";
-import { AxisUnits } from "@cockroachlabs/cluster-ui";
-
-import { GraphDashboardProps, nodeDisplayName } from "./dashboardUtils";
 import {
   StatementDenialsClusterSettingsTooltip,
   TransactionRestartsToolTip,
 } from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { Metric, Axis } from "src/views/shared/components/metricQuery";
+
+import { GraphDashboardProps, nodeDisplayName } from "./dashboardUtils";
+
 import TimeSeriesQueryAggregator = cockroach.ts.tspb.TimeSeriesQueryAggregator;
 
 export default function (props: GraphDashboardProps) {
@@ -42,7 +38,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="connections">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.conns"
@@ -62,7 +58,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="connections per second">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.new_conns"
@@ -72,6 +68,23 @@ export default function (props: GraphDashboardProps) {
             nonNegativeRate
           />
         ))}
+      </Axis>
+    </LineGraph>,
+
+    <LineGraph
+      title="Upgrades of SQL Transaction Isolation Level"
+      isKvGraph={false}
+      sources={nodeSources}
+      tenantSource={tenantSource}
+      tooltip={`The total number of times a SQL transaction was upgraded to a stronger isolation level ${tooltipSelection}. If this metric is non-zero, then your application may be affected by the upcoming support of additional isolation levels.`}
+      showMetricsInTooltip={true}
+    >
+      <Axis label="transactions">
+        <Metric
+          name="cr.node.sql.txn.upgraded_iso_level.count"
+          title="Upgrades of Transaction Isolation Level"
+          downsampleMax
+        />
       </Axis>
     </LineGraph>,
 
@@ -124,12 +137,12 @@ export default function (props: GraphDashboardProps) {
     </LineGraph>,
 
     <LineGraph
-      title="SQL Statements"
+      title="SQL Queries Per Second"
       isKvGraph={false}
       sources={nodeSources}
       tenantSource={tenantSource}
       tooltip={`A ten-second moving average of the # of SELECT, INSERT, UPDATE, and
-          DELETE statements successfully executed per second ${tooltipSelection}.`}
+          DELETE statements, and the sum of all four, successfully executed per second ${tooltipSelection}.`}
       showMetricsInTooltip={true}
     >
       <Axis label="queries">
@@ -151,6 +164,11 @@ export default function (props: GraphDashboardProps) {
         <Metric
           name="cr.node.sql.delete.count"
           title="Deletes"
+          nonNegativeRate
+        />
+        <Metric
+          name="cr.node.sql.crud_query.count"
+          title="Total Queries"
           nonNegativeRate
         />
       </Axis>
@@ -196,17 +214,38 @@ export default function (props: GraphDashboardProps) {
       isKvGraph={false}
       sources={nodeSources}
       tenantSource={tenantSource}
-      tooltip={`The total number of full table/index scans ${tooltipSelection}.`}
+      tooltip={`The total number of full table/index scans per second ${tooltipSelection}.`}
       showMetricsInTooltip={true}
     >
-      <Axis label="full scans">
-        {_.map(nodeIDs, node => (
+      <Axis label="full scans per second">
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.full.scan.count"
             title={nodeDisplayName(nodeDisplayNameByID, node)}
             sources={[node]}
-            downsampleMax
+            nonNegativeRate
+          />
+        ))}
+      </Axis>
+    </LineGraph>,
+
+    <LineGraph
+      title="Transaction Deadlocks"
+      isKvGraph={false}
+      sources={nodeSources}
+      tenantSource={tenantSource}
+      tooltip={`The total number of transaction per second; typically, should be 0 ${tooltipSelection}.`}
+      showMetricsInTooltip={true}
+    >
+      <Axis label="transaction deadlocks per second">
+        {map(nodeIDs, node => (
+          <Metric
+            key={node}
+            name="cr.store.txnwaitqueue.deadlocks_total"
+            title={nodeDisplayName(nodeDisplayNameByID, node)}
+            sources={[node]}
+            nonNegativeRate
           />
         ))}
       </Axis>
@@ -221,7 +260,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis label="flows">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.distsql.flows.active"
@@ -241,7 +280,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.conn.latency-p99"
@@ -262,7 +301,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.conn.latency-p90"
@@ -291,7 +330,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.service.latency-p99.99"
@@ -320,7 +359,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.service.latency-p99.9"
@@ -349,7 +388,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.service.latency-p99"
@@ -378,7 +417,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.service.latency-p90"
@@ -400,7 +439,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.exec.latency-p99"
@@ -422,7 +461,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.exec.latency-p90"
@@ -484,11 +523,6 @@ export default function (props: GraphDashboardProps) {
           nonNegativeRate
         />
         <Metric
-          name="cr.node.txn.restarts.writetoooldmulti"
-          title="Write Too Old (multiple)"
-          nonNegativeRate
-        />
-        <Metric
           name="cr.node.txn.restarts.serializable"
           title="Forwarded Timestamp (iso=serializable)"
           nonNegativeRate
@@ -506,16 +540,6 @@ export default function (props: GraphDashboardProps) {
         <Metric
           name="cr.node.txn.restarts.txnaborted"
           title="Aborted"
-          nonNegativeRate
-        />
-        <Metric
-          name="cr.node.txn.restarts.txnpush"
-          title="Push Failure"
-          nonNegativeRate
-        />
-        <Metric
-          name="cr.node.txn.restarts.unknown"
-          title="Unknown"
           nonNegativeRate
         />
       </Axis>
@@ -538,7 +562,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.txn.latency-p99"
@@ -567,7 +591,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.txn.latency-p90"
@@ -588,7 +612,7 @@ export default function (props: GraphDashboardProps) {
       showMetricsInTooltip={true}
     >
       <Axis units={AxisUnits.Bytes} label="allocated bytes">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.mem.root.current"

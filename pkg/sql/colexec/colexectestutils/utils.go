@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexectestutils
 
@@ -83,7 +78,9 @@ func (t Tuple) String() string {
 	return sb.String()
 }
 
-func (t Tuple) less(other Tuple, evalCtx *eval.Context, tupleFromOtherSet Tuple) bool {
+func (t Tuple) less(
+	ctx context.Context, other Tuple, evalCtx *eval.Context, tupleFromOtherSet Tuple,
+) bool {
 	for i := range t {
 		// If either side is nil, we short circuit the comparison. For nil, we
 		// define: nil < {any_none_nil}
@@ -97,7 +94,10 @@ func (t Tuple) less(other Tuple, evalCtx *eval.Context, tupleFromOtherSet Tuple)
 		// Check whether we have datum-backed values.
 		if d1, ok := t[i].(tree.Datum); ok {
 			d2 := other[i].(tree.Datum)
-			cmp := d1.Compare(evalCtx, d2)
+			cmp, err := d1.Compare(ctx, evalCtx, d2)
+			if err != nil {
+				colexecerror.InternalError(err)
+			}
 			if cmp == 0 {
 				continue
 			}
@@ -199,7 +199,10 @@ func (t Tuple) less(other Tuple, evalCtx *eval.Context, tupleFromOtherSet Tuple)
 					// tuples.sort for more details.
 					d1 := stringToDatum(lString, d.ResolvedType(), evalCtx)
 					d2 := stringToDatum(rString, d.ResolvedType(), evalCtx)
-					cmp := d1.Compare(evalCtx, d2)
+					cmp, err := d1.Compare(ctx, evalCtx, d2)
+					if err != nil {
+						colexecerror.InternalError(err)
+					}
 					if cmp == 0 {
 						continue
 					}
@@ -256,7 +259,7 @@ func (t Tuples) String() string {
 // tree.Datum in the latter but strings in the former. In order to use the same
 // ordering when sorting the strings, we need to peek into the actual tuple to
 // determine whether we want to convert the string to datum before comparison.
-func (t Tuples) sort(evalCtx *eval.Context, tupleFromOtherSet Tuple) Tuples {
+func (t Tuples) sort(ctx context.Context, evalCtx *eval.Context, tupleFromOtherSet Tuple) Tuples {
 	b := make(Tuples, len(t))
 	for i := range b {
 		b[i] = make(Tuple, len(t[i]))
@@ -265,7 +268,7 @@ func (t Tuples) sort(evalCtx *eval.Context, tupleFromOtherSet Tuple) Tuples {
 	sort.SliceStable(b, func(i, j int) bool {
 		lhs := b[i]
 		rhs := b[j]
-		return lhs.less(rhs, evalCtx, tupleFromOtherSet)
+		return lhs.less(ctx, rhs, evalCtx, tupleFromOtherSet)
 	})
 	return b
 }
@@ -414,7 +417,7 @@ func RunTestsWithOrderedCols(
 				originalTuples = append(originalTuples, GetTupleFromBatch(originalBatch, i))
 				tuplesWithNulls = append(tuplesWithNulls, GetTupleFromBatch(batchWithNulls, i))
 			}
-			if err := AssertTuplesSetsEqual(originalTuples, tuplesWithNulls, evalCtx); err != nil {
+			if err := AssertTuplesSetsEqual(ctx, originalTuples, tuplesWithNulls, evalCtx); err != nil {
 				// err is non-nil which means that the batches are different.
 				foundDifference = true
 				break
@@ -428,21 +431,6 @@ func RunTestsWithOrderedCols(
 			require.True(t, foundDifference, "since there were "+
 				"non-nulls in the input tuples, we expect for all nulls injection to "+
 				"change the output")
-		}
-		closeIfCloser(t, originalOp)
-		closeIfCloser(t, opWithNulls)
-	}
-}
-
-// closeIfCloser is a testing utility function that checks whether op is a
-// colexecop.Closer and closes it if so.
-//
-// RunTests harness needs to do that once it is done with op. In non-test
-// setting, the closing happens at the end of the query execution.
-func closeIfCloser(t *testing.T, op colexecop.Operator) {
-	if c, ok := op.(colexecop.Closer); ok {
-		if err := c.Close(context.Background()); err != nil {
-			t.Fatal(err)
 		}
 	}
 }
@@ -540,7 +528,6 @@ func RunTestsWithoutAllNullsInjectionWithErrorHandler(
 				errorHandler(err)
 			}
 		}
-		closeIfCloser(t, op)
 	})
 
 	if !skipVerifySelAndNullsResets {
@@ -568,8 +555,6 @@ func RunTestsWithoutAllNullsInjectionWithErrorHandler(
 			if err != nil {
 				t.Fatal(err)
 			}
-			// We might short-circuit, so defer the closing of the operator.
-			defer closeIfCloser(t, op)
 			op.Init(ctx)
 			// NOTE: this test makes sense only if the operator returns two
 			// non-zero length batches (if not, we short-circuit the test since
@@ -651,7 +636,6 @@ func RunTestsWithoutAllNullsInjectionWithErrorHandler(
 		}); err != nil {
 			errorHandler(err)
 		}
-		closeIfCloser(t, op)
 	}
 }
 
@@ -740,7 +724,7 @@ func stringToDatum(val string, typ *types.T, evalCtx *eval.Context) tree.Datum {
 	if err != nil {
 		colexecerror.InternalError(err)
 	}
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	typedExpr, err := tree.TypeCheck(context.Background(), expr, &semaCtx, typ)
 	if err != nil {
 		colexecerror.InternalError(err)
@@ -754,7 +738,7 @@ func stringToDatum(val string, typ *types.T, evalCtx *eval.Context) tree.Datum {
 
 // setColVal is a test helper function to set the given value at the equivalent
 // col[idx]. This function is slow due to reflection.
-func setColVal(vec coldata.Vec, idx int, val interface{}, evalCtx *eval.Context) {
+func setColVal(vec *coldata.Vec, idx int, val interface{}, evalCtx *eval.Context) {
 	switch vec.CanonicalTypeFamily() {
 	case types.BytesFamily:
 		var (
@@ -1312,7 +1296,7 @@ func (r *OpTestOutput) Verify() error {
 		}
 		actual = append(actual, tup)
 	}
-	return assertTuplesOrderedEqual(r.expected, actual, r.evalCtx)
+	return assertTuplesOrderedEqual(context.Background(), r.expected, actual, r.evalCtx)
 }
 
 // VerifyAnyOrder ensures that the input to this OpTestOutput produced the same
@@ -1334,7 +1318,7 @@ func (r *OpTestOutput) VerifyAnyOrder() error {
 		}
 		actual = append(actual, tup)
 	}
-	return AssertTuplesSetsEqual(r.expected, actual, r.evalCtx)
+	return AssertTuplesSetsEqual(context.Background(), r.expected, actual, r.evalCtx)
 }
 
 // VerifyPartialOrder ensures that the input to this OpTestOutput produced the
@@ -1388,7 +1372,7 @@ func (r *OpTestOutput) VerifyPartialOrder() error {
 		}
 		expected = r.expected[start : start+count]
 		start = start + count
-		if err := AssertTuplesSetsEqual(expected, actual, r.evalCtx); err != nil {
+		if err := AssertTuplesSetsEqual(context.Background(), expected, actual, r.evalCtx); err != nil {
 			return err
 		}
 		actual = nil
@@ -1399,7 +1383,7 @@ func (r *OpTestOutput) VerifyPartialOrder() error {
 // tupleEquals checks that two tuples are equal, using a slow,
 // reflection-based method to do the comparison. Reflection is used so that
 // values can be compared in a type-agnostic way.
-func tupleEquals(expected Tuple, actual Tuple, evalCtx *eval.Context) bool {
+func tupleEquals(ctx context.Context, expected Tuple, actual Tuple, evalCtx *eval.Context) bool {
 	if len(expected) != len(actual) {
 		return false
 	}
@@ -1466,7 +1450,9 @@ func tupleEquals(expected Tuple, actual Tuple, evalCtx *eval.Context) bool {
 				default:
 					return false
 				}
-				if d1.Compare(evalCtx, d2) == 0 {
+				if cmp, err := d1.Compare(ctx, evalCtx, d2); err != nil {
+					colexecerror.InternalError(err)
+				} else if cmp == 0 {
 					continue
 				}
 				return false
@@ -1508,7 +1494,9 @@ func makeError(expected Tuples, actual Tuples) error {
 }
 
 // AssertTuplesSetsEqual asserts that two sets of tuples are equal.
-func AssertTuplesSetsEqual(expected Tuples, actual Tuples, evalCtx *eval.Context) error {
+func AssertTuplesSetsEqual(
+	ctx context.Context, expected Tuples, actual Tuples, evalCtx *eval.Context,
+) error {
 	if len(expected) != len(actual) {
 		return makeError(expected, actual)
 	}
@@ -1516,22 +1504,24 @@ func AssertTuplesSetsEqual(expected Tuples, actual Tuples, evalCtx *eval.Context
 	if len(expected) > 0 {
 		tupleFromOtherSet = expected[0]
 	}
-	actual = actual.sort(evalCtx, tupleFromOtherSet)
+	actual = actual.sort(ctx, evalCtx, tupleFromOtherSet)
 	if len(actual) > 0 {
 		tupleFromOtherSet = actual[0]
 	}
-	expected = expected.sort(evalCtx, tupleFromOtherSet)
-	return assertTuplesOrderedEqual(expected, actual, evalCtx)
+	expected = expected.sort(ctx, evalCtx, tupleFromOtherSet)
+	return assertTuplesOrderedEqual(ctx, expected, actual, evalCtx)
 }
 
 // assertTuplesOrderedEqual asserts that two permutations of tuples are equal
 // in order.
-func assertTuplesOrderedEqual(expected Tuples, actual Tuples, evalCtx *eval.Context) error {
+func assertTuplesOrderedEqual(
+	ctx context.Context, expected Tuples, actual Tuples, evalCtx *eval.Context,
+) error {
 	if len(expected) != len(actual) {
 		return errors.Errorf("expected %+v, actual %+v", expected, actual)
 	}
 	for i := range expected {
-		if !tupleEquals(expected[i], actual[i], evalCtx) {
+		if !tupleEquals(ctx, expected[i], actual[i], evalCtx) {
 			return makeError(expected, actual)
 		}
 	}
@@ -1651,7 +1641,7 @@ type chunkingBatchSource struct {
 	colexecop.ZeroInputNode
 	allocator *colmem.Allocator
 	typs      []*types.T
-	cols      []coldata.Vec
+	cols      []*coldata.Vec
 	len       int
 
 	curIdx int
@@ -1663,7 +1653,7 @@ var _ colexecop.ResettableOperator = &chunkingBatchSource{}
 // NewChunkingBatchSource returns a new chunkingBatchSource with the given
 // column types, columns, and length.
 func NewChunkingBatchSource(
-	allocator *colmem.Allocator, typs []*types.T, cols []coldata.Vec, len int,
+	allocator *colmem.Allocator, typs []*types.T, cols []*coldata.Vec, len int,
 ) colexecop.ResettableOperator {
 	return &chunkingBatchSource{
 		allocator: allocator,
@@ -1782,9 +1772,8 @@ func MakeRandWindowFrameRangeOffset(t *testing.T, rng *rand.Rand, typ *types.T) 
 // EncodeWindowFrameOffset returns the given datum offset encoded as bytes, for
 // use in testing window functions in RANGE mode with offsets.
 func EncodeWindowFrameOffset(t *testing.T, offset tree.Datum) []byte {
-	var encoded, scratch []byte
-	encoded, err := valueside.Encode(
-		encoded, valueside.NoColumnID, offset, scratch)
+	var encoded []byte
+	encoded, err := valueside.Encode(encoded, valueside.NoColumnID, offset)
 	require.NoError(t, err)
 	return encoded
 }

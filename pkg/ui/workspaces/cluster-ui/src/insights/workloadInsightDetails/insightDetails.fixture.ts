@@ -1,17 +1,12 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import moment from "moment-timezone";
 import { createMemoryHistory } from "history";
-import { noop } from "lodash";
-import { StatementInsightDetailsProps } from "./statementInsightDetails";
+import noop from "lodash/noop";
+import moment from "moment-timezone";
+
 import {
   InsightEventBase,
   InsightExecEnum,
@@ -19,6 +14,8 @@ import {
   StatementStatus,
   StmtInsightEvent,
 } from "../types";
+
+import { StatementInsightDetailsProps } from "./statementInsightDetails";
 
 const insightEventBaseFixture: InsightEventBase = {
   application: "app",
@@ -28,13 +25,13 @@ const insightEventBaseFixture: InsightEventBase = {
   implicitTxn: true,
   insights: [
     {
-      name: InsightNameEnum.slowExecution,
+      name: InsightNameEnum.SLOW_EXECUTION,
       label: "label",
       description: "slow query",
       tooltipDescription: "a really slow query",
     },
     {
-      name: InsightNameEnum.suboptimalPlan,
+      name: InsightNameEnum.SUBOPTIMAL_PLAN,
       label: "label2",
       description: "bad plan",
       tooltipDescription: "a really bad plan",
@@ -94,7 +91,6 @@ export const getStatementInsightPropsFixture =
       insightEventDetails: insightEventFixture,
       insightError: null,
       hasAdminRole: true,
-      useObsService: false,
       setTimeScale: noop,
       refreshUserSQLRoles: noop,
     };

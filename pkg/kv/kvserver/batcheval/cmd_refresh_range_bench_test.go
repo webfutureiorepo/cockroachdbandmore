@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval_test
 
@@ -17,7 +12,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
@@ -25,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testfixtures"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -54,6 +49,7 @@ func BenchmarkRefreshRange(b *testing.B) {
 		"linear-keys": {
 			numKeys:    numKeys,
 			valueBytes: valueBytes,
+			rwMode:     fs.ReadWrite,
 		},
 		// random-keys is our worst case. We write keys in
 		// random order but with timestamps that keep marching
@@ -66,6 +62,7 @@ func BenchmarkRefreshRange(b *testing.B) {
 			randomKeyOrder: true,
 			numKeys:        numKeys,
 			valueBytes:     valueBytes,
+			rwMode:         fs.ReadWrite,
 		},
 		// mixed-case is a middling case.
 		//
@@ -84,7 +81,7 @@ func BenchmarkRefreshRange(b *testing.B) {
 			randomKeyOrder: true,
 			numKeys:        numKeys,
 			valueBytes:     valueBytes,
-			readOnlyEngine: true,
+			rwMode:         fs.ReadOnly,
 			lBaseMaxBytes:  256,
 		},
 	}
@@ -168,7 +165,7 @@ type benchDataOptions struct {
 	numKeys        int
 	valueBytes     int
 	randomKeyOrder bool
-	readOnlyEngine bool
+	rwMode         fs.RWMode
 	lBaseMaxBytes  int64
 }
 
@@ -178,23 +175,19 @@ type benchOptions struct {
 	dataOpts    benchDataOptions
 }
 
-type engineMaker func(testing.TB, string, int64, bool) storage.Engine
+type engineMaker func(testing.TB, string, int64, fs.RWMode) storage.Engine
 
-func setupMVCCPebble(b testing.TB, dir string, lBaseMaxBytes int64, readOnly bool) storage.Engine {
-	opts := storage.DefaultPebbleOptions()
-	opts.FS = vfs.Default
-	opts.LBaseMaxBytes = lBaseMaxBytes
-	opts.ReadOnly = readOnly
-	peb, err := storage.NewPebble(
-		context.Background(),
-		storage.PebbleConfig{
-			StorageConfig: base.StorageConfig{Dir: dir, Settings: cluster.MakeTestingClusterSettings()},
-			Opts:          opts,
-		})
+func setupMVCCPebble(b testing.TB, dir string, lBaseMaxBytes int64, rw fs.RWMode) storage.Engine {
+	env, err := fs.InitEnv(context.Background(), vfs.Default, dir, fs.EnvConfig{RW: rw}, nil /* statsCollector */)
 	if err != nil {
+		b.Fatalf("could not initialize fs env at %s: %+v", dir, err)
+	}
+	eng, err := storage.Open(context.Background(), env, cluster.MakeTestingClusterSettings(), storage.LBaseMaxBytes(lBaseMaxBytes))
+	if err != nil {
+		env.Close()
 		b.Fatalf("could not create new pebble instance at %s: %+v", dir, err)
 	}
-	return peb
+	return eng
 }
 
 // setupData data writes numKeys keys. One version of each key
@@ -203,8 +196,8 @@ func setupMVCCPebble(b testing.TB, dir string, lBaseMaxBytes int64, readOnly boo
 // and continuing to t=5ns*(numKeys+1). The goal of this is to
 // approximate an append-only type workload.
 //
-// A read-only engine is returned if opts.readOnlyEngine is set. The goal of
-// this is to prevent read-triggered compactions that might change the
+// A read-only engine is returned if opts.rwMode is set to fs.ReadOnly. The goal
+// of this is to prevent read-triggered compactions that might change the
 // distribution of data across levels.
 //
 // The creation of the database is time-consuming, especially for larger numbers
@@ -221,14 +214,14 @@ func setupData(
 		orderStr = "random"
 	}
 	readOnlyStr := ""
-	if opts.readOnlyEngine {
+	if opts.rwMode == fs.ReadOnly {
 		readOnlyStr = "_readonly"
 	}
-	name := fmt.Sprintf("refresh_range_bench_data_%s_%s%s_%d_%d_%d",
+	name := fmt.Sprintf("refresh_range_bench_data_%s_%s%s_%d_%d_%d_v2",
 		verStr, orderStr, readOnlyStr, opts.numKeys, opts.valueBytes, opts.lBaseMaxBytes)
 
 	dir := testfixtures.ReuseOrGenerate(b, name, func(dir string) {
-		eng := emk(b, dir, opts.lBaseMaxBytes, false)
+		eng := emk(b, dir, opts.lBaseMaxBytes, fs.ReadWrite)
 		log.Infof(ctx, "creating refresh range benchmark data: %s", dir)
 
 		// Generate the same data every time.
@@ -291,5 +284,5 @@ func setupData(
 	})
 
 	testutils.ReadAllFiles(filepath.Join(dir, "*"))
-	return emk(b, dir, opts.lBaseMaxBytes, opts.readOnlyEngine), dir
+	return emk(b, dir, opts.lBaseMaxBytes, opts.rwMode), dir
 }

@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scdeps
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -25,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec/backfiller"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -93,6 +90,11 @@ type jobExecutionDeps struct {
 	testingKnobs *scexec.TestingKnobs
 	statements   []string
 	sessionData  *sessiondata.SessionData
+
+	mu struct {
+		syncutil.Mutex
+		explainOutput string
+	}
 }
 
 var _ scrun.JobRunDependencies = (*jobExecutionDeps)(nil)
@@ -172,4 +174,34 @@ func (d *jobExecutionDeps) WithTxnInJob(ctx context.Context, fn scrun.JobTxnFunc
 		}
 	}
 	return nil
+}
+
+// GetExplain returns the previously saved explain output.
+func (d *jobExecutionDeps) GetExplain() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.mu.explainOutput
+}
+
+// SetExplain is a setter to store explain output for later retrieval.
+//
+// The parameters are meant to be the return variables from Plan.ExplainCompact().
+// We do error checking of ExplainCompact() here as we don't want that to impact
+// the schema change. If there is an error, we will record the error in the
+// explain output and then ignore it.
+//
+// We could have called ExplainCompact() right in the getter and not even store
+// the explain output. But that would require saving the Plan somewhere. It
+// seemed easier to just save the explain output.
+func (d *jobExecutionDeps) SetExplain(op string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil {
+		// The explain output is just for debugging and shouldn't impact the actual
+		// schema change. We will log the error message, then ignore the error.
+		d.mu.explainOutput = fmt.Sprintf("failed to get explain output: %s", err)
+		return
+	}
+	// The explain output is taken We opted store the explain output here, rather than
+	d.mu.explainOutput = op
 }

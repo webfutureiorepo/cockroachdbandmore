@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colenc
 
@@ -87,7 +82,7 @@ func MakeEncoder(
 	partialIndexes map[descpb.IndexID][]bool,
 	memoryUsageCheck func() error,
 ) BatchEncoder {
-	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), sv, false /*internal*/, metrics)
+	rh := row.NewRowHelper(codec, desc, desc.WritableNonPrimaryIndexes(), nil /* uniqueWithTombstoneIndexes */, sv, false /*internal*/, metrics)
 	rh.Init()
 	colMap := row.ColIDtoRowIndexFromCols(insCols)
 	return BatchEncoder{rh: &rh, b: b, colMap: colMap,
@@ -349,7 +344,6 @@ func (b *BatchEncoder) encodePK(ctx context.Context, ind catalog.Index) error {
 			}
 
 			col := fetchedCols[idx]
-			typ := col.GetType()
 			vec := vecs[idx]
 			nulls := vec.Nulls()
 			lastColIDs := b.lastColIDs
@@ -372,7 +366,7 @@ func (b *BatchEncoder) encodePK(ctx context.Context, ind catalog.Index) error {
 				colIDDelta := valueside.MakeColumnIDDelta(lastColIDs[row], colID)
 				lastColIDs[row] = colID
 				var err error
-				values[row], err = valuesideEncodeCol(values[row], typ, colIDDelta, vec, row+b.start)
+				values[row], err = valuesideEncodeCol(values[row], colIDDelta, vec, row+b.start)
 				if err != nil {
 					return err
 				}
@@ -426,7 +420,7 @@ func (b *BatchEncoder) encodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 	kys := b.keys
 
 	// Encode key suffix columns and save the results in extraKeys.
-	_, err = encodeColumns(ind.IndexDesc().KeySuffixColumnIDs, nil /*directions*/, b.colMap, b.start, b.end, b.b.ColVecs(), b.extraKeys)
+	err = encodeColumns(ind.IndexDesc().KeySuffixColumnIDs, nil /*directions*/, b.colMap, b.start, b.end, b.b.ColVecs(), b.extraKeys)
 	if err != nil {
 		return err
 	}
@@ -436,7 +430,7 @@ func (b *BatchEncoder) encodeSecondaryIndex(ctx context.Context, ind catalog.Ind
 	if ind.GetType() == descpb.IndexDescriptor_INVERTED {
 		// Since the inverted indexes generate multiple keys per row just handle them
 		// separately.
-		return b.encodeInvertedSecondaryIndex(ind, kys, b.extraKeys)
+		return b.encodeInvertedSecondaryIndex(ctx, ind, kys, b.extraKeys)
 	} else {
 		keyAndSuffixCols := b.rh.TableDesc.IndexFetchSpecKeyAndSuffixColumns(ind)
 		keyCols := keyAndSuffixCols[:ind.NumKeyColumns()]
@@ -500,7 +494,7 @@ func (b *BatchEncoder) encodeSecondaryIndexNoFamilies(ind catalog.Index, kys []r
 	if err := b.writeColumnValues(kys, values, ind, cols); err != nil {
 		return err
 	}
-	b.p.InitPutBytes(kys, values)
+	b.p.CPutBytesEmpty(kys, values)
 	return nil
 }
 
@@ -562,9 +556,9 @@ func (b *BatchEncoder) encodeSecondaryIndexWithFamilies(
 		// include encoded primary key columns. For other families,
 		// use the tuple encoding for the value.
 		if familyID == 0 {
-			b.p.InitPutBytes(kys, values)
+			b.p.CPutBytesEmpty(kys, values)
 		} else {
-			b.p.InitPutTuples(kys, values)
+			b.p.CPutTuplesEmpty(kys, values)
 		}
 		if err := b.checkMemory(); err != nil {
 			return err
@@ -601,7 +595,7 @@ func (b *BatchEncoder) writeColumnValues(
 			}
 			colIDDelta := valueside.MakeColumnIDDelta(lastColIDs[row], col.ColID)
 			lastColIDs[row] = col.ColID
-			values[row], err = valuesideEncodeCol(values[row], vec.Type(), colIDDelta, vec, row+b.start)
+			values[row], err = valuesideEncodeCol(values[row], colIDDelta, vec, row+b.start)
 			if err != nil {
 				return err
 			}
@@ -617,34 +611,28 @@ func encodeColumns[T []byte | roachpb.Key](
 	directions rowenc.Directions,
 	colMap catalog.TableColMap,
 	start, end int,
-	vecs []coldata.Vec,
+	vecs []*coldata.Vec,
 	keys []T,
-) (*coldata.Nulls, error) {
-	var nulls coldata.Nulls
+) error {
 	var err error
 	for colIdx, id := range columnIDs {
-		var vec coldata.Vec
-		var typ *types.T
+		var vec *coldata.Vec
 		i, ok := colMap.Get(id)
 		if ok {
 			vec = vecs[i]
-			typ = vec.Type()
-			if vec.Nulls().MaybeHasNulls() {
-				nulls = nulls.Or(*vec.Nulls())
-			}
 		}
 		dir := encoding.Ascending
 		if directions != nil {
 			dir, err = directions.Get(colIdx)
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
-		if err := encodeKeys(keys, typ, dir, vec, start, end); err != nil {
-			return nil, err
+		if err = encodeKeys(keys, dir, vec, start, end); err != nil {
+			return err
 		}
 	}
-	return &nulls, nil
+	return nil
 }
 
 func (b *BatchEncoder) initFamily(familyIndex, familyID int) {
@@ -710,10 +698,10 @@ func (b *BatchEncoder) checkMemory() error {
 }
 
 func (b *BatchEncoder) skipColumnNotInPrimaryIndexValue(
-	colID catid.ColumnID, vec coldata.Vec, row int,
+	colID catid.ColumnID, vec *coldata.Vec, row int,
 ) bool {
 	// Reuse this function but fake out the value and handle composites here.
-	if skip := b.rh.SkipColumnNotInPrimaryIndexValue(colID, tree.DNull); skip {
+	if skip, _ := b.rh.SkipColumnNotInPrimaryIndexValue(colID, tree.DNull); skip {
 		if !b.compositeColumnIDs.Contains(int(colID)) {
 			return true
 		}
@@ -722,7 +710,7 @@ func (b *BatchEncoder) skipColumnNotInPrimaryIndexValue(
 	return false
 }
 
-func isComposite(vec coldata.Vec, row int) bool {
+func isComposite(vec *coldata.Vec, row int) bool {
 	switch vec.CanonicalTypeFamily() {
 	case types.FloatFamily:
 		f := tree.DFloat(vec.Float64()[row])

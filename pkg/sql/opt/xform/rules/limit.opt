@@ -35,10 +35,61 @@
 =>
 (Scan (LimitScanPrivate $scanPrivate $limit $ordering))
 
+# PushLimitIntoProjectFilteredScan is similar to PushLimitIntoFilteredScan, but
+# matches when there is a Project expression between the Limit and the filtered
+# Scan.
+#
+# This rule is useful when GenerateConstrainedScans generates a Project above a
+# partial index Scan that produces a column(s) held constant by the partial
+# index predicate. For example, consider the schema and query:
+#
+#   CREATE TABLE t (a INT PRIMARY KEY, b INT, INDEX a_b_idx (a) WHERE b = 1)
+#   SELECT * FROM t WHERE a > 0 AND b = 1 LIMIT 1
+#
+# After GenerateConstrainedScans fires the memo will contain an expression tree
+# like:
+#
+#   limit
+#    ├── columns: a:1 b:2
+#    ├── project
+#    │    ├── columns: a:1 b:2 a:1
+#    │    ├── scan t@a_b_idx,partial
+#    │    │    ├── columns: a:1
+#    │    │    └── constraint: /1: [/1 - ]
+#    │    └── projections
+#    │         └── 1 [as=b:2]
+#    └── 5
+#
+# While the Project producing b:2 is beneficial because it eliminates the need
+# for an IndexJoin, it also prevents PushLimitIntoFilteredScan from pushing the
+# limit into the scan. PushLimitIntoProjectFilteredScan matches this specific
+# pattern to solve the issue.
+#
+# This rule is similar to the PushLimitIntoProject normalization rule.
+# Unfortunately, that rule does not apply here because normalization rules
+# cannot not fire on parent expressions when alternative expressions are
+# generated for their child groups during exploration. So, an exploration rule
+# with similar behavior is necessary.
+[PushLimitIntoProjectFilteredScan, Explore]
+(Limit
+    (Project
+            (Scan $scanPrivate:*)
+            $projections:*
+            $passthrough:*
+        ) &
+        (PushLimitIntoProjectFilteredScanEnabled)
+    (Const $limit:* & (IsPositiveInt $limit))
+    $ordering:* & (CanLimitFilteredScan $scanPrivate $ordering)
+)
+=>
+(Project
+    (Scan (LimitScanPrivate $scanPrivate $limit $ordering))
+    $projections
+    $passthrough
+)
+
 # PushLimitIntoIndexJoin pushes a limit through an index join. Since index
 # lookup can be expensive, it's always better to discard rows beforehand.
-#
-# TODO(radu): we can similarly push Offset too.
 [PushLimitIntoIndexJoin, Explore]
 (Limit
     (IndexJoin $input:* $indexJoinPrivate:*) &
@@ -53,6 +104,26 @@
 =>
 (IndexJoin
     (Limit $input $limitExpr (PruneOrdering $ordering $cols))
+    $indexJoinPrivate
+)
+
+# PushOffsetIntoIndexJoin pushes an offset through an index join. Since an index
+# lookup can be expensive, it's always better to discard rows beforehand.
+[PushOffsetIntoIndexJoin, Explore]
+(Offset
+    (IndexJoin $input:* $indexJoinPrivate:*) &
+        (CanPushOffsetIntoIndexJoin) &
+        (IndexJoinPreservesRows $indexJoinPrivate)
+    $offsetExpr:(Const $offset:* & (IsPositiveInt $offset))
+    $ordering:* &
+        (OrderingCanProjectCols
+            $ordering
+            $cols:(OutputCols $input)
+        )
+)
+=>
+(IndexJoin
+    (Offset $input $offsetExpr (PruneOrdering $ordering $cols))
     $indexJoinPrivate
 )
 
@@ -219,4 +290,42 @@
     $private
     $groupingCols
     $newOrdering
+)
+
+# GenerateVectorSearch generates VectorSearch expressions that implement
+# approximate KNN search using vector indexes. Currently, the comparison
+# must be with a constant or placeholder vector expression.
+#
+# TODO(drewk, mw5h): generate VectorSearch in more cases.
+[GenerateVectorSearch, Explore]
+(Limit
+    $project:(Project
+            $scan:(Scan
+                $scanPrivate:* & (IsCanonicalScan $scanPrivate)
+            )
+            $projections:[
+                (ProjectionsItem
+                    $distanceExpr:(VectorDistance
+                        (Variable $vectorCol:*) &
+                            (IsFixedWidthVectorCol $vectorCol)
+                        $queryVector:(Const | Placeholder)
+                    )
+                    $distanceCol:*
+                )
+            ]
+            $passthrough:*
+        ) &
+        ^(HasOuterCols $project)
+    (Const $limit:* & (IsPositiveInt $limit))
+    $ordering:* & (OrderingBySingleColAsc $ordering $distanceCol)
+)
+=>
+(TryGenerateVectorSearch
+    $scanPrivate
+    $passthrough
+    $vectorCol
+    $distanceCol
+    $distanceExpr
+    $queryVector
+    $limit
 )

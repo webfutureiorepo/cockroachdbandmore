@@ -1,20 +1,17 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execinfrapb
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/optional"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -106,6 +103,17 @@ func (s *ComponentStats) SafeFormat(w redact.SafePrinter, _ rune) {
 	w.SafeRune('}')
 }
 
+func printNodeIDs(nodeIDs []int32) redact.SafeString {
+	var sb strings.Builder
+	for i, id := range nodeIDs {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("n%d", id))
+	}
+	return redact.SafeString(sb.String())
+}
+
 // formatStats calls fn for each statistic that is set. value can be nil.
 func (s *ComponentStats) formatStats(fn func(suffix string, value interface{})) {
 	// Network Rx stats.
@@ -165,6 +173,15 @@ func (s *ComponentStats) formatStats(fn func(suffix string, value interface{})) 
 	}
 
 	// KV stats.
+	if s.KV.UsedFollowerRead {
+		fn("used follower read", nil)
+	}
+	if len(s.KV.NodeIDs) > 0 {
+		fn("KV nodes", printNodeIDs(s.KV.NodeIDs))
+	}
+	if len(s.KV.Regions) > 0 {
+		fn("KV regions", strings.Join(s.KV.Regions, ", "))
+	}
 	if s.KV.KVTime.HasValue() {
 		fn("KV time", humanizeutil.Duration(s.KV.KVTime.Value()))
 	}
@@ -263,6 +280,13 @@ func (s *ComponentStats) Union(other *ComponentStats) *ComponentStats {
 	result.Inputs = append(result.Inputs, other.Inputs...)
 
 	// KV stats.
+	if len(other.KV.NodeIDs) != 0 {
+		result.KV.NodeIDs = util.CombineUnique(result.KV.NodeIDs, other.KV.NodeIDs)
+	}
+	if len(other.KV.Regions) != 0 {
+		result.KV.Regions = util.CombineUnique(result.KV.Regions, other.KV.Regions)
+	}
+	result.KV.UsedFollowerRead = result.KV.UsedFollowerRead || other.KV.UsedFollowerRead
 	if !result.KV.KVTime.HasValue() {
 		result.KV.KVTime = other.KV.KVTime
 	}
@@ -438,6 +462,14 @@ func (s *ComponentStats) MakeDeterministic() {
 	if s.KV.BatchRequestsIssued.HasValue() {
 		// BatchRequestsIssued is overridden to a useful value for tests.
 		s.KV.BatchRequestsIssued.Set(s.KV.TuplesRead.Value())
+	}
+	if len(s.KV.NodeIDs) > 0 {
+		// The nodes can be non-deterministic because they depend on the actual
+		// cluster configuration. Override to a useful value for tests.
+		s.KV.NodeIDs = []int32{1}
+	}
+	if len(s.KV.Regions) > 0 {
+		s.KV.Regions = []string{"test"}
 	}
 
 	// Exec.

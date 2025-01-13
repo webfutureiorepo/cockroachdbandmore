@@ -1,32 +1,25 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { ArrowLeft } from "@cockroachlabs/icons";
 import { Col, Row } from "antd";
-import "antd/lib/col/style";
-import "antd/lib/row/style";
+import classNames from "classnames/bind";
 import Long from "long";
 import React, { useEffect } from "react";
 import Helmet from "react-helmet";
 import { RouteComponentProps } from "react-router-dom";
+
 import { Schedule } from "src/api/schedulesApi";
 import { Button } from "src/button";
+import { commonStyles } from "src/common";
 import { Loading } from "src/loading";
+import scheduleStyles from "src/schedules/schedules.module.scss";
 import { SqlBox, SqlBoxSize } from "src/sql";
 import { SummaryCard, SummaryCardItem } from "src/summaryCard";
+import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
 import { DATE_FORMAT_24_TZ, idAttr, getMatchParamByName } from "src/util";
 
-import { commonStyles } from "src/common";
-import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
-import scheduleStyles from "src/schedules/schedules.module.scss";
-
-import classNames from "classnames/bind";
 import { Timestamp } from "../../timestamp";
 
 const cardCx = classNames.bind(summaryCardStyles);
@@ -44,7 +37,7 @@ export interface ScheduleDetailsDispatchProps {
 
 export type ScheduleDetailsProps = ScheduleDetailsStateProps &
   ScheduleDetailsDispatchProps &
-  RouteComponentProps<unknown>;
+  RouteComponentProps;
 
 export const ScheduleDetails: React.FC<ScheduleDetailsProps> = props => {
   const idStr = getMatchParamByName(props.match, idAttr);
@@ -61,7 +54,7 @@ export const ScheduleDetails: React.FC<ScheduleDetailsProps> = props => {
       <>
         <Row gutter={24}>
           <Col className="gutter-row" span={24}>
-            <SqlBox value={schedule.command} size={SqlBoxSize.custom} />
+            <SqlBox value={schedule.command} size={SqlBoxSize.CUSTOM} />
           </Col>
         </Row>
         <Row gutter={24}>

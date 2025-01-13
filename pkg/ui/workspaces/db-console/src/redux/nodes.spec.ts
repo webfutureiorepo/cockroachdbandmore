@@ -1,18 +1,15 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { createHashHistory } from "history";
+import { createHashHistory, createMemoryHistory } from "history";
+import merge from "lodash/merge";
 
-import { MetricConstants, INodeStatus } from "src/util/proto";
 import * as protos from "src/js/protos";
+import { MetricConstants, INodeStatus } from "src/util/proto";
 
+import { nodesReducerObj, livenessReducerObj } from "./apiReducers";
 import {
   nodeDisplayNameByIDSelector,
   selectCommissionedNodeStatuses,
@@ -20,9 +17,9 @@ import {
   LivenessStatus,
   sumNodeStats,
   numNodesByVersionsTagSelector,
+  nodeDisplayNameByIDSelectorWithoutAddress,
 } from "./nodes";
-import { nodesReducerObj, livenessReducerObj } from "./apiReducers";
-import { createAdminUIStore } from "./state";
+import { AdminUIState, createAdminUIStore } from "./state";
 
 function makeNodesState(
   ...addresses: { id: number; address: string; status?: LivenessStatus }[]
@@ -219,6 +216,139 @@ describe("node data selectors", function () {
   });
 });
 
+describe("node data selectors without addresses", function () {
+  describe("display name by ID", function () {
+    it("display name is node id appended to address", function () {
+      const state: any = makeNodesState(
+        { id: 1, address: "addressA" },
+        { id: 2, address: "addressB" },
+        { id: 3, address: "addressC" },
+        { id: 4, address: "addressD" },
+      );
+
+      const addressesByID = nodeDisplayNameByIDSelectorWithoutAddress(state);
+      expect(addressesByID).toEqual({
+        1: "n1",
+        2: "n2",
+        3: "n3",
+        4: "n4",
+      });
+    });
+
+    it("generates unique names for re-used addresses", function () {
+      const state: any = makeNodesState(
+        { id: 1, address: "addressA" },
+        { id: 2, address: "addressB" },
+        { id: 3, address: "addressC" },
+        { id: 4, address: "addressD" },
+        { id: 5, address: "addressA" },
+        { id: 6, address: "addressC" },
+        { id: 7, address: "addressA" },
+      );
+
+      const addressesByID = nodeDisplayNameByIDSelectorWithoutAddress(state);
+      expect(addressesByID).toEqual({
+        1: "n1",
+        2: "n2",
+        3: "n3",
+        4: "n4",
+        5: "n5",
+        6: "n6",
+        7: "n7",
+      });
+    });
+
+    it("adds decommissioned flag to decommissioned nodes", function () {
+      const state: any = makeNodesState(
+        {
+          id: 1,
+          address: "addressA",
+          status: LivenessStatus.NODE_STATUS_DECOMMISSIONED,
+        },
+        { id: 2, address: "addressB" },
+        {
+          id: 3,
+          address: "addressC",
+          status: LivenessStatus.NODE_STATUS_DECOMMISSIONED,
+        },
+        { id: 4, address: "addressD", status: LivenessStatus.NODE_STATUS_DEAD },
+        {
+          id: 5,
+          address: "addressA",
+          status: LivenessStatus.NODE_STATUS_DECOMMISSIONED,
+        },
+        { id: 6, address: "addressC" },
+        { id: 7, address: "addressA" },
+        {
+          id: 8,
+          address: "addressE",
+          status: LivenessStatus.NODE_STATUS_DECOMMISSIONING,
+        },
+        {
+          id: 9,
+          address: "addressF",
+          status: LivenessStatus.NODE_STATUS_UNAVAILABLE,
+        },
+      );
+
+      const addressesByID = nodeDisplayNameByIDSelectorWithoutAddress(state);
+      expect(addressesByID[1]).toEqual("[decommissioned] n1");
+      expect(addressesByID).toEqual({
+        1: "[decommissioned] n1",
+        2: "n2",
+        3: "[decommissioned] n3",
+        4: "n4",
+        5: "[decommissioned] n5",
+        6: "n6",
+        7: "n7",
+        8: "n8",
+        9: "n9",
+      });
+    });
+
+    it("returns empty collection for empty state", function () {
+      const store = createAdminUIStore(createHashHistory());
+      expect(
+        nodeDisplayNameByIDSelectorWithoutAddress(store.getState()),
+      ).toEqual({});
+    });
+  });
+  describe("store IDs by node ID", function () {
+    it("correctly creates storeID map", function () {
+      const data = [
+        {
+          desc: { node_id: 1 },
+          store_statuses: [
+            { desc: { store_id: 1 } },
+            { desc: { store_id: 2 } },
+            { desc: { store_id: 3 } },
+          ],
+        },
+        {
+          desc: { node_id: 2 },
+          store_statuses: [{ desc: { store_id: 4 } }],
+        },
+        {
+          desc: { node_id: 3 },
+          store_statuses: [
+            { desc: { store_id: 5 } },
+            { desc: { store_id: 6 } },
+          ],
+        },
+      ];
+      const store = createAdminUIStore(createHashHistory());
+      store.dispatch(nodesReducerObj.receiveData(data));
+      const state = store.getState();
+
+      expect(selectStoreIDsByNodeID(state)).toEqual({
+        1: ["1", "2", "3"],
+        2: ["4"],
+        3: ["5", "6"],
+      });
+    });
+  });
+});
+
 describe("selectCommissionedNodeStatuses", function () {
   const nodeStatuses: INodeStatus[] = [
     {
@@ -230,25 +360,29 @@ describe("selectCommissionedNodeStatuses", function () {
 
   function makeStateForLiveness(livenessStatuses: {
     [id: string]: LivenessStatus;
-  }) {
-    return {
-      cachedData: {
-        nodes: {
-          data: nodeStatuses,
-          inFlight: false,
-          valid: true,
-          unauthorized: false,
-        },
-        liveness: {
-          data: {
-            statuses: livenessStatuses,
+  }): AdminUIState {
+    const store = createAdminUIStore(createMemoryHistory());
+    return merge<AdminUIState, RecursivePartial<AdminUIState>>(
+      store.getState(),
+      {
+        cachedData: {
+          nodes: {
+            data: nodeStatuses,
+            inFlight: false,
+            valid: true,
+            unauthorized: false,
           },
-          inFlight: false,
-          valid: true,
-          unauthorized: false,
+          liveness: {
+            data: {
+              statuses: livenessStatuses,
+            },
+            inFlight: false,
+            valid: true,
+            unauthorized: false,
+          },
         },
       },
-    };
+    );
   }
 
   it("selects all nodes when liveness status missing", function () {

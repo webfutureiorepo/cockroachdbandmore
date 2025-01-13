@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // reduce reduces SQL passed from the input file using cockroach demo. The input
 // file is simplified such that -contains argument is present as an error during
@@ -52,6 +47,8 @@ var (
 	}()
 	flags             = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	binary            = flags.String("binary", "./cockroach", "path to cockroach binary")
+	httpPort          = flags.Int("http-port", 8080, "first port number for HTTP servers in demo")
+	sqlPort           = flags.Int("sql-port", 26257, "first port number for SQL servers in demo")
 	file              = flags.String("file", "", "the path to a file containing SQL queries to reduce; required")
 	outFlag           = flags.String("out", "", "if set, the path to a new file where reduced result will be written to")
 	verbose           = flags.Bool("v", false, "print progress to standard output and the original test case output if it is not interesting")
@@ -122,8 +119,8 @@ func main() {
 	}
 	reducesql.LogUnknown = *unknown
 	out, err := reduceSQL(
-		*binary, *contains, file, *workers, *verbose, *chunkReductions, *multiRegion,
-		*tlp, *costfuzz, *unoptimizedOracle,
+		*binary, *httpPort, *sqlPort, *contains, file, *workers, *verbose,
+		*chunkReductions, *multiRegion, *tlp, *costfuzz, *unoptimizedOracle,
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -141,7 +138,9 @@ func main() {
 }
 
 func reduceSQL(
-	binary, contains string,
+	binary string,
+	httpPort, sqlPort int,
+	contains string,
 	file *string,
 	workers int,
 	verbose bool,
@@ -297,27 +296,22 @@ SELECT '%[1]s';
 	}
 
 	isInteresting := func(ctx context.Context, sql string) (interesting bool, logOriginalHint func()) {
-		// If not multi-region, disable license generation. Do not exit on errors so
-		// the entirety of the input SQL is processed.
-		var cmd *exec.Cmd
-		if multiRegion {
-			cmd = exec.CommandContext(ctx, binary,
-				"demo",
-				"--empty",
-				"--nodes=9",
-				"--multitenant=false",
-				"--set=errexit=false",
-				"--format=tsv",
-			)
-		} else {
-			cmd = exec.CommandContext(ctx, binary,
-				"demo",
-				"--empty",
-				"--disable-demo-license",
-				"--set=errexit=false",
-				"--format=tsv",
-			)
+		args := []string{
+			"demo",
+			"--insecure",
+			"--empty",
+			// Do not exit on errors so the entirety of the input SQL is
+			// processed.
+			"--set=errexit=false",
+			"--format=tsv",
+			fmt.Sprintf("--http-port=%d", httpPort),
+			fmt.Sprintf("--sql-port=%d", sqlPort),
 		}
+		if multiRegion {
+			args = append(args, "--nodes=9")
+			args = append(args, "--multitenant=false")
+		}
+		cmd := exec.CommandContext(ctx, binary, args...)
 		// Disable telemetry.
 		cmd.Env = []string{"COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING", "true"}
 		sql = settings + sql
@@ -403,9 +397,9 @@ func findPreviousQuery(lines []string, lineIdx int) (string, int) {
 		lineIdx--
 	}
 	// lineIdx right now points at an empty line before the query.
-	query := strings.Join(lines[lineIdx+1:lastQueryLineIdx+1], " ")
+	query := strings.Join(lines[lineIdx+1:lastQueryLineIdx+1], "\n")
 	// Remove the semicolon.
-	return query[:len(query)-1], lineIdx
+	return strings.TrimSuffix(query, ";"), lineIdx
 }
 
 // findPreviousSetStatements returns any SET or RESET statements preceding
@@ -432,7 +426,7 @@ func findPreviousSetStatements(lines []string, lineIdx int) (string, int) {
 		}
 	}
 	// firstQueryLineIdx right now points at an empty line before the statement.
-	query := strings.Join(lines[firstQueryLineIdx+1:lastQueryLineIdx+1], " ")
+	query := strings.Join(lines[firstQueryLineIdx+1:lastQueryLineIdx+1], "\n")
 	return query, firstQueryLineIdx
 }
 

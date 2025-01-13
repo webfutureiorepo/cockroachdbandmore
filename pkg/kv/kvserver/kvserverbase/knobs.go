@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package workload provides an abstraction for generators of sql query loads
 // (and requisite initial data) as well as tools for working with these
@@ -57,6 +52,16 @@ type BatchEvalTestingKnobs struct {
 	// its record (which can be resolved synchronously with EndTxn). This is
 	// useful in certain tests.
 	DisableTxnAutoGC bool
+
+	// OverrideDoTimelyApplicationToAllReplicas overrides the cluster version
+	// check for the timely replication directive which force flushes rac2 send
+	// queues to all replicas, if present for *Migrate* requests only. When set
+	// to true, the directive is always set, when set to false, the default
+	// behavior is used.
+	//
+	// NOTE: This currently only applies to Migrate requests and only ignores the
+	// cluster version.
+	OverrideDoTimelyApplicationToAllReplicas bool
 }
 
 // IntentResolverTestingKnobs contains testing helpers that are used during

@@ -1,18 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file implements data structures used by index constraints generation.
 
 package constraint
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"testing"
@@ -230,12 +226,12 @@ func testKey(t *testing.T, k Key, expected string) {
 }
 
 func testKeyContext(cols ...opt.OrderingColumn) *KeyContext {
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := eval.MakeTestingEvalContext(st)
+	ctx := context.Background()
+	evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 
 	var columns Columns
 	columns.Init(cols)
 
-	keyCtx := MakeKeyContext(&columns, &evalCtx)
+	keyCtx := MakeKeyContext(ctx, &columns, &evalCtx)
 	return &keyCtx
 }

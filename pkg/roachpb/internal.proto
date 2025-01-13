@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Cannot be proto3 because we depend on absent-vs-empty distinction.
 syntax = "proto2";
@@ -95,6 +90,9 @@ message InternalTimeSeriesData {
   // during this sample period. If this column is elided, its value for all
   // samples is zero.
   repeated double variance = 11 [packed=true];
+
+  // Note: if more repeated fields are added, ResetRetainingSlices should be
+  // updated to retain the slice.
 }
 
 // A InternalTimeSeriesSample represents data gathered from multiple

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserverpb
 
@@ -21,6 +16,12 @@ func (st LeaseStatus) IsValid() bool {
 	return st.State == LeaseState_VALID
 }
 
+// IsExpired returns whether the lease was expired at the time that the
+// lease status was computed.
+func (st LeaseStatus) IsExpired() bool {
+	return st.State == LeaseState_EXPIRED
+}
+
 // OwnedBy returns whether the lease is owned by the given store.
 func (st LeaseStatus) OwnedBy(storeID roachpb.StoreID) bool {
 	return st.Lease.OwnedBy(storeID)
@@ -32,7 +33,21 @@ func (st LeaseStatus) Expiration() hlc.Timestamp {
 	case roachpb.LeaseExpiration:
 		return st.Lease.GetExpiration()
 	case roachpb.LeaseEpoch:
-		return st.Liveness.Expiration.ToTimestamp()
+		exp := st.Lease.MinExpiration
+		// The expiration of the liveness record is inherited by the lease iff the
+		// lease epoch matches the liveness epoch.
+		if st.Lease.Epoch == st.Liveness.Epoch {
+			exp.Forward(st.Liveness.Expiration.ToTimestamp())
+		}
+		return exp
+	case roachpb.LeaseLeader:
+		exp := st.Lease.MinExpiration
+		// The leader support applies to the lease iff the lease term matches the
+		// raft term.
+		if st.Lease.Term == st.LeaderSupport.Term {
+			exp.Forward(st.LeaderSupport.LeadSupportUntil)
+		}
+		return exp
 	default:
 		panic("unexpected")
 	}

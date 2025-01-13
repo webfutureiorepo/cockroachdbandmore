@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -46,7 +41,7 @@ func TestRefreshRange(t *testing.T) {
 		ctx, eng, roachpb.Key("c"), hlc.Timestamp{WallTime: 5}, roachpb.Value{}, storage.MVCCWriteOptions{})
 	require.NoError(t, err)
 	require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(
-		ctx, eng, nil, roachpb.Key("d"), roachpb.Key("f"), hlc.Timestamp{WallTime: 7}, hlc.ClockTimestamp{}, nil, nil, false, 0, nil))
+		ctx, eng, nil, roachpb.Key("d"), roachpb.Key("f"), hlc.Timestamp{WallTime: 7}, hlc.ClockTimestamp{}, nil, nil, false, 0, 0, nil))
 
 	testcases := map[string]struct {
 		start, end string

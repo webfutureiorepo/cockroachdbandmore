@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package status
 
@@ -221,6 +216,13 @@ func (mr *MetricsRecorder) RemoveTenantRegistry(tenantID roachpb.TenantID) {
 	defer mr.mu.Unlock()
 
 	delete(mr.mu.tenantRegistries, tenantID)
+}
+
+// AppRegistry returns the metric registry for application-level metrics.
+func (mr *MetricsRecorder) AppRegistry() *metric.Registry {
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
+	return mr.mu.appRegistry
 }
 
 // AddNode adds various metric registries an initialized server, along
@@ -484,22 +486,49 @@ func (mr *MetricsRecorder) GetMetricsMetadata(
 	mr.mu.logRegistry.WriteMetricsMetadata(srvMetrics)
 	mr.mu.sysRegistry.WriteMetricsMetadata(srvMetrics)
 
-	// Get a random storeID.
-	var sID roachpb.StoreID
-
-	storeFound := false
-	for storeID := range mr.mu.storeRegistries {
-		sID = storeID
-		storeFound = true
-		break
-	}
-
-	// Get metric metadata from that store because all stores have the same metadata.
-	if storeFound {
-		mr.mu.storeRegistries[sID].WriteMetricsMetadata(nodeMetrics)
-	}
-
+	mr.writeStoreMetricsMetadata(nodeMetrics)
 	return nodeMetrics, appMetrics, srvMetrics
+}
+
+// GetRecordedMetricNames takes a map of metric metadata and returns a map
+// of the metadata name to the name the metric is recorded with in tsdb.
+func (mr *MetricsRecorder) GetRecordedMetricNames(
+	allMetadata map[string]metric.Metadata,
+) map[string]string {
+	storeMetricsMap := make(map[string]metric.Metadata)
+	tsDbMetricNames := make(map[string]string, len(allMetadata))
+	mr.writeStoreMetricsMetadata(storeMetricsMap)
+	for metricName, metadata := range allMetadata {
+		prefix := nodeTimeSeriesPrefix
+		if _, ok := storeMetricsMap[metricName]; ok {
+			prefix = storeTimeSeriesPrefix
+		}
+		if metadata.MetricType == prometheusgo.MetricType_HISTOGRAM {
+			for _, metricComputer := range metric.HistogramMetricComputers {
+				computedMetricName := metricName + metricComputer.Suffix
+				tsDbMetricNames[computedMetricName] = fmt.Sprintf(prefix, computedMetricName)
+			}
+		} else {
+			tsDbMetricNames[metricName] = fmt.Sprintf(prefix, metricName)
+		}
+
+	}
+	return tsDbMetricNames
+}
+
+// writeStoreMetricsMetadata Gets a store from mr.mu.storeRegistries and writes
+// the metrics metadata to the provided map.
+func (mr *MetricsRecorder) writeStoreMetricsMetadata(metricsMetadata map[string]metric.Metadata) {
+	if len(mr.mu.storeRegistries) == 0 {
+		return
+	}
+
+	// All store registries should have the same metadata, so only the metadata
+	// from the first store is used to write to metricsMetadata.
+	for _, registry := range mr.mu.storeRegistries {
+		registry.WriteMetricsMetadata(metricsMetadata)
+		return
+	}
 }
 
 // getNetworkActivity produces a map of network activity from this node to all
@@ -689,18 +718,15 @@ func extractValue(name string, mtr interface{}, fn func(string, float64)) error 
 			return errors.Newf(`extractValue called on histogram metric %q that does not implement the
 				CumulativeHistogram interface. All histogram metrics are expected to implement this interface`, name)
 		}
-		count, sum := cumulative.CumulativeSnapshot().Total()
-		fn(name+"-count", float64(count))
-		fn(name+"-sum", sum)
+		cumulativeSnapshot := cumulative.CumulativeSnapshot()
 		// Use windowed stats for avg and quantiles
 		windowedSnapshot := mtr.WindowedSnapshot()
-		avg := windowedSnapshot.Mean()
-		if math.IsNaN(avg) || math.IsInf(avg, +1) || math.IsInf(avg, -1) {
-			avg = 0
-		}
-		fn(name+"-avg", avg)
-		for _, pt := range metric.RecordHistogramQuantiles {
-			fn(name+pt.Suffix, windowedSnapshot.ValueAtQuantile(pt.Quantile))
+		for _, c := range metric.HistogramMetricComputers {
+			if c.IsSummaryMetric {
+				fn(name+c.Suffix, c.ComputedMetric(windowedSnapshot))
+			} else {
+				fn(name+c.Suffix, c.ComputedMetric(cumulativeSnapshot))
+			}
 		}
 	case metric.PrometheusExportable:
 		// NB: this branch is intentionally at the bottom since all metrics implement it.
@@ -710,6 +736,10 @@ func extractValue(name string, mtr interface{}, fn func(string, float64)) error 
 		} else if m.Counter != nil {
 			fn(name, *m.Counter.Value)
 		}
+	case metric.PrometheusVector:
+		// NOOP - We don't record metric.PrometheusVector into TSDB. These metrics
+		// are only exported as prometheus metrics via metric.PrometheusExporter.
+		return nil
 
 	default:
 		return errors.Errorf("cannot extract value for type %T", mtr)

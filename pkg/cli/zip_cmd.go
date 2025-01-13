@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -30,4 +25,14 @@ requires the cluster to be live.
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: clierrorplus.MaybeDecorateError(runDebugZip),
+}
+
+// debugZipUploadCmd is a hidden command that uploads the generated debug.zip
+// to datadog. This will not apprear in the help text of the zip command.
+var debugZipUploadCmd = &cobra.Command{
+	Use:    "upload <path to debug dir>",
+	Short:  "upload the contents of the debug.zip to an observability platform",
+	Args:   cobra.ExactArgs(1),
+	Hidden: true,
+	RunE:   clierrorplus.MaybeDecorateError(runDebugZipUpload),
 }

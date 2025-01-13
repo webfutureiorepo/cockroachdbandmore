@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logstore
 
@@ -29,9 +24,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -42,7 +39,6 @@ import (
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/raftpb"
 	"golang.org/x/time/rate"
 )
 
@@ -66,7 +62,7 @@ func mkEnt(
 	}
 	var ent raftpb.Entry
 	ent.Index, ent.Term = index, term
-	ent.Data = raftlog.EncodeCommandBytes(enc, kvserverbase.CmdIDKey(cmdIDKey), b)
+	ent.Data = raftlog.EncodeCommandBytes(enc, kvserverbase.CmdIDKey(cmdIDKey), b, 0 /* pri */)
 	return ent
 }
 
@@ -101,7 +97,7 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 
 	assertExists := func(exists bool) {
 		t.Helper()
-		_, err := ss.eng.Stat(ss.dir)
+		_, err := ss.eng.Env().Stat(ss.dir)
 		if !exists {
 			require.True(t, oserror.IsNotExist(err), err)
 		} else {
@@ -259,7 +255,7 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 		// First add a file that shouldn't be in the sideloaded storage to ensure
 		// sane behavior when directory can't be removed after full truncate.
 		nonRemovableFile := filepath.Join(ss.Dir(), "cantremove.xx")
-		f, err := eng.Create(nonRemovableFile)
+		f, err := eng.Env().Create(nonRemovableFile, fs.UnspecifiedWriteCategory)
 		if err != nil {
 			t.Fatalf("could not create non i*.t* file in sideloaded storage: %+v", err)
 		}
@@ -272,18 +268,18 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 		// is optional. But the file should still be there!
 		require.NoError(t, err)
 		{
-			_, err := eng.Stat(nonRemovableFile)
+			_, err := eng.Env().Stat(nonRemovableFile)
 			require.NoError(t, err)
 		}
 
 		// Now remove extra file and let truncation proceed to remove directory.
-		require.NoError(t, eng.Remove(nonRemovableFile))
+		require.NoError(t, eng.Env().Remove(nonRemovableFile))
 
 		// Test that directory is removed when filepath.Glob returns 0 matches.
 		_, _, err = ss.TruncateTo(ctx, math.MaxUint64)
 		require.NoError(t, err)
 		// Ensure directory is removed, now that all files should be gone.
-		_, err = eng.Stat(ss.Dir())
+		_, err = eng.Env().Stat(ss.Dir())
 		require.True(t, oserror.IsNotExist(err), "%v", err)
 		// Ensure HasAnyEntry doesn't find anything.
 		found, err := ss.HasAnyEntry(ctx, 0, 10000)
@@ -322,7 +318,7 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 		require.Zero(t, retainedByTruncateTo)
 		require.Equal(t, freedByTruncateTo, freed)
 		// Ensure directory is removed when all records are removed.
-		_, err = eng.Stat(ss.Dir())
+		_, err = eng.Env().Stat(ss.Dir())
 		require.True(t, oserror.IsNotExist(err), "%v", err)
 	}()
 
@@ -569,7 +565,7 @@ func TestRaftSSTableSideloadingSideload(t *testing.T) {
 			if test.size != size {
 				t.Fatalf("expected %d sideloadedSize, but found %d", test.size, size)
 			}
-			actKeys, err := sideloaded.eng.List(sideloaded.Dir())
+			actKeys, err := sideloaded.eng.Env().List(sideloaded.Dir())
 			if oserror.IsNotExist(err) {
 				t.Log("swallowing IsNotExist")
 				err = nil
@@ -587,7 +583,7 @@ func newOnDiskEngine(ctx context.Context, t *testing.T) (func(), storage.Engine)
 	dir, cleanup := testutils.TempDir(t)
 	eng, err := storage.Open(
 		ctx,
-		storage.Filesystem(dir),
+		fs.MustInitPhysicalTestingEnv(dir),
 		cluster.MakeClusterSettings(),
 		storage.CacheSize(1<<20 /* 1 MiB */))
 	if err != nil {
@@ -606,9 +602,11 @@ func TestSideloadStorageSync(t *testing.T) {
 		// Create a sideloaded storage with an in-memory FS. Use strict MemFS to be
 		// able to emulate crash restart by rolling it back to last synced state.
 		ctx := context.Background()
-		fs := vfs.NewStrictMem()
-		eng := storage.InMemFromFS(ctx, fs, "",
-			cluster.MakeTestingClusterSettings(), storage.ForTesting)
+		memFS := vfs.NewCrashableMem()
+		env, err := fs.InitEnv(ctx, memFS, "", fs.EnvConfig{}, nil /* statsCollector */)
+		require.NoError(t, err)
+		eng, err := storage.Open(ctx, env, cluster.MakeTestingClusterSettings(), storage.ForTesting)
+		require.NoError(t, err)
 		ss := newTestingSideloadStorage(eng)
 
 		// Put an entry which should trigger the lazy creation of the sideloaded
@@ -619,21 +617,21 @@ func TestSideloadStorageSync(t *testing.T) {
 			require.NoError(t, ss.Sync())
 		}
 		// Cut off all syncs from this point, to emulate a crash.
-		fs.SetIgnoreSyncs(true)
+		crashFS := memFS.CrashClone(vfs.CrashCloneCfg{})
 		ss = nil
 		eng.Close()
 		// Reset filesystem to the last synced state.
-		fs.ResetToSyncedState()
-		fs.SetIgnoreSyncs(false)
 
 		// Emulate process restart. Load from the last synced state.
-		eng = storage.InMemFromFS(ctx, fs, "",
-			cluster.MakeTestingClusterSettings(), storage.ForTesting)
+		env, err = fs.InitEnv(ctx, crashFS, "", fs.EnvConfig{}, nil /* statsCollector */)
+		require.NoError(t, err)
+		eng, err = storage.Open(ctx, env, cluster.MakeTestingClusterSettings(), storage.ForTesting)
+		require.NoError(t, err)
 		defer eng.Close()
 		ss = newTestingSideloadStorage(eng)
 
 		// The sideloaded directory must exist because all its parents are synced.
-		_, err := eng.Stat(ss.Dir())
+		_, err = eng.Env().Stat(ss.Dir())
 		require.NoError(t, err)
 
 		// The stored entry is still durable if we synced the sideloaded storage
@@ -734,7 +732,7 @@ func TestMkdirAllAndSyncParents(t *testing.T) {
 		wantGone:  []string{"../a/b/c"},
 	}} {
 		t.Run("", func(t *testing.T) {
-			fs := vfs.NewStrictMem()
+			fs := vfs.NewCrashableMem()
 			require.NoError(t, fs.MkdirAll(tc.path, os.ModePerm))
 			for _, dir := range tc.sync {
 				handle, err := fs.OpenDir(dir)
@@ -762,7 +760,7 @@ func TestMkdirAllAndSyncParents(t *testing.T) {
 			assertExistence(t, tc.wantGone, true)
 			// After crash and resetting to the synced state, wantExist directories
 			// must exist, and wantGone are lost.
-			fs.ResetToSyncedState()
+			fs = fs.CrashClone(vfs.CrashCloneCfg{})
 			assertExistence(t, tc.wantExist, true)
 			assertExistence(t, tc.wantGone, false)
 		})
@@ -775,10 +773,6 @@ func TestMkdirAllAndSyncParentsErrors(t *testing.T) {
 
 	t.Run("empty", func(t *testing.T) {
 		fs := vfs.NewMem()
-		for _, path := range []string{".", "./a", ".."} {
-			require.ErrorContains(t, mkdirAllAndSyncParents(fs, path, os.ModePerm),
-				"topmost dir does not exist", path)
-		}
 		// The root exists in an empty MemFS.
 		require.NoError(t, mkdirAllAndSyncParents(fs, "/", os.ModePerm))
 		// TODO(pavelkalinnikov): find a way to remove "/", and exercise the missing
@@ -788,16 +782,16 @@ func TestMkdirAllAndSyncParentsErrors(t *testing.T) {
 	})
 
 	t.Run("not-a-directory", func(t *testing.T) {
-		fs := vfs.NewMem()
-		require.NoError(t, mkdirAllAndSyncParents(fs, "/a", os.ModePerm))
+		memFS := vfs.NewMem()
+		require.NoError(t, mkdirAllAndSyncParents(memFS, "/a", os.ModePerm))
 
 		// Write a file, and try to trick mkdir into thinking that it's a directory.
-		f, err := fs.Create("/a/file")
+		f, err := memFS.Create("/a/file", fs.UnspecifiedWriteCategory)
 		require.NoError(t, err)
 		require.NoError(t, f.Close())
 
 		for _, path := range []string{"/a/file", "/a/file/sub"} {
-			require.ErrorContains(t, mkdirAllAndSyncParents(fs, path, os.ModePerm), "not a directory")
+			require.ErrorContains(t, mkdirAllAndSyncParents(memFS, path, os.ModePerm), "not a directory")
 		}
 	})
 }

@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -131,7 +128,7 @@ func testSendAndReceiveRows(t *testing.T, sinkSrc Sink, sinkDest *cdctest.MockWe
 
 	opts, err := getGenericWebhookSinkOptions().GetEncodingOptions()
 	require.NoError(t, err)
-	enc, err := makeJSONEncoder(jsonEncoderOptions{EncodingOptions: opts})
+	enc, err := makeJSONEncoder(ctx, jsonEncoderOptions{EncodingOptions: opts})
 	require.NoError(t, err)
 
 	// test a resolved timestamp entry
@@ -719,4 +716,50 @@ func TestWebhookSinkRetryDuration(t *testing.T) {
 	_, retryCfg, err = getSinkConfigFromJson(webhookOpts.JSONConfig, sinkJSONConfig{})
 	require.NoError(t, err)
 	require.Equal(t, retryCfg.MaxBackoff, 30*time.Second)
+}
+
+// Regression test for #118485.
+func TestWebhookSinkRetry(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	skip.UnderShort(t)
+
+	ctx := context.Background()
+	opts := getGenericWebhookSinkOptions(struct {
+		key   string
+		value string
+	}{
+		key: changefeedbase.OptWebhookSinkConfig,
+		// Note: The original issue repros most successfully with a 60s backoff,
+		// which is higher than we support and is higher than desirable for testing.
+		value: `{"Retry":{"Backoff": "500ms", "Max": "2"}}`})
+	cert, certEncoded, err := cdctest.NewCACertBase64Encoded()
+	require.NoError(t, err)
+
+	sinkDest, err := cdctest.StartMockWebhookSink(cert)
+	require.NoError(t, err)
+	// Return an error that retries in the sink client, then ok.
+	sinkDest.SetStatusCodes([]int{http.StatusTooManyRequests, http.StatusOK})
+
+	sinkDestHost, err := url.Parse(sinkDest.URL())
+	require.NoError(t, err)
+
+	params := sinkDestHost.Query()
+	params.Set(changefeedbase.SinkParamCACert, certEncoded)
+	sinkDestHost.RawQuery = params.Encode()
+
+	details := jobspb.ChangefeedDetails{
+		SinkURI: fmt.Sprintf("webhook-%s", sinkDestHost.String()),
+		Opts:    opts.AsMap(),
+	}
+
+	sinkSrc, err := setupWebhookSinkWithDetails(ctx, details, 1 /* parallelism */, timeutil.DefaultTimeSource{})
+	require.NoError(t, err)
+
+	require.NoError(t, sinkSrc.EmitRow(ctx, noTopic{}, []byte("[1001]"), []byte("{\"after\":{\"col1\":\"val1\",\"rowid\":1000},\"key\":[1001],\"topic:\":\"foo\"}"), zeroTS, zeroTS, zeroAlloc))
+	require.NoError(t, sinkSrc.Flush(ctx))
+
+	require.Equal(t, "{\"payload\":[{\"after\":{\"col1\":\"val1\",\"rowid\":1000},\"key\":[1001],\"topic:\":\"foo\"}],\"length\":1}", sinkDest.Pop())
+
+	sinkDest.Close()
+	require.NoError(t, sinkSrc.Close())
 }

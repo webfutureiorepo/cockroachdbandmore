@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -18,7 +13,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
@@ -54,6 +49,7 @@ import (
 )
 
 type alterTableNode struct {
+	zeroInputPlanNode
 	n         *tree.AlterTable
 	prefix    catalog.ResolvedObjectPrefix
 	tableDesc *tabledesc.Mutable
@@ -104,7 +100,7 @@ func (p *planner) AlterTable(ctx context.Context, n *tree.AlterTable) (planNode,
 
 	// Disallow schema changes if this table's schema is locked, unless it is to
 	// set/reset the "schema_locked" storage parameter.
-	if err = checkTableSchemaUnlocked(tableDesc); err != nil && !isSetOrResetSchemaLocked(n) {
+	if err = checkSchemaChangeIsAllowed(tableDesc, n); err != nil {
 		return nil, err
 	}
 
@@ -122,7 +118,6 @@ func (p *planner) AlterTable(ctx context.Context, n *tree.AlterTable) (planNode,
 		}
 		typedExpr, err := p.analyzeExpr(
 			ctx, injectStats.Stats,
-			nil, /* sources - no name resolution */
 			tree.IndexedVarHelper{},
 			types.Jsonb, true, /* requireType */
 			"INJECT STATISTICS" /* typingContext */)
@@ -268,11 +263,17 @@ func (n *alterTableNode) startExec(params runParams) error {
 					return err
 				}
 
+				// We are going to modify the AST to replace any index expressions with
+				// virtual columns. If the txn ends up retrying, then this change is not
+				// syntactically valid, since the virtual column is only added in the descriptor
+				// and not in the AST.
+				columns := make(tree.IndexElemList, len(d.Columns))
+				copy(columns, d.Columns)
 				if err := replaceExpressionElemsWithVirtualCols(
 					params.ctx,
 					n.tableDesc,
 					tableName,
-					d.Columns,
+					columns,
 					false, /* isInverted */
 					false, /* isNewTable */
 					params.p.SemaCtx(),
@@ -282,7 +283,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 
 				// Check if the columns exist on the table.
-				for _, column := range d.Columns {
+				for _, column := range columns {
 					if column.Expr != nil {
 						return pgerror.New(
 							pgcode.InvalidTableDefinition,
@@ -295,11 +296,6 @@ func (n *alterTableNode) startExec(params runParams) error {
 					}
 				}
 
-				activeVersion := params.ExecCfg().Settings.Version.ActiveVersion(params.ctx)
-				if !activeVersion.IsActive(clusterversion.V23_2) &&
-					d.Invisibility.Value > 0.0 && d.Invisibility.Value < 1.0 {
-					return unimplemented.New("partially visible indexes", "partially visible indexes are not yet supported")
-				}
 				idx := descpb.IndexDescriptor{
 					Name:             string(d.Name),
 					Unique:           true,
@@ -308,7 +304,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 					StoreColumnNames: d.Storing.ToStrings(),
 					CreatedAtNanos:   params.EvalContext().GetTxnTimestamp(time.Microsecond).UnixNano(),
 				}
-				if err := idx.FillColumns(d.Columns); err != nil {
+				if err := idx.FillColumns(columns); err != nil {
 					return err
 				}
 
@@ -390,17 +386,29 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 
 			case *tree.ForeignKeyConstraintTableDef:
-				// We want to reject uses of FK ON UPDATE actions where there is already
-				// an ON UPDATE expression for the column.
-				if d.Actions.Update != tree.NoAction && d.Actions.Update != tree.Restrict {
+				// There are two cases that we want to reject FKs related to
+				// ON UPDATE/DELETE clauses:
+				// - a FK ON UPDATE action and there is already an ON UPDATE
+				//   expression for the column
+				// - a FK over a computed column, and we have a ON UPDATE or ON DELETE
+				//   that modifies the FK column value in some manner. We block these
+				//   because the column value cannot change since it is computed. We do
+				//   allow ON DELETE CASCADE though since that removes the entire row.
+				hasUpdateAction := d.Actions.HasUpdateAction()
+				if hasUpdateAction || d.Actions.HasDisallowedActionForComputedFKCol() {
 					for _, fromCol := range d.FromCols {
 						for _, toCheck := range n.tableDesc.Columns {
-							if fromCol == toCheck.ColName() && toCheck.HasOnUpdate() {
+							if fromCol != toCheck.ColName() {
+								continue
+							}
+							if hasUpdateAction && toCheck.HasOnUpdate() {
 								return pgerror.Newf(
 									pgcode.InvalidTableDefinition,
 									"cannot specify a foreign key update action and an ON UPDATE"+
 										" expression on the same column",
 								)
+							} else if toCheck.IsComputed() {
+								return sqlerrors.NewInvalidActionOnComputedFKColumnError(hasUpdateAction)
 							}
 						}
 					}
@@ -449,6 +457,11 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 				descriptorChanged = true
 				for _, updated := range affected {
+					// Disallow schema change if the FK references a table whose schema is
+					// locked.
+					if err := checkSchemaChangeIsAllowed(updated, n.n); err != nil {
+						return err
+					}
 					if err := params.p.writeSchemaChange(
 						params.ctx, updated, descpb.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann()),
 					); err != nil {
@@ -492,7 +505,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 					"remove all data in that column and drop any indexes that reference that column")
 				if !params.extendedEvalCtx.TxnIsSingleStmt {
 					err = errors.WithIssueLink(err, errors.IssueLink{
-						IssueURL: "https://github.com/cockroachdb/cockroach/issues/46541",
+						IssueURL: build.MakeIssueURL(46541),
 						Detail: "when used in an explicit transaction combined with other " +
 							"schema changes to the same table, DROP COLUMN can result in data " +
 							"loss if one of the other schema change fails or is canceled",
@@ -571,8 +584,8 @@ func (n *alterTableNode) startExec(params runParams) error {
 			}
 			if ck := c.AsCheck(); ck != nil {
 				if err := validateCheckInTxn(
-					params.ctx, params.p.InternalSQLTxn(), &params.p.semaCtx,
-					params.p.SessionData(), n.tableDesc, ck,
+					params.ctx, params.p.InternalSQLTxn(), params.p.EvalContext(),
+					&params.p.semaCtx, params.p.SessionData(), n.tableDesc, ck,
 				); err != nil {
 					return err
 				}
@@ -623,11 +636,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 			if columnName == catpb.TTLDefaultExpirationColumnName &&
 				tableDesc.HasRowLevelTTL() &&
 				tableDesc.GetRowLevelTTL().HasDurationExpr() {
-				return pgerror.Newf(
-					pgcode.InvalidTableDefinition,
-					`cannot alter column %s while ttl_expire_after is set`,
-					columnName,
-				)
+				return sqlerrors.NewAlterDependsOnDurationExprError("alter", "column", columnName, tn.Object())
 			}
 			// Apply mutations to copy of column descriptor.
 			if err := applyColumnMutation(params.ctx, tableDesc, col, t, params, n.n.Cmds, tn); err != nil {
@@ -831,6 +840,10 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return err
 			}
 			descriptorChanged = true
+		case *tree.AlterTableSetRLSMode:
+			return unimplemented.NewWithIssuef(
+				136700,
+				"row-level security mode alteration is not supported")
 		default:
 			return errors.AssertionFailedf("unsupported alter command: %T", cmd)
 		}
@@ -897,21 +910,15 @@ func (p *planner) setAuditMode(
 	event := &auditevents.SensitiveTableAccessEvent{TableDesc: desc, Writing: true}
 	p.curPlan.auditEventBuilders = append(p.curPlan.auditEventBuilders, event)
 
-	// Requires admin or MODIFYCLUSTERSETTING as of 22.2
-	hasAdmin, err := p.HasAdminRole(ctx)
+	// Requires MODIFYCLUSTERSETTING as of 22.2.
+	// Check for system privilege first, otherwise fall back to role options.
+	hasModify, err := p.HasGlobalPrivilegeOrRoleOption(ctx, privilege.MODIFYCLUSTERSETTING)
 	if err != nil {
 		return false, err
 	}
-	if !hasAdmin {
-		// Check for system privilege first, otherwise fall back to role options.
-		hasModify, err := p.HasGlobalPrivilegeOrRoleOption(ctx, privilege.MODIFYCLUSTERSETTING)
-		if err != nil {
-			return false, err
-		}
-		if !hasModify {
-			return false, pgerror.Newf(pgcode.InsufficientPrivilege,
-				"only users with admin or %s system privilege are allowed to change audit settings on a table ", privilege.MODIFYCLUSTERSETTING)
-		}
+	if !hasModify {
+		return false, pgerror.Newf(pgcode.InsufficientPrivilege,
+			"only users with admin or %s system privilege are allowed to change audit settings on a table ", privilege.MODIFYCLUSTERSETTING)
 	}
 
 	telemetry.Inc(sqltelemetry.SchemaSetAuditModeCounter(auditMode.TelemetryName()))
@@ -940,6 +947,25 @@ func applyColumnMutation(
 		return AlterColumnType(ctx, tableDesc, col, t, params, cmds, tn)
 
 	case *tree.AlterTableSetDefault:
+		// If our column is computed, block mixing defaults in entirely.
+		// This check exists here instead of later on during validation because
+		// adding a null default to a computed column should also be blocked, but
+		// is undetectable later on since SET DEFAULT NUL means a nil default
+		// expression.
+		if col.IsComputed() {
+			// Block dropping a computed column "default" as well.
+			if t.Default == nil {
+				return pgerror.Newf(
+					pgcode.Syntax,
+					"column %q of relation %q is a computed column",
+					col.GetName(),
+					tn.ObjectName)
+			}
+			return pgerror.Newf(
+				pgcode.Syntax,
+				"computed column %q cannot also have a DEFAULT expression",
+				col.GetName())
+		}
 		if err := updateNonComputedColExpr(
 			params,
 			tableDesc,
@@ -1044,7 +1070,9 @@ func applyColumnMutation(
 		// it in the schema changer.
 		check := tabledesc.MakeNotNullCheckConstraint(tableDesc, col,
 			descpb.ConstraintValidity_Dropping, tableDesc.GetNextConstraintID())
-		tableDesc.Checks = append(tableDesc.Checks, check)
+		if tableDesc.Adding() {
+			tableDesc.Checks = append(tableDesc.Checks, check)
+		}
 		tableDesc.NextConstraintID++
 		tableDesc.AddNotNullMutation(check, descpb.DescriptorMutation_DROP)
 
@@ -1058,6 +1086,210 @@ func applyColumnMutation(
 				"column %q is not a stored computed column", col.GetName())
 		}
 		col.ColumnDesc().ComputeExpr = nil
+
+	case *tree.AlterTableAddIdentity:
+		if typ := col.GetType(); typ == nil || typ.InternalType.Family != types.IntFamily {
+			return pgerror.Newf(
+				pgcode.InvalidParameterValue,
+				"column %q of relation %q type must be an integer type", col.GetName(), tableDesc.GetName())
+		}
+		if col.IsGeneratedAsIdentity() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q is already an identity column",
+				col.GetName(), tableDesc.GetName())
+		}
+		if col.HasDefault() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q already has a default value", col.GetName(), tableDesc.GetName())
+		}
+		if col.IsComputed() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q already has a computed value", col.GetName(), tableDesc.GetName())
+		}
+		if col.IsNullable() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q must be declared NOT NULL before identity can be added", col.GetName(), tableDesc.GetName())
+		}
+		if col.HasOnUpdate() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q already has an update expression", col.GetName(), tableDesc.GetName())
+		}
+
+		// Create column definition for identity column
+		q := []tree.NamedColumnQualification{{Qualification: t.Qualification}}
+		colDef, err := tree.NewColumnTableDef(tree.Name(col.GetName()), col.GetType(), false /* isSerial */, q)
+		if err != nil {
+			return err
+		}
+		newDef, prefix, seqName, seqOpts, err := params.p.processSerialLikeInColumnDef(params.ctx, colDef, tn)
+		if err != nil {
+			return err
+		}
+		if seqName == nil {
+			return errors.Newf("failed to create sequence %q for new identity column %q in %q", seqName, col.ColName(), tn)
+		}
+		colDef = newDef
+
+		colOwnedSeqDesc, err := doCreateSequence(
+			ctx,
+			params.p,
+			params.SessionData(),
+			prefix.Database,
+			prefix.Schema,
+			seqName,
+			tree.PersistencePermanent,
+			seqOpts,
+			fmt.Sprintf("creating sequence %q for new identity column %q in %q", seqName, col.ColName(), tn),
+		)
+		if err != nil {
+			return err
+		}
+
+		typedExpr, _, err := sanitizeColumnExpression(params, colDef.DefaultExpr.Expr, col, tree.ColumnDefaultExprInSetDefault)
+		if err != nil {
+			return err
+		}
+
+		changedSeqDescs, err := maybeAddSequenceDependencies(
+			params.ctx,
+			params.p.ExecCfg().Settings,
+			params.p,
+			tableDesc,
+			col.ColumnDesc(),
+			typedExpr,
+			nil, /* backrefs */
+			tabledesc.DefaultExpr,
+		)
+		if err != nil {
+			return err
+		}
+		for _, changedSeqDesc := range changedSeqDescs {
+			// `colOwnedSeqDesc` and `changedSeqDesc` should refer to a same instance.
+			// But we still want to use the right copy to write a schema change for by
+			// using `changedSeqDesc` just in case the assumption became false in the
+			// future.
+			if colOwnedSeqDesc != nil && colOwnedSeqDesc.ID == changedSeqDesc.ID {
+				if err := setSequenceOwner(changedSeqDesc, col.ColName(), tableDesc); err != nil {
+					return err
+				}
+			}
+			if err := params.p.writeSchemaChange(
+				params.ctx, changedSeqDesc, descpb.InvalidMutationID, tree.AsStringWithFQNames(t, params.Ann()),
+			); err != nil {
+				return err
+			}
+		}
+
+		// Set column description to identity
+		switch (t.Qualification).(type) {
+		case *tree.GeneratedAlwaysAsIdentity:
+			col.ColumnDesc().GeneratedAsIdentityType = catpb.GeneratedAsIdentityType_GENERATED_ALWAYS
+		case *tree.GeneratedByDefAsIdentity:
+			col.ColumnDesc().GeneratedAsIdentityType = catpb.GeneratedAsIdentityType_GENERATED_BY_DEFAULT
+		}
+		seqOptsStr := tree.Serialize(&seqOpts)
+		col.ColumnDesc().GeneratedAsIdentitySequenceOption = &seqOptsStr
+
+	case *tree.AlterTableSetIdentity:
+		if !col.IsGeneratedAsIdentity() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q is not an identity column",
+				col.GetName(), tableDesc.GetName())
+		}
+
+		switch t.GeneratedAsIdentityType {
+		case tree.GeneratedAlways:
+			if col.IsGeneratedAlwaysAsIdentity() {
+				return nil
+			}
+			col.ColumnDesc().GeneratedAsIdentityType = catpb.GeneratedAsIdentityType_GENERATED_ALWAYS
+		case tree.GeneratedByDefault:
+			if col.IsGeneratedByDefaultAsIdentity() {
+				return nil
+			}
+			col.ColumnDesc().GeneratedAsIdentityType = catpb.GeneratedAsIdentityType_GENERATED_BY_DEFAULT
+		}
+
+	case *tree.AlterTableIdentity:
+		if !col.IsGeneratedAsIdentity() {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q is not an identity column",
+				col.GetName(), tableDesc.GetName())
+		}
+
+		// It is assumed that an identify column owns only one sequence.
+		if col.NumUsesSequences() != 1 {
+			return errors.AssertionFailedf(
+				"identity column %q of relation %q has %d sequences instead of 1",
+				col.GetName(), tableDesc.GetName(), col.NumUsesSequences())
+		}
+
+		seqDesc, err := params.p.Descriptors().MutableByID(params.p.txn).Table(ctx, col.GetUsesSequenceID(0))
+		if err != nil {
+			return err
+		}
+
+		// Alter referenced sequence for identity with sepcified option.
+		// Does not override existing values if not specified.
+		if err := alterSequenceImpl(params, seqDesc, t.SeqOptions, t); err != nil {
+			return err
+		}
+
+		opts := seqDesc.GetSequenceOpts()
+		optsNode := tree.SequenceOptions{}
+		if opts.CacheSize > 1 {
+			optsNode = append(optsNode, tree.SequenceOption{Name: tree.SeqOptCache, IntVal: &opts.CacheSize})
+		}
+		optsNode = append(optsNode, tree.SequenceOption{Name: tree.SeqOptMinValue, IntVal: &opts.MinValue})
+		optsNode = append(optsNode, tree.SequenceOption{Name: tree.SeqOptMaxValue, IntVal: &opts.MaxValue})
+		optsNode = append(optsNode, tree.SequenceOption{Name: tree.SeqOptIncrement, IntVal: &opts.Increment})
+		optsNode = append(optsNode, tree.SequenceOption{Name: tree.SeqOptStart, IntVal: &opts.Start})
+		if opts.Virtual {
+			optsNode = append(optsNode, tree.SequenceOption{Name: tree.SeqOptVirtual})
+		}
+		s := tree.Serialize(&optsNode)
+		col.ColumnDesc().GeneratedAsIdentitySequenceOption = &s
+
+	case *tree.AlterTableDropIdentity:
+		if !col.IsGeneratedAsIdentity() {
+			if t.IfExists {
+				params.p.BufferClientNotice(
+					params.ctx,
+					pgnotice.Newf("column %q of relation %q is not an identity column, skipping", col.GetName(), tableDesc.GetName()),
+				)
+				return nil
+			}
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q of relation %q is not an identity column",
+				col.GetName(), tableDesc.GetName())
+		}
+
+		// It is assumed that an identify column owns only one sequence.
+		if col.NumUsesSequences() != 1 {
+			return errors.AssertionFailedf(
+				"identity column %q of relation %q has %d sequences instead of 1",
+				col.GetName(), tableDesc.GetName(), col.NumUsesSequences())
+		}
+
+		// Verify sequence is not depended on by another column.
+		// Use tree.DropDefault behavior to verify without the need to alter other dependencies via tree.DropCascade.
+		if err := params.p.canRemoveAllColumnOwnedSequences(params.ctx, tableDesc, col, tree.DropDefault); err != nil {
+			return err
+		}
+		// Drop the identity flag first, so that it is treated like a normal column.
+		// Otherwise, we will run into the assertion saying that uses sequences should
+		// exist.
+		col.ColumnDesc().GeneratedAsIdentityType = catpb.GeneratedAsIdentityType_NOT_IDENTITY_COLUMN
+
+		// Drop the identity sequence and remove it from the column OwnsSequenceIds and DefaultExpr.
+		// Use tree.DropCascade behavior to remove dependencies on the column.
+		if err := params.p.dropSequencesOwnedByCol(params.ctx, col, true /* queueJob */, tree.DropCascade); err != nil {
+			return err
+		}
+
+		// Remove column identity descriptors
+		col.ColumnDesc().GeneratedAsIdentitySequenceOption = nil
+
 	}
 	return nil
 }
@@ -1076,7 +1308,8 @@ func labeledRowValues(cols []catalog.Column, values tree.Datums) string {
 		if i != 0 {
 			s.WriteString(`, `)
 		}
-		s.WriteString(cols[i].GetName())
+		colName := cols[i].ColName()
+		s.WriteString(colName.String())
 		s.WriteString(`=`)
 		s.WriteString(values[i].String())
 	}
@@ -1096,6 +1329,10 @@ func updateNonComputedColExpr(
 	exprField **string,
 	op tree.SchemaExprContext,
 ) error {
+	if col.IsGeneratedAsIdentity() {
+		return sqlerrors.NewSyntaxErrorf("column %q is an identity column", col.GetName())
+	}
+
 	// If a DEFAULT or ON UPDATE expression starts using a sequence and is then
 	// modified to not use that sequence, we need to drop the dependency from
 	// the sequence to the column. The way this is done is by wiping all
@@ -1105,10 +1342,6 @@ func updateNonComputedColExpr(
 		if err := params.p.removeSequenceDependencies(params.ctx, tab, col); err != nil {
 			return err
 		}
-	}
-
-	if col.IsGeneratedAsIdentity() {
-		return sqlerrors.NewSyntaxErrorf("column %q is an identity column", col.GetName())
 	}
 
 	if newExpr == nil {
@@ -1280,7 +1513,8 @@ func injectTableStats(
 		}
 	}
 
-	// First, delete all statistics for the table.
+	// First, delete all statistics for the table. (We use the current transaction
+	// so that this will rollback on any error.)
 	if _ /* rows */, err := params.p.InternalSQLTxn().Exec(
 		params.ctx,
 		"delete-stats",
@@ -1298,6 +1532,22 @@ StatsLoop:
 		if err != nil {
 			return err
 		}
+
+		// Check that the type matches.
+		// TODO(49698): When we support multi-column histograms this check will need
+		// adjustment.
+		if len(s.Columns) == 1 {
+			col := catalog.FindColumnByName(desc, s.Columns[0])
+			// Ignore dropped columns (they are handled below).
+			if col != nil {
+				if err := h.TypeCheck(
+					col.GetType(), desc.GetName(), s.Columns[0], stats.TSFromString(s.CreatedAt),
+				); err != nil {
+					return pgerror.WithCandidateCode(err, pgcode.DatatypeMismatch)
+				}
+			}
+		}
+
 		// histogram will be passed to the INSERT statement; we want it to be a
 		// nil interface{} if we don't generate a histogram.
 		var histogram interface{}
@@ -1363,11 +1613,45 @@ func insertJSONStatistic(
 		fullStatisticIDValue = s.FullStatisticID
 	}
 
-	_ /* rows */, err := txn.Exec(
-		ctx,
-		"insert-stats",
-		txn.KV(),
-		`INSERT INTO system.table_statistics (
+	if s.ID != 0 {
+		_ /* rows */, err := txn.Exec(
+			ctx,
+			"insert-stats",
+			txn.KV(),
+			`INSERT INTO system.table_statistics (
+					"statisticID",
+					"tableID",
+					"name",
+					"columnIDs",
+					"createdAt",
+					"rowCount",
+					"distinctCount",
+					"nullCount",
+					"avgSize",
+					histogram,
+					"partialPredicate",
+					"fullStatisticID"
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			s.ID,
+			tableID,
+			name,
+			columnIDs,
+			s.CreatedAt,
+			s.RowCount,
+			s.DistinctCount,
+			s.NullCount,
+			s.AvgSize,
+			histogram,
+			predicateValue,
+			fullStatisticIDValue,
+		)
+		return err
+	} else {
+		_ /* rows */, err := txn.Exec(
+			ctx,
+			"insert-stats",
+			txn.KV(),
+			`INSERT INTO system.table_statistics (
 					"tableID",
 					"name",
 					"columnIDs",
@@ -1380,19 +1664,20 @@ func insertJSONStatistic(
 					"partialPredicate",
 					"fullStatisticID"
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		tableID,
-		name,
-		columnIDs,
-		s.CreatedAt,
-		s.RowCount,
-		s.DistinctCount,
-		s.NullCount,
-		s.AvgSize,
-		histogram,
-		predicateValue,
-		fullStatisticIDValue,
-	)
-	return err
+			tableID,
+			name,
+			columnIDs,
+			s.CreatedAt,
+			s.RowCount,
+			s.DistinctCount,
+			s.NullCount,
+			s.AvgSize,
+			histogram,
+			predicateValue,
+			fullStatisticIDValue,
+		)
+		return err
+	}
 }
 
 // validateConstraintNameIsNotUsed checks that the name of the constraint we're
@@ -1466,7 +1751,7 @@ func validateConstraintNameIsNotUsed(
 			return true, nil
 		}
 		if idx.Dropped() {
-			return false, pgerror.Newf(pgcode.DuplicateObject, "constraint with name %q already exists and is being dropped, try again later", name)
+			return false, pgerror.Newf(pgcode.DuplicateRelation, "constraint with name %q already exists and is being dropped, try again later", name)
 		}
 		return false, pgerror.Newf(pgcode.DuplicateRelation, "constraint with name %q already exists", name)
 
@@ -1654,7 +1939,7 @@ func dropColumnImpl(
 	if err := schemaexpr.ValidateColumnHasNoDependents(tableDesc, colToDrop); err != nil {
 		return nil, err
 	}
-	if err := schemaexpr.ValidateTTLExpressionDoesNotDependOnColumn(tableDesc, rowLevelTTL, colToDrop); err != nil {
+	if err := schemaexpr.ValidateTTLExpression(tableDesc, rowLevelTTL, colToDrop, tn, "drop"); err != nil {
 		return nil, err
 	}
 
@@ -1681,7 +1966,8 @@ func dropColumnImpl(
 
 			if colIDs.Contains(colToDrop.GetID()) {
 				containsThisColumn = true
-				return nil, sqlerrors.NewColumnReferencedByPartialIndex(string(colToDrop.ColName()), idx.GetName())
+				return nil, sqlerrors.ColumnReferencedByPartialIndex(
+					"drop", "column", string(colToDrop.ColName()), idx.GetName())
 			}
 		}
 		// Perform the DROP.
@@ -1724,7 +2010,8 @@ func dropColumnImpl(
 			}
 
 			if colIDs.Contains(colToDrop.GetID()) {
-				return nil, sqlerrors.NewColumnReferencedByPartialUniqueWithoutIndexConstraint(string(colToDrop.ColName()), uwoi.GetName())
+				return nil, sqlerrors.ColumnReferencedByPartialUniqueWithoutIndexConstraint(
+					"drop", "column", string(colToDrop.ColName()), uwoi.GetName())
 			}
 		}
 		if uwoi.Dropped() || !uwoi.CollectKeyColumnIDs().Contains(colToDrop.GetID()) {
@@ -1832,7 +2119,7 @@ func handleTTLStorageParamChange(
 			if err != nil {
 				return false, err
 			}
-			if err := s.SetSchedule(after.DeletionCronOrDefault()); err != nil {
+			if err := s.SetScheduleAndNextRun(after.DeletionCronOrDefault()); err != nil {
 				return false, err
 			}
 			if err := schedules.Update(params.ctx, s); err != nil {
@@ -1945,8 +2232,24 @@ func handleTTLStorageParamChange(
 			&descpb.ModifyRowLevelTTL{RowLevelTTL: after},
 			direction,
 		)
+		// Also, check if the table has inbound foreign keys (i.e. this table is being
+		// referenced  by other tables). In such a case, flag a notice to the user
+		// advising them to update the ttl_delete_batch_size to avoid generating
+		// TTL deletion jobs with a high cardinality of rows being deleted.
+		// See https://github.com/cockroachdb/cockroach/issues/125103 for more details.
+		for _, fk := range tableDesc.InboundFKs {
+			// Use foreign key actions to determine upstream impact and flag a notice if the
+			// actions for delete involve cascading deletes for any one of the inbound foreign keys.
+			if fk.OnDelete != semenumpb.ForeignKeyAction_NO_ACTION && fk.OnDelete != semenumpb.ForeignKeyAction_RESTRICT {
+				params.p.BufferClientNotice(
+					params.ctx,
+					pgnotice.Newf("Columns within table %s are referenced as foreign keys."+
+						" This will make TTL deletion jobs more expensive as dependent rows"+
+						" in other tables will need to be updated as well. To improve performance"+
+						" of the TTL job, consider reducing the value of ttl_delete_batch_size.", tableDesc.GetName()))
+			}
+		}
 	}
-
 	// Validate the type and volatility of ttl_expiration_expression.
 	if after != nil {
 		if err := schemaexpr.ValidateTTLExpirationExpression(
@@ -2025,27 +2328,30 @@ func (p *planner) tryRemoveFKBackReferences(
 	return nil
 }
 
-func checkTableSchemaUnlocked(desc catalog.TableDescriptor) (ret error) {
-	if desc != nil && desc.IsSchemaLocked() {
+// checkSchemaChangeIsAllowed checks if a schema change is allowed on
+// this table. A schema change is disallowed if one of the following is true:
+//   - The schema_locked table storage parameter is true, and this statement is
+//     not modifying the value of schema_locked.
+//   - The table is referenced by logical data replication jobs, and the statement
+//     is not in the allow list of LDR schema changes.
+func checkSchemaChangeIsAllowed(desc catalog.TableDescriptor, n tree.Statement) (ret error) {
+	if desc == nil {
+		return nil
+	}
+	if desc.IsSchemaLocked() && !tree.IsSetOrResetSchemaLocked(n) {
 		return sqlerrors.NewSchemaChangeOnLockedTableErr(desc.GetName())
 	}
-	return nil
-}
-
-// isSetOrResetSchemaLocked returns true if `n` contains a command to
-// set/reset "schema_locked" storage parameter.
-func isSetOrResetSchemaLocked(n *tree.AlterTable) bool {
-	for _, cmd := range n.Cmds {
-		switch cmd := cmd.(type) {
-		case *tree.AlterTableSetStorageParams:
-			if cmd.StorageParams.GetVal("schema_locked") != nil {
-				return true
-			}
-		case *tree.AlterTableResetStorageParams:
-			if cmd.Params.Contains("schema_locked") {
-				return true
+	if len(desc.TableDesc().LDRJobIDs) > 0 {
+		var virtualColNames []string
+		for _, col := range desc.NonDropColumns() {
+			if col.IsVirtual() {
+				virtualColNames = append(virtualColNames, col.GetName())
 			}
 		}
+		if !tree.IsAllowedLDRSchemaChange(n, virtualColNames) {
+			return sqlerrors.NewDisallowedSchemaChangeOnLDRTableErr(desc.GetName(), desc.TableDesc().LDRJobIDs)
+
+		}
 	}
-	return false
+	return nil
 }

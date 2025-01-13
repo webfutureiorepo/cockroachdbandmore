@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
@@ -15,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
@@ -37,9 +31,13 @@ import (
 )
 
 func alterTableAlterPrimaryKey(
-	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t *tree.AlterTableAlterPrimaryKey,
+	b BuildCtx,
+	tn *tree.TableName,
+	tbl *scpb.Table,
+	stmt tree.Statement,
+	t *tree.AlterTableAlterPrimaryKey,
 ) {
-	alterPrimaryKey(b, tn, tbl, alterPrimaryKeySpec{
+	alterPrimaryKey(b, tn, tbl, stmt, alterPrimaryKeySpec{
 		n:             t,
 		Columns:       t.Columns,
 		Sharded:       t.Sharded,
@@ -56,7 +54,9 @@ type alterPrimaryKeySpec struct {
 	StorageParams tree.StorageParams
 }
 
-func alterPrimaryKey(b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t alterPrimaryKeySpec) {
+func alterPrimaryKey(
+	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, stmt tree.Statement, t alterPrimaryKeySpec,
+) {
 	// Panic on certain forbidden `ALTER PRIMARY KEY` cases (e.g. one of
 	// the new primary key column is a virtual column). See the comments
 	// for a full list of preconditions we check.
@@ -67,16 +67,12 @@ func alterPrimaryKey(b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t alterPri
 		return
 	}
 
+	panicIfRegionChangeUnderwayOnRBRTable(b, "ALTER PRIMARY KEY", tbl.TableID)
 	// TODO (xiang): This section contains all fall-back cases and need to
 	// be removed to fully support `ALTER PRIMARY KEY`.
 	fallBackIfShardedIndexExists(b, t, tbl.TableID)
 	fallBackIfPartitionedIndexExists(b, t, tbl.TableID)
 	fallBackIfRegionalByRowTable(b, t.n, tbl.TableID)
-	fallBackIfDescColInRowLevelTTLTables(b, tbl.TableID, t)
-	fallBackIfSubZoneConfigExists(b, t.n, tbl.TableID)
-	// Version gates functionally that is implemented after the statement is
-	// publicly published.
-	fallbackIfAddColDropColAlterPKInOneAlterTableStmtBeforeV232(b, tbl.TableID, t.n)
 
 	inflatedChain := getInflatedPrimaryIndexChain(b, tbl.TableID)
 	if !haveSameIndexColsByKind(b, tbl.TableID, inflatedChain.oldSpec.primary.IndexID,
@@ -106,13 +102,13 @@ func alterPrimaryKey(b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t alterPri
 	b.LogEventForExistingTarget(inflatedChain.finalSpec.primary)
 
 	// Recreate all secondary indexes.
-	recreateAllSecondaryIndexes(b, tbl, inflatedChain.finalSpec.primary, inflatedChain.inter2Spec.primary)
+	recreateAllSecondaryIndexes(b, t, tbl, inflatedChain.finalSpec.primary, inflatedChain.inter2Spec.primary)
 
 	// Drop the rowid column, if applicable.
 	rowidToDrop := getPrimaryIndexDefaultRowIDColumn(b, tbl.TableID, inflatedChain.oldSpec.primary.IndexID)
 	if checkIfColumnCanBeDropped(b, rowidToDrop) {
 		elts := b.QueryByID(rowidToDrop.TableID).Filter(hasColumnIDAttrFilter(rowidToDrop.ColumnID))
-		dropColumn(b, tn, tbl, t.n, rowidToDrop, elts, tree.DropRestrict)
+		dropColumn(b, tn, tbl, stmt, t.n, rowidToDrop, elts, tree.DropRestrict)
 	}
 
 	// Create a unique index on the old primary key columns, if applicable.
@@ -125,10 +121,8 @@ func alterPrimaryKey(b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t alterPri
 	// This behavior is added in V23.1 and gated.
 	oldShardColToDrop := getprimaryIndexShardColumn(b, tbl.TableID, inflatedChain.oldSpec.primary.IndexID)
 	if checkIfColumnCanBeDropped(b, oldShardColToDrop) {
-		if b.EvalCtx().Settings.Version.IsActive(b, clusterversion.V23_1) {
-			elts := b.QueryByID(oldShardColToDrop.TableID).Filter(hasColumnIDAttrFilter(oldShardColToDrop.ColumnID))
-			dropColumn(b, tn, tbl, t.n, oldShardColToDrop, elts, tree.DropRestrict)
-		}
+		elts := b.QueryByID(oldShardColToDrop.TableID).Filter(hasColumnIDAttrFilter(oldShardColToDrop.ColumnID))
+		dropColumn(b, tn, tbl, stmt, t.n, oldShardColToDrop, elts, tree.DropRestrict)
 	}
 }
 
@@ -287,7 +281,8 @@ func alterPKInPrimaryIndexAndItsTemp(
 //  3. no inaccessible columns;
 //  4. no nullable columns;
 //  5. no virtual columns (starting from v22.1);
-//  6. add more here
+//  6. No columns that are scheduled to be dropped (target status set to `ABSENT`);
+//  7. add more here
 //
 // Panic if any precondition is found unmet.
 func checkForEarlyExit(b BuildCtx, tbl *scpb.Table, t alterPrimaryKeySpec) {
@@ -329,7 +324,7 @@ func checkForEarlyExit(b BuildCtx, tbl *scpb.Table, t alterPrimaryKeySpec) {
 			panic(errors.AssertionFailedf("programming error: resolving column %v does not give a "+
 				"Column element.", col.Column))
 		}
-		if colCurrentStatus == scpb.Status_DROPPED || colCurrentStatus == scpb.Status_ABSENT {
+		if colCurrentStatus == scpb.Status_DROPPED || colCurrentStatus == scpb.Status_ABSENT || colTargetStatus == scpb.ToAbsent {
 			if colTargetStatus == scpb.ToPublic {
 				panic(pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 					"column %q is being added", col.Column))
@@ -344,6 +339,17 @@ func checkForEarlyExit(b BuildCtx, tbl *scpb.Table, t alterPrimaryKeySpec) {
 		if !isColNotNull(b, tbl.TableID, colElem.ColumnID) {
 			panic(pgerror.Newf(pgcode.InvalidSchemaDefinition, "cannot use nullable column "+
 				"%q in primary key", col.Column))
+		}
+
+		columnType := mustRetrieveColumnTypeElem(b, tbl.TableID, colElem.ColumnID)
+		// Check if the column type is indexable.
+		if !colinfo.ColumnTypeIsIndexable(columnType.Type) {
+			panic(unimplemented.NewWithIssueDetailf(35730,
+				columnType.Type.DebugString(),
+				"column %s is of type %s and thus is not indexable",
+				col.Column,
+				columnType.Type),
+			)
 		}
 	}
 }
@@ -440,25 +446,6 @@ func fallBackIfRegionalByRowTable(b BuildCtx, t tree.NodeFormatter, tableID cati
 	}
 }
 
-// fallBackIfDescColInRowLevelTTLTables panics with an unimplemented
-// error if the table is a (row-level-ttl table && (it has a descending
-// key column || it has any inbound/outbound FK constraint)).
-func fallBackIfDescColInRowLevelTTLTables(b BuildCtx, tableID catid.DescID, t alterPrimaryKeySpec) {
-	if _, _, rowLevelTTLElem := scpb.FindRowLevelTTL(b.QueryByID(tableID)); rowLevelTTLElem == nil {
-		return
-	}
-
-	// It's a row-level-ttl table. Ensure it has no non-descending
-	// key columns, and there is no inbound/outbound foreign keys.
-	if !b.ClusterSettings().Version.IsActive(b, clusterversion.V23_2) {
-		for _, col := range t.Columns {
-			if indexColumnDirection(col.Direction) != catenumpb.IndexColumn_ASC {
-				panic(scerrors.NotImplementedErrorf(t.n, "non-ascending ordering on PRIMARY KEYs are not supported"))
-			}
-		}
-	}
-}
-
 func mustRetrieveCurrentPrimaryIndexElement(
 	b BuildCtx, tableID catid.DescID,
 ) (res *scpb.PrimaryIndex) {
@@ -479,15 +466,9 @@ func mustRetrieveCurrentPrimaryIndexElement(
 func mustRetrieveColumnElem(
 	b BuildCtx, tableID catid.DescID, columnID catid.ColumnID,
 ) (column *scpb.Column) {
-	scpb.ForEachColumn(b.QueryByID(tableID), func(current scpb.Status, target scpb.TargetStatus, e *scpb.Column) {
-		if e.ColumnID == columnID {
-			column = e
-		}
-	})
-	if column == nil {
-		panic(errors.AssertionFailedf("programming error: cannot find a Column element for column ID %v", columnID))
-	}
-	return column
+	return b.QueryByID(tableID).FilterColumn().Filter(func(current scpb.Status, target scpb.TargetStatus, e *scpb.Column) bool {
+		return e.ColumnID == columnID
+	}).MustGetOneElement()
 }
 
 func retrieveColumnElemAndStatus(
@@ -601,23 +582,6 @@ func mustRetrieveKeyIndexColumns(
 	return keyIndexCols
 }
 
-func mustRetrieveIndexNameElem(
-	b BuildCtx, tableID catid.DescID, indexID catid.IndexID,
-) (indexNameElem *scpb.IndexName) {
-	scpb.ForEachIndexName(b.QueryByID(tableID), func(
-		current scpb.Status, target scpb.TargetStatus, e *scpb.IndexName,
-	) {
-		if e.IndexID == indexID {
-			indexNameElem = e
-		}
-	})
-	if indexNameElem == nil {
-		panic(errors.AssertionFailedf("programming error: cannot find an index name element "+
-			"with ID %v from table %v", indexID, tableID))
-	}
-	return indexNameElem
-}
-
 func mustRetrieveConstraintWithoutIndexNameElem(
 	b BuildCtx, tableID catid.DescID, constraintID catid.ConstraintID,
 ) (constraintWithoutIndexName *scpb.ConstraintWithoutIndexName) {
@@ -658,7 +622,10 @@ func checkIfConstraintNameAlreadyExists(b BuildCtx, tbl *scpb.Table, t alterPrim
 // columns remain the same in the face of a primary key change, the key suffix
 // columns or the stored columns may not.
 func recreateAllSecondaryIndexes(
-	b BuildCtx, tbl *scpb.Table, newPrimaryIndex, sourcePrimaryIndex *scpb.PrimaryIndex,
+	b BuildCtx,
+	t alterPrimaryKeySpec,
+	tbl *scpb.Table,
+	newPrimaryIndex, sourcePrimaryIndex *scpb.PrimaryIndex,
 ) {
 	publicTableElts := b.QueryByID(tbl.TableID).Filter(publicTargetFilter)
 	// Generate all possible key suffix columns.
@@ -677,6 +644,37 @@ func recreateAllSecondaryIndexes(
 	// Recreate each secondary index.
 	scpb.ForEachSecondaryIndex(publicTableElts, func(_ scpb.Status, _ scpb.TargetStatus, idx *scpb.SecondaryIndex) {
 		out := makeIndexSpec(b, idx.TableID, idx.IndexID)
+		// If this index is referenced by any other objects, then we will
+		// block the primary key swap, since we don't have a mechanism to
+		// fix these references yet.
+		// TODO(fqazi): As a part of #124131 we should add logic to fix
+		// these references.
+		backrefs := b.BackReferences(idx.TableID)
+		functions := backrefs.FilterFunctionBody().Elements()
+		for _, function := range functions {
+			for _, tableRef := range function.UsesTables {
+				if tableRef.TableID == idx.TableID && tableRef.IndexID == idx.IndexID {
+					panic(unimplemented.NewWithIssuef(124131,
+						"table %q has an index (%s) that is still referenced by %q",
+						publicTableElts.FilterNamespace().MustGetOneElement().Name,
+						out.name.Name,
+						b.QueryByID(function.FunctionID).FilterFunctionName().MustGetOneElement().Name))
+				}
+			}
+		}
+		views := backrefs.FilterView().Elements()
+		for _, view := range views {
+			for _, f := range view.ForwardReferences {
+				if f.ToID == idx.TableID && f.IndexID == idx.IndexID {
+					panic(unimplemented.NewWithIssuef(124131,
+						"table %q has an index (%s) that is still referenced by %q",
+						publicTableElts.FilterNamespace().MustGetOneElement().Name,
+						out.name.Name,
+						b.QueryByID(view.ViewID).FilterNamespace().MustGetOneElement().Name))
+				}
+			}
+		}
+
 		var idxColIDs catalog.TableColSet
 		inColumns := make([]indexColumnSpec, 0, len(out.columns))
 		// Determine which columns end up in the new secondary index.
@@ -738,9 +736,7 @@ func recreateAllSecondaryIndexes(
 			}
 		}
 		in, temp := makeSwapIndexSpec(b, out, sourcePrimaryIndex.IndexID, inColumns, false /* inUseTempIDs */)
-		if b.ClusterSettings().Version.IsActive(b, clusterversion.V23_1) {
-			in.secondary.RecreateSourceIndexID = out.indexID()
-		}
+		in.secondary.RecreateSourceIndexID = out.indexID()
 		out.apply(b.Drop)
 		in.apply(b.Add)
 		temp.apply(b.AddTransient)
@@ -1085,7 +1081,7 @@ func checkIfColumnCanBeDropped(b BuildCtx, columnToDrop *scpb.Column) bool {
 		return false
 	}
 	canBeDropped := true
-	walkDropColumnDependencies(b, columnToDrop, func(e scpb.Element) {
+	walkColumnDependencies(b, columnToDrop, "drop", "column", func(e scpb.Element, op, objType string) {
 		if !canBeDropped {
 			return
 		}

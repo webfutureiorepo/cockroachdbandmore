@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package testutils
 
@@ -17,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -39,7 +35,7 @@ const (
 // RaceSucceedsSoonDuration if race is enabled).
 func SucceedsSoon(t TestFataler, fn func() error) {
 	t.Helper()
-	SucceedsWithin(t, fn, succeedsSoonDuration())
+	SucceedsWithin(t, fn, SucceedsSoonDuration())
 }
 
 // SucceedsSoonError returns an error unless the supplied function runs without
@@ -48,7 +44,7 @@ func SucceedsSoon(t TestFataler, fn func() error) {
 // and ending at DefaultSucceedsSoonDuration (or RaceSucceedsSoonDuration if
 // race is enabled).
 func SucceedsSoonError(fn func() error) error {
-	return SucceedsWithinError(fn, succeedsSoonDuration())
+	return SucceedsWithinError(fn, SucceedsSoonDuration())
 }
 
 // SucceedsWithin fails the test (with t.Fatal) unless the supplied
@@ -81,8 +77,8 @@ func SucceedsWithinError(fn func() error, duration time.Duration) error {
 	return retry.ForDuration(duration, wrappedFn)
 }
 
-func succeedsSoonDuration() time.Duration {
-	if util.RaceEnabled {
+func SucceedsSoonDuration() time.Duration {
+	if util.RaceEnabled || syncutil.DeadlockEnabled {
 		return RaceSucceedsSoonDuration
 	}
 	return DefaultSucceedsSoonDuration

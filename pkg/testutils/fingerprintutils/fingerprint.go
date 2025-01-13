@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package fingerprintutils
 
@@ -100,7 +95,6 @@ func FingerprintTables(
 	result := make([]int64, len(tableIDs))
 	eg, _ := errgroup.WithContext(ctx)
 	for j, id := range tableIDs {
-		j, id := j, id // capture range variables
 		eg.Go(func() error {
 			fingerprint, err := FingerprintTable(ctx, db, id, optFuncs...)
 			if err != nil {

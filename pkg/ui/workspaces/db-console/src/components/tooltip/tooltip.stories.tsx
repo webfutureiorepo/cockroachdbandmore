@@ -1,32 +1,27 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { storiesOf } from "@storybook/react";
+import React from "react";
 
+import { Tooltip } from "src/components/tooltip/tooltip";
+import { nodeLocalityFixture } from "src/components/tooltip/tooltip.fixtures";
+import { LivenessStatus } from "src/redux/nodes";
+import { styledWrapper } from "src/util/decorators";
 import * as ClusterTooltips from "src/views/cluster/containers/clusterOverview/tooltips";
-import * as NodeOverviewTooltips from "src/views/cluster/containers/nodeOverview/tooltips";
-import * as CapacityArkTooltips from "src/views/clusterviz/components/nodeOrLocality/tooltips";
 import * as GraphTooltips from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
-import { ToolTipWrapper } from "src/views/shared/components/toolTip";
+import * as NodeOverviewTooltips from "src/views/cluster/containers/nodeOverview/tooltips";
+import { AggregatedNodeStatus } from "src/views/cluster/containers/nodesOverview";
 import {
   plainNodeTooltips,
   getNodeStatusDescription,
   getStatusDescription,
   NodeLocalityColumn,
 } from "src/views/cluster/containers/nodesOverview/tooltips";
-import { AggregatedNodeStatus } from "src/views/cluster/containers/nodesOverview";
-import { LivenessStatus } from "src/redux/nodes";
-import { Tooltip } from "src/components/tooltip/tooltip";
-import { styledWrapper } from "src/util/decorators";
-import { nodeLocalityFixture } from "src/components/tooltip/tooltip.fixtures";
+import * as CapacityArkTooltips from "src/views/clusterviz/components/nodeOrLocality/tooltips";
+import { ToolTipWrapper } from "src/views/shared/components/toolTip";
 
 const triggerStyle: React.CSSProperties = {
   width: "300px",
@@ -64,11 +59,14 @@ const tooltipsStack = (components: object) => (
   </>
 );
 
-const statusTooltipsStack = (statusNames: object, descriptionGetter: any) => (
+const statusTooltipsStack = (
+  statusNames: Record<string, unknown>,
+  descriptionGetter: any,
+) => (
   <>
     {Object.keys(statusNames)
       .filter(status => isNaN(Number(status)))
-      .map((status: keyof typeof statusNames, idx) => (
+      .map((status, idx) => (
         <Tooltip
           key={idx}
           title={descriptionGetter(statusNames[status])}

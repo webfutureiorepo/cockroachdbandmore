@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sessionprotectedts_test
 
@@ -92,7 +87,7 @@ func TestSessionProtectedTimestampReconciler(t *testing.T) {
 
 	state, err := pts.GetState(ctx)
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), state.NumRecords)
+	require.Equal(t, 2, len(state.Records))
 
 	t.Run("reconcile", func(t *testing.T) {
 		ptreconcile.ReconcileInterval.Override(ctx, &settings.SV, time.Millisecond)

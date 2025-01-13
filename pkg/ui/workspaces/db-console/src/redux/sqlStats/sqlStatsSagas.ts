@@ -1,21 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { all, call, put, takeEvery } from "redux-saga/effects";
 
 import { cockroach } from "src/js/protos";
-import { resetSQLStats } from "src/util/api";
-import { all, call, put, takeEvery } from "redux-saga/effects";
-import { RESET_SQL_STATS, resetSQLStatsFailedAction } from "./sqlStatsActions";
 import {
   invalidateAllStatementDetails,
   invalidateStatements,
 } from "src/redux/apiReducers";
+import { resetSQLStats } from "src/util/api";
+
+import { RESET_SQL_STATS, resetSQLStatsFailedAction } from "./sqlStatsActions";
 
 import ResetSQLStatsRequest = cockroach.server.serverpb.ResetSQLStatsRequest;
 

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bench
 
@@ -23,9 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
@@ -43,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/errors"
 )
 
 // A query can be issued using the "simple protocol" or the "prepare protocol".
@@ -210,6 +205,51 @@ var schemas = []string{
 		a INT PRIMARY KEY,
 		b INT,
 		INDEX b_idx (b)
+	)
+	`,
+	`
+	CREATE TABLE comp
+	(
+		a INT,
+		b INT,
+		c INT,
+		d INT,
+		e INT,
+		f INT,
+		a1 INT AS (a+1) STORED,
+		b1 INT AS (b+1) STORED,
+		c1 INT AS (c+1) STORED,
+		d1 INT AS (d+1) VIRTUAL,
+		e1 INT AS (e+1) VIRTUAL,
+		f1 INT AS (f+1) VIRTUAL,
+		shard INT AS (mod(fnv32(crdb_internal.datums_to_bytes(a, b, c, d, e)), 8)) VIRTUAL,
+		CHECK (shard IN (0, 1, 2, 3, 4, 5, 6, 7)),
+		PRIMARY KEY (shard, a, b, c, d, e),
+		INDEX (a, b, a1),
+		INDEX (c1, a, c),
+		INDEX (f),
+		INDEX (d1, d, e)
+	)
+	`,
+	`
+	CREATE TABLE json_table
+	(
+		k INT PRIMARY KEY,
+		i INT,
+		j JSON
+	)
+	`,
+	`
+	CREATE TABLE json_comp
+	(
+		k UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		i INT,
+		j1 JSON,
+		j2 JSON,
+		j3 JSON,
+		j4 INT AS ((j1->'foo'->'bar'->'int')::INT) STORED,
+		j5 INT AS ((j1->'foo'->'bar'->'int2')::INT) STORED,
+		j6 STRING AS ((j2->'str')::STRING) STORED
 	)
 	`,
 	`
@@ -441,10 +481,67 @@ var queries = [...]benchQuery{
 		`,
 		args: []interface{}{1, 2, 3},
 	},
+
+	// Query with high column IDs and an aggregation.
+	{
+		name: "many-columns-and-indexes-d",
+		query: `
+			SELECT
+				k1.a, k2.a, k3.a, k4.a, k5.a, k6.a, k7.a, k8.a, k9.a, k10.a, k11.a,
+				min(k1.b), min(k2.b), min(k3.b), min(k4.b), min(k5.b), min(k6.b),
+				min(k7.b), min(k8.b), min(k9.b), min(k10.b), min(k11.b),
+				min(k1.c), min(k2.c), min(k3.c), min(k4.c), min(k5.c), min(k6.c),
+				min(k7.c), min(k8.c), min(k9.c), min(k10.c), min(k11.c),
+				min(k1.d), min(k2.d), min(k3.d), min(k4.d), min(k5.d), min(k6.d),
+				min(k7.d), min(k8.d), min(k9.d), min(k10.d), min(k11.d)
+			FROM
+			  k k1, k k2, k k3, k k4, k k5, k k6, k k7, k k8, k k9, k k10, k k11
+			WHERE k1.s = $1 AND k2.t = $2
+			GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+		`,
+		args: []interface{}{1, 2},
+	},
+	{
+		name:  "comp-pk",
+		query: "SELECT * FROM comp WHERE a = $1 AND b = $2 AND c = $3 AND d = $4 AND e = $5",
+		args:  []interface{}{1, 2, 3, 4, 5},
+	},
+	{
+		name:  "comp-insert-on-conflict",
+		query: "INSERT INTO comp VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (shard, a, b, c, d, e) DO UPDATE SET f = excluded.f + 1",
+		args:  []interface{}{1, 2, 3, 4, 5, 6},
+	},
 	{
 		name:  "single-col-histogram-range",
 		query: "SELECT * FROM single_col_histogram WHERE k >= $1",
 		args:  []interface{}{"'abc'"},
+	},
+	{
+		name:  "single-col-histogram-bounded-range-small",
+		query: "SELECT * FROM single_col_histogram WHERE k >= $1 and k < $2",
+		args: []interface{}{
+			"'abcdefghijklmnopqrstuvwxyz___________________7325'",
+			"'abcdefghijklmnopqrstuvwxyz___________________7350'",
+		},
+	},
+	{
+		name:  "single-col-histogram-bounded-range-big",
+		query: "SELECT * FROM single_col_histogram WHERE k >= $1 and k < $2",
+		args: []interface{}{
+			"'abcdefghijklmnopqrstuvwxyz___________________7325'",
+			"'abcdefghijklmnopqrstuvwxyz___________________9000'",
+		},
+	},
+	{
+		name:    "json-insert",
+		query:   `INSERT INTO json_table(k, i, j) VALUES (1, 10, '{"a": "foo", "b": "bar", "c": [2, 3, "baz", true, false, null]}')`,
+		args:    []interface{}{},
+		cleanup: "TRUNCATE TABLE json_table",
+	},
+	{
+		name:  "json-comp-insert",
+		query: `INSERT INTO json_comp(i, j1, j2, j3) VALUES ($1, $2, $3, $4)`,
+		args:  []interface{}{10, `'{"foo": {"bar": {"int": 12345, "int2": 1}}, "baz": false}'`, `'{"str": "hello world"}'`, `'{"c": [2, 3, "baz", true, false, null]}'`},
 	},
 	{
 		name: "batch-insert-one",
@@ -644,6 +741,11 @@ var queries = [...]benchQuery{
 		args:    []interface{}{},
 		cleanup: "TRUNCATE TABLE customer",
 	},
+	{
+		name:  "const-agg",
+		query: `SELECT * FROM k GROUP BY id HAVING sum(a) > 100`,
+		args:  []interface{}{},
+	},
 }
 
 func init() {
@@ -716,20 +818,14 @@ type harness struct {
 func newHarness(tb testing.TB, query benchQuery, schemas []string) *harness {
 	h := &harness{
 		ctx:     context.Background(),
-		semaCtx: tree.MakeSemaContext(),
+		semaCtx: tree.MakeSemaContext(nil /* resolver */),
 		evalCtx: eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings()),
 	}
 
-	// Setup the default session settings.
-	h.evalCtx.SessionData().OptimizerUseMultiColStats = true
-	h.evalCtx.SessionData().ZigzagJoinEnabled = true
-	h.evalCtx.SessionData().OptimizerUseForecasts = true
-	h.evalCtx.SessionData().OptimizerUseHistograms = true
-	h.evalCtx.SessionData().LocalityOptimizedSearch = true
-	h.evalCtx.SessionData().ReorderJoinsLimit = opt.DefaultJoinOrderLimit
-	h.evalCtx.SessionData().InsertFastPath = true
-	h.evalCtx.SessionData().OptSplitScanLimit = tabledesc.MaxBucketAllowed
-	h.evalCtx.SessionData().VariableInequalityLookupJoinEnabled = true
+	// Set session settings to their global defaults.
+	if err := sql.TestingResetSessionVariables(h.ctx, h.evalCtx); err != nil {
+		panic(errors.Wrap(err, "could not reset session variables"))
+	}
 
 	// Set up the test catalog.
 	h.testCat = testcat.New()
@@ -746,9 +842,7 @@ func newHarness(tb testing.TB, query benchQuery, schemas []string) *harness {
 		}
 	}
 
-	if err := h.semaCtx.Placeholders.Init(len(query.args), nil /* typeHints */); err != nil {
-		tb.Fatal(err)
-	}
+	h.semaCtx.Placeholders.Init(len(query.args), nil /* typeHints */)
 	// Run optbuilder to build the memo for Prepare. Even if we will not be using
 	// the Prepare method, we still want to run the optbuilder to infer any
 	// placeholder types.
@@ -849,10 +943,12 @@ func (h *harness) runSimple(tb testing.TB, query benchQuery, phase Phase) {
 		tb.Fatalf("invalid phase %s for Simple", phase)
 	}
 
+	var gf explain.PlanGistFactory
+	gf.Init(exec.StubFactory{})
 	root := execMemo.RootExpr()
 	eb := execbuilder.New(
 		context.Background(),
-		explain.NewPlanGistFactory(exec.StubFactory{}),
+		&gf,
 		&h.optimizer,
 		execMemo,
 		nil, /* catalog */
@@ -905,10 +1001,12 @@ func (h *harness) runPrepared(tb testing.TB, phase Phase) {
 		tb.Fatalf("invalid phase %s for Prepared", phase)
 	}
 
+	var gf explain.PlanGistFactory
+	gf.Init(exec.StubFactory{})
 	root := execMemo.RootExpr()
 	eb := execbuilder.New(
 		context.Background(),
-		explain.NewPlanGistFactory(exec.StubFactory{}),
+		&gf,
 		&h.optimizer,
 		execMemo,
 		nil, /* catalog */
@@ -1041,45 +1139,66 @@ func BenchmarkEndToEnd(b *testing.B) {
 	srv, db, _ := serverutils.StartServer(b, base.TestServerArgs{UseDatabase: "bench"})
 	defer srv.Stopper().Stop(context.Background())
 	sr := sqlutils.MakeSQLRunner(db)
+	sr.Exec(b, `SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false`)
+	sr.Exec(b, `SET CLUSTER SETTING sql.stats.flush.enabled = false`)
+	sr.Exec(b, `SET CLUSTER SETTING sql.metrics.statement_details.enabled = false`)
 	sr.Exec(b, `CREATE DATABASE bench`)
 	for _, schema := range schemas {
 		sr.Exec(b, schema)
 	}
 
 	for _, query := range queriesToTest(b) {
+		args := trimSingleQuotes(query.args)
 		b.Run(query.name, func(b *testing.B) {
-			b.Run("Simple", func(b *testing.B) {
-				for i := 0; i < b.N; i++ {
-					sr.Exec(b, query.query, query.args...)
-					if query.cleanup != "" {
-						sr.Exec(b, query.cleanup)
-					}
-				}
-			})
-			b.Run("Prepared", func(b *testing.B) {
-				prepared, err := db.Prepare(query.query)
-				if err != nil {
-					b.Fatalf("%v", err)
-				}
-				for i := 0; i < b.N; i++ {
-					res, err := prepared.Exec(query.args...)
-					if err != nil {
-						b.Fatalf("%v", err)
-					}
-					if query.cleanup != "" {
-						sr.Exec(b, query.cleanup)
-					}
-					rows, err := res.RowsAffected()
-					if err != nil {
-						b.Fatalf("%v", err)
-					}
-					if rows > 0 {
-						b.ReportMetric(float64(rows), "rows/op")
-					}
-				}
-			})
+			for _, vectorize := range []string{"on", "off"} {
+				b.Run("vectorize="+vectorize, func(b *testing.B) {
+					sr.Exec(b, "SET vectorize="+vectorize)
+					b.Run("Simple", func(b *testing.B) {
+						for i := 0; i < b.N; i++ {
+							sr.Exec(b, query.query, args...)
+							if query.cleanup != "" {
+								sr.Exec(b, query.cleanup)
+							}
+						}
+					})
+					b.Run("Prepared", func(b *testing.B) {
+						prepared, err := db.Prepare(query.query)
+						if err != nil {
+							b.Fatalf("%v", err)
+						}
+						for i := 0; i < b.N; i++ {
+							res, err := prepared.Exec(args...)
+							if err != nil {
+								b.Fatalf("%v", err)
+							}
+							if query.cleanup != "" {
+								sr.Exec(b, query.cleanup)
+							}
+							rows, err := res.RowsAffected()
+							if err != nil {
+								b.Fatalf("%v", err)
+							}
+							if rows > 0 {
+								b.ReportMetric(float64(rows), "rows/op")
+							}
+						}
+					})
+				})
+			}
 		})
 	}
+}
+
+func trimSingleQuotes(args []interface{}) []interface{} {
+	res := make([]interface{}, len(args))
+	for i, arg := range args {
+		if s, ok := arg.(string); ok {
+			res[i] = strings.Trim(s, "'")
+		} else {
+			res[i] = arg
+		}
+	}
+	return res
 }
 
 var slowQueries = [...]benchQuery{
@@ -1580,6 +1699,105 @@ func BenchmarkSlowQueries(b *testing.B) {
 						h.runSimple(b, query, Explore)
 					}
 				})
+			}
+		})
+	}
+}
+
+// BenchmarkSysbenchDistinctRange measures the time to optimize the
+// distinct-range query from sysbench oltp_read_only (and oltp_read_write).
+func BenchmarkSysbenchDistinctRange(b *testing.B) {
+	const schema = `
+  CREATE TABLE public.sbtest (
+    id INT8 NOT NULL,
+    k INT8 NOT NULL DEFAULT 0:::INT8,
+    c CHAR(120) NOT NULL DEFAULT '':::STRING,
+    pad CHAR(60) NOT NULL DEFAULT '':::STRING,
+    CONSTRAINT sbtest_pkey PRIMARY KEY (id ASC),
+    INDEX k_idx (k ASC)
+  );
+  `
+	benchQueries := []benchQuery{
+		{
+			name:  "sysbench-distinct-range",
+			query: "SELECT DISTINCT c FROM sbtest WHERE id BETWEEN 1 AND 16 ORDER BY c",
+			args:  []interface{}{},
+		},
+	}
+	for _, query := range benchQueries {
+		b.Run(query.name, func(b *testing.B) {
+			h := newHarness(b, query, []string{schema})
+			for i := 0; i < b.N; i++ {
+				h.runSimple(b, query, Explore)
+			}
+		})
+	}
+}
+
+// BenchmarkExecBuild measures the time that the execbuilder phase takes. It
+// does not include any other phases.
+func BenchmarkExecBuild(b *testing.B) {
+	type testCase struct {
+		query  benchQuery
+		schema []string
+	}
+	var testCases []testCase
+
+	// Add the basic queries.
+	for _, query := range queriesToTest(b) {
+		testCases = append(testCases, testCase{query, schemas})
+	}
+
+	// Add the slow queries.
+	p := datapathutils.TestDataPath(b, "slow-schemas.sql")
+	slowSchemas, err := os.ReadFile(p)
+	if err != nil {
+		b.Fatalf("%v", err)
+	}
+	for _, query := range slowQueries {
+		testCases = append(testCases, testCase{query, []string{string(slowSchemas)}})
+	}
+
+	for _, tc := range testCases {
+		h := newHarness(b, tc.query, tc.schema)
+
+		stmt, err := parser.ParseOne(tc.query.query)
+		if err != nil {
+			b.Fatalf("%v", err)
+		}
+
+		h.optimizer.Init(context.Background(), &h.evalCtx, h.testCat)
+		bld := optbuilder.New(h.ctx, &h.semaCtx, &h.evalCtx, h.testCat, h.optimizer.Factory(), stmt.AST)
+		if err = bld.Build(); err != nil {
+			b.Fatalf("%v", err)
+		}
+
+		if _, err := h.optimizer.Optimize(); err != nil {
+			panic(err)
+		}
+
+		execMemo := h.optimizer.Memo()
+		root := execMemo.RootExpr()
+
+		b.Run(tc.query.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				var gf explain.PlanGistFactory
+				gf.Init(exec.StubFactory{})
+				eb := execbuilder.New(
+					context.Background(),
+					&gf,
+					&h.optimizer,
+					execMemo,
+					nil, /* catalog */
+					root,
+					&h.semaCtx,
+					&h.evalCtx,
+					true,  /* allowAutoCommit */
+					false, /* isANSIDML */
+				)
+				if _, err := eb.Build(); err != nil {
+					b.Fatalf("%v", err)
+				}
 			}
 		})
 	}

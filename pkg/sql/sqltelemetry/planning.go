@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqltelemetry
 
@@ -64,6 +59,10 @@ var LookupJoinHintUseCounter = telemetry.GetCounterOnce("sql.plan.hints.lookup-j
 // InvertedJoinHintUseCounter is to be incremented whenever a query specifies an
 // inverted join via a query hint.
 var InvertedJoinHintUseCounter = telemetry.GetCounterOnce("sql.plan.hints.inverted-join")
+
+// StraightJoinHintUseCounter is to be incremented whenever a query specifies a
+// straight join via a query hint.
+var StraightJoinHintUseCounter = telemetry.GetCounterOnce("sql.plan.hints.straight-join")
 
 // IndexHintUseCounter is to be incremented whenever a query specifies an index
 // hint. Incremented whenever one of the more specific variants below is
@@ -204,6 +203,22 @@ var CancelQueriesUseCounter = telemetry.GetCounterOnce("sql.session.cancel-queri
 // CancelSessionsUseCounter is to be incremented whenever CANCEL SESSION or
 // CANCEL SESSIONS is run.
 var CancelSessionsUseCounter = telemetry.GetCounterOnce("sql.session.cancel-sessions")
+
+// PlanTypeForceCustomCounter is to be incremented whenever a custom plan is
+// used when plan_cache_mode=force_custom_plan.
+var PlanTypeForceCustomCounter = telemetry.GetCounterOnce("sql.plan.type.force-custom")
+
+// PlanTypeForceGenericCounter is to be incremented whenever a generic plan is used
+// when plan_cache_mode=force_generic_plan.
+var PlanTypeForceGenericCounter = telemetry.GetCounterOnce("sql.plan.type.force-generic")
+
+// PlanTypeAutoCustomCounter is to be incremented whenever a generic plan is
+// used when plan_cache_mode=auto.
+var PlanTypeAutoCustomCounter = telemetry.GetCounterOnce("sql.plan.type.auto-custom")
+
+// PlanTypeAutoGenericCounter is to be incremented whenever a custom plan is
+// used when plan_cache_mode=auto.
+var PlanTypeAutoGenericCounter = telemetry.GetCounterOnce("sql.plan.type.auto-generic")
 
 // We can't parameterize these telemetry counters, so just make a bunch of
 // buckets for setting the join reorder limit since the range of reasonable

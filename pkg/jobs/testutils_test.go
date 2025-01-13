@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -83,6 +78,7 @@ func newTestHelperForTables(
 	s, db, _ := serverutils.StartServer(t, args)
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
+	sqlDB.Exec(t, "CREATE USER testuser")
 
 	if envTableType == jobstest.UseTestTables {
 		sqlDB.Exec(t, jobstest.GetScheduledJobsTableSchema(env))
@@ -138,7 +134,7 @@ func (h *testHelper) loadSchedule(t *testing.T, id jobspb.ScheduleID) *Scheduled
 	j := NewScheduledJob(h.env)
 	row, cols, err := h.cfg.DB.Executor().QueryRowExWithCols(
 		context.Background(), "sched-load", nil,
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf(
 			"SELECT * FROM %s WHERE schedule_id = %d",
 			h.env.ScheduledJobsTableName(), id),
@@ -171,7 +167,7 @@ func addFakeJob(
 	t *testing.T, h *testHelper, scheduleID jobspb.ScheduleID, status Status, txn isql.Txn,
 ) jobspb.JobID {
 	datums, err := txn.QueryRowEx(context.Background(), "fake-job", txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf(`
 INSERT INTO %s (created_by_type, created_by_id, status)
 VALUES ($1, $2, $3)

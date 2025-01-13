@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package distribution
 
@@ -178,8 +173,8 @@ func TestGetDistributions(t *testing.T) {
 			inputRel := childInput
 			distributeExpr := &memo.DistributeExpr{Input: childInput}
 			distributeRel = distributeExpr
-			f.Memo().SetBestProps(distributeRel, &physical.Required{}, parentProvided, 0)
-			f.Memo().SetBestProps(inputRel, &physical.Required{}, childProvided, 0)
+			f.Memo().SetBestProps(distributeRel, &physical.Required{}, parentProvided, memo.Cost{C: 0})
+			f.Memo().SetBestProps(inputRel, &physical.Required{}, childProvided, memo.Cost{C: 0})
 
 			targetDist, sourceDist, ok := distributeExpr.GetDistributions()
 			// Check if we got distributions when expected.

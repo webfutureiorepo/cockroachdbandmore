@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachpb
 
@@ -41,4 +36,31 @@ func (data *InternalTimeSeriesData) OffsetForTimestamp(timestampNanos int64) int
 // offset in this collection.
 func (data *InternalTimeSeriesData) TimestampForOffset(offset int32) int64 {
 	return data.StartTimestampNanos + int64(offset)*data.SampleDurationNanos
+}
+
+// ResetRetainingSlices clears all fields in the InternalTimeSeriesData, but
+// retains any backing slices.
+func (data *InternalTimeSeriesData) ResetRetainingSlices() {
+	samples := data.Samples[:0]
+	offset := data.Offset[:0]
+	last := data.Last[:0]
+	count := data.Count[:0]
+	sum := data.Sum[:0]
+	maxSlice := data.Max[:0]
+	minSlice := data.Min[:0]
+	first := data.First[:0]
+	variance := data.Variance[:0]
+
+	// We make sure we don't cause correctness issues if new fields are added.
+	*data = InternalTimeSeriesData{
+		Samples:  samples,
+		Offset:   offset,
+		Last:     last,
+		Count:    count,
+		Sum:      sum,
+		Max:      maxSlice,
+		Min:      minSlice,
+		First:    first,
+		Variance: variance,
+	}
 }

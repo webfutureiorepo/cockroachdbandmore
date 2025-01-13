@@ -1,22 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
 import (
-	"context"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
@@ -205,6 +198,7 @@ func (RoutineVolatility) routineOption()        {}
 func (RoutineLeakproof) routineOption()         {}
 func (RoutineBodyStr) routineOption()           {}
 func (RoutineLanguage) routineOption()          {}
+func (RoutineSecurity) routineOption()          {}
 
 // RoutineNullInputBehavior represent the UDF property on null parameters.
 type RoutineNullInputBehavior int
@@ -312,27 +306,40 @@ func AsRoutineLanguage(lang string) (RoutineLanguage, error) {
 	return RoutineLanguage(lang), nil
 }
 
+// RoutineSecurity indicates the mode of security that the routine will
+// be executed with.
+type RoutineSecurity int
+
+const (
+	// RoutineInvoker indicates that the routine is run with the privileges of
+	// the user invoking it. This is the default security mode if none is
+	// provided.
+	RoutineInvoker RoutineSecurity = iota
+	// RoutineDefiner indicates that the routine is run with the privileges of
+	// the user who defined it.
+	RoutineDefiner
+)
+
+// Format implements the NodeFormatter interface.
+func (node RoutineSecurity) Format(ctx *FmtCtx) {
+	ctx.WriteString("SECURITY ")
+	switch node {
+	case RoutineInvoker:
+		ctx.WriteString("INVOKER")
+	case RoutineDefiner:
+		ctx.WriteString("DEFINER")
+	default:
+		panic(pgerror.New(pgcode.InvalidParameterValue, "unknown routine option"))
+	}
+}
+
 // RoutineBodyStr is a string containing all statements in a UDF body.
 type RoutineBodyStr string
 
 // Format implements the NodeFormatter interface.
 func (node RoutineBodyStr) Format(ctx *FmtCtx) {
 	ctx.WriteString("AS ")
-	if ctx.flags.HasFlags(FmtTagDollarQuotes) {
-		ctx.WriteString("$funcbody$")
-	} else {
-		ctx.WriteString("$$")
-	}
-	if ctx.flags.HasFlags(FmtAnonymize) || ctx.flags.HasFlags(FmtHideConstants) {
-		ctx.WriteString("_")
-	} else {
-		ctx.WriteString(string(node))
-	}
-	if ctx.flags.HasFlags(FmtTagDollarQuotes) {
-		ctx.WriteString("$funcbody$")
-	} else {
-		ctx.WriteString("$$")
-	}
+	ctx.FormatStringDollarQuotes(string(node))
 }
 
 // RoutineParams represents a list of RoutineParam.
@@ -359,18 +366,18 @@ type RoutineParam struct {
 // Format implements the NodeFormatter interface.
 func (node *RoutineParam) Format(ctx *FmtCtx) {
 	switch node.Class {
+	case RoutineParamDefault:
 	case RoutineParamIn:
-		ctx.WriteString("IN")
+		ctx.WriteString("IN ")
 	case RoutineParamOut:
-		ctx.WriteString("OUT")
+		ctx.WriteString("OUT ")
 	case RoutineParamInOut:
-		ctx.WriteString("INOUT")
+		ctx.WriteString("INOUT ")
 	case RoutineParamVariadic:
-		ctx.WriteString("VARIADIC")
+		ctx.WriteString("VARIADIC ")
 	default:
 		panic(pgerror.New(pgcode.InvalidParameterValue, "unknown routine option"))
 	}
-	ctx.WriteString(" ")
 	if node.Name != "" {
 		ctx.FormatNode(&node.Name)
 		ctx.WriteString(" ")
@@ -386,8 +393,11 @@ func (node *RoutineParam) Format(ctx *FmtCtx) {
 type RoutineParamClass int
 
 const (
+	// RoutineParamDefault indicates that RoutineParamClass was unspecified
+	// (in almost all cases it is equivalent to RoutineParamIn).
+	RoutineParamDefault RoutineParamClass = iota
 	// RoutineParamIn args can only be used as input.
-	RoutineParamIn RoutineParamClass = iota
+	RoutineParamIn
 	// RoutineParamOut args can only be used as output.
 	RoutineParamOut
 	// RoutineParamInOut args can be used as both input and output.
@@ -396,8 +406,38 @@ const (
 	RoutineParamVariadic
 )
 
+// IsInParamClass returns true if the given parameter class specifies an input
+// parameter (i.e. either unspecified, IN or, INOUT).
+func IsInParamClass(class RoutineParamClass) bool {
+	switch class {
+	case RoutineParamDefault, RoutineParamIn, RoutineParamInOut:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsOutParamClass returns true if the given parameter class specifies an output
+// parameter (i.e. either OUT or INOUT).
+func IsOutParamClass(class RoutineParamClass) bool {
+	switch class {
+	case RoutineParamOut, RoutineParamInOut:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsInParam returns true if the parameter is an input parameter (i.e. either IN
+// or INOUT).
+func (node *RoutineParam) IsInParam() bool {
+	return IsInParamClass(node.Class)
+}
+
+// IsOutParam returns true if the parameter is an output parameter (i.e. either
+// OUT or INOUT).
 func (node *RoutineParam) IsOutParam() bool {
-	return node.Class == RoutineParamOut || node.Class == RoutineParamInOut
+	return IsOutParamClass(node.Class)
 }
 
 // RoutineReturnType represent the return type of UDF.
@@ -459,27 +499,6 @@ func (node *RoutineObj) Format(ctx *FmtCtx) {
 		ctx.FormatNode(node.Params)
 		ctx.WriteString(")")
 	}
-}
-
-// ParamTypes returns a slice of parameter types of the routine.
-func (node RoutineObj) ParamTypes(
-	ctx context.Context, res TypeReferenceResolver,
-) ([]*types.T, error) {
-	// TODO(#100405): handle INOUT, OUT and VARIADIC argument classes when we
-	// support them. This is because only IN and INOUT arg types need to be
-	// considered to match a overload.
-	var argTypes []*types.T
-	if node.Params != nil {
-		argTypes = make([]*types.T, len(node.Params))
-		for i, arg := range node.Params {
-			typ, err := ResolveType(ctx, arg.Type, res)
-			if err != nil {
-				return nil, err
-			}
-			argTypes[i] = typ
-		}
-	}
-	return argTypes, nil
 }
 
 // AlterFunctionOptions represents a ALTER FUNCTION...action statement.
@@ -630,7 +649,7 @@ func ComputedColumnExprContext(isVirtual bool) SchemaExprContext {
 // ValidateRoutineOptions checks whether there are conflicting or redundant
 // routine options in the given slice.
 func ValidateRoutineOptions(options RoutineOptions, isProc bool) error {
-	var hasLang, hasBody, hasLeakProof, hasVolatility, hasNullInputBehavior bool
+	var hasLang, hasBody, hasLeakProof, hasVolatility, hasNullInputBehavior, hasSecurity bool
 	conflictingErr := func(opt RoutineOption) error {
 		return errors.Wrapf(ErrConflictingRoutineOption, "%s", AsString(opt))
 	}
@@ -670,6 +689,11 @@ func ValidateRoutineOptions(options RoutineOptions, isProc bool) error {
 				return conflictingErr(option)
 			}
 			hasNullInputBehavior = true
+		case RoutineSecurity:
+			if hasSecurity {
+				return conflictingErr(option)
+			}
+			hasSecurity = true
 		default:
 			return pgerror.Newf(pgcode.InvalidParameterValue, "unknown function option: ", AsString(option))
 		}

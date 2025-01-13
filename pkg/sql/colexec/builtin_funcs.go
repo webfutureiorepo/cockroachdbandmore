@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -52,7 +47,7 @@ func (b *defaultBuiltinFuncOperator) Next() coldata.Batch {
 	sel := batch.Selection()
 	output := batch.ColVec(b.outputIdx)
 	b.allocator.PerformOperation(
-		[]coldata.Vec{output},
+		[]*coldata.Vec{output},
 		func() {
 			b.toDatumConverter.ConvertBatchAndDeselect(batch)
 			for i := 0; i < n; i++ {
@@ -138,7 +133,17 @@ func NewBuiltinFunctionOperator(
 			)
 		}
 		return newRangeStatsOperator(
-			evalCtx.RangeStatsFetcher, allocator, argumentCols[0], outputIdx, input,
+			evalCtx.RangeStatsFetcher, allocator, argumentCols[0], outputIdx, input, false, /* withErrors */
+		)
+	case tree.CrdbInternalRangeStatsWithErrors:
+		if len(argumentCols) != 1 {
+			return nil, errors.AssertionFailedf(
+				"expected 1 input column to crdb_internal.range_stats, got %d",
+				len(argumentCols),
+			)
+		}
+		return newRangeStatsOperator(
+			evalCtx.RangeStatsFetcher, allocator, argumentCols[0], outputIdx, input, true, /* withErrors */
 		)
 	default:
 		return &defaultBuiltinFuncOperator{

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlclustersettings
 
@@ -65,7 +60,7 @@ var SecondaryTenantZoneConfigsEnabled = settings.RegisterBoolSetting(
 	settings.SystemVisible,
 	"sql.zone_configs.allow_for_secondary_tenant.enabled",
 	"enable the use of ALTER CONFIGURE ZONE in virtual clusters",
-	false,
+	true,
 	settings.WithName("sql.virtual_cluster.feature_access.zone_configs.enabled"),
 )
 
@@ -76,6 +71,15 @@ var SecondaryTenantsAllZoneConfigsEnabled = settings.RegisterBoolSetting(
 	settings.SystemVisible,
 	"sql.virtual_cluster.feature_access.zone_configs_unrestricted.enabled",
 	"enable unrestricted usage of ALTER CONFIGURE ZONE in virtual clusters",
+	true,
+)
+
+// MultiRegionSystemDatabaseEnabled controls if system tenants are allowed
+// to be set up to be multi-region.
+var MultiRegionSystemDatabaseEnabled = settings.RegisterBoolSetting(
+	settings.SystemVisible,
+	"sql.multiregion.system_database_multiregion.enabled",
+	"enable option to set up system database as multi-region",
 	false,
 )
 
@@ -93,3 +97,15 @@ func RequireSystemTenantOrClusterSetting(
 		"Feature was disabled by the system operator."),
 		"Feature flag: %s", setting.Name())
 }
+
+// CachedSequencesCacheSizeSetting is the default cache size used when
+// SessionNormalizationMode is SerialUsesCachedSQLSequences or
+// SerialUsesCachedNodeSQLSequences.
+var CachedSequencesCacheSizeSetting = settings.RegisterIntSetting(
+	settings.ApplicationLevel,
+	"sql.defaults.serial_sequences_cache_size",
+	"the default cache size when the session's serial normalization mode is set to cached sequences"+
+		"A cache size of 1 means no caching. Any cache size less than 1 is invalid.",
+	256,
+	settings.PositiveInt,
+)

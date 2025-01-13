@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
@@ -44,6 +39,13 @@ type MemoryMonitoringProfiler struct {
 const memMonitoringFileNamePrefix = "memmonitoring"
 const memMonitoringFileNameSuffix = ".txt"
 
+var memMonitoringCombinedFileSize = settings.RegisterByteSizeSetting(
+	settings.ApplicationLevel,
+	"server.mem_monitoring.total_dump_size_limit",
+	"maximum combined disk size of preserved mem monitoring profiles",
+	4<<20, // 4MiB
+)
+
 // NewMemoryMonitoringProfiler returns a new MemoryMonitoringProfiler. dir is
 // the directory in which memory monitoring dumps are to be stored.
 func NewMemoryMonitoringProfiler(
@@ -53,7 +55,7 @@ func NewMemoryMonitoringProfiler(
 		return nil, errors.AssertionFailedf("need to specify dir for MemoryMonitoringProfiler")
 	}
 
-	dumpStore := dumpstore.NewStore(dir, maxCombinedFileSize, st)
+	dumpStore := dumpstore.NewStore(dir, memMonitoringCombinedFileSize, st)
 	mmp := &MemoryMonitoringProfiler{
 		profiler: makeProfiler(
 			newProfileStore(dumpStore, memMonitoringFileNamePrefix, memMonitoringFileNameSuffix, st),
@@ -108,6 +110,10 @@ func takeMemoryMonitoringDump(
 
 func getMonitorStateCb(f io.Writer) func(state mon.MonitorState) error {
 	return func(s mon.MonitorState) error {
+		if s.Stopped {
+			// Omit monitors that have been stopped.
+			return nil
+		}
 		if s.Used == 0 && s.ReservedUsed == 0 && s.ReservedReserved == 0 {
 			// Omit monitors that don't have any memory usage reported.
 			return nil

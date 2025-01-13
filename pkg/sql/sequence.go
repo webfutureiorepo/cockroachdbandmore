@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
@@ -108,10 +104,13 @@ func incrementSequenceHelper(
 		}
 	}
 	if !hasRequiredPriviledge {
+		return 0, sqlerrors.NewInsufficientPrivilegeOnDescriptorError(p.User(), requiredPrivileges,
+			string(descriptor.DescriptorType()), descriptor.GetName())
+	}
 
-		return 0, pgerror.Newf(pgcode.InsufficientPrivilege,
-			"user %s does not have UPDATE or USAGE privilege on %s %s",
-			p.User(), descriptor.DescriptorType(), descriptor.GetName())
+	// If the descriptor is read only block any write operations.
+	if descriptor.IsReadOnly() {
+		return 0, readOnlyError("nextval()")
 	}
 
 	var err error
@@ -217,7 +216,12 @@ func (p *planner) incrementSequenceUsingCache(
 			return 0, err
 		}
 	} else {
-		val, err = p.GetOrInitSequenceCache().NextValue(uint32(sequenceID), uint32(descriptor.GetVersion()), fetchNextValues)
+		// If cache size option is 1 (default -> not cached), and node cache size option is not 0 (not default -> node-cached), then use node-level cache
+		if seqOpts.CacheSize == 1 && seqOpts.NodeCacheSize != 0 {
+			val, err = p.GetSequenceCacheNode().NextValue(sequenceID, uint32(descriptor.GetVersion()), fetchNextValues)
+		} else {
+			val, err = p.GetOrInitSequenceCache().NextValue(uint32(sequenceID), uint32(descriptor.GetVersion()), fetchNextValues)
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -290,6 +294,10 @@ func (p *planner) SetSequenceValueByID(
 	descriptor, err := p.Descriptors().ByIDWithLeased(p.txn).WithoutNonPublic().Get().Table(ctx, descpb.ID(seqID))
 	if err != nil {
 		return err
+	}
+	// If the descriptor is read only block any write operations.
+	if descriptor.IsReadOnly() {
+		return readOnlyError("setval()")
 	}
 	seqName, err := p.getQualifiedTableName(ctx, descriptor)
 	if err != nil {
@@ -407,7 +415,14 @@ func (p *planner) GetSequenceValue(
 func getSequenceValueFromDesc(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, desc catalog.TableDescriptor,
 ) (int64, error) {
-	keyValue, err := txn.Get(ctx, codec.SequenceKey(uint32(desc.GetID())))
+	targetID := desc.GetID()
+	// For external row data, adjust the key that we will
+	// scan.
+	if ext := desc.ExternalRowData(); ext != nil {
+		codec = keys.MakeSQLCodec(ext.TenantID)
+		targetID = desc.ExternalRowData().TableID
+	}
+	keyValue, err := txn.Get(ctx, codec.SequenceKey(uint32(targetID)))
 	if err != nil {
 		return 0, err
 	}
@@ -657,7 +672,7 @@ func maybeAddSequenceDependencies(
 		// Check if this reference is cross DB.
 		if seqDesc.GetParentID() != tableDesc.GetParentID() &&
 			!allowCrossDatabaseSeqReferences.Get(&st.SV) {
-			return nil, errors.WithHintf(
+			return nil, errors.WithHint(
 				pgerror.Newf(pgcode.FeatureNotSupported,
 					"sequence references cannot come from other databases; (see the '%s' cluster setting)",
 					allowCrossDatabaseSeqReferencesSetting),
@@ -889,5 +904,6 @@ func (p *planner) removeSequenceDependencies(
 	}
 	// Remove the reference from the column descriptor to the sequence descriptor.
 	col.ColumnDesc().UsesSequenceIds = []descpb.ID{}
+	col.ColumnDesc().GeneratedAsIdentityType = catpb.GeneratedAsIdentityType_NOT_IDENTITY_COLUMN
 	return nil
 }

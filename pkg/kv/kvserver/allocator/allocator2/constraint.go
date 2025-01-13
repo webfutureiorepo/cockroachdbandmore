@@ -1,18 +1,15 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package allocator2
 
 import (
+	"cmp"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -400,8 +397,8 @@ func doStructuralNormalization(conf *normalizedSpanConfig) (*normalizedSpanConfi
 		}
 	}
 	// Sort these relationships in the order we want to examine them.
-	sort.Slice(rels, func(i, j int) bool {
-		return rels[i].voterAndAllRel < rels[j].voterAndAllRel
+	slices.SortFunc(rels, func(a, b relationshipVoterAndAll) int {
+		return cmp.Compare(a.voterAndAllRel, b.voterAndAllRel)
 	})
 	// First are the intersecting constraints, which cause an error.
 	index := 0

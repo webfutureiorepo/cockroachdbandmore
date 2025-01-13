@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -44,10 +39,11 @@ import (
 func (c *CustomFuncs) GenerateIndexScans(
 	grp memo.RelExpr, required *physical.Required, scanPrivate *memo.ScanPrivate,
 ) {
-	// Iterate over all non-inverted and non-partial secondary indexes.
+	// Iterate over all non-inverted and non-vector secondary indexes.
 	var pkCols opt.ColSet
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, nil /* filters */, rejectPrimaryIndex|rejectInvertedIndexes)
+	reject := rejectPrimaryIndex | rejectInvertedIndexes | rejectVectorIndexes
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, nil /* filters */, reject)
 	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
 		// The iterator only produces pseudo-partial indexes (the predicate is
 		// true) because no filters are passed to iter.Init to imply a partial
@@ -224,7 +220,7 @@ func (c *CustomFuncs) GenerateLocalityOptimizedScan(
 	localScanPrivate := c.DuplicateScanPrivate(scanPrivate)
 	localScanPrivate.LocalityOptimized = true
 	localConstraint.Columns = localConstraint.Columns.RemapColumns(scanPrivate.Table, localScanPrivate.Table)
-	localScanPrivate.SetConstraint(c.e.evalCtx, &localConstraint)
+	localScanPrivate.SetConstraint(c.e.ctx, c.e.evalCtx, &localConstraint)
 	localScanPrivate.HardLimit = scanPrivate.HardLimit
 	if scanPrivate.InvertedConstraint != nil {
 		localScanPrivate.InvertedConstraint = make(inverted.Spans, len(scanPrivate.InvertedConstraint))
@@ -238,7 +234,8 @@ func (c *CustomFuncs) GenerateLocalityOptimizedScan(
 		if scanPrivate.HardLimit > memo.ScanLimit(localScan.Relational().Cardinality.Max) {
 			return
 		}
-	} else {
+	} else if localScan.Relational().Cardinality.Max < grp.Relational().Cardinality.Max &&
+		!tabMeta.IgnoreUniqueWithoutIndexKeys {
 		// When the max cardinality of the original scan is greater than the max
 		// cardinality of the local scan, a remote scan will always be required.
 		// IgnoreUniqueWithoutIndexKeys is true when we're performing a scan
@@ -246,17 +243,14 @@ func (c *CustomFuncs) GenerateLocalityOptimizedScan(
 		// uniqueness constraint. This could cause the check below to return, but
 		// by design we want to use locality-optimized search for these duplicate
 		// checks. So avoid returning if that flag is set.
-		if localScan.Relational().Cardinality.Max <
-			grp.Relational().Cardinality.Max && !tabMeta.IgnoreUniqueWithoutIndexKeys {
-			return
-		}
+		return
 	}
 
 	// Create the remote scan.
 	remoteScanPrivate := c.DuplicateScanPrivate(scanPrivate)
 	remoteScanPrivate.LocalityOptimized = true
 	remoteConstraint.Columns = remoteConstraint.Columns.RemapColumns(scanPrivate.Table, remoteScanPrivate.Table)
-	remoteScanPrivate.SetConstraint(c.e.evalCtx, &remoteConstraint)
+	remoteScanPrivate.SetConstraint(c.e.ctx, c.e.evalCtx, &remoteConstraint)
 	remoteScanPrivate.HardLimit = scanPrivate.HardLimit
 	if scanPrivate.InvertedConstraint != nil {
 		remoteScanPrivate.InvertedConstraint = make(inverted.Spans, len(scanPrivate.InvertedConstraint))
@@ -490,7 +484,7 @@ func (c *CustomFuncs) splitSpans(
 			remoteSpans.Append(span)
 		}
 	}
-	keyCtx := constraint.MakeKeyContext(&origConstraint.Columns, c.e.evalCtx)
+	keyCtx := constraint.MakeKeyContext(c.e.ctx, &origConstraint.Columns, c.e.evalCtx)
 	localConstraint.Init(&keyCtx, &localSpans)
 	remoteConstraint.Init(&keyCtx, &remoteSpans)
 	return localConstraint, remoteConstraint

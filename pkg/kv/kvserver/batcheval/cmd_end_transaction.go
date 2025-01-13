@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -30,15 +25,41 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
+
+// MaxMVCCStatCountDiff defines the maximum number of units (e.g. keys or
+// intents) that is acceptable for an individual MVCC stat to diverge from the
+// real value when computed during splits. If this threshold is
+// exceeded, the split will fall back to computing 100% accurate stats.
+// It takes effect only if kv.split.estimated_mvcc_stats.enabled is true.
+var MaxMVCCStatCountDiff = settings.RegisterIntSetting(
+	settings.SystemVisible,
+	"kv.split.max_mvcc_stat_count_diff",
+	"defines the max number of units that are acceptable for an individual "+
+		"MVCC stat to diverge; needs kv.split.estimated_mvcc_stats.enabled to be true",
+	5000)
+
+// MaxMVCCStatBytesDiff defines the maximum number of bytes (e.g. keys bytes or
+// intents bytes) that is acceptable for an individual MVCC stat to diverge
+// from the real value when computed during splits. If this threshold is
+// exceeded, the split will fall back to computing 100% accurate stats.
+// It takes effect only if kv.split.estimated_mvcc_stats.enabled is true.
+var MaxMVCCStatBytesDiff = settings.RegisterIntSetting(
+	settings.SystemVisible,
+	"kv.split.max_mvcc_stat_bytes_diff",
+	"defines the max number of bytes that are acceptable for an individual "+
+		"MVCC stat to diverge; needs kv.split.estimated_mvcc_stats.enabled to be true",
+	5120000) // 5.12 MB = 1% of the max range size
 
 func init() {
 	RegisterReadWriteCommand(kvpb.EndTxn, declareKeysEndTxn, EndTxn)
@@ -226,7 +247,7 @@ func EndTxn(
 	ms := cArgs.Stats
 	reply := resp.(*kvpb.EndTxnResponse)
 
-	if err := VerifyTransaction(h, args, roachpb.PENDING, roachpb.STAGING, roachpb.ABORTED); err != nil {
+	if err := VerifyTransaction(h, args, roachpb.PENDING, roachpb.PREPARED, roachpb.STAGING, roachpb.ABORTED); err != nil {
 		return result.Result{}, err
 	}
 	if args.Require1PC {
@@ -238,6 +259,14 @@ func EndTxn(
 	if args.Commit && args.Poison {
 		return result.Result{}, errors.AssertionFailedf("cannot poison during a committing EndTxn request")
 	}
+	if args.Prepare {
+		if !args.Commit {
+			return result.Result{}, errors.AssertionFailedf("cannot prepare a rollback")
+		}
+		if args.IsParallelCommit() {
+			return result.Result{}, errors.AssertionFailedf("cannot prepare a parallel commit")
+		}
+	}
 
 	key := keys.TransactionKey(h.Txn.Key, h.Txn.ID)
 
@@ -245,7 +274,7 @@ func EndTxn(
 	var existingTxn roachpb.Transaction
 	recordAlreadyExisted, err := storage.MVCCGetProto(
 		ctx, readWriter, key, hlc.Timestamp{}, &existingTxn, storage.MVCCGetOptions{
-			ReadCategory: storage.BatchEvalReadCategory,
+			ReadCategory: fs.BatchEvalReadCategory,
 		},
 	)
 	if err != nil {
@@ -324,17 +353,34 @@ func EndTxn(
 					"programming error: epoch regression: %d", h.Txn.Epoch)
 			}
 
+		case roachpb.PREPARED:
+			if h.Txn.Epoch != reply.Txn.Epoch {
+				return result.Result{}, errors.AssertionFailedf(
+					"programming error: epoch mismatch with prepared transaction: %d != %d", h.Txn.Epoch, reply.Txn.Epoch)
+			}
+			if args.IsParallelCommit() {
+				return result.Result{}, errors.AssertionFailedf(
+					"programming error: cannot parallel commit a prepared transaction")
+			}
+
 		case roachpb.STAGING:
-			if h.Txn.Epoch < reply.Txn.Epoch {
+			switch {
+			case h.Txn.Epoch < reply.Txn.Epoch:
 				return result.Result{}, errors.AssertionFailedf(
 					"programming error: epoch regression: %d", h.Txn.Epoch)
-			}
-			if h.Txn.Epoch > reply.Txn.Epoch {
+			case h.Txn.Epoch == reply.Txn.Epoch:
+				if args.Prepare {
+					return result.Result{}, errors.AssertionFailedf(
+						"programming error: cannot prepare a staging transaction")
+				}
+			case h.Txn.Epoch > reply.Txn.Epoch:
 				// If the EndTxn carries a newer epoch than a STAGING txn record, we do
 				// not consider the transaction to be performing a parallel commit and
 				// potentially already implicitly committed because we know that the
 				// transaction restarted since entering the STAGING state.
 				reply.Txn.Status = roachpb.PENDING
+			default:
+				panic("unreachable")
 			}
 
 		default:
@@ -353,6 +399,12 @@ func EndTxn(
 		switch {
 		case !recordAlreadyExisted, existingTxn.Status == roachpb.PENDING:
 			BumpToMinTxnCommitTS(ctx, cArgs.EvalCtx, reply.Txn)
+		case existingTxn.Status == roachpb.PREPARED:
+			// Don't check timestamp cache. The transaction could not have been pushed
+			// while its record was in the PREPARED state. Furthermore, checking the
+			// timestamp cache and increasing the commit timestamp at this point would
+			// be incorrect, because the transaction must not fail to commit after
+			// being prepared.
 		case existingTxn.Status == roachpb.STAGING:
 			// Don't check timestamp cache. The transaction could not have been pushed
 			// while its record was in the STAGING state so checking is unnecessary.
@@ -370,6 +422,16 @@ func EndTxn(
 		// assert this in txnCommitter.makeTxnCommitExplicitAsync.
 		if retry, reason, extraMsg := IsEndTxnTriggeringRetryError(reply.Txn, args.Deadline); retry {
 			return result.Result{}, kvpb.NewTransactionRetryError(reason, extraMsg)
+		}
+
+		// If the transaction is being prepared to commit, mark it as such. Do not
+		// proceed to release locks or resolve intents.
+		if args.Prepare {
+			reply.Txn.Status = roachpb.PREPARED
+			if err := updatePreparedTxn(ctx, readWriter, ms, key, args, reply.Txn); err != nil {
+				return result.Result{}, err
+			}
+			return result.Result{}, nil
 		}
 
 		// If the transaction needs to be staged as part of an implicit commit
@@ -435,9 +497,13 @@ func EndTxn(
 
 	// Resolve locks on the local range synchronously so that their resolution
 	// ends up in the same Raft entry. There should always be at least one because
-	// we position the transaction record next to the first write of a transaction.
-	// This avoids the need for the intentResolver to have to return to this range
-	// to resolve locks for this transaction in the future.
+	// we position the transaction record next to the first lock acquired by a
+	// transaction. This avoids the need for the intentResolver to have to return
+	// to this range to resolve locks for this transaction in the future.
+	// TODO(nvanbenschoten): clean up the handling of args and reply.Txn in these
+	// functions. Ideally, only reply.Txn would be passed through and fields from
+	// args would be extracted. This would help us re-use LockSpans from the txn
+	// record when they're not provided in args.
 	resolvedLocks, releasedReplLocks, externalLocks, err := resolveLocalLocks(
 		ctx, readWriter, cArgs.EvalCtx, ms, args, reply.Txn)
 	if err != nil {
@@ -693,6 +759,25 @@ func resolveLocalLocksWithPagination(
 	return resolvedLocks, releasedReplLocks, externalLocks, nil
 }
 
+// updatePreparedTxn persists the PREPARED transaction record with updated
+// status (and possibly timestamp). It persists the record with all of the
+// transaction's (local and remote) locks.
+func updatePreparedTxn(
+	ctx context.Context,
+	readWriter storage.ReadWriter,
+	ms *enginepb.MVCCStats,
+	key []byte,
+	args *kvpb.EndTxnRequest,
+	txn *roachpb.Transaction,
+) error {
+	txn.LockSpans = args.LockSpans
+	txn.InFlightWrites = nil
+	txnRecord := txn.AsRecord()
+	return storage.MVCCPutProto(
+		ctx, readWriter, key, hlc.Timestamp{}, &txnRecord,
+		storage.MVCCWriteOptions{Stats: ms, Category: fs.BatchEvalReadCategory})
+}
+
 // updateStagingTxn persists the STAGING transaction record with updated status
 // (and possibly timestamp). It persists the record with the EndTxn request's
 // declared in-flight writes along with all of the transaction's (local and
@@ -710,7 +795,7 @@ func updateStagingTxn(
 	txnRecord := txn.AsRecord()
 	return storage.MVCCPutProto(
 		ctx, readWriter, key, hlc.Timestamp{}, &txnRecord,
-		storage.MVCCWriteOptions{Stats: ms, Category: storage.BatchEvalReadCategory})
+		storage.MVCCWriteOptions{Stats: ms, Category: fs.BatchEvalReadCategory})
 }
 
 // updateFinalizedTxn persists the COMMITTED or ABORTED transaction record with
@@ -728,7 +813,7 @@ func updateFinalizedTxn(
 	recordAlreadyExisted bool,
 	externalLocks []roachpb.Span,
 ) error {
-	opts := storage.MVCCWriteOptions{Stats: ms, Category: storage.BatchEvalReadCategory}
+	opts := storage.MVCCWriteOptions{Stats: ms, Category: fs.BatchEvalReadCategory}
 	if !evalCtx.EvalKnobs().DisableTxnAutoGC && len(externalLocks) == 0 {
 		if log.V(2) {
 			log.Infof(ctx, "auto-gc'ed %s (%d locks)", txn.Short(), len(args.LockSpans))
@@ -1032,6 +1117,17 @@ func splitTrigger(
 			"unable to determine whether right hand side of split is empty")
 	}
 
+	// The intentInterleavingIterator doesn't like iterating over spans containing
+	// both local and global keys. Here we only care about global keys.
+	spanWithNoLocals := split.LeftDesc.KeySpan().AsRawSpanWithNoLocals()
+	emptyLHS, err := storage.MVCCIsSpanEmpty(ctx, batch, storage.MVCCIsSpanEmptyOptions{
+		StartKey: spanWithNoLocals.Key, EndKey: spanWithNoLocals.EndKey,
+	})
+	if err != nil {
+		return enginepb.MVCCStats{}, result.Result{}, errors.Wrapf(err,
+			"unable to determine whether left hand side of split is empty")
+	}
+
 	rangeKeyDeltaMS, err := computeSplitRangeKeyStatsDelta(ctx, batch, split.LeftDesc, split.RightDesc)
 	if err != nil {
 		return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err,
@@ -1055,12 +1151,20 @@ func splitTrigger(
 	}
 
 	h := splitStatsHelperInput{
-		AbsPreSplitBothStored: currentStats,
-		DeltaBatchEstimated:   bothDeltaMS,
-		DeltaRangeKey:         rangeKeyDeltaMS,
-		PostSplitScanLeftFn:   makeScanStatsFn(ctx, batch, ts, &split.LeftDesc, "left hand side"),
-		PostSplitScanRightFn:  makeScanStatsFn(ctx, batch, ts, &split.RightDesc, "right hand side"),
-		ScanRightFirst:        splitScansRightForStatsFirst || emptyRHS,
+		AbsPreSplitBothStored:    currentStats,
+		DeltaBatchEstimated:      bothDeltaMS,
+		DeltaRangeKey:            rangeKeyDeltaMS,
+		PreSplitLeftUser:         split.PreSplitLeftUserStats,
+		PreSplitStats:            split.PreSplitStats,
+		PostSplitScanLeftFn:      makeScanStatsFn(ctx, batch, ts, &split.LeftDesc, "left hand side", false /* excludeUserSpans */),
+		PostSplitScanRightFn:     makeScanStatsFn(ctx, batch, ts, &split.RightDesc, "right hand side", false /* excludeUserSpans */),
+		PostSplitScanLocalLeftFn: makeScanStatsFn(ctx, batch, ts, &split.LeftDesc, "local left hand side", true /* excludeUserSpans */),
+		ScanRightFirst:           splitScansRightForStatsFirst || emptyRHS,
+		LeftUserIsEmpty:          emptyLHS,
+		RightUserIsEmpty:         emptyRHS,
+		MaxCountDiff:             MaxMVCCStatCountDiff.Get(&rec.ClusterSettings().SV),
+		MaxBytesDiff:             MaxMVCCStatBytesDiff.Get(&rec.ClusterSettings().SV),
+		UseEstimatesBecauseExternalBytesArePresent: split.UseEstimatesBecauseExternalBytesArePresent,
 	}
 	return splitTriggerHelper(ctx, rec, batch, h, split, ts)
 }
@@ -1070,7 +1174,7 @@ func splitTrigger(
 // the split trigger. In practice, the splitQueue wants to scan the left hand
 // side because the split key computation ensures that we do not create large
 // LHS ranges. However, to improve test coverage, we use a metamorphic value.
-var splitScansRightForStatsFirst = util.ConstantWithMetamorphicTestBool(
+var splitScansRightForStatsFirst = metamorphic.ConstantWithTestBool(
 	"split-scans-right-for-stats-first", false)
 
 // makeScanStatsFn constructs a splitStatsScanFn for the provided post-split
@@ -1081,9 +1185,14 @@ func makeScanStatsFn(
 	ts hlc.Timestamp,
 	sideDesc *roachpb.RangeDescriptor,
 	sideName string,
+	excludeUserSpans bool,
 ) splitStatsScanFn {
+	computeStatsFn := rditer.ComputeStatsForRange
+	if excludeUserSpans {
+		computeStatsFn = rditer.ComputeStatsForRangeExcludingUser
+	}
 	return func() (enginepb.MVCCStats, error) {
-		sideMS, err := rditer.ComputeStatsForRange(ctx, sideDesc, reader, ts.WallTime)
+		sideMS, err := computeStatsFn(ctx, sideDesc, reader, ts.WallTime)
 		if err != nil {
 			return enginepb.MVCCStats{}, errors.Wrapf(err,
 				"unable to compute stats for %s range after split", sideName)
@@ -1120,7 +1229,7 @@ func splitTriggerHelper(
 	}
 	if err := storage.MVCCPutProto(
 		ctx, batch, keys.RangeLastReplicaGCTimestampKey(split.RightDesc.RangeID), hlc.Timestamp{},
-		&replicaGCTS, storage.MVCCWriteOptions{Category: storage.BatchEvalReadCategory}); err != nil {
+		&replicaGCTS, storage.MVCCWriteOptions{Category: fs.BatchEvalReadCategory}); err != nil {
 		return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to copy last replica GC timestamp")
 	}
 
@@ -1128,7 +1237,62 @@ func splitTriggerHelper(
 	// modifications to the left hand side are allowed after this line and any
 	// modifications to the right hand side are accounted for by updating the
 	// helper's AbsPostSplitRight() reference.
-	h, err := makeSplitStatsHelper(statsInput)
+	var h splitStatsHelper
+	// There are a few conditions under which we want to fall back to accurate
+	// stats computation:
+	// 1. There are no pre-computed stats for the LHS. This can happen if
+	// kv.split.estimated_mvcc_stats.enabled is disabled, or if the leaseholder
+	// node is running an older version. Pre-computed stats are necessary for
+	// makeEstimatedSplitStatsHelper to estimate the stats.
+	// Note that PreSplitLeftUserStats can also be equal to enginepb.MVCCStats{}
+	// when the user LHS stats are all zero, but in that case it's ok to fall back
+	// to accurate stats computation because scanning the empty LHS is not
+	// expensive.
+	noPreComputedStats := split.PreSplitLeftUserStats == enginepb.MVCCStats{}
+	// 2. This is a manual split. Manual splits issued via AdminSplit are used in
+	// bulk operations, like import, and tests to split many ranges out of the
+	// same original range. Pre-computing the LHS user stats for each of these
+	// ranges concurrently causes CPU spikes and split slowness; issuing repeated
+	// RecomputeStats requests for the same range contributes even more and can
+	// cause contention on the range descriptor.
+	manualSplit := split.ManualSplit
+	// 3. If either side contains no user data; scanning the empty ranges is
+	// cheap.
+	emptyLeftOrRight := statsInput.LeftUserIsEmpty || statsInput.RightUserIsEmpty
+	// 4. If the user pre-split stats differ significantly from the current stats
+	// stored on disk. Note that the current stats on disk were corrected in
+	// AdminSplit, so any differences we see here are due to writes concurrent
+	// with this split (not compounded estimates from previous splits).
+	preComputedStatsDiff := !statsInput.AbsPreSplitBothStored.HasUserDataCloseTo(
+		statsInput.PreSplitStats, statsInput.MaxCountDiff, statsInput.MaxBytesDiff)
+	// 5. If we haven't been asked to use estimated stats because of
+	// external bytes being present in the underlying store. This should
+	// only be true when an online restore has recently been performed.
+	shouldUseCrudeEstimates := statsInput.UseEstimatesBecauseExternalBytesArePresent &&
+		statsInput.AbsPreSplitBothStored.ContainsEstimates > 0
+
+	computeAccurateStats := (noPreComputedStats || manualSplit || emptyLeftOrRight || preComputedStatsDiff)
+	computeAccurateStats = computeAccurateStats && !shouldUseCrudeEstimates
+	if computeAccurateStats {
+		var reason redact.RedactableString
+		if noPreComputedStats {
+			reason = "there are no pre-split LHS stats (or they're empty)"
+		} else if manualSplit {
+			reason = "this is a manual split"
+		} else if emptyLeftOrRight {
+			reason = "the in-split LHS or RHS is empty"
+		} else {
+			reason = redact.Sprintf("the pre-split user stats differ too much "+
+				"from the in-split stats; pre-split: %+v, in-split: %+v",
+				statsInput.PreSplitStats, statsInput.AbsPreSplitBothStored)
+		}
+		log.KvDistribution.Infof(ctx, "falling back to accurate stats computation because %v", reason)
+		h, err = makeSplitStatsHelper(statsInput)
+	} else if statsInput.UseEstimatesBecauseExternalBytesArePresent {
+		h, err = makeCrudelyEstimatedSplitStatsHelper(statsInput)
+	} else {
+		h, err = makeEstimatedSplitStatsHelper(statsInput)
+	}
 	if err != nil {
 		return enginepb.MVCCStats{}, result.Result{}, err
 	}
@@ -1176,15 +1340,33 @@ func splitTriggerHelper(
 			log.Fatalf(ctx, "LHS of split has no lease")
 		}
 
-		replica, found := split.RightDesc.GetReplicaDescriptor(leftLease.Replica.StoreID)
-		if !found {
+		// Copy the lease from the left-hand side of the split over to the
+		// right-hand side so that it can immediately start serving requests.
+		// When doing so, we need to make a few modifications.
+		rightLease := leftLease
+		// Rebind the lease to the existing leaseholder store's replica from the
+		// right-hand side's descriptor.
+		var ok bool
+		rightLease.Replica, ok = split.RightDesc.GetReplicaDescriptor(leftLease.Replica.StoreID)
+		if !ok {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Errorf(
 				"pre-split lease holder %+v not found in post-split descriptor %+v",
 				leftLease.Replica, split.RightDesc,
 			)
 		}
-		rightLease := leftLease
-		rightLease.Replica = replica
+		// Convert leader leases into expiration-based leases. A leader lease is
+		// tied to a specific raft leadership term within a specific raft group.
+		// During a range split, we initialize a new raft group on the right-hand
+		// side, so a leader lease term from the left-hand side is unusable. Once
+		// the right-hand side elects a leader and collocates the lease and leader,
+		// it can promote the expiration-based lease back to a leader lease.
+		if rightLease.Type() == roachpb.LeaseLeader {
+			exp := rec.Clock().Now().Add(int64(rec.GetRangeLeaseDuration()), 0)
+			rightLease.Expiration = &exp
+			rightLease.Term = 0
+			rightLease.MinExpiration = hlc.Timestamp{}
+		}
+
 		gcThreshold, err := sl.LoadGCThreshold(ctx, batch)
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
@@ -1246,7 +1428,19 @@ func splitTriggerHelper(
 		// hand side range (i.e. it goes from zero to its stats).
 		RHSDelta: *h.AbsPostSplitRight(),
 	}
+	// Set DoTimelyApplicationToAllReplicas since splits that are not applied on
+	// all replicas eventually cause snapshots for the RHS to be sent to
+	// replicas that already have the unsplit range, *and* these snapshots are
+	// rejected (which is very wasteful). See the long comment in
+	// split_delay_helper.go for more details.
+	if rec.ClusterSettings().Version.IsActive(ctx, clusterversion.V25_1_AddRangeForceFlushKey) {
+		pd.Replicated.DoTimelyApplicationToAllReplicas = true
+	}
 
+	pd.Local.Metrics = &result.Metrics{
+		SplitsWithEstimatedStats:     h.splitsWithEstimates,
+		SplitEstimatedTotalBytesDiff: h.estimatedTotalBytesDiff,
+	}
 	deltaPostSplitLeft := h.DeltaPostSplitLeft()
 	return deltaPostSplitLeft, pd, nil
 }
@@ -1305,6 +1499,8 @@ func mergeTrigger(
 		} else if priorSum != nil {
 			mergedSum.Merge(*priorSum)
 		}
+		// Compress the persisted read summary, as it will likely never be needed.
+		mergedSum.Compress(0)
 		if err := readsummary.Set(ctx, batch, rec.GetRangeID(), ms, mergedSum); err != nil {
 			return result.Result{}, err
 		}
@@ -1330,20 +1526,20 @@ func mergeTrigger(
 	// it's only used at evaluation time and doesn't affect below-Raft state.
 	if merge.RightRangeIDLocalMVCCStats != (enginepb.MVCCStats{}) {
 		ms.Subtract(merge.RightRangeIDLocalMVCCStats)
-	} else {
-		_ = clusterversion.V23_1 // remove this branch when 23.1 support is removed
-		ridPrefix := keys.MakeRangeIDReplicatedPrefix(merge.RightDesc.RangeID)
-		sysMS, err := storage.ComputeStats(
-			ctx, batch, ridPrefix, ridPrefix.PrefixEnd(), 0 /* nowNanos */)
-		if err != nil {
-			return result.Result{}, err
-		}
-		ms.Subtract(sysMS)
 	}
 
 	var pd result.Result
 	pd.Replicated.Merge = &kvserverpb.Merge{
 		MergeTrigger: *merge,
+	}
+	// Set DoTimelyApplicationToAllReplicas so that merges are applied on all
+	// replicas. This is not technically necessary since even though
+	// Replica.AdminMerge calls waitForApplication, that call happens earlier in
+	// the merge distributed txn, when sending a kvpb.SubsumeRequest. But since
+	// we have force-flushed once during the merge txn anyway, we choose to
+	// complete the merge story and finish the merge on all replicas.
+	if rec.ClusterSettings().Version.IsActive(ctx, clusterversion.V25_1_AddRangeForceFlushKey) {
+		pd.Replicated.DoTimelyApplicationToAllReplicas = true
 	}
 
 	{
@@ -1439,7 +1635,7 @@ func computeSplitRangeKeyStatsDelta(
 		KeyTypes:     storage.IterKeyTypeRangesOnly,
 		LowerBound:   leftPeekBound,
 		UpperBound:   rightPeekBound,
-		ReadCategory: storage.BatchEvalReadCategory,
+		ReadCategory: fs.BatchEvalReadCategory,
 	})
 	if err != nil {
 		return ms, err

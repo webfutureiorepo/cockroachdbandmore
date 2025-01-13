@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colmem_test
 
@@ -46,10 +41,11 @@ const increment = -1
 func getAllocator(increment int64) (_ *colmem.Allocator, _ *mon.BoundAccount, cleanup func()) {
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	testMemMonitor := mon.NewMonitor(
-		"test-mem" /* name */, mon.MemoryResource, nil, /* curCount */
-		nil /* maxHist */, increment, math.MaxInt64 /* noteworthy */, st,
-	)
+	testMemMonitor := mon.NewMonitor(mon.Options{
+		Name:      mon.MakeMonitorName("test-mem"),
+		Increment: increment,
+		Settings:  st,
+	})
 	testMemMonitor.Start(ctx, nil, mon.NewStandaloneBudget(math.MaxInt64))
 	memAcc := testMemMonitor.MakeBoundAccount()
 	evalCtx := eval.MakeTestingEvalContext(st)
@@ -81,7 +77,7 @@ func TestMaybeAppendColumn(t *testing.T) {
 
 		// We expect that the old vector is reallocated because the present one
 		// is made to be of insufficient capacity.
-		b.ReplaceCol(testAllocator.NewMemColumn(types.Int, 1 /* capacity */), colIdx)
+		b.ReplaceCol(testAllocator.NewVec(types.Int, 1 /* capacity */), colIdx)
 		testAllocator.MaybeAppendColumn(b, types.Int, colIdx)
 		require.Equal(t, coldata.BatchSize(), b.ColVec(colIdx).Capacity())
 

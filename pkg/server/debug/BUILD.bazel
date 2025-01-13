@@ -16,7 +16,6 @@ go_library(
         "//pkg/base/serverident",
         "//pkg/kv/kvserver",
         "//pkg/kv/kvserver/closedts/sidetransport",
-        "//pkg/kv/kvserver/kvstorage",
         "//pkg/multitenant/tenantcapabilities",
         "//pkg/roachpb",
         "//pkg/server/debug/goroutineui",
@@ -39,6 +38,7 @@ go_library(
         "@com_github_cockroachdb_pebble//tool",
         "@com_github_cockroachdb_pebble//vfs",
         "@com_github_cockroachdb_redact//:redact",
+        "@com_github_felixge_fgprof//:fgprof",
         "@com_github_rcrowley_go_metrics//:go-metrics",
         "@com_github_rcrowley_go_metrics//exp",
         "@com_github_spf13_cobra//:cobra",
@@ -55,10 +55,6 @@ go_test(
         "main_test.go",
     ],
     embed = [":debug"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/kv/kvclient/kvtenant",

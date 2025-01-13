@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -24,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
-	"github.com/cockroachdb/errors"
 )
 
 var sqlAlchemyResultRegex = regexp.MustCompile(`^(?P<test>test.*::.*::[^ \[\]]*(?:\[.*])?) (?P<result>\w+)\s+\[.+]$`)
@@ -123,7 +117,7 @@ func runSQLAlchemy(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// Phew, after having setup all that, let's actually run the test.
 
 	t.Status("setting up cockroach")
-	c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(), c.All())
+	c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 	version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 	if err != nil {
@@ -143,14 +137,14 @@ func runSQLAlchemy(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// Note that this is expected to return an error, since the test suite
 	// will fail. And it is safe to swallow it here.
 	result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(node),
-		`source venv/bin/activate && cd /mnt/data1/sqlalchemy-cockroachdb/ && pytest --maxfail=0 \
-		--dburi='cockroachdb://test_admin@localhost:{pgport:1}/defaultdb?sslmode=disable&disable_cockroachdb_telemetry=true' \
+		fmt.Sprintf(`source venv/bin/activate && cd /mnt/data1/sqlalchemy-cockroachdb/ && pytest --maxfail=0 \
+		--dburi='cockroachdb://%s:%s@localhost:{pgport:1}/defaultdb?sslmode=require&disable_cockroachdb_telemetry=true' \
 		test/test_suite_sqlalchemy.py
-	`)
+	`, install.DefaultUser, install.DefaultPassword))
 
-	// Fatal for a roachprod or SSH error. A roachprod error is when result.Err==nil.
+	// Fatal for a roachprod or transient error. A roachprod error is when result.Err==nil.
 	// Proceed for any other (command) errors
-	if err != nil && (result.Err == nil || errors.Is(err, rperrors.ErrSSH255)) {
+	if err != nil && (result.Err == nil || rperrors.IsTransient(err)) {
 		t.Fatal(err)
 	}
 

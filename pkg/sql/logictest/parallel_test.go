@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // The parallel_test adds an orchestration layer on top of the logic_test code
 // with the capability of running multiple test data files in parallel.
@@ -177,7 +172,7 @@ func (t *parallelTest) setup(ctx context.Context, spec *parTestSpec) {
 		mode := sessiondatapb.DistSQLOff
 		st := server.ClusterSettings()
 		st.Manual.Store(true)
-		sql.DistSQLClusterExecMode.Override(ctx, &st.SV, int64(mode))
+		sql.DistSQLClusterExecMode.Override(ctx, &st.SV, mode)
 		// Disable automatic stats - they can interfere with the test shutdown.
 		stats.AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
 		stats.UseStatisticsOnSystemTables.Override(ctx, &st.SV, false)
@@ -230,6 +225,7 @@ func TestParallel(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	skip.UnderRace(t, "takes >1 min under race")
+	skip.UnderDeadlock(t, "too slow")
 
 	glob := *paralleltestdata
 	paths, err := filepath.Glob(glob)

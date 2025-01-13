@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sdnotify implements both sides of the systemd readiness
 // protocol. Servers can use sdnotify.Ready() to signal that they are
@@ -19,9 +14,10 @@ import "os/exec"
 // Ready sends a readiness signal using the systemd notification
 // protocol. It should be called (once) by a server after it has
 // completed its initialization (including but not necessarily limited
-// to binding ports) and is ready to receive traffic.
-func Ready() error {
-	return ready()
+// to binding ports) and is ready to receive traffic. If preNotify is
+// specified, it will be called before the readiness signal is sent.
+func Ready(preNotify func()) error {
+	return ready(preNotify)
 }
 
 // Exec the given command in the background using the systemd

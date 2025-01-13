@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logconfig
 
@@ -20,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/errors"
@@ -66,7 +60,7 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		BufferedWrites:  &bt,
 		MaxFileSize:     &zeroByteSize,
 		MaxGroupSize:    &zeroByteSize,
-		FilePermissions: func() *FilePermissions { s := FilePermissions(0o644); return &s }(),
+		FilePermissions: func() *FilePermissions { s := DefaultFilePerms; return &s }(),
 		CommonSinkConfig: CommonSinkConfig{
 			Format:      func() *string { s := DefaultFileFormat; return &s }(),
 			Criticality: &bt,
@@ -178,17 +172,12 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		c.Sinks.Stderr.Criticality = &bt
 	}
 	c.Sinks.Stderr.Auditable = nil
-	// The format parameter for stderr is set to `crdb-v2-tty` and cannot be changed.
-	// See docs: https://www.cockroachlabs.com/docs/stable/configure-logs#output-to-stderr
-	if *c.Sinks.Stderr.Format != DefaultStderrFormat {
-		f := DefaultStderrFormat
-		c.Sinks.Stderr.Format = &f
-	}
+
 	// FormatOptions are format-specific. We should only copy them over to StdErr from
-	// FileDefaults if FileDefaults is also making use of a crdb-v2 format. Otherwise,
+	// FileDefaults if FileDefaults specifies the same format as the stderr sink. Otherwise,
 	// we are likely to error when trying to apply an unsupported format option.
 	if c.FileDefaults.CommonSinkConfig.Format != nil &&
-		!strings.Contains(*c.FileDefaults.CommonSinkConfig.Format, "v2") &&
+		!canShareFormatOptions(*c.FileDefaults.CommonSinkConfig.Format, *c.Sinks.Stderr.Format) &&
 		!stdErrFormatOptionsOriginallySet {
 		c.Sinks.Stderr.CommonSinkConfig.FormatOptions = map[string]string{}
 	}
@@ -379,14 +368,18 @@ func (c *Config) newFileSinkConfig(groupName string) *FileSinkConfig {
 func (c *Config) validateFileSinkConfig(fc *FileSinkConfig) error {
 	propagateFileDefaults(&fc.FileDefaults, c.FileDefaults)
 	if !fc.Buffering.IsNone() {
-		// We cannot use unimplemented.WithIssue() here because of a
-		// circular dependency.
-		err := errors.UnimplementedError(
-			errors.IssueLink{IssueURL: build.MakeIssueURL(72452)},
-			`unimplemented: "buffering" not yet supported for file-groups`)
-		err = errors.WithHint(err, `Use "buffered-writes".`)
-		err = errors.WithTelemetry(err, "#72452")
-		return err
+		if fc.BufferedWrites != nil && *fc.BufferedWrites {
+			return errors.Newf(`Unable to use "buffered-writes" in conjunction with a "buffering" configuration. ` +
+				`These configuration options are mutually exclusive.`)
+		}
+		if *fc.Auditable {
+			return errors.Newf(`File-based audit logging cannot coexist with buffering configuration. ` +
+				`Disable either the buffering configuration ("buffering") or auditable log ("auditable") configuration.`)
+		}
+		// To preserve the format of log files, avoid additional formatting in the
+		// buffering configuration.
+		fmtNone := BufferFmtNone
+		fc.Buffering.Format = &fmtNone
 	}
 	if fc.Dir != c.FileDefaults.Dir {
 		// A directory was specified explicitly. Normalize it.
@@ -538,4 +531,15 @@ func propagateDefaults(target, source interface{}) {
 			tf.Set(s.Field(i))
 		}
 	}
+}
+
+// canShareFormatOptions returns true if f1 and f2 can share format options.
+// See log.FormatParsers for full list of supported formats.
+// Examples:
+//
+//	canShareFormatOptions("json", "json") => true
+//	canShareFormatOptions("crdb-v2", "crdb-v2-tty") => true
+//	canShareFormatOptions("crdb-v2", "json") => false
+func canShareFormatOptions(f1, f2 string) bool {
+	return strings.HasPrefix(f1, f2) || strings.HasPrefix(f2, f1)
 }

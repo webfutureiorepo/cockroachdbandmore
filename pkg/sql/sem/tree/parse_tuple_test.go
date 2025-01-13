@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -213,7 +209,9 @@ func TestParseTuple(t *testing.T) {
 			if err != nil {
 				t.Fatalf("tuple %s: got error %s, expected %s", td.str, err.Error(), td.expected)
 			}
-			if actual.Compare(evalContext, td.expected) != 0 {
+			if cmp, err := actual.Compare(context.Background(), evalContext, td.expected); err != nil {
+				t.Fatal(err)
+			} else if cmp != 0 {
 				t.Fatalf("tuple %s: got %s, expected %s", td.str, actual, td.expected)
 			}
 		})
@@ -306,7 +304,9 @@ func TestParseTupleRandomDatums(t *testing.T) {
 				tupContents,
 			)
 		}
-		if tup.Compare(evalCtx, parsed) != 0 {
+		if cmp, err := tup.Compare(context.Background(), evalCtx, parsed); err != nil {
+			t.Fatal(err)
+		} else if cmp != 0 {
 			t.Fatalf(`iteration %d: tuple "%s", got %#v, expected %#v`, i, tupString, parsed, tup)
 		}
 	}

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package privchecker
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
+	"github.com/cockroachdb/redact"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 )
@@ -47,7 +43,7 @@ type CheckerForRPCHandlers interface {
 	RequireViewClusterSettingOrModifyClusterSettingPermission(ctx context.Context) error
 	RequireViewActivityAndNoViewActivityRedactedPermission(ctx context.Context) error
 	RequireViewClusterMetadataPermission(ctx context.Context) error
-	RequireRepairClusterMetadataPermission(ctx context.Context) error
+	RequireRepairClusterPermission(ctx context.Context) error
 	RequireViewDebugPermission(ctx context.Context) error
 }
 
@@ -69,7 +65,7 @@ type SQLPrivilegeChecker interface {
 
 	// SetSQLAuthzAccessorFactory sets the accessor factory that can be
 	// used by HasGlobalPrivilege.
-	SetAuthzAccessorFactory(factory func(opName string) (sql.AuthorizationAccessor, func()))
+	SetAuthzAccessorFactory(factory func(opName redact.SafeString) (sql.AuthorizationAccessor, func()))
 
 	// HasGlobalPrivilege is a convenience wrapper
 	HasGlobalPrivilege(ctx context.Context, user username.SQLUsername, privilege privilege.Kind) (bool, error)

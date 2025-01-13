@@ -1,19 +1,13 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
 import (
 	"bytes"
 	"context"
-	gosql "database/sql"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -85,7 +79,6 @@ func TestStatementReuses(t *testing.T) {
 		`ALTER TABLE a SCATTER`,
 
 		`ALTER INDEX a@woo RENAME TO waa`,
-		`ALTER INDEX a@woo CONFIGURE ZONE USING DEFAULT`,
 		`ALTER INDEX a@woo SPLIT AT VALUES(1)`,
 		`ALTER INDEX a@woo SCATTER`,
 
@@ -357,6 +350,7 @@ func TestExplainKVInfo(t *testing.T) {
 			scanQuery := "SELECT count(*) FROM ab"
 			info := getKVInfo(t, r, scanQuery)
 
+			assert.Equal(t, 1, info.counters[kvNodes])
 			assert.Equal(t, 1000, info.counters[rowsRead])
 			assert.Equal(t, 1000, info.counters[pairsRead])
 			assert.LessOrEqual(t, 31 /* KiB */, info.counters[bytesRead])
@@ -367,6 +361,7 @@ func TestExplainKVInfo(t *testing.T) {
 			lookupJoinQuery := "SELECT count(*) FROM ab INNER LOOKUP JOIN bc ON ab.b = bc.b"
 			info = getKVInfo(t, r, lookupJoinQuery)
 
+			assert.Equal(t, 1, info.counters[kvNodes])
 			assert.Equal(t, 1000, info.counters[rowsRead])
 			assert.Equal(t, 1000, info.counters[pairsRead])
 			assert.LessOrEqual(t, 13 /* KiB */, info.counters[bytesRead])
@@ -378,7 +373,10 @@ func TestExplainKVInfo(t *testing.T) {
 }
 
 const (
-	rowsRead = iota
+	// Note that kvNodes is not really a counter, but since we're using a single
+	// node cluster, only a single node ID is expected.
+	kvNodes = iota
+	rowsRead
 	pairsRead
 	bytesRead
 	gRPCCalls
@@ -394,6 +392,7 @@ type kvInfo struct {
 var patterns [numKVCounters]*regexp.Regexp
 
 func init() {
+	patterns[kvNodes] = regexp.MustCompile(`kv nodes: n(\d)`)
 	patterns[rowsRead] = regexp.MustCompile(`KV rows decoded: (\d+)`)
 	patterns[pairsRead] = regexp.MustCompile(`KV pairs read: (\d+)`)
 	patterns[bytesRead] = regexp.MustCompile(`KV bytes read: (\d+) \w+`)
@@ -510,6 +509,7 @@ func TestExplainRedact(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	skip.UnderDeadlock(t, "the test is too slow")
+	skip.UnderRace(t, "the test is too slow")
 
 	const numStatements = 10
 
@@ -521,8 +521,9 @@ func TestExplainRedact(t *testing.T) {
 	srv, sqlDB, _ := serverutils.StartServer(t, params)
 	defer srv.Stopper().Stop(ctx)
 
-	query := func(sql string) (*gosql.Rows, error) {
-		return sqlDB.QueryContext(ctx, sql)
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// To check for PII leaks, we inject a single unlikely string into some of the
@@ -544,18 +545,22 @@ func TestExplainRedact(t *testing.T) {
 	setup = append(setup, "SET CLUSTER SETTING sql.stats.automatic_collection.enabled = off;")
 	setup = append(setup, "ANALYZE seed;")
 	setup = append(setup, "SET statement_timeout = '5s';")
-	t.Log(strings.Join(setup, "\n"))
-	db := sqlutils.MakeSQLRunner(sqlDB)
-	db.ExecMultiple(t, setup...)
+	for _, stmt := range setup {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+		t.Log(stmt + ";")
+	}
 
 	smith, err := sqlsmith.NewSmither(sqlDB, rng,
 		sqlsmith.PrefixStringConsts(pii),
 		sqlsmith.DisableDDLs(),
+		sqlsmith.SimpleNames(),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer smith.Close()
 
-	tests.GenerateAndCheckRedactedExplainsForPII(t, smith, numStatements, query, containsPII)
+	tests.GenerateAndCheckRedactedExplainsForPII(t, smith, numStatements, conn, containsPII)
 }

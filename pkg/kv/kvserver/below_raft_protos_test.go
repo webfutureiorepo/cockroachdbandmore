@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -18,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
@@ -26,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 // TestBelowRaftProtosDontChange is a manually curated list of protos that we
@@ -51,9 +46,11 @@ func TestBelowRaftProtosDontChange(t *testing.T) {
 		},
 		func(r *rand.Rand) protoutil.Message {
 			type expectedHardState struct {
-				Term   uint64
-				Vote   uint64
-				Commit uint64
+				Term      uint64
+				Vote      raftpb.PeerID
+				Commit    uint64
+				Lead      raftpb.PeerID
+				LeadEpoch raftpb.Epoch
 			}
 			// Conversion fails if new fields are added to `HardState`, in which case this method
 			// and the expected sums should be updated.
@@ -61,9 +58,11 @@ func TestBelowRaftProtosDontChange(t *testing.T) {
 
 			n := r.Uint64()
 			return &raftpb.HardState{
-				Term:   n % 3,
-				Vote:   n % 7,
-				Commit: n % 11,
+				Term:      n % 3,
+				Vote:      raftpb.PeerID(n % 7),
+				Commit:    n % 11,
+				Lead:      raftpb.PeerID(n % 13),
+				LeadEpoch: raftpb.Epoch(n % 17),
 			}
 		},
 		func(r *rand.Rand) protoutil.Message {

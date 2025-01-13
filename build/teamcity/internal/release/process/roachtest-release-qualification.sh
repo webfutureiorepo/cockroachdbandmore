@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname $(dirname "${0}")))))"
@@ -37,8 +43,8 @@ curl -f -s -S -o- "https://storage.googleapis.com/cockroach-builds-artifacts-pro
 chmod +x cockroach
 
 run_bazel <<'EOF'
-bazel build --config ci --config crosslinux //pkg/cmd/workload //pkg/cmd/roachtest //pkg/cmd/roachprod
-BAZEL_BIN=$(bazel info bazel-bin --config ci --config crosslinux)
+bazel build --config crosslinux //pkg/cmd/workload //pkg/cmd/roachtest //pkg/cmd/roachprod
+BAZEL_BIN=$(bazel info bazel-bin --config crosslinux)
 mkdir -p bin
 cp $BAZEL_BIN/pkg/cmd/roachprod/roachprod_/roachprod bin
 cp $BAZEL_BIN/pkg/cmd/roachtest/roachtest_/roachtest bin

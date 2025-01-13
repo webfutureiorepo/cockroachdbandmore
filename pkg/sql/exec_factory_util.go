@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -29,9 +24,10 @@ func constructPlan(
 	planner *planner,
 	root exec.Node,
 	subqueries []exec.Subquery,
-	cascades []exec.Cascade,
+	cascades, triggers []exec.PostQuery,
 	checks []exec.Node,
 	rootRowCount int64,
+	flags exec.PlanFlags,
 ) (exec.Plan, error) {
 	res := &planComponents{}
 	assignPlan := func(plan *planMaybePhysical, node exec.Node) {
@@ -61,6 +57,8 @@ func constructPlan(
 				out.execMode = rowexec.SubqueryExecModeAllRowsNormalized
 			case exec.SubqueryAllRows:
 				out.execMode = rowexec.SubqueryExecModeAllRows
+			case exec.SubqueryDiscardAllRows:
+				out.execMode = rowexec.SubqueryExecModeDiscardAllRows
 			default:
 				return nil, errors.Errorf("invalid SubqueryMode %d", in.Mode)
 			}
@@ -70,9 +68,9 @@ func constructPlan(
 		}
 	}
 	if len(cascades) > 0 {
-		res.cascades = make([]cascadeMetadata, len(cascades))
+		res.cascades = make([]postQueryMetadata, len(cascades))
 		for i := range cascades {
-			res.cascades[i].Cascade = cascades[i]
+			res.cascades[i].PostQuery = cascades[i]
 		}
 	}
 	if len(checks) > 0 {
@@ -80,6 +78,36 @@ func constructPlan(
 		for i := range checks {
 			assignPlan(&res.checkPlans[i].plan, checks[i])
 		}
+	}
+	if len(triggers) > 0 {
+		res.triggers = make([]postQueryMetadata, len(triggers))
+		for i := range triggers {
+			res.triggers[i].PostQuery = triggers[i]
+		}
+	}
+	if flags.IsSet(exec.PlanFlagIsDDL) {
+		res.flags.Set(planFlagIsDDL)
+	}
+	if flags.IsSet(exec.PlanFlagContainsFullTableScan) {
+		res.flags.Set(planFlagContainsFullTableScan)
+	}
+	if flags.IsSet(exec.PlanFlagContainsFullIndexScan) {
+		res.flags.Set(planFlagContainsFullIndexScan)
+	}
+	if flags.IsSet(exec.PlanFlagContainsLargeFullTableScan) {
+		res.flags.Set(planFlagContainsLargeFullTableScan)
+	}
+	if flags.IsSet(exec.PlanFlagContainsLargeFullIndexScan) {
+		res.flags.Set(planFlagContainsLargeFullIndexScan)
+	}
+	if flags.IsSet(exec.PlanFlagContainsMutation) {
+		res.flags.Set(planFlagContainsMutation)
+	}
+	if flags.IsSet(exec.PlanFlagContainsLocking) {
+		res.flags.Set(planFlagContainsLocking)
+	}
+	if flags.IsSet(exec.PlanFlagCheckContainsLocking) {
+		res.flags.Set(planFlagCheckContainsLocking)
 	}
 
 	return res, nil
@@ -208,16 +236,6 @@ func getResultColumnsForGroupBy(
 	return columns
 }
 
-// convertNodeOrdinalsToInts converts a slice of exec.NodeColumnOrdinals to a slice
-// of ints.
-func convertNodeOrdinalsToInts(ordinals []exec.NodeColumnOrdinal) []int {
-	ints := make([]int, len(ordinals))
-	for i := range ordinals {
-		ints[i] = int(ordinals[i])
-	}
-	return ints
-}
-
 func constructVirtualScan(
 	ef exec.Factory,
 	p *planner,
@@ -239,13 +257,12 @@ func constructVirtualScan(
 	}
 	idx := index.(*optVirtualIndex).idx
 	columns, constructor := virtual.getPlanInfo(
-		table.(*optVirtualTable).desc,
-		idx, params.IndexConstraint, p.execCfg.DistSQLPlanner.stopper)
+		table.(*optVirtualTable).desc, idx, params.IndexConstraint, p.execCfg.Stopper,
+	)
 
 	n, err := delayedNodeCallback(&delayedNode{
-		name:            fmt.Sprintf("%s@%s", table.Name(), index.Name()),
-		columns:         columns,
-		indexConstraint: params.IndexConstraint,
+		name:    fmt.Sprintf("%s@%s", table.Name(), index.Name()),
+		columns: columns,
 		constructor: func(ctx context.Context, p *planner) (planNode, error) {
 			return constructor(ctx, p, tn.Catalog())
 		},
@@ -258,7 +275,7 @@ func constructVirtualScan(
 	if params.NeededCols.Contains(0) {
 		return nil, errors.Errorf("use of %s column not allowed.", table.Column(0).ColName())
 	}
-	if params.Locking.IsLocking() {
+	if !params.Locking.IsNoOp() {
 		// We shouldn't have allowed SELECT FOR UPDATE for a virtual table.
 		return nil, errors.AssertionFailedf("locking cannot be used with virtual table")
 	}
@@ -284,7 +301,7 @@ func constructVirtualScan(
 	// Virtual indexes never provide a legitimate ordering, so we have to make
 	// sure to sort if we have a required ordering.
 	if len(reqOrdering) != 0 {
-		n, err = ef.ConstructSort(n, reqOrdering, 0)
+		n, err = ef.ConstructSort(n, reqOrdering, 0 /* alreadyOrderedPrefix */, 0 /* estimatedInputRowCount */)
 		if err != nil {
 			return nil, err
 		}

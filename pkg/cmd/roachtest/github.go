@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -16,24 +11,23 @@ import (
 	"os"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/internal/issues"
+	"github.com/cockroachdb/cockroach/pkg/cmd/bazci/githubpost/issues"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestflags"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/tests"
 	"github.com/cockroachdb/cockroach/pkg/internal/team"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
-	"github.com/cockroachdb/cockroach/pkg/roachprod/vm/gce"
 )
 
 type githubIssues struct {
 	disable      bool
 	cluster      *clusterImpl
 	vmCreateOpts *vm.CreateOpts
-	issuePoster  func(context.Context, issues.Logger, issues.IssueFormatter, issues.PostRequest, *issues.Options) error
+	issuePoster  func(context.Context, issues.Logger, issues.IssueFormatter, issues.PostRequest, *issues.Options) (*issues.TestFailureIssue, error)
 	teamLoader   func() (team.Map, error)
 }
 
@@ -47,13 +41,9 @@ func newGithubIssues(disable bool, c *clusterImpl, vmCreateOpts *vm.CreateOpts) 
 	}
 }
 
-func roachtestPrefix(p string) string {
-	return "ROACHTEST_" + p
-}
-
 // generateHelpCommand creates a HelpCommand for createPostRequest
 func generateHelpCommand(
-	testName string, clusterName string, cloud string, start time.Time, end time.Time,
+	testName string, clusterName string, cloud spec.Cloud, start time.Time, end time.Time,
 ) func(renderer *issues.Renderer) {
 	return func(renderer *issues.Renderer) {
 		issues.HelpCommandAsLink(
@@ -83,55 +73,98 @@ func generateHelpCommand(
 	}
 }
 
-// postIssueCondition encapsulates a condition that causes issue
-// posting to be skipped. The `reason` field contains a textual
-// description as to why issue posting was skipped.
-type postIssueCondition struct {
-	cond   func(g *githubIssues, t test.Test) bool
-	reason string
+func failuresAsErrorWithOwnership(failures []failure) *registry.ErrorWithOwnership {
+	var transientError rperrors.TransientError
+	var errWithOwner registry.ErrorWithOwnership
+	if failuresMatchingError(failures, &transientError) {
+		errWithOwner = registry.ErrorWithOwner(
+			registry.OwnerTestEng, transientError,
+			registry.WithTitleOverride(transientError.Cause),
+			registry.InfraFlake,
+		)
+
+		return &errWithOwner
+	}
+
+	if failuresMatchingError(failures, &errWithOwner) {
+		return &errWithOwner
+	}
+
+	return nil
 }
+
+func failuresAsNonReportableError(failures []failure) *registry.NonReportableError {
+	var nonReportable registry.NonReportableError
+	if failuresMatchingError(failures, &nonReportable) {
+		return &nonReportable
+	}
+
+	return nil
+}
+
+// postIssueCondition is a condition that causes issue posting to be
+// skipped. If it returns a non-empty string, posting is skipped for
+// the returned reason.
+type postIssueCondition func(g *githubIssues, t test.Test) string
 
 var defaultOpts = issues.DefaultOptionsFromEnv()
 
 var skipConditions = []postIssueCondition{
-	{
-		cond:   func(g *githubIssues, _ test.Test) bool { return g.disable },
-		reason: "issue posting was disabled via command line flag",
+	func(g *githubIssues, _ test.Test) string {
+		if g.disable {
+			return "issue posting was disabled via command line flag"
+		}
+
+		return ""
 	},
-	{
-		cond:   func(g *githubIssues, _ test.Test) bool { return !defaultOpts.CanPost() },
-		reason: "GitHub API token not set",
+	func(g *githubIssues, _ test.Test) string {
+		if defaultOpts.CanPost() {
+			return ""
+		}
+
+		return "GitHub API token not set"
 	},
-	{
-		cond:   func(g *githubIssues, _ test.Test) bool { return !defaultOpts.IsReleaseBranch() },
-		reason: fmt.Sprintf("not a release branch: %q", defaultOpts.Branch),
+	func(g *githubIssues, _ test.Test) string {
+		if defaultOpts.IsReleaseBranch() {
+			return ""
+		}
+
+		return fmt.Sprintf("not a release branch: %q", defaultOpts.Branch)
 	},
-	{
-		cond:   func(_ *githubIssues, t test.Test) bool { return t.Spec().(*registry.TestSpec).Run == nil },
-		reason: "TestSpec.Run is nil",
+	func(_ *githubIssues, t test.Test) string {
+		if nonReportable := failuresAsNonReportableError(t.(*testImpl).failures()); nonReportable != nil {
+			return nonReportable.Error()
+		}
+
+		return ""
 	},
-	{
-		cond:   func(_ *githubIssues, t test.Test) bool { return t.Spec().(*registry.TestSpec).Cluster.NodeCount == 0 },
-		reason: "Cluster.NodeCount is zero",
+	func(_ *githubIssues, t test.Test) string {
+		if t.Spec().(*registry.TestSpec).Run == nil {
+			return "TestSpec.Run is nil"
+		}
+
+		return ""
+	},
+	func(_ *githubIssues, t test.Test) string {
+		if t.Spec().(*registry.TestSpec).Cluster.NodeCount == 0 {
+			return "Cluster.NodeCount is zero"
+		}
+
+		return ""
 	},
 }
 
-// shouldPost two values: whether GitHub posting should happen, and a
-// reason for skipping (non-empty only when posting should *not*
-// happen).
-func (g *githubIssues) shouldPost(t test.Test) (bool, string) {
-	post := true
-	var reason string
-
+// shouldPost checks whether we should post a GitHub issue: if we do,
+// the return value will be the empty string. Otherwise, this function
+// returns the reason for not posting.
+func (g *githubIssues) shouldPost(t test.Test) string {
 	for _, sc := range skipConditions {
-		if sc.cond(g, t) {
-			post = false
-			reason = sc.reason
-			break
+		if skipReason := sc(g, t); skipReason != "" {
+			return skipReason
 		}
 	}
 
-	return post, reason
+	return ""
 }
 
 func (g *githubIssues) createPostRequest(
@@ -141,49 +174,50 @@ func (g *githubIssues) createPostRequest(
 	spec *registry.TestSpec,
 	failures []failure,
 	message string,
-	metamorphicBuild bool,
+	sideEyeTimeoutSnapshotURL string,
+	runtimeAssertionsBuild bool,
 	coverageBuild bool,
+	params map[string]string,
 ) (issues.PostRequest, error) {
 	var mention []string
 	var projColID int
 
-	issueOwner := spec.Owner
-	issueName := testName
-	issueClusterName := ""
+	var (
+		issueOwner    = spec.Owner
+		issueName     = testName
+		messagePrefix string
+		infraFlake    bool
+	)
 
-	messagePrefix := ""
-	var infraFlake bool
-	firstFailure := failures[0]
-	// Overrides to shield eng teams from potential flakes
-	switch {
-	case failuresContainsError(failures, errVMPreemption):
-		issueOwner = registry.OwnerTestEng
-		issueName = "vm_preemption"
-		messagePrefix = fmt.Sprintf("test %s failed due to ", testName)
-		infraFlake = true
-	case failureContainsError(firstFailure, errClusterProvisioningFailed):
-		issueOwner = registry.OwnerTestEng
-		issueName = "cluster_creation"
-		messagePrefix = fmt.Sprintf("test %s was skipped due to ", testName)
-		infraFlake = true
-	case failureContainsError(firstFailure, rperrors.ErrSSH255):
-		issueOwner = registry.OwnerTestEng
-		issueName = "ssh_problem"
-		messagePrefix = fmt.Sprintf("test %s failed due to ", testName)
-		infraFlake = true
-	case failureContainsError(firstFailure, gce.ErrDNSOperation):
-		issueOwner = registry.OwnerTestEng
-		issueName = "dns_problem"
-		messagePrefix = fmt.Sprintf("test %s failed due to ", testName)
-		infraFlake = true
-	case failureContainsError(firstFailure, errDuringPostAssertions):
-		messagePrefix = fmt.Sprintf("test %s failed during post test assertions (see test-post-assertions.log) due to ", testName)
+	// handleErrorWithOwnership updates the local variables in this
+	// function that contain the name of the issue being created,
+	// message prefix, and team that will own it.
+	handleErrorWithOwnership := func(err registry.ErrorWithOwnership) {
+		issueOwner = err.Owner
+		infraFlake = err.InfraFlake
+
+		if err.TitleOverride != "" {
+			issueName = err.TitleOverride
+			messagePrefix = fmt.Sprintf("test %s failed: ", testName)
+		}
+	}
+
+	issueClusterName := ""
+	// If we find a failure that was labeled as a roachprod transient
+	// error, redirect that to Test Eng with the corresponding label as
+	// title override.
+	errWithOwner := failuresAsErrorWithOwnership(failures)
+	if errWithOwner == nil {
+		errWithOwner = transientErrorOwnershipFallback(failures)
+	}
+	if errWithOwner != nil {
+		handleErrorWithOwnership(*errWithOwner)
 	}
 
 	// Issues posted from roachtest are identifiable as such, and they are also release blockers
 	// (this label may be removed by a human upon closer investigation).
 	const infraFlakeLabel = "X-infra-flake"
-	const metamorphicLabel = "B-metamorphic-enabled"
+	const runtimeAssertionsLabel = "B-runtime-assertions-enabled"
 	const coverageLabel = "B-coverage-enabled"
 	labels := []string{"O-roachtest"}
 	if infraFlake {
@@ -192,12 +226,12 @@ func (g *githubIssues) createPostRequest(
 		labels = append(labels, issues.TestFailureLabel)
 		if !spec.NonReleaseBlocker {
 			// TODO(radu): remove this check once these build types are stabilized.
-			if !metamorphicBuild && !coverageBuild {
+			if !coverageBuild {
 				labels = append(labels, issues.ReleaseBlockerLabel)
 			}
 		}
-		if metamorphicBuild {
-			labels = append(labels, metamorphicLabel)
+		if runtimeAssertionsBuild {
+			labels = append(labels, runtimeAssertionsLabel)
 		}
 		if coverageBuild {
 			labels = append(labels, coverageLabel)
@@ -211,8 +245,11 @@ func (g *githubIssues) createPostRequest(
 	}
 
 	if sl, ok := teams.GetAliasesForPurpose(issueOwner.ToTeamAlias(), team.PurposeRoachtest); ok {
+		mentionTeam := !teams[sl[0]].SilenceMentions
 		for _, alias := range sl {
-			mention = append(mention, "@"+string(alias))
+			if mentionTeam {
+				mention = append(mention, "@"+string(alias))
+			}
 			if label := teams[alias].Label; label != "" {
 				labels = append(labels, label)
 			}
@@ -227,31 +264,7 @@ func (g *githubIssues) createPostRequest(
 
 	artifacts := fmt.Sprintf("/%s", testName)
 
-	clusterParams := map[string]string{
-		roachtestPrefix("cloud"):            roachtestflags.Cloud,
-		roachtestPrefix("cpu"):              fmt.Sprintf("%d", spec.Cluster.CPUs),
-		roachtestPrefix("ssd"):              fmt.Sprintf("%d", spec.Cluster.SSDs),
-		roachtestPrefix("metamorphicBuild"): fmt.Sprintf("%t", metamorphicBuild),
-		roachtestPrefix("coverageBuild"):    fmt.Sprintf("%t", coverageBuild),
-	}
-	// Emit CPU architecture only if it was specified; otherwise, it's captured below, assuming cluster was created.
-	if spec.Cluster.Arch != "" {
-		clusterParams[roachtestPrefix("arch")] = string(spec.Cluster.Arch)
-	}
-	// These params can be probabilistically set, so we pass them here to
-	// show what their actual values are in the posted issue.
-	if g.vmCreateOpts != nil {
-		clusterParams[roachtestPrefix("fs")] = g.vmCreateOpts.SSDOpts.FileSystem
-		clusterParams[roachtestPrefix("localSSD")] = fmt.Sprintf("%v", g.vmCreateOpts.SSDOpts.UseLocalSSD)
-	}
-
 	if g.cluster != nil {
-		clusterParams[roachtestPrefix("encrypted")] = fmt.Sprintf("%v", g.cluster.encAtRest)
-		if spec.Cluster.Arch == "" {
-			// N.B. when Arch is specified, it cannot differ from cluster's arch.
-			// Hence, we only emit when arch was unspecified.
-			clusterParams[roachtestPrefix("arch")] = string(g.cluster.arch)
-		}
 		issueClusterName = g.cluster.name
 	}
 
@@ -267,11 +280,16 @@ func (g *githubIssues) createPostRequest(
 				"there should be a similar issue without the "+coverageLabel+" label. If there isn't one, it is "+
 				"possible that this failure is related to the code coverage infrastructure or overhead.")
 	}
-	if metamorphicBuild {
+	if runtimeAssertionsBuild {
 		topLevelNotes = append(topLevelNotes,
-			"This build has metamorphic test constants enabled. If the same failure was hit in a "+
-				"non-metamorphic run, there should be a similar issue without the "+metamorphicLabel+" label. If there "+
-				"isn't one, it is possible that this failure is caused by a metamorphic constant.")
+			"This build has runtime assertions enabled. If the same failure was hit in a run without assertions "+
+				"enabled, there should be a similar failure without this message. If there isn't one, "+
+				"then this failure is likely due to an assertion violation or (assertion) timeout.")
+	}
+
+	sideEyeMsg := ""
+	if sideEyeTimeoutSnapshotURL != "" {
+		sideEyeMsg = "A Side-Eye cluster snapshot was captured on timeout: "
 	}
 
 	return issues.PostRequest{
@@ -281,34 +299,38 @@ func (g *githubIssues) createPostRequest(
 		TestName:        issueName,
 		Labels:          labels,
 		// Keep issues separate unless the if these labels don't match.
-		AdoptIssueLabelMatchSet: []string{infraFlakeLabel, coverageLabel, metamorphicLabel},
+		AdoptIssueLabelMatchSet: []string{infraFlakeLabel, coverageLabel},
 		TopLevelNotes:           topLevelNotes,
 		Message:                 issueMessage,
 		Artifacts:               artifacts,
-		ExtraParams:             clusterParams,
+		SideEyeSnapshotMsg:      sideEyeMsg,
+		SideEyeSnapshotURL:      sideEyeTimeoutSnapshotURL,
+		ExtraParams:             params,
 		HelpCommand:             generateHelpCommand(testName, issueClusterName, roachtestflags.Cloud, start, end),
 	}, nil
 }
 
-func (g *githubIssues) MaybePost(t *testImpl, l *logger.Logger, message string) error {
-	doPost, skipReason := g.shouldPost(t)
-	if !doPost {
+func (g *githubIssues) MaybePost(
+	t *testImpl,
+	l *logger.Logger,
+	message string,
+	sideEyeTimeoutSnapshotURL string,
+	params map[string]string,
+) (*issues.TestFailureIssue, error) {
+	skipReason := g.shouldPost(t)
+	if skipReason != "" {
 		l.Printf("skipping GitHub issue posting (%s)", skipReason)
-		return nil
+		return nil, nil
 	}
 
-	var metamorphicBuild bool
-	switch t.spec.CockroachBinary {
-	case registry.StandardCockroach:
-		metamorphicBuild = false
-	case registry.RuntimeAssertionsCockroach:
-		metamorphicBuild = true
-	default:
-		metamorphicBuild = tests.UsingRuntimeAssertions(t)
-	}
-	postRequest, err := g.createPostRequest(t.Name(), t.start, t.end, t.spec, t.failures(), message, metamorphicBuild, t.goCoverEnabled)
+	postRequest, err := g.createPostRequest(
+		t.Name(), t.start, t.end, t.spec, t.failures(),
+		message, sideEyeTimeoutSnapshotURL,
+		roachtestutil.UsingRuntimeAssertions(t), t.goCoverEnabled, params,
+	)
+
 	if err != nil {
-		return err
+		return nil, err
 	}
 	opts := issues.DefaultOptionsFromEnv()
 

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package base_test
 
@@ -151,15 +146,11 @@ target_file_size=2097152`
 		{"path=/mnt/hda1,type=mem,size=20GiB", "path specified for in memory store", StoreSpec{}},
 
 		// provisioned rate
-		{"path=/mnt/hda1,provisioned-rate=disk-name=nvme1n1:bandwidth=200MiB/s", "",
-			StoreSpec{Path: "/mnt/hda1", ProvisionedRateSpec: base.ProvisionedRateSpec{
-				DiskName: "nvme1n1", ProvisionedBandwidth: 200 << 20}}},
-		{"path=/mnt/hda1,provisioned-rate=disk-name=sdb", "", StoreSpec{
-			Path: "/mnt/hda1", ProvisionedRateSpec: base.ProvisionedRateSpec{
-				DiskName: "sdb", ProvisionedBandwidth: 0}}},
-
-		// RocksDB
-		{"path=/,rocksdb=key1=val1;key2=val2", "", StoreSpec{Path: "/", RocksDBOptions: "key1=val1;key2=val2"}},
+		{"path=/mnt/hda1,provisioned-rate=bandwidth=200MiB/s", "",
+			StoreSpec{Path: "/mnt/hda1", ProvisionedRateSpec: base.ProvisionedRateSpec{ProvisionedBandwidth: 200 << 20}}},
+		{"path=/mnt/hda1,provisioned-rate=bandwidth=200MiB", "provisioned-rate field does not have bandwidth sub-field 200MiB ending in /s", StoreSpec{}},
+		{"path=/mnt/hda1,provisioned-rate=200MiB/s", "provisioned-rate field has invalid value 200MiB/s", StoreSpec{}},
+		{"path=/mnt/hda1,provisioned-rate=bandwidth=0B/s", "provisioned-rate field is trying to set bandwidth to 0", StoreSpec{}},
 
 		// Pebble
 		{"path=/,pebble=[Options] l0_compaction_threshold=2 l0_stop_writes_threshold=10", "", StoreSpec{Path: "/",

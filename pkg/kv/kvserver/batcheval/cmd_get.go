@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -54,7 +50,8 @@ func Get(
 		MaxKeys:               cArgs.Header.MaxSpanRequestKeys,
 		TargetBytes:           cArgs.Header.TargetBytes,
 		AllowEmpty:            cArgs.Header.AllowEmpty,
-		ReadCategory:          storage.BatchEvalReadCategory,
+		ReadCategory:          fs.BatchEvalReadCategory,
+		ReturnRawMVCCValues:   args.ReturnRawMVCCValues,
 	})
 	if err != nil {
 		return result.Result{}, err
@@ -92,13 +89,15 @@ func Get(
 	}
 
 	var res result.Result
-	if args.KeyLockingStrength != lock.None && h.Txn != nil && getRes.Value != nil {
+	if args.KeyLockingStrength != lock.None && getRes.Value != nil {
 		acq, err := acquireLockOnKey(ctx, readWriter, h.Txn, args.KeyLockingStrength,
 			args.KeyLockingDurability, args.Key, cArgs.Stats, cArgs.EvalCtx.ClusterSettings())
 		if err != nil {
 			return result.Result{}, err
 		}
-		res.Local.AcquiredLocks = []roachpb.LockAcquisition{acq}
+		if !acq.Empty() {
+			res.Local.AcquiredLocks = []roachpb.LockAcquisition{acq}
+		}
 	}
 	res.Local.EncounteredIntents = intents
 	return res, err

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package slstorage
 
@@ -24,6 +19,7 @@ import (
 type keyCodec interface {
 	encode(sid sqlliveness.SessionID) (roachpb.Key, string, error)
 	decode(key roachpb.Key) (sqlliveness.SessionID, error)
+	validate(session sqlliveness.SessionID) error
 
 	// indexPrefix returns the prefix for an encoded key. encode() will return
 	// something with the prefix and decode will expect a key with this prefix.
@@ -35,6 +31,10 @@ type keyCodec interface {
 
 type rbrEncoder struct {
 	rbrIndex roachpb.Key
+}
+
+func (e *rbrEncoder) validate(session sqlliveness.SessionID) error {
+	return ValidateSessionID(session)
 }
 
 func (e *rbrEncoder) encode(session sqlliveness.SessionID) (roachpb.Key, string, error) {

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Command genbzl is used to generate bazel files which then get imported by
 // the gen package's BUILD.bazel to facilitate hoisting these generated files
@@ -26,8 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 )
 
 var (
@@ -41,7 +34,7 @@ func main() {
 	flag.Parse()
 	if err := generate(*outDir); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to generate files: %v\n", err)
-		exit.WithCode(exit.UnspecifiedError())
+		os.Exit(1)
 	}
 }
 

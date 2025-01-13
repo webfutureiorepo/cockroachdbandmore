@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdceval
 
@@ -278,13 +275,13 @@ func (e *familyEvaluator) planAndRun(ctx context.Context) (err error) {
 	return err
 }
 
+// preparePlan creates a plan for CDC expression. If no error is returned, the
+// caller must call e.performCleanup().
 func (e *familyEvaluator) preparePlan(
 	ctx context.Context,
 ) (plan sql.CDCExpressionPlan, prevCol catalog.Column, err error) {
-	if e.cleanup != nil {
-		e.cleanup()
-		e.cleanup = nil
-	}
+	// Perform cleanup of the previous plan if there is one.
+	e.performCleanup()
 
 	err = withPlanner(ctx, e.execCfg, e.statementTS, e.user, e.currDesc.SchemaTS, e.sessionData,
 		func(ctx context.Context, execCtx sql.JobExecContext, cleanup func()) error {
@@ -310,6 +307,7 @@ func (e *familyEvaluator) preparePlan(
 			return err
 		})
 	if err != nil {
+		e.performCleanup()
 		return sql.CDCExpressionPlan{}, nil, err
 	}
 	return plan, prevCol, nil
@@ -480,7 +478,16 @@ func (e *familyEvaluator) setupContextForRow(
 	return nil
 }
 
+func (e *familyEvaluator) performCleanup() {
+	if e.cleanup != nil {
+		e.cleanup()
+		e.cleanup = nil
+	}
+}
+
 func (e *familyEvaluator) closeErr() error {
+	defer e.performCleanup()
+
 	if e.errCh != nil {
 		// Must be deferred since planGroup  go routine might write.
 		defer func() {
@@ -495,9 +502,6 @@ func (e *familyEvaluator) closeErr() error {
 		return e.planGroup.Wait()
 	}
 
-	if e.cleanup != nil {
-		e.cleanup()
-	}
 	return nil
 }
 

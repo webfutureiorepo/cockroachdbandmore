@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package result
 
@@ -244,7 +239,6 @@ func (p *Result) MergeAndDestroy(q Result) error {
 			return errors.AssertionFailedf("conflicting TruncatedState")
 		}
 		q.Replicated.State.TruncatedState = nil
-		q.Replicated.RaftExpectedFirstIndex = 0
 
 		if q.Replicated.State.GCThreshold != nil {
 			if p.Replicated.State.GCThreshold == nil {
@@ -272,11 +266,28 @@ func (p *Result) MergeAndDestroy(q Result) error {
 		if q.Replicated.State.Stats != nil {
 			return errors.AssertionFailedf("must not specify Stats")
 		}
+		if q.Replicated.State.ForceFlushIndex != (roachpb.ForceFlushIndex{}) {
+			return errors.AssertionFailedf("must not specify ForceFlushIndex")
+		}
 		if (*q.Replicated.State != kvserverpb.ReplicaState{}) {
 			log.Fatalf(context.TODO(), "unhandled EvalResult: %s",
 				pretty.Diff(*q.Replicated.State, kvserverpb.ReplicaState{}))
 		}
 		q.Replicated.State = nil
+	}
+
+	if p.Replicated.RaftTruncatedState == nil {
+		p.Replicated.RaftTruncatedState = q.Replicated.RaftTruncatedState
+		p.Replicated.RaftExpectedFirstIndex = q.Replicated.RaftExpectedFirstIndex
+	} else if q.Replicated.RaftTruncatedState != nil {
+		return errors.AssertionFailedf("conflicting RaftTruncatedState")
+	}
+	q.Replicated.RaftTruncatedState = nil
+	q.Replicated.RaftExpectedFirstIndex = 0
+
+	if p.Replicated.State != nil && p.Replicated.State.TruncatedState != nil &&
+		p.Replicated.RaftTruncatedState != nil {
+		return errors.AssertionFailedf("conflicting RaftTruncatedState")
 	}
 
 	if p.Replicated.Split == nil {
@@ -321,6 +332,13 @@ func (p *Result) MergeAndDestroy(q Result) error {
 	}
 	q.Replicated.AddSSTable = nil
 
+	if p.Replicated.LinkExternalSSTable == nil {
+		p.Replicated.LinkExternalSSTable = q.Replicated.LinkExternalSSTable
+	} else if q.Replicated.LinkExternalSSTable != nil {
+		return errors.AssertionFailedf("conflicting LinkExternalSSTable")
+	}
+	q.Replicated.LinkExternalSSTable = nil
+
 	if p.Replicated.MVCCHistoryMutation == nil {
 		p.Replicated.MVCCHistoryMutation = q.Replicated.MVCCHistoryMutation
 	} else if q.Replicated.MVCCHistoryMutation != nil {
@@ -347,6 +365,11 @@ func (p *Result) MergeAndDestroy(q Result) error {
 		p.Replicated.IsProbe = q.Replicated.IsProbe
 	}
 	q.Replicated.IsProbe = false
+
+	if q.Replicated.DoTimelyApplicationToAllReplicas {
+		p.Replicated.DoTimelyApplicationToAllReplicas = true
+	}
+	q.Replicated.DoTimelyApplicationToAllReplicas = false
 
 	if p.Local.EncounteredIntents == nil {
 		p.Local.EncounteredIntents = q.Local.EncounteredIntents

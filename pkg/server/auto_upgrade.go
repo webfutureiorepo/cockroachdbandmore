@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -69,14 +64,14 @@ func (s *topLevelServer) startAttemptUpgrade(ctx context.Context) error {
 				log.Infof(ctx, "failed attempt to upgrade cluster version: %v", err)
 				continue
 			case UpgradeDisabledByConfigurationToPreserveDowngrade:
-				log.Infof(ctx, "auto upgrade is disabled for current version (preserve_downgrade_option): %s", redact.Safe(clusterVersion))
+				log.Infof(ctx, "auto upgrade is disabled by preserve_downgrade_option")
 				// Note: we do 'continue' here (and not 'return') so that the
 				// auto-upgrade gets a chance to continue/complete if the
 				// operator resets `preserve_downgrade_option` after the node
 				// has started up already.
 				continue
 			case UpgradeDisabledByConfiguration:
-				log.Infof(ctx, "auto upgrade is disabled by (cluster.auto_upgrade.enabled)")
+				log.Infof(ctx, "auto upgrade is disabled by cluster.auto_upgrade.enabled")
 				// Note: we do 'continue' here (and not 'return') so that the
 				// auto-upgrade gets a chance to continue/complete if the
 				// operator resets `auto_upgrade.enabled` after the node
@@ -103,7 +98,7 @@ func (s *topLevelServer) startAttemptUpgrade(ctx context.Context) error {
 			for ur := retry.StartWithCtx(ctx, upgradeRetryOpts); ur.Next(); {
 				if _, err := s.sqlServer.internalExecutor.ExecEx(
 					ctx, "set-version", nil, /* txn */
-					sessiondata.RootUserSessionDataOverride,
+					sessiondata.NodeUserSessionDataOverride,
 					"SET CLUSTER SETTING version = crdb_internal.node_executable_version();",
 				); err != nil {
 					log.Errorf(ctx, "error when finalizing cluster version upgrade: %v", err)
@@ -215,7 +210,7 @@ func (s *topLevelServer) upgradeStatus(
 func (s *topLevelServer) clusterVersion(ctx context.Context) (string, error) {
 	row, err := s.sqlServer.internalExecutor.QueryRowEx(
 		ctx, "show-version", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"SHOW CLUSTER SETTING version;",
 	)
 	if err != nil {

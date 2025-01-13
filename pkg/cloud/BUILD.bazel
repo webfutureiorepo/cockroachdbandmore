@@ -22,6 +22,7 @@ go_library(
         "//pkg/settings",
         "//pkg/settings/cluster",
         "//pkg/sql/isql",
+        "//pkg/util/cidr",
         "//pkg/util/ctxgroup",
         "//pkg/util/ioctx",
         "//pkg/util/log",
@@ -40,13 +41,10 @@ go_test(
     name = "cloud_test",
     srcs = [
         "cloud_io_test.go",
+        "options_test.go",
         "uris_test.go",
     ],
     embed = [":cloud"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/cloud/cloudpb",
         "//pkg/util/ioctx",

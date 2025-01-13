@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -17,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,13 +25,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/multitenant/mtinfopb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -51,19 +47,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/deprecatedshowranges"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/ts/catalog"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
@@ -76,11 +71,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingui"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
 	gwutil "github.com/grpc-ecosystem/grpc-gateway/utilities"
-	"golang.org/x/exp/slices"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
 )
 
@@ -134,11 +130,6 @@ type systemAdminServer struct {
 	nodeLiveness *liveness.NodeLiveness
 	server       *topLevelServer
 }
-
-// noteworthyAdminMemoryUsageBytes is the minimum size tracked by the
-// admin SQL pool before the pool start explicitly logging overall
-// usage growth in the log.
-var noteworthyAdminMemoryUsageBytes = envutil.EnvOrDefaultInt64("COCKROACH_NOTEWORTHY_ADMIN_MEMORY_USAGE", 100*1024)
 
 var tableStatsMaxFetcherConcurrency = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
@@ -234,15 +225,10 @@ func newAdminServer(
 
 	// TODO(knz): We do not limit memory usage by admin operations
 	// yet. Is this wise?
-	server.memMonitor = mon.NewUnlimitedMonitor(
-		context.Background(),
-		"admin",
-		mon.MemoryResource,
-		nil,
-		nil,
-		noteworthyAdminMemoryUsageBytes,
-		cs,
-	)
+	server.memMonitor = mon.NewUnlimitedMonitor(context.Background(), mon.Options{
+		Name:     mon.MakeMonitorName("admin"),
+		Settings: cs,
+	})
 	return server
 }
 
@@ -285,13 +271,15 @@ func (s *adminServer) RegisterGateway(
 			http.Error(w, "invalid id", http.StatusBadRequest)
 			return
 		}
-		// Add default user when running in Insecure mode because we don't
-		// retrieve the user from gRPC metadata (which falls back to `root`)
-		// but from HTTP metadata (which does not).
-		if s.sqlServer.cfg.Insecure {
-			ctx := req.Context()
-			ctx = authserver.ContextWithHTTPAuthInfo(ctx, username.RootUser, 0)
-			req = req.WithContext(ctx)
+
+		// The privilege checks in the privilege checker below checks the user in the incoming
+		// gRPC metadata.
+		md := authserver.TranslateHTTPAuthInfoToGRPCMetadata(req.Context(), req)
+		authCtx := metadata.NewIncomingContext(req.Context(), md)
+		authCtx = s.AnnotateCtx(authCtx)
+		if err := s.privilegeChecker.RequireViewActivityAndNoViewActivityRedactedPermission(authCtx); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
 		}
 		s.getStatementBundle(req.Context(), id, w)
 	})
@@ -313,8 +301,10 @@ func (s *adminServer) AllMetricMetadata(
 ) (*serverpb.MetricMetadataResponse, error) {
 
 	md, _, _ := s.metricsRecorder.GetMetricsMetadata(true /* combine */)
+	metricNames := s.metricsRecorder.GetRecordedMetricNames(md)
 	resp := &serverpb.MetricMetadataResponse{
-		Metadata: md,
+		Metadata:      md,
+		RecordedNames: metricNames,
 	}
 
 	return resp, nil
@@ -686,11 +676,6 @@ func (s *adminServer) getDatabaseStats(
 	)
 	responses := make(chan tableStatsResponse, len(tableSpans))
 	for tableName, tableSpan := range tableSpans {
-		// Because Go reuses loop variables across iterations, we must
-		// make these local, stable copies for the async task to close
-		// over, else our results will be nondeterministic.
-		tableName := tableName
-		tableSpan := tableSpan
 		if err := s.sqlServer.stopper.RunAsyncTaskEx(
 			ctx, stop.TaskOpts{
 				TaskName:   "server.adminServer: requesting table stats",
@@ -1014,50 +999,11 @@ func (s *adminServer) tableDetailsHelper(
 	}
 
 	// MVCC Garbage result.
-
-	// Needed for backward-compat on crdb_internal.ranges{_no_leases}.
-	// Remove in v23.2.
-	if deprecatedshowranges.ShowRangesDeprecatedBehaviorSetting.Get(&s.st.SV) {
-		// NOTE: this query is deprecated. See the "else" branch below for
-		// the current code.
-		//
-		// This query is unable to handle table names with a schema qualification.
-		// If a user complains about this, tell them to opt out of the deprecated
-		// SHOW RANGES behavior, which will enable the proper semantics below.
-		tbName := strings.TrimPrefix(req.Table, "public.")
-		row, cols, err = s.internalExecutor.QueryRowExWithCols(
-			ctx, "admin-show-mvcc-garbage-info", nil,
-			sessiondata.InternalExecutorOverride{User: userName},
+	row, cols, err = s.internalExecutor.QueryRowExWithCols(
+		ctx, "admin-show-mvcc-garbage-info", nil,
+		sessiondata.InternalExecutorOverride{User: userName},
+		fmt.Sprintf(
 			`WITH
-			range_stats AS (
-				SELECT crdb_internal.range_stats(start_key) AS d
-				FROM crdb_internal.ranges_no_leases WHERE database_name = $1 AND table_name = $2
-			),
-			aggregated AS (
-				SELECT
-					sum((d->>'live_bytes')::INT8) AS live,
-					sum(
-						(d->>'key_bytes')::INT8 + 
-						(d->>'val_bytes')::INT8 + 
-						COALESCE((d->>'range_key_bytes')::INT8, 0) +
-						COALESCE((d->>'range_val_bytes')::INT8, 0) +
-						(d->>'sys_bytes')::INT8) AS total
-				FROM
-					range_stats
-			)
-			SELECT
-				COALESCE(total, 0)::INT8 as total_bytes,
-				COALESCE(live, 0)::INT8 as live_bytes,
-				COALESCE(live / NULLIF(total,0), 0)::FLOAT8 as live_percentage
-			FROM aggregated`,
-			req.Database, tbName,
-		)
-	} else {
-		row, cols, err = s.internalExecutor.QueryRowExWithCols(
-			ctx, "admin-show-mvcc-garbage-info", nil,
-			sessiondata.InternalExecutorOverride{User: userName},
-			fmt.Sprintf(
-				`WITH
 			range_stats AS (
 				SELECT crdb_internal.range_stats(raw_start_key) AS d
 				FROM [SHOW RANGES FROM TABLE %s WITH KEYS]
@@ -1066,8 +1012,8 @@ func (s *adminServer) tableDetailsHelper(
 				SELECT
 					sum((d->>'live_bytes')::INT8) AS live,
 					sum(
-						(d->>'key_bytes')::INT8 + 
-						(d->>'val_bytes')::INT8 + 
+						(d->>'key_bytes')::INT8 +
+						(d->>'val_bytes')::INT8 +
 						COALESCE((d->>'range_key_bytes')::INT8, 0) +
 						COALESCE((d->>'range_val_bytes')::INT8, 0) +
 						(d->>'sys_bytes')::INT8) AS total
@@ -1079,9 +1025,8 @@ func (s *adminServer) tableDetailsHelper(
 				COALESCE(live, 0)::INT8 as live_bytes,
 				COALESCE(live / NULLIF(total,0), 0)::FLOAT8 as live_percentage
 			FROM aggregated`,
-				escQualTable),
-		)
-	}
+			escQualTable),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,14 +1055,14 @@ func (s *adminServer) tableDetailsHelper(
 	row, cols, err = s.internalExecutor.QueryRowExWithCols(
 		ctx, "admin-show-statistics", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
-		fmt.Sprintf("SELECT max(created) AS created FROM [SHOW STATISTICS FOR TABLE %s]", escQualTable),
+		fmt.Sprintf("SELECT max(created) AS stats_last_created_at FROM [SHOW STATISTICS FOR TABLE %s]", escQualTable),
 	)
 	if err != nil {
 		return nil, err
 	}
 	if row != nil {
 		scanner := makeResultScanner(cols)
-		const createdCol = "created"
+		const createdCol = "stats_last_created_at"
 		var createdTs *time.Time
 		if err := scanner.Scan(row, createdCol, &createdTs); err != nil {
 			return nil, err
@@ -1736,7 +1681,7 @@ func (s *adminServer) rangeLogHelper(
 	}
 	it, err := s.internalExecutor.QueryIteratorEx(
 		ctx, "admin-range-log", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		q.String(), q.QueryArguments()...,
 	)
 	if err != nil {
@@ -1864,7 +1809,7 @@ func (s *adminServer) getUIData(
 	}
 	it, err := s.internalExecutor.QueryIteratorEx(
 		ctx, "admin-getUIData", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		query.String(), query.QueryArguments()...,
 	)
 	if err != nil {
@@ -1944,7 +1889,7 @@ func (s *adminServer) SetUIData(
 		query := `UPSERT INTO system.ui (key, value, "lastUpdated") VALUES ($1, $2, now())`
 		rowsAffected, err := ie.ExecEx(
 			ctx, "admin-set-ui-data", nil, /* txn */
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			query, makeUIKey(userName, key), val)
 		if err != nil {
 			return nil, srverrors.ServerError(ctx, err)
@@ -2062,7 +2007,7 @@ func (s *adminServer) Settings(
 	alteredSettings := make(map[settings.InternalKey]*time.Time)
 	if it, err := s.internalExecutor.QueryIteratorEx(
 		ctx, "read-setting", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		`SELECT name, "lastUpdated" FROM system.settings`,
 	); err != nil {
 		log.Warningf(ctx, "failed to read settings: %s", err)
@@ -2168,7 +2113,7 @@ func (s *adminServer) checkReadinessForHealthCheck(ctx context.Context) error {
 		return err
 	}
 
-	if !s.sqlServer.isReady.Get() {
+	if !s.sqlServer.isReady.Load() {
 		return grpcstatus.Errorf(codes.Unavailable, "node is not accepting SQL clients")
 	}
 
@@ -2211,7 +2156,7 @@ func (s *systemAdminServer) checkReadinessForHealthCheck(ctx context.Context) er
 		return grpcstatus.Errorf(codes.Unavailable, "node is not healthy")
 	}
 
-	if !s.sqlServer.isReady.Get() {
+	if !s.sqlServer.isReady.Load() {
 		return grpcstatus.Errorf(codes.Unavailable, "node is not accepting SQL clients")
 	}
 
@@ -2293,17 +2238,9 @@ func (s *adminServer) Jobs(
 	return j, nil
 }
 
-// Note that the function returns plain errors, and it is the caller's
-// responsibility to convert them to srverrors.ServerErrors.
-func jobsHelper(
-	ctx context.Context,
-	req *serverpb.JobsRequest,
-	userName username.SQLUsername,
-	sqlServer *SQLServer,
-	cfg *BaseConfig,
-	sv *settings.Values,
-) (_ *serverpb.JobsResponse, retErr error) {
-
+// BuildJobQueryFromRequest builds the SQL query for the given
+// JobsRequest. This is exported for testing purposes only.
+func BuildJobQueryFromRequest(req *serverpb.JobsRequest) *safesql.Query {
 	q := safesql.NewQuery()
 	q.Append(`
 SELECT
@@ -2322,9 +2259,6 @@ SELECT
   fraction_completed,
   high_water_timestamp,
   error,
-  last_run,
-  next_run,
-  num_runs,
   execution_events::string,
   coordinator_id
 FROM crdb_internal.jobs
@@ -2349,6 +2283,20 @@ WHERE true`) // Simplifies filter construction below.
 	if req.Limit > 0 {
 		q.Append(" LIMIT $", tree.DInt(req.Limit))
 	}
+	return q
+}
+
+// Note that the function returns plain errors, and it is the caller's
+// responsibility to convert them to srverrors.ServerErrors.
+func jobsHelper(
+	ctx context.Context,
+	req *serverpb.JobsRequest,
+	userName username.SQLUsername,
+	sqlServer *SQLServer,
+	cfg *BaseConfig,
+	sv *settings.Values,
+) (_ *serverpb.JobsResponse, retErr error) {
+	q := BuildJobQueryFromRequest(req)
 	it, err := sqlServer.internalExecutor.QueryIteratorEx(
 		ctx, "admin-jobs", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
@@ -2427,9 +2375,6 @@ func scanRowIntoJob(scanner resultScanner, row tree.Datums, job *serverpb.JobRes
 		&fractionCompletedOrNil,
 		&highwaterOrNil,
 		&job.Error,
-		&job.LastRun,
-		&job.NextRun,
-		&job.NumRuns,
 		&executionFailuresOrNil,
 		&coordinatorOrNil,
 	); err != nil {
@@ -2500,9 +2445,7 @@ func jobHelper(
 	const query = `
 	        SELECT job_id, job_type, description, statement, user_name, descriptor_ids, status,
 	  						 running_status, created, started, finished, modified,
-	  						 fraction_completed, high_water_timestamp, error, last_run,
-								 next_run, num_runs, execution_events::string,
-                 coordinator_id
+	  						 fraction_completed, high_water_timestamp, error, execution_events::string, coordinator_id
 	          FROM crdb_internal.jobs
 	         WHERE job_id = $1`
 	row, cols, err := sqlServer.internalExecutor.QueryRowExWithCols(
@@ -2558,7 +2501,7 @@ func (s *adminServer) locationsHelper(
 	q.Append(`SELECT "localityKey", "localityValue", latitude, longitude FROM system.locations`)
 	it, err := s.internalExecutor.QueryIteratorEx(
 		ctx, "admin-locations", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		q.String(),
 	)
 	if err != nil {
@@ -2650,12 +2593,12 @@ func (s *adminServer) QueryPlan(
 }
 
 // getStatementBundle retrieves the statement bundle with the given id and
-// writes it out as an attachment.
+// writes it out as an attachment. Note this function assumes the user has
+// permission to access the statement bundle.
 func (s *adminServer) getStatementBundle(ctx context.Context, id int64, w http.ResponseWriter) {
-	sqlUsername := authserver.UserFromHTTPAuthInfoContext(ctx)
 	row, err := s.internalExecutor.QueryRowEx(
 		ctx, "admin-stmt-bundle", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: sqlUsername},
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT bundle_chunks FROM system.statement_diagnostics WHERE id=$1 AND bundle_chunks IS NOT NULL",
 		id,
 	)
@@ -2674,7 +2617,7 @@ func (s *adminServer) getStatementBundle(ctx context.Context, id int64, w http.R
 	for _, chunkID := range chunkIDs {
 		chunkRow, err := s.internalExecutor.QueryRowEx(
 			ctx, "admin-stmt-bundle", nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: sqlUsername},
+			sessiondata.NodeUserSessionDataOverride,
 			"SELECT data FROM system.statement_bundle_chunks WHERE id=$1",
 			chunkID,
 		)
@@ -2956,14 +2899,7 @@ func (s *systemAdminServer) Decommission(
 }
 
 // DataDistribution returns a count of replicas on each node for each table.
-//
-// TODO(kv): Now that we have coalesced ranges, this endpoint no longer reports
-// accurate replica counts. Furthermore, since it doesn't take coalesced ranges
-// into account, this endpoint doesn't work for secondary tenants whose ranges are
-// *always* coalesced. Update this endpoint to handle coalesced ranges and
-// implement tenant filtering, after which it can be moved back into the
-// adminServer instead of the systemAdminServer.
-func (s *systemAdminServer) DataDistribution(
+func (s *adminServer) DataDistribution(
 	ctx context.Context, req *serverpb.DataDistributionRequest,
 ) (_ *serverpb.DataDistributionResponse, retErr error) {
 	if err := s.privilegeChecker.RequireViewClusterMetadataPermission(ctx); err != nil {
@@ -2994,19 +2930,43 @@ func (s *adminServer) dataDistributionHelper(
 		ZoneConfigs:  make(map[string]serverpb.DataDistributionResponse_ZoneConfig),
 	}
 
-	// Get ids and names for databases and tables.
-	// Set up this structure in the response.
-
-	// This relies on crdb_internal.tables returning data even for newly added tables
-	// and deleted tables (as opposed to e.g. information_schema) because we are interested
-	// in the data for all ranges, not just ranges for visible tables.
+	// We use crdb_internal.tables as it also returns data for deleted tables
+	// which are not garbage collected yet, as opposed to information_schema,
+	// because we are interested in the data for all ranges, not just ranges for
+	// visible tables.
 	//
-	// Don't include tables with a NULL database_name, which in this case means
-	// excluding virtual tables (like crdb_internal.tables itself, for example).
-	tablesQuery := `SELECT name, schema_name, table_id, database_name, drop_time FROM
-									"".crdb_internal.tables WHERE database_name IS NOT NULL`
+	// The query is structured as follows:
+	//
+	// 1. The tables CTE selects table details from crdb_internal.tables and
+	//    joins it with crdb_internal.table_spans to get the start and end keys for
+	//    each table. We exclude tables with a NULL database_name to avoid virtual
+	//    tables (like crdb_internal.tables itself).
+	//
+	// 2. The main SELECT joins the tables CTE with crdb_internal.ranges_no_leases to
+	//    get the ranges the current table overlaps with. A single table can
+	//    overlap with multiple ranges, and if range coalescing is enabled, a single
+	//    range may overlap with multiple tables too.
+	tablesQuery := `
+    WITH tables AS (
+        SELECT
+            t.schema_name, t.name AS table_name, t.database_name,
+            t.table_id, t.drop_time, s.start_key, s.end_key
+        FROM
+            "".crdb_internal.tables t
+            JOIN "".crdb_internal.table_spans s ON t.table_id = s.descriptor_id
+        WHERE
+            t.database_name IS NOT NULL
+    )
+    SELECT
+        t.table_id, t.table_name, t.schema_name, t.database_name, t.drop_time, r.replicas
+    FROM
+        tables t
+        JOIN "".crdb_internal.ranges_no_leases r ON t.start_key < r.end_key
+            AND t.end_key > r.start_key
+    ORDER BY t.table_id;`
+
 	it, err := s.internalExecutor.QueryIteratorEx(
-		ctx, "admin-replica-matrix", nil, /* txn */
+		ctx, "data-distribution", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
 		tablesQuery,
 	)
@@ -3017,26 +2977,36 @@ func (s *adminServer) dataDistributionHelper(
 	// for loop early (before Next() returns false).
 	defer func(it isql.Rows) { retErr = errors.CombineErrors(retErr, it.Close()) }(it)
 
-	// Used later when we're scanning Meta2 and only have IDs, not names.
-	tableInfosByTableID := map[uint32]serverpb.DataDistributionResponse_TableInfo{}
-
 	var hasNext bool
-	for hasNext, err = it.Next(ctx); hasNext; hasNext, err = it.Next(ctx) {
-		row := it.Cur()
-		tableName := (*string)(row[0].(*tree.DString))
-		schemaName := (*string)(row[1].(*tree.DString))
-		fqTableName := fmt.Sprintf("%s.%s",
-			tree.NameStringP(schemaName), tree.NameStringP(tableName))
-		tableID := uint32(tree.MustBeDInt(row[2]))
-		dbName := (*string)(row[3].(*tree.DString))
+	for hasNext, err = it.Next(ctx); err == nil && hasNext; /* `it` updated by inner loop */ {
+		firstRow := it.Cur()
+		tableID := uint32(*firstRow[0].(*tree.DInt))
 
-		// Look at whether it was dropped.
-		var droppedAtTime *time.Time
-		droppedAtDatum, ok := row[4].(*tree.DTimestamp)
-		if ok {
-			droppedAtTime = &droppedAtDatum.Time
+		tableInfo := serverpb.DataDistributionResponse_TableInfo{
+			ReplicaCountByNodeId: make(map[roachpb.NodeID]int64),
 		}
 
+		// Iterate over rows with the same table ID since rows are sorted by table_id
+		for ; err == nil && hasNext; hasNext, err = it.Next(ctx) {
+			row := it.Cur()
+			curTableID := uint32(*row[0].(*tree.DInt))
+			if tableID != curTableID {
+				break
+			}
+			for _, node := range row[5].(*tree.DArray).Array {
+				tableInfo.ReplicaCountByNodeId[roachpb.NodeID(*node.(*tree.DInt))]++
+			}
+		}
+
+		if droppedAtDatum, ok := firstRow[4].(*tree.DTimestamp); ok {
+			tableInfo.DroppedAt = &droppedAtDatum.Time
+		}
+
+		tableName := (*string)(firstRow[1].(*tree.DString))
+		schemaName := (*string)(firstRow[2].(*tree.DString))
+		fqTableName := fmt.Sprintf("%s.%s", tree.NameStringP(schemaName), tree.NameStringP(tableName))
+
+		dbName := (*string)(firstRow[3].(*tree.DString))
 		// Insert database if it doesn't exist.
 		dbInfo, ok := resp.DatabaseInfo[*dbName]
 		if !ok {
@@ -3045,100 +3015,9 @@ func (s *adminServer) dataDistributionHelper(
 			}
 			resp.DatabaseInfo[*dbName] = dbInfo
 		}
-
-		// Get zone config for table.
-		zcID := int64(0)
-
-		if droppedAtTime == nil {
-			// TODO(vilterp): figure out a way to get zone configs for tables that are dropped
-			zoneConfigQuery := fmt.Sprintf(
-				`SELECT zone_id FROM [SHOW ZONE CONFIGURATION FOR TABLE %s.%s.%s]`,
-				(*tree.Name)(dbName), (*tree.Name)(schemaName), (*tree.Name)(tableName),
-			)
-			row, err := s.internalExecutor.QueryRowEx(
-				ctx, "admin-replica-matrix", nil, /* txn */
-				sessiondata.InternalExecutorOverride{User: userName},
-				zoneConfigQuery,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if row == nil {
-				return nil, errors.Errorf(
-					"could not get zone config for table %s; 0 rows returned", *tableName,
-				)
-			}
-
-			zcID = int64(tree.MustBeDInt(row[0]))
-		}
-
-		// Insert table.
-		tableInfo := serverpb.DataDistributionResponse_TableInfo{
-			ReplicaCountByNodeId: make(map[roachpb.NodeID]int64),
-			ZoneConfigId:         zcID,
-			DroppedAt:            droppedAtTime,
-		}
 		dbInfo.TableInfo[fqTableName] = tableInfo
-		tableInfosByTableID[tableID] = tableInfo
 	}
 	if err != nil {
-		return nil, err
-	}
-
-	// Get replica counts.
-	if err := s.db.Txn(ctx, func(txnCtx context.Context, txn *kv.Txn) error {
-		acct := s.memMonitor.MakeBoundAccount()
-		defer acct.Close(txnCtx)
-
-		kvs, err := kvclient.ScanMetaKVs(ctx, txn, roachpb.Span{
-			Key:    keys.SystemSQLCodec.TablePrefix(keys.MaxReservedDescID + 1),
-			EndKey: keys.MaxKey,
-		})
-		if err != nil {
-			return err
-		}
-
-		// Group replicas by table and node, accumulate counts.
-		var rangeDesc roachpb.RangeDescriptor
-		for _, kv := range kvs {
-			if err := acct.Grow(txnCtx, int64(len(kv.Key)+len(kv.Value.RawBytes))); err != nil {
-				return err
-			}
-			if err := kv.ValueProto(&rangeDesc); err != nil {
-				return err
-			}
-			// TODO(embrown): Tables can use one codec since they
-			// seem to all share the same id.
-			_, tenID, err := keys.DecodeTenantPrefix(rangeDesc.StartKey.AsRawKey())
-			if err != nil {
-				return err
-			}
-
-			// A range descriptor for a secondary tenant may not contain
-			// a table prefix. Often, the start key for a tenant will be just
-			// the tenant prefix itself, e.g. `/Tenant/2`. Once the tenant prefix
-			// is stripped inside `DecodeTablePrefix`, nothing (aka `/Min`) is left.
-			keySansPrefix, _ := keys.MakeSQLCodec(tenID).StripTenantPrefix(rangeDesc.StartKey.AsRawKey())
-			if keys.MinKey.Equal(keySansPrefix) {
-				// There's no table prefix to be decoded.
-				// Try the next descriptor.
-				continue
-			}
-			_, tableID, err := keys.MakeSQLCodec(tenID).DecodeTablePrefix(rangeDesc.StartKey.AsRawKey())
-			if err != nil {
-				return err
-			}
-			for _, replicaDesc := range rangeDesc.Replicas().Descriptors() {
-				tableInfo, found := tableInfosByTableID[tableID]
-				if !found {
-					// This is a database, skip.
-					continue
-				}
-				tableInfo.ReplicaCountByNodeId[replicaDesc.NodeID]++
-			}
-		}
-		return nil
-	}); err != nil {
 		return nil, err
 	}
 
@@ -3150,7 +3029,7 @@ func (s *adminServer) dataDistributionHelper(
 		WHERE target IS NOT NULL
 	`
 	it, err = s.internalExecutor.QueryIteratorEx(
-		ctx, "admin-replica-matrix", nil, /* txn */
+		ctx, "data-distribution", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
 		zoneConfigsQuery)
 	if err != nil {
@@ -3191,7 +3070,7 @@ func (s *systemAdminServer) EnqueueRange(
 	ctx = authserver.ForwardSQLIdentityThroughRPCCalls(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if err := s.privilegeChecker.RequireRepairClusterMetadataPermission(ctx); err != nil {
+	if err := s.privilegeChecker.RequireRepairClusterPermission(ctx); err != nil {
 		// NB: not using srverrors.ServerError() here since the priv checker
 		// already returns a proper gRPC error status.
 		return nil, err
@@ -3246,7 +3125,7 @@ func (s *systemAdminServer) EnqueueRange(
 
 	if err := timeutil.RunWithTimeout(ctx, "enqueue range", time.Minute, func(ctx context.Context) error {
 		return iterateNodes(
-			ctx, s.serverIterator, s.server.stopper, fmt.Sprintf("enqueue r%d in queue %s", req.RangeID, req.Queue),
+			ctx, s.serverIterator, s.server.stopper, redact.Sprintf("enqueue r%d in queue %s", req.RangeID, req.Queue),
 			noTimeout,
 			dialFn, nodeFn, responseFn, errorFn,
 		)
@@ -3317,9 +3196,11 @@ func (s *systemAdminServer) enqueueRangeLocal(
 		queueName = "mvccGC"
 	}
 
-	traceSpans, processErr, err := store.Enqueue(
-		ctx, queueName, repl, req.SkipShouldQueue, false, /* async */
+	traceCtx, rec := tracing.ContextWithRecordingSpan(ctx, store.GetStoreConfig().Tracer(), "trace-enqueue")
+	processErr, err := store.Enqueue(
+		traceCtx, queueName, repl, req.SkipShouldQueue, false, /* async */
 	)
+	traceSpans := rec()
 	if err != nil {
 		response.Details[0].Error = err.Error()
 		return response, nil
@@ -3339,7 +3220,7 @@ func (s *systemAdminServer) SendKVBatch(
 	ctx = s.AnnotateCtx(ctx)
 	// Note: the root user will bypass SQL auth checks, which is useful in case of
 	// a cluster outage.
-	err := s.privilegeChecker.RequireRepairClusterMetadataPermission(ctx)
+	err := s.privilegeChecker.RequireRepairClusterPermission(ctx)
 	if err != nil {
 		// NB: not using srverrors.ServerError() here since the priv checker
 		// already returns a proper gRPC error status.
@@ -3370,7 +3251,7 @@ func (s *systemAdminServer) SendKVBatch(
 		},
 		BatchRequest: string(baJSON),
 	}
-	log.StructuredEvent(ctx, event)
+	log.StructuredEvent(ctx, severity.INFO, event)
 
 	ctx, sp := s.server.node.setupSpanForIncomingRPC(ctx, roachpb.SystemTenantID, ba)
 	// Wipe the tracing information from the request. We've used this info in the
@@ -3430,7 +3311,7 @@ func (s *systemAdminServer) RecoveryStagePlan(
 	ctx context.Context, request *serverpb.RecoveryStagePlanRequest,
 ) (*serverpb.RecoveryStagePlanResponse, error) {
 	ctx = s.server.AnnotateCtx(ctx)
-	err := s.privilegeChecker.RequireRepairClusterMetadataPermission(ctx)
+	err := s.privilegeChecker.RequireRepairClusterPermission(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -3561,6 +3442,19 @@ func (rs resultScanner) ScanIndex(row tree.Datums, index int, dst interface{}) e
 		}
 		val := int64(*s)
 		*d = &val
+
+	case *[]int64:
+		s, ok := tree.AsDArray(src)
+		if !ok {
+			return errors.Errorf("source type assertion failed")
+		}
+		for i := 0; i < s.Len(); i++ {
+			id, ok := tree.AsDInt(s.Array[i])
+			if !ok {
+				return errors.Errorf("source type assertion failed on index %d", i)
+			}
+			*d = append(*d, int64(id))
+		}
 
 	case *[]descpb.ID:
 		s, ok := tree.AsDArray(src)
@@ -4067,4 +3961,54 @@ func (s *systemAdminServer) ListTenants(
 	return &serverpb.ListTenantsResponse{
 		Tenants: tenantList,
 	}, nil
+}
+
+// ReadFromTenantInfo returns the read-from info for a tenant, if configured.
+func (s *systemAdminServer) ReadFromTenantInfo(
+	ctx context.Context, req *serverpb.ReadFromTenantInfoRequest,
+) (*serverpb.ReadFromTenantInfoResponse, error) {
+	tenantID, ok := roachpb.ClientTenantFromContext(ctx)
+	if ok && req.TenantID != tenantID {
+		return nil, errors.Errorf("mismatched tenant IDs")
+	}
+	tenantID = req.TenantID
+	if tenantID.IsSystem() {
+		return &serverpb.ReadFromTenantInfoResponse{}, nil
+	}
+
+	var dstID roachpb.TenantID
+	var dstTenant *mtinfopb.TenantInfo
+	if err := s.sqlServer.internalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+		found, err := sql.GetTenantRecordByID(ctx, txn, tenantID, s.st)
+		if err != nil {
+			return err
+		}
+		if found.ReadFromTenant == nil || !found.ReadFromTenant.IsSet() {
+			return nil
+		}
+		dstID = *found.ReadFromTenant
+		target, err := sql.GetTenantRecordByID(ctx, txn, dstID, s.st)
+		if err != nil {
+			return err
+		}
+		dstTenant = target
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if dstTenant == nil {
+		return &serverpb.ReadFromTenantInfoResponse{}, nil
+	}
+
+	if dstTenant.PhysicalReplicationConsumerJobID == 0 {
+		return nil, errors.Errorf("missing job ID")
+	}
+
+	progress, err := jobs.LoadJobProgress(ctx, s.sqlServer.internalDB, dstTenant.PhysicalReplicationConsumerJobID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &serverpb.ReadFromTenantInfoResponse{ReadFrom: dstID, ReadAt: progress.GetStreamIngest().ReplicatedTime}, nil
 }

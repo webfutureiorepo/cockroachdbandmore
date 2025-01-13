@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stop_test
 
@@ -709,19 +704,27 @@ func TestStopperRunAsyncTaskTracing(t *testing.T) {
 				event: async 2`))
 }
 
-// Test that RunAsyncTask creates root spans when the caller doesn't have a
+// Test that RunAsyncTask creates root spans only if the caller has a
 // span.
 func TestStopperRunAsyncTaskCreatesRootSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	tr := tracing.NewTracer()
-	ctx := context.Background()
-	s := stop.NewStopper(stop.WithTracer(tr))
-	defer s.Stop(ctx)
-	c := make(chan *tracing.Span)
-	require.NoError(t, s.RunAsyncTask(ctx, "test",
-		func(ctx context.Context) {
-			c <- tracing.SpanFromContext(ctx)
-		},
-	))
-	require.NotNil(t, <-c)
+
+	testutils.RunTrueAndFalse(t, "hasSpan", func(t *testing.T, hasSpan bool) {
+		tr := tracing.NewTracer()
+		ctx := context.Background()
+		s := stop.NewStopper(stop.WithTracer(tr))
+		defer s.Stop(ctx)
+		c := make(chan *tracing.Span)
+		if hasSpan {
+			var sp *tracing.Span
+			ctx, sp = tr.StartSpanCtx(ctx, "root", tracing.WithForceRealSpan())
+			defer sp.Finish()
+		}
+		require.NoError(t, s.RunAsyncTask(ctx, "test",
+			func(ctx context.Context) {
+				c <- tracing.SpanFromContext(ctx)
+			},
+		))
+		require.Equal(t, hasSpan, <-c != nil)
+	})
 }

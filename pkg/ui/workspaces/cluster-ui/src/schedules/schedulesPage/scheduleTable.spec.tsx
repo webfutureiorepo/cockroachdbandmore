@@ -1,16 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-import React from "react";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { shallow } from "enzyme";
-import { ScheduleTable, ScheduleTableProps } from "./scheduleTable";
+import React from "react";
+
 import { allSchedulesFixture } from "./schedulesPage.fixture";
+import { ScheduleTable, ScheduleTableProps } from "./scheduleTable";
 
 describe("<ScheduleTable>", () => {
   it("should reset page to 1 after schedule list prop changes", () => {

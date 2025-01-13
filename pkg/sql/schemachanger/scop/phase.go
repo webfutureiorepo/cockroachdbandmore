@@ -1,14 +1,11 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scop
+
+import "github.com/cockroachdb/redact"
 
 // A Phase represents the context in which an op is executed within a schema
 // change. Different phases require different dependencies for the execution of
@@ -18,6 +15,11 @@ package scop
 // and partially executed in the user transaction. This will change as we
 // transition to transactional schema changes.
 type Phase int
+
+var _ redact.SafeValue = Phase(0)
+
+// SafeValue implements the redact.SafeValue interface.
+func (p Phase) SafeValue() {}
 
 //go:generate stringer --type Phase
 

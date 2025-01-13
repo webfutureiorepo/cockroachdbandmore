@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -233,6 +228,9 @@ func BuildChildPhysicalProps(
 // As a result, cases where this limit hint may be poor (too low or more than
 // twice as high as needed) tend to occur when distinctCount is very close to
 // neededRows.
+//
+// TODO(mgartner): This function should probably consider the input row count in
+// order to make more accurate estimates. See streamingGroupByInputLimitHint.
 func distinctOnLimitHint(distinctCount, neededRows float64) float64 {
 	// The harmonic function below is not intended for values under 1 (for one,
 	// it's not monotonic until 0.5); make sure we never return negative results.

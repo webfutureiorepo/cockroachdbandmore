@@ -1,35 +1,30 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
-import React from "react";
-import { Helmet } from "react-helmet";
-import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
-
-import * as protos from "src/js/protos";
-import { INodeStatus } from "src/util/proto";
-import { nodeIDAttr } from "src/util/constants";
-import { LogEntriesResponseMessage } from "src/util/api";
-import { AdminUIState } from "src/redux/state";
-import { refreshLogs, refreshNodes } from "src/redux/apiReducers";
-import { currentNode } from "src/views/cluster/containers/nodeOverview";
-import { CachedDataReducerState } from "src/redux/cachedDataReducer";
-import { getDisplayName } from "src/redux/nodes";
 import {
   Loading,
   SortedTable,
   util,
   Timestamp,
 } from "@cockroachlabs/cluster-ui";
+import sortBy from "lodash/sortBy";
+import React from "react";
+import { Helmet } from "react-helmet";
+import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
+
+import * as protos from "src/js/protos";
+import { refreshLogs, refreshNodes } from "src/redux/apiReducers";
+import { CachedDataReducerState } from "src/redux/cachedDataReducer";
+import { getDisplayName } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
+import { LogEntriesResponseMessage } from "src/util/api";
+import { nodeIDAttr } from "src/util/constants";
+import { INodeStatus } from "src/util/proto";
 import { getMatchParamByName } from "src/util/query";
+import { currentNode } from "src/views/cluster/containers/nodeOverview";
 import "./logs.styl";
 
 type LogEntries = protos.cockroach.util.log.IEntry;
@@ -54,7 +49,7 @@ export class Logs extends React.Component<LogProps & RouteComponentProps, {}> {
   }
 
   renderContent = () => {
-    const logEntries = _.sortBy(this.props.logs.data.entries, e => e.time);
+    const logEntries = sortBy(this.props.logs.data.entries, e => e.time);
     const columns = [
       {
         title: "Time",

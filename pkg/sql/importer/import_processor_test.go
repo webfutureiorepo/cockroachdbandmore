@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -17,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -124,7 +120,7 @@ func TestConverterFlushesBatches(t *testing.T) {
 				}
 
 				kvCh := make(chan row.KVBatch, batchSize)
-				semaCtx := tree.MakeSemaContext()
+				semaCtx := tree.MakeSemaContext(nil /* resolver */)
 				conv, err := makeInputConverter(ctx, &semaCtx, converterSpec, &evalCtx, kvCh,
 					nil /* seqChunkProvider */, db)
 				if err != nil {
@@ -242,7 +238,7 @@ func TestImportIgnoresProcessedFiles(t *testing.T) {
 		Mon:     evalCtx.TestingMon,
 		Cfg: &execinfra.ServerConfig{
 			JobRegistry:     &jobs.Registry{},
-			Settings:        &cluster.Settings{},
+			Settings:        cluster.MakeTestingClusterSettings(),
 			ExternalStorage: externalStorageFactory,
 			DB:              fakeDB{},
 			BulkAdder: func(
@@ -367,7 +363,7 @@ func TestImportHonorsResumePosition(t *testing.T) {
 		Mon:     evalCtx.TestingMon,
 		Cfg: &execinfra.ServerConfig{
 			JobRegistry:     &jobs.Registry{},
-			Settings:        &cluster.Settings{},
+			Settings:        cluster.MakeTestingClusterSettings(),
 			ExternalStorage: externalStorageFactory,
 			DB:              fakeDB{},
 			BulkAdder: func(
@@ -406,6 +402,9 @@ func TestImportHonorsResumePosition(t *testing.T) {
 		numKeys := 0
 
 		for _, resumePos := range resumes {
+			// t.Failed() acquires a read lock only, so in order to prevent the
+			// race in the progress consumer goroutine, we use our own atomic.
+			var failed atomic.Bool
 			spec.ResumePos = map[int32]int64{0: resumePos}
 			if resumePos == 0 {
 				// We use 0 resume position to record the set of keys in the input file.
@@ -430,6 +429,7 @@ func TestImportHonorsResumePosition(t *testing.T) {
 					keys.Lock()
 					idx := sort.Search(maxKeyIdx, func(i int) bool { return keys.keys[i].Compare(k) == 0 })
 					if idx < maxKeyIdx {
+						failed.Store(true)
 						t.Errorf("failed to skip key[%d]=%s", idx, k)
 					}
 					keys.Unlock()
@@ -447,7 +447,7 @@ func TestImportHonorsResumePosition(t *testing.T) {
 					// (BulkAdderFlushesEveryBatch), then the progress resport must be emitted every
 					// batchSize rows (possibly out of order), starting from our initial resumePos
 					for prog := range progCh {
-						if !t.Failed() && prog.ResumePos[0] < (rp+int64(batchSize)) {
+						if !failed.Load() && prog.ResumePos[0] < (rp+int64(batchSize)) {
 							t.Logf("unexpected progress resume pos: %d", prog.ResumePos[0])
 							t.Fail()
 						}
@@ -497,7 +497,7 @@ func TestImportHandlesDuplicateKVs(t *testing.T) {
 		Mon:     evalCtx.TestingMon,
 		Cfg: &execinfra.ServerConfig{
 			JobRegistry:     &jobs.Registry{},
-			Settings:        &cluster.Settings{},
+			Settings:        cluster.MakeTestingClusterSettings(),
 			ExternalStorage: externalStorageFactory,
 			DB:              fakeDB{},
 			BulkAdder: func(

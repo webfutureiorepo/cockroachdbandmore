@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -117,8 +113,8 @@ func ClearRange(
 	// consider the txn incomplete, uncommitting it and its writes (even those
 	// outside of the cleared range).
 	maxLockConflicts := storage.MaxConflictsPerLockConflictError.Get(&cArgs.EvalCtx.ClusterSettings().SV)
-	locks, err := storage.ScanLocks(ctx, readWriter, from, to, maxLockConflicts, 0,
-		storage.BatchEvalReadCategory)
+	targetLockConflictBytes := storage.TargetBytesPerLockConflictError.Get(&cArgs.EvalCtx.ClusterSettings().SV)
+	locks, err := storage.ScanLocks(ctx, readWriter, from, to, maxLockConflicts, targetLockConflictBytes)
 	if err != nil {
 		return result.Result{}, err
 	} else if len(locks) > 0 {
@@ -222,7 +218,7 @@ func computeStatsDelta(
 				KeyTypes:     storage.IterKeyTypeRangesOnly,
 				LowerBound:   leftPeekBound,
 				UpperBound:   rightPeekBound,
-				ReadCategory: storage.BatchEvalReadCategory,
+				ReadCategory: fs.BatchEvalReadCategory,
 			})
 			if err != nil {
 				return enginepb.MVCCStats{}, err

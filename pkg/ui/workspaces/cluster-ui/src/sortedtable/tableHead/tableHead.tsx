@@ -1,17 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import classNames from "classnames/bind";
-import styles from "./tableHead.module.scss";
+import React from "react";
+
 import { ExpandableConfig, SortableColumn, SortSetting } from "../sortedtable";
+
+import styles from "./tableHead.module.scss";
 
 const cx = classNames.bind(styles);
 
@@ -23,13 +20,8 @@ interface TableHeadProps {
   firstCellBordered: boolean;
 }
 
-export const TableHead: React.FC<TableHeadProps> = ({
-  expandableConfig,
-  columns,
-  sortSetting,
-  onChangeSortSetting,
-  firstCellBordered,
-}) => {
+export const TableHead: React.FC<TableHeadProps> = props => {
+  const { expandableConfig, columns, sortSetting, firstCellBordered } = props;
   const trClass = cx("head-wrapper__row", "head-wrapper__row--header");
   const thClass = cx("head-wrapper__cell");
   const cellContentWrapper = cx("inner-content-wrapper");
@@ -44,10 +36,11 @@ export const TableHead: React.FC<TableHeadProps> = ({
     // descending. If is the same columnTitle the value is updated.
 
     const ascending = newColumnSelected ? false : !prevValue;
-    onChangeSortSetting({
-      ascending,
-      columnTitle,
-    });
+    props.onChangeSortSetting &&
+      props.onChangeSortSetting({
+        ascending,
+        columnTitle,
+      });
   }
 
   return (
@@ -55,12 +48,12 @@ export const TableHead: React.FC<TableHeadProps> = ({
       <tr className={trClass}>
         {expandableConfig && <th className={thClass} />}
         {columns.map((c: SortableColumn, idx: number) => {
-          const sortable = c.columnTitle !== (null || undefined);
+          const sortable = !!c.columnTitle;
           const newColumnSelected = c.name !== sortSetting.columnTitle;
           const style = { textAlign: c.titleAlign };
-          const cellAction = sortable
-            ? () => handleSort(newColumnSelected, c.name, sortSetting.ascending)
-            : null;
+          const cellAction = () =>
+            sortable &&
+            handleSort(newColumnSelected, c.name, sortSetting.ascending);
           const cellClasses = cx(
             "head-wrapper__cell",
             "sorted__cell",
@@ -79,7 +72,7 @@ export const TableHead: React.FC<TableHeadProps> = ({
             <th
               className={cx(cellClasses)}
               key={"headCell" + idx}
-              onClick={cellAction}
+              onClick={_ => cellAction()}
               style={style}
             >
               <div className={cellContentWrapper}>

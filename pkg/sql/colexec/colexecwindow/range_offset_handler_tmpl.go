@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -207,7 +202,7 @@ func (h *_OP_STRING) getIdx(ctx context.Context, currRow, lastIdx int) (idx int)
 		return lastIdx
 	}
 
-	var vec coldata.Vec
+	var vec *coldata.Vec
 	var vecIdx, n int
 	vec, vecIdx, _ = h.storedCols.GetVecWithTuple(ctx, h.ordColIdx, currRow)
 
@@ -293,7 +288,7 @@ func (h *_OP_STRING) getIdx(ctx context.Context, currRow, lastIdx int) (idx int)
 	// Scan to the next peer group and then compare to the value indicated by
 	// the offset. If the comparison fails, scan again to the next peer group
 	// and repeat.
-	var peersVec coldata.Vec
+	var peersVec *coldata.Vec
 	for {
 		if idx >= h.storedCols.Length() {
 			break

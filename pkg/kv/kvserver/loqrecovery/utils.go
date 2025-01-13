@@ -1,22 +1,19 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecovery
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/strutil"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
 type storeIDSet map[roachpb.StoreID]struct{}
@@ -35,7 +32,7 @@ func (s storeIDSet) storeSliceFromSet() []roachpb.StoreID {
 	for k := range s {
 		storeIDs = append(storeIDs, k)
 	}
-	sort.Sort(roachpb.StoreIDSlice(storeIDs))
+	slices.Sort(storeIDs)
 	return storeIDs
 }
 
@@ -93,8 +90,8 @@ func (m locationsMap) asSortedSlice() []NodeStores {
 	for k, v := range m {
 		nodes = append(nodes, NodeStores{NodeID: k, StoreIDs: v.storeSliceFromSet()})
 	}
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].NodeID < nodes[j].NodeID
+	slices.SortFunc(nodes, func(a, b NodeStores) int {
+		return cmp.Compare(a.NodeID, b.NodeID)
 	})
 	return nodes
 }
@@ -139,7 +136,7 @@ func (m locationsMap) joinNodeIDs() string {
 	for k := range m {
 		nodeIDs = append(nodeIDs, k)
 	}
-	sort.Sort(roachpb.NodeIDSlice(nodeIDs))
+	slices.Sort(nodeIDs)
 	return strutil.JoinIDs("n", nodeIDs)
 }
 
@@ -314,4 +311,91 @@ func (e *RecoveryError) ErrorDetail() string {
 		descriptions = append(descriptions, fmt.Sprintf("%v", id))
 	}
 	return strings.Join(descriptions, "\n")
+}
+
+// grpcStream is a specialization of a grpc.ServerStream for a specific message
+// type. It is implemented by code generated gRPC server streams.
+//
+// As mentioned in the grpc.ServerStream documentation, it is not safe to call
+// Send on the same stream in different goroutines.
+type grpcStream[T any] interface {
+	Send(T) error
+}
+
+// threadSafeStream wraps a grpcStream and provides basic thread safety.
+type threadSafeStream[T any] struct {
+	mu syncutil.Mutex
+	s  grpcStream[T]
+}
+
+func makeThreadSafeStream[T any](s grpcStream[T]) *threadSafeStream[T] {
+	return &threadSafeStream[T]{s: s}
+}
+
+func (s *threadSafeStream[T]) Send(t T) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.s.Send(t)
+}
+
+// threadSafeMap wraps a map and provides basic thread safety.
+type threadSafeMap[K comparable, V any] struct {
+	mu syncutil.Mutex
+	m  map[K]V
+}
+
+func makeThreadSafeMap[K comparable, V any]() *threadSafeMap[K, V] {
+	return &threadSafeMap[K, V]{m: make(map[K]V)}
+}
+
+func (m *threadSafeMap[K, V]) Get(k K) V {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.m[k]
+}
+
+func (m *threadSafeMap[K, V]) Set(k K, v V) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.m[k] = v
+}
+
+func (m *threadSafeMap[K, V]) Delete(k K) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.m, k)
+}
+
+func (m *threadSafeMap[K, V]) Len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.m)
+}
+
+func (m *threadSafeMap[K, V]) Clone() map[K]V {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clone := make(map[K]V, len(m.m))
+	for k, v := range m.m {
+		clone[k] = v
+	}
+	return clone
+}
+
+// threadSafeSlice wraps a slice and provides basic thread safety.
+type threadSafeSlice[T any] struct {
+	mu syncutil.Mutex
+	s  []T
+}
+
+func (s *threadSafeSlice[T]) Append(t ...T) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.s = append(s.s, t...)
+}
+
+func (s *threadSafeSlice[T]) Clone() []T {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]T(nil), s.s...)
 }

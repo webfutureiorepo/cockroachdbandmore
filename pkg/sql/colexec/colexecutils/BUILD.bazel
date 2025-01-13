@@ -29,9 +29,9 @@ go_library(
         "//pkg/sql/sem/tree",
         "//pkg/sql/sqlerrors",
         "//pkg/sql/types",
-        "//pkg/util",
         "//pkg/util/cancelchecker",
         "//pkg/util/log",
+        "//pkg/util/metamorphic",
         "//pkg/util/mon",
         "@com_github_apache_arrow_go_arrow//array",
         "@com_github_cockroachdb_errors//:errors",
@@ -50,10 +50,6 @@ go_test(
         "spilling_queue_test.go",
     ],
     embed = [":colexecutils"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/col/coldata",
         "//pkg/col/coldataext",

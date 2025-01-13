@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -16,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -142,6 +138,7 @@ const (
 	exprKindWhere
 	exprKindWindowFrameStart
 	exprKindWindowFrameEnd
+	exprKindWhen
 )
 
 var exprKindName = [...]string{
@@ -165,6 +162,7 @@ var exprKindName = [...]string{
 	exprKindWhere:             "WHERE",
 	exprKindWindowFrameStart:  "WINDOW FRAME START",
 	exprKindWindowFrameEnd:    "WINDOW FRAME END",
+	exprKindWhen:              "WHEN",
 }
 
 func (k exprKind) String() string {
@@ -496,6 +494,17 @@ func (s *scope) resolveAndRequireType(expr tree.Expr, desired *types.T) tree.Typ
 	return s.ensureNullType(texpr, desired)
 }
 
+// resolveTypeAndReject converts the given expr to a tree.TypedExpr. It is
+// similar to resolveType, but also allows tree.SemaRejectFlags to be provided.
+// The original tree.SemaRejectFlags are restored before the function returns.
+func (s *scope) resolveTypeAndReject(
+	expr tree.Expr, desired *types.T, context string, flags tree.SemaRejectFlags,
+) tree.TypedExpr {
+	defer s.builder.semaCtx.Properties.Restore(s.builder.semaCtx.Properties)
+	s.builder.semaCtx.Properties.Require(context, flags)
+	return s.resolveType(expr, desired)
+}
+
 // ensureNullType tests the type of the given expression. If types.Unknown, then
 // ensureNullType wraps the expression in a CAST to the desired type (assuming
 // it is not types.Any). types.Unknown is a special type used for null values,
@@ -555,6 +564,17 @@ func (s *scope) colList() opt.ColList {
 		colList[i] = s.cols[i].id
 	}
 	return colList
+}
+
+// forEachColWithExtras applies the given function to every column in the scope,
+// including extra columns.
+func (s *scope) forEachColWithExtras(fn func(col *scopeColumn)) {
+	for i := range s.cols {
+		fn(&s.cols[i])
+	}
+	for i := range s.extraCols {
+		fn(&s.extraCols[i])
+	}
 }
 
 // hasSameColumns returns true if this scope has the same columns
@@ -650,6 +670,20 @@ func (s *scope) findFuncArgCol(idx tree.PlaceholderIdx) *scopeColumn {
 		for i := range s.cols {
 			col := &s.cols[i]
 			if col.funcParamReferencedBy(idx) {
+				return col
+			}
+		}
+	}
+	return nil
+}
+
+// findAnonymousColumnWithMetadataName returns the first anonymous column that
+// has the given name in the query metadata.
+func (s *scope) findAnonymousColumnWithMetadataName(metadataName string) *scopeColumn {
+	for ; s != nil; s = s.parent {
+		for i := range s.cols {
+			col := &s.cols[i]
+			if col.name.refName == "" && col.name.metadataName == metadataName {
 				return col
 			}
 		}
@@ -1034,12 +1068,30 @@ func (s *scope) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
 			// It may be a reference to a table, e.g. SELECT tbl FROM tbl.
 			// Attempt to resolve as a TupleStar.
 			if sqlerrors.IsUndefinedColumnError(resolveErr) {
+				if s.context == exprKindWhen {
+					panic(errors.WithHint(resolveErr,
+						"column references in a trigger WHEN clause must be prefixed with NEW or OLD"))
+				}
 				// Attempt to resolve as columnname.*, which allows items
 				// such as SELECT row_to_json(tbl_name) FROM tbl_name to work.
 				return func() (bool, tree.Expr) {
 					defer wrapColTupleStarPanic(resolveErr)
 					return s.VisitPre(columnNameAsTupleStar(string(t.ColumnName)))
 				}()
+			}
+			if sqlerrors.IsUndefinedRelationError(resolveErr) && t.TableName.Object() != "" {
+				// Attempt to resolve as columnname.fieldname in order to provide a more
+				// helpful error message.
+				_, sourceResolveErr := colinfo.ResolveColumnItem(
+					s.builder.ctx, s, &tree.ColumnItem{ColumnName: tree.Name(t.TableName.Object())},
+				)
+				if sourceResolveErr == nil {
+					panic(errors.WithIssueLink(errors.WithHint(resolveErr,
+						"to access a field of a composite-typed column or variable, "+
+							"surround the column/variable name in parentheses: (varName).fieldName"),
+						errors.IssueLink{IssueURL: build.MakeIssueURL(114687)},
+					))
+				}
 			}
 			panic(resolveErr)
 		}
@@ -1063,6 +1115,12 @@ func (s *scope) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
 		// can handle overloads with the same name.
 		def, err := t.Func.Resolve(s.builder.ctx, semaCtx.SearchPath, semaCtx.FunctionResolver)
 		if err != nil {
+			if t.InCall && errors.Is(err, tree.ErrRoutineUndefined) {
+				panic(errors.WithHint(
+					pgerror.Newf(pgcode.UndefinedFunction, "procedure %s does not exist", t.Func),
+					"No procedure matches the given name.",
+				))
+			}
 			panic(err)
 		}
 
@@ -1576,7 +1634,7 @@ func (s *scope) replaceCount(
 			}
 			// We call TypeCheck to fill in FuncExpr internals. This is a fixed
 			// expression; we should not hit an error here.
-			semaCtx := tree.MakeSemaContext()
+			semaCtx := tree.MakeSemaContext(nil /* resolver */)
 			if _, err := e.TypeCheck(s.builder.ctx, &semaCtx, types.Any); err != nil {
 				panic(err)
 			}
@@ -1633,14 +1691,7 @@ func (*scope) VisitPost(expr tree.Expr) tree.Expr {
 // scope implements the IndexedVarContainer interface so it can be used as
 // semaCtx.IVarContainer. This allows tree.TypeCheck to determine the correct
 // type for any IndexedVars.
-var _ eval.IndexedVarContainer = &scope{}
-
-// IndexedVarEval is part of the eval.IndexedVarContainer interface.
-func (s *scope) IndexedVarEval(
-	ctx context.Context, idx int, e tree.ExprEvaluator,
-) (tree.Datum, error) {
-	panic(errors.AssertionFailedf("unimplemented: scope.IndexedVarEval"))
-}
+var _ tree.IndexedVarContainer = &scope{}
 
 // IndexedVarResolvedType is part of the IndexedVarContainer interface.
 func (s *scope) IndexedVarResolvedType(idx int) *types.T {
@@ -1653,11 +1704,6 @@ func (s *scope) IndexedVarResolvedType(idx int) *types.T {
 			"invalid column ordinal: @%d", idx+1))
 	}
 	return s.cols[idx].typ
-}
-
-// IndexedVarNodeFormatter is part of the IndexedVarContainer interface.
-func (s *scope) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
-	panic(errors.AssertionFailedf("unimplemented: scope.IndexedVarNodeFormatter"))
 }
 
 // newAmbiguousSourceError returns an error with a helpful error message to be

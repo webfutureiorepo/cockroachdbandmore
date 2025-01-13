@@ -1,17 +1,13 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	io "io"
 	"path/filepath"
@@ -28,9 +24,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
+	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 )
@@ -52,7 +51,7 @@ func TestSSTSnapshotStorage(t *testing.T) {
 	scratch := sstSnapshotStorage.NewScratchSpace(testRangeID, testSnapUUID)
 
 	// Check that the storage lazily creates the directories on first write.
-	_, err := eng.Stat(scratch.snapDir)
+	_, err := eng.Env().Stat(scratch.snapDir)
 	if !oserror.IsNotExist(err) {
 		t.Fatalf("expected %s to not exist", scratch.snapDir)
 	}
@@ -65,7 +64,7 @@ func TestSSTSnapshotStorage(t *testing.T) {
 
 	// Check that the storage lazily creates the files on write.
 	for _, fileName := range scratch.SSTs() {
-		_, err := eng.Stat(fileName)
+		_, err := eng.Env().Stat(fileName)
 		if !oserror.IsNotExist(err) {
 			t.Fatalf("expected %s to not exist", fileName)
 		}
@@ -75,7 +74,7 @@ func TestSSTSnapshotStorage(t *testing.T) {
 
 	// After writing to files, check that they have been flushed to disk.
 	for _, fileName := range scratch.SSTs() {
-		f, err := eng.Open(fileName)
+		f, err := eng.Env().Open(fileName)
 		require.NoError(t, err)
 		data, err := io.ReadAll(f)
 		require.NoError(t, err)
@@ -98,17 +97,17 @@ func TestSSTSnapshotStorage(t *testing.T) {
 	// Check that Close removes the snapshot directory as well as the range
 	// directory.
 	require.NoError(t, scratch.Close())
-	_, err = eng.Stat(scratch.snapDir)
+	_, err = eng.Env().Stat(scratch.snapDir)
 	if !oserror.IsNotExist(err) {
 		t.Fatalf("expected %s to not exist", scratch.snapDir)
 	}
 	rangeDir := filepath.Join(sstSnapshotStorage.dir, strconv.Itoa(int(scratch.rangeID)))
-	_, err = eng.Stat(rangeDir)
+	_, err = eng.Env().Stat(rangeDir)
 	if !oserror.IsNotExist(err) {
 		t.Fatalf("expected %s to not exist", rangeDir)
 	}
 	require.NoError(t, sstSnapshotStorage.Clear())
-	_, err = eng.Stat(sstSnapshotStorage.dir)
+	_, err = eng.Env().Stat(sstSnapshotStorage.dir)
 	if !oserror.IsNotExist(err) {
 		t.Fatalf("expected %s to not exist", sstSnapshotStorage.dir)
 	}
@@ -134,7 +133,7 @@ func TestSSTSnapshotStorageConcurrentRange(t *testing.T) {
 		scratch := sstSnapshotStorage.NewScratchSpace(testRangeID, snapUUID)
 
 		// Check that the storage lazily creates the directories on first write.
-		_, err := eng.Stat(scratch.snapDir)
+		_, err := eng.Env().Stat(scratch.snapDir)
 		if !oserror.IsNotExist(err) {
 			return errors.Errorf("expected %s to not exist", scratch.snapDir)
 		}
@@ -147,7 +146,7 @@ func TestSSTSnapshotStorageConcurrentRange(t *testing.T) {
 
 		// Check that the storage lazily creates the files on write.
 		for _, fileName := range scratch.SSTs() {
-			_, err := eng.Stat(fileName)
+			_, err := eng.Env().Stat(fileName)
 			if !oserror.IsNotExist(err) {
 				return errors.Errorf("expected %s to not exist", fileName)
 			}
@@ -157,7 +156,7 @@ func TestSSTSnapshotStorageConcurrentRange(t *testing.T) {
 
 		// After writing to files, check that they have been flushed to disk.
 		for _, fileName := range scratch.SSTs() {
-			f, err := eng.Open(fileName)
+			f, err := eng.Env().Open(fileName)
 			require.NoError(t, err)
 			data, err := io.ReadAll(f)
 			require.NoError(t, err)
@@ -179,7 +178,7 @@ func TestSSTSnapshotStorageConcurrentRange(t *testing.T) {
 
 		// Check that Close removes the snapshot directory.
 		require.NoError(t, scratch.Close())
-		_, err = eng.Stat(scratch.snapDir)
+		_, err = eng.Env().Stat(scratch.snapDir)
 		if !oserror.IsNotExist(err) {
 			return errors.Errorf("expected %s to not exist", scratch.snapDir)
 		}
@@ -207,12 +206,12 @@ func TestSSTSnapshotStorageConcurrentRange(t *testing.T) {
 	// Ensure that the range directory was deleted after the scratches were
 	// closed.
 	rangeDir := filepath.Join(sstSnapshotStorage.dir, strconv.Itoa(int(testRangeID)))
-	_, err := eng.Stat(rangeDir)
+	_, err := eng.Env().Stat(rangeDir)
 	if !oserror.IsNotExist(err) {
 		t.Fatalf("expected %s to not exist", rangeDir)
 	}
 	require.NoError(t, sstSnapshotStorage.Clear())
-	_, err = eng.Stat(sstSnapshotStorage.dir)
+	_, err = eng.Env().Stat(sstSnapshotStorage.dir)
 	if !oserror.IsNotExist(err) {
 		t.Fatalf("expected %s to not exist", sstSnapshotStorage.dir)
 	}
@@ -276,10 +275,12 @@ func TestMultiSSTWriterInitSST(t *testing.T) {
 		EndKey:   roachpb.RKeyMax,
 	}
 	keySpans := rditer.MakeReplicatedKeySpans(&desc)
+	localSpans := keySpans[:len(keySpans)-1]
+	mvccSpan := keySpans[len(keySpans)-1]
 
 	msstw, err := newMultiSSTWriter(
-		ctx, cluster.MakeTestingClusterSettings(), scratch, keySpans, 0,
-		false, /* skipRangeDelForLastSpan */
+		ctx, cluster.MakeTestingClusterSettings(), scratch, localSpans, mvccSpan, 0,
+		false /* skipRangeDelForMVCCSpan */, false, /* rangeKeysInOrder */
 	)
 	require.NoError(t, err)
 	_, err = msstw.Finish(ctx)
@@ -288,7 +289,7 @@ func TestMultiSSTWriterInitSST(t *testing.T) {
 	var actualSSTs [][]byte
 	fileNames := msstw.scratch.SSTs()
 	for _, file := range fileNames {
-		sst, err := fs.ReadFile(eng, file)
+		sst, err := fs.ReadFile(eng.Env(), file)
 		require.NoError(t, err)
 		actualSSTs = append(actualSSTs, sst)
 	}
@@ -313,6 +314,139 @@ func TestMultiSSTWriterInitSST(t *testing.T) {
 	for i := range fileNames {
 		require.Equal(t, actualSSTs[i], expectedSSTs[i])
 	}
+}
+
+func buildIterForScratch(
+	t *testing.T, keySpans []roachpb.Span, scratch *SSTSnapshotStorageScratch,
+) (storage.MVCCIterator, error) {
+	var openFiles []sstable.ReadableFile
+	for _, sstPath := range scratch.SSTs()[len(keySpans)-1:] {
+		f, err := vfs.Default.Open(sstPath)
+		require.NoError(t, err)
+		openFiles = append(openFiles, f)
+	}
+	mvccSpan := keySpans[len(keySpans)-1]
+
+	return storage.NewSSTIterator([][]sstable.ReadableFile{openFiles}, storage.IterOptions{
+		LowerBound: mvccSpan.Key,
+		UpperBound: mvccSpan.EndKey,
+	})
+}
+
+// TestMultiSSTWriterSize tests the effect of lowering the max size
+// of sstables in a multiSSTWriter, and ensuring that the produced sstables
+// are still correct.
+func TestMultiSSTWriterSize(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	ctx := context.Background()
+	testRangeID := roachpb.RangeID(1)
+	testSnapUUID := uuid.Must(uuid.FromBytes([]byte("foobar1234567890")))
+	testLimiter := rate.NewLimiter(rate.Inf, 0)
+
+	cleanup, eng := newOnDiskEngine(ctx, t)
+	defer cleanup()
+	defer eng.Close()
+
+	sstSnapshotStorage := NewSSTSnapshotStorage(eng, testLimiter)
+	ref := sstSnapshotStorage.NewScratchSpace(testRangeID, testSnapUUID)
+	scratch := sstSnapshotStorage.NewScratchSpace(testRangeID, testSnapUUID)
+	settings := cluster.MakeTestingClusterSettings()
+
+	desc := roachpb.RangeDescriptor{
+		StartKey: roachpb.RKey("d"),
+		EndKey:   roachpb.RKeyMax,
+	}
+	keySpans := rditer.MakeReplicatedKeySpans(&desc)
+	localSpans := keySpans[:len(keySpans)-1]
+	mvccSpan := keySpans[len(keySpans)-1]
+
+	// Make a reference msstw with the default size.
+	referenceMsstw, err := newMultiSSTWriter(ctx, settings, ref, localSpans, mvccSpan, 0, false, true /* rangeKeysInOrder */)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), referenceMsstw.dataSize)
+	now := timeutil.Now().UnixNano()
+
+	for i := range localSpans {
+		require.NoError(t, referenceMsstw.Put(ctx, storage.EngineKey{Key: localSpans[i].Key}, []byte("foo")))
+	}
+
+	for i := 0; i < 1000; i++ {
+		key := binary.BigEndian.AppendUint32(append([]byte(nil), desc.StartKey...), uint32(i))
+		mvccKey := storage.MVCCKey{Key: roachpb.Key(key), Timestamp: hlc.Timestamp{WallTime: now}}
+		engineKey, ok := storage.DecodeEngineKey(storage.EncodeMVCCKey(mvccKey))
+		require.True(t, ok)
+
+		if i%50 == 0 {
+			// Add a range key.
+			endKey := binary.BigEndian.AppendUint32(desc.StartKey, uint32(i+10))
+			require.NoError(t, referenceMsstw.PutRangeKey(
+				ctx, key, endKey, storage.EncodeMVCCTimestampSuffix(mvccKey.Timestamp.WallPrev()), []byte("")))
+		}
+		require.NoError(t, referenceMsstw.Put(ctx, engineKey, []byte("foobarbaz")))
+	}
+	_, err = referenceMsstw.Finish(ctx)
+	require.NoError(t, err)
+
+	refIter, err := buildIterForScratch(t, keySpans, ref)
+	require.NoError(t, err)
+	defer refIter.Close()
+
+	MaxSnapshotSSTableSize.Override(ctx, &settings.SV, 100)
+
+	multiSSTWriter, err := newMultiSSTWriter(ctx, settings, scratch, localSpans, mvccSpan, 0, false, true /* rangeKeysInOrder */)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), multiSSTWriter.dataSize)
+
+	for i := range localSpans {
+		require.NoError(t, multiSSTWriter.Put(ctx, storage.EngineKey{Key: localSpans[i].Key}, []byte("foo")))
+	}
+
+	for i := 0; i < 1000; i++ {
+		key := binary.BigEndian.AppendUint32(append([]byte(nil), desc.StartKey...), uint32(i))
+		mvccKey := storage.MVCCKey{Key: roachpb.Key(key), Timestamp: hlc.Timestamp{WallTime: now}}
+		engineKey, ok := storage.DecodeEngineKey(storage.EncodeMVCCKey(mvccKey))
+		require.True(t, ok)
+		if i%50 == 0 {
+			// Add a range key.
+			endKey := binary.BigEndian.AppendUint32(desc.StartKey, uint32(i+10))
+			require.NoError(t, multiSSTWriter.PutRangeKey(
+				ctx, key, endKey, storage.EncodeMVCCTimestampSuffix(mvccKey.Timestamp.WallPrev()), []byte("")))
+		}
+		require.NoError(t, multiSSTWriter.Put(ctx, engineKey, []byte("foobarbaz")))
+	}
+
+	_, err = multiSSTWriter.Finish(ctx)
+	require.NoError(t, err)
+	require.Greater(t, len(scratch.SSTs()), len(ref.SSTs()))
+
+	iter, err := buildIterForScratch(t, keySpans, scratch)
+	require.NoError(t, err)
+	defer iter.Close()
+
+	iter.SeekGE(storage.MVCCKey{Key: mvccSpan.Key})
+	refIter.SeekGE(storage.MVCCKey{Key: mvccSpan.Key})
+	valid, err := iter.Valid()
+	valid2, err2 := refIter.Valid()
+	require.NoError(t, err)
+	require.NoError(t, err2)
+
+	for valid && valid2 {
+
+		require.Equal(t, iter.UnsafeKey(), refIter.UnsafeKey())
+		val, err := iter.UnsafeValue()
+		require.NoError(t, err)
+		val2, err2 := refIter.UnsafeValue()
+		require.NoError(t, err2)
+		require.Equal(t, val, val2)
+		iter.Next()
+		refIter.Next()
+		valid, err = iter.Valid()
+		valid2, err2 = refIter.Valid()
+		require.NoError(t, err)
+		require.NoError(t, err2)
+	}
+	require.Equal(t, valid, valid2)
 }
 
 // TestMultiSSTWriterAddLastSpan tests that multiSSTWriter initializes each of
@@ -342,14 +476,16 @@ func TestMultiSSTWriterAddLastSpan(t *testing.T) {
 				EndKey:   roachpb.RKeyMax,
 			}
 			keySpans := rditer.MakeReplicatedKeySpans(&desc)
+			localSpans := keySpans[:len(keySpans)-1]
+			mvccSpan := keySpans[len(keySpans)-1]
 
 			msstw, err := newMultiSSTWriter(
-				ctx, cluster.MakeTestingClusterSettings(), scratch, keySpans, 0,
-				true, /* skipRangeDelForLastSpan */
+				ctx, cluster.MakeTestingClusterSettings(), scratch, localSpans, mvccSpan, 0,
+				true /* skipRangeDelForMVCCSpan */, false, /* rangeKeysInOrder */
 			)
 			require.NoError(t, err)
 			if addRangeDel {
-				require.NoError(t, msstw.addRangeDelForLastSpan())
+				require.NoError(t, msstw.addClearForMVCCSpan())
 			}
 			testKey := storage.MVCCKey{Key: roachpb.RKey("d1").AsRawKey(), Timestamp: hlc.Timestamp{WallTime: 1}}
 			testEngineKey, _ := storage.DecodeEngineKey(storage.EncodeMVCCKey(testKey))
@@ -360,7 +496,7 @@ func TestMultiSSTWriterAddLastSpan(t *testing.T) {
 			var actualSSTs [][]byte
 			fileNames := msstw.scratch.SSTs()
 			for _, file := range fileNames {
-				sst, err := fs.ReadFile(eng, file)
+				sst, err := fs.ReadFile(eng.Env(), file)
 				require.NoError(t, err)
 				actualSSTs = append(actualSSTs, sst)
 			}
@@ -398,7 +534,7 @@ func newOnDiskEngine(ctx context.Context, t *testing.T) (func(), storage.Engine)
 	dir, cleanup := testutils.TempDir(t)
 	eng, err := storage.Open(
 		ctx,
-		storage.Filesystem(dir),
+		fs.MustInitPhysicalTestingEnv(dir),
 		cluster.MakeClusterSettings(),
 		storage.CacheSize(1<<20 /* 1 MiB */))
 	if err != nil {

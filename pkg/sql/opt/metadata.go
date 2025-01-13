@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opt
 
@@ -42,6 +37,11 @@ type SchemaID int32
 // that is present in the bitmap is represented by a bit that is shifted by
 // 1 << privilege.Kind, so that multiple privileges can be stored.
 type privilegeBitmap uint64
+
+type routineDep struct {
+	overload        *tree.Overload
+	invocationTypes []*types.T
+}
 
 // Metadata assigns unique ids to the columns, tables, and other metadata used
 // for global identification within the scope of a particular query. These ids
@@ -122,9 +122,9 @@ type Metadata struct {
 	// dataSourceDeps stores each data source object that the query depends on.
 	dataSourceDeps map[cat.StableID]cat.DataSource
 
-	// udfDeps stores each user-defined function overload that the query depends
-	// on.
-	udfDeps map[cat.StableID]*tree.Overload
+	// routineDeps stores each user-defined function and stored procedure overload
+	// (as well as the invocation signature) that the query depends on.
+	routineDeps map[cat.StableID]routineDep
 
 	// objectRefsByName stores each unique name that the query uses to reference
 	// each object. It is needed because changes to the search path may change
@@ -182,12 +182,12 @@ func (md *Metadata) Init() {
 		delete(md.dataSourceDeps, id)
 	}
 
-	udfDeps := md.udfDeps
-	if udfDeps == nil {
-		udfDeps = make(map[cat.StableID]*tree.Overload)
+	routineDeps := md.routineDeps
+	if routineDeps == nil {
+		routineDeps = make(map[cat.StableID]routineDep)
 	}
-	for id := range md.udfDeps {
-		delete(md.udfDeps, id)
+	for id := range md.routineDeps {
+		delete(md.routineDeps, id)
 	}
 
 	objectRefsByName := md.objectRefsByName
@@ -223,7 +223,7 @@ func (md *Metadata) Init() {
 	md.sequences = sequences[:0]
 	md.views = views[:0]
 	md.dataSourceDeps = dataSourceDeps
-	md.udfDeps = udfDeps
+	md.routineDeps = routineDeps
 	md.objectRefsByName = objectRefsByName
 	md.privileges = privileges
 	md.builtinRefsByName = builtinRefsByName
@@ -241,7 +241,7 @@ func (md *Metadata) CopyFrom(from *Metadata, copyScalarFn func(Expr) Expr) {
 	if len(md.schemas) != 0 || len(md.cols) != 0 || len(md.tables) != 0 ||
 		len(md.sequences) != 0 || len(md.views) != 0 || len(md.userDefinedTypes) != 0 ||
 		len(md.userDefinedTypesSlice) != 0 || len(md.dataSourceDeps) != 0 ||
-		len(md.udfDeps) != 0 || len(md.objectRefsByName) != 0 || len(md.privileges) != 0 ||
+		len(md.routineDeps) != 0 || len(md.objectRefsByName) != 0 || len(md.privileges) != 0 ||
 		len(md.builtinRefsByName) != 0 {
 		panic(errors.AssertionFailedf("CopyFrom requires empty destination"))
 	}
@@ -285,11 +285,11 @@ func (md *Metadata) CopyFrom(from *Metadata, copyScalarFn func(Expr) Expr) {
 		md.dataSourceDeps[id] = dataSource
 	}
 
-	for id, overload := range from.udfDeps {
-		if md.udfDeps == nil {
-			md.udfDeps = make(map[cat.StableID]*tree.Overload)
+	for id, overload := range from.routineDeps {
+		if md.routineDeps == nil {
+			md.routineDeps = make(map[cat.StableID]routineDep)
 		}
-		md.udfDeps[id] = overload
+		md.routineDeps[id] = overload
 	}
 
 	for id, names := range from.objectRefsByName {
@@ -399,11 +399,6 @@ func (md *Metadata) CheckDependencies(
 		}
 	}
 
-	// Ensure that all required privileges for the data sources are still valid.
-	if err := md.checkDataSourcePrivileges(ctx, optCatalog); err != nil {
-		return false, err
-	}
-
 	// Check that no referenced user defined types have changed.
 	for _, typ := range md.AllUserDefinedTypes() {
 		id := cat.StableID(catid.UserDefinedOIDToID(typ.Oid()))
@@ -423,8 +418,10 @@ func (md *Metadata) CheckDependencies(
 		}
 	}
 
-	// Check that no referenced user defined functions have changed.
-	for id, overload := range md.udfDeps {
+	// Check that no referenced user defined functions or stored procedures have
+	// changed.
+	for id, dep := range md.routineDeps {
+		overload := dep.overload
 		if names, ok := md.objectRefsByName[id]; ok {
 			for _, name := range names {
 				definition, err := optCatalog.ResolveFunction(
@@ -434,19 +431,44 @@ func (md *Metadata) CheckDependencies(
 				if err != nil {
 					return false, maybeSwallowMetadataResolveErr(err)
 				}
+				routineObj := tree.RoutineObj{
+					FuncName: name.ToRoutineName(),
+					Params:   make(tree.RoutineParams, len(dep.invocationTypes)),
+				}
+				for i := 0; i < len(routineObj.Params); i++ {
+					routineObj.Params[i] = tree.RoutineParam{
+						Type: dep.invocationTypes[i],
+						// Since we're not in the DROP context, it's sufficient
+						// to specify only the input parameters.
+						Class: tree.RoutineParamIn,
+						// Note that we don't need to specify the DefaultVal
+						// here because invocationTypes specifies the argument
+						// schema that was actually used. Instead, we will ask
+						// for matching overloads to use their DEFAULT
+						// expressions if necessary.
+					}
+				}
 				// NOTE: We match for all types of routines here, including
 				// procedures so that if a function has been dropped and a
 				// procedure is created with the same signature, we do not get a
 				// "<func> is not a function" error here. Instead, we'll return
 				// false and attempt to rebuild the statement.
+				routineType := tree.UDFRoutine | tree.BuiltinRoutine | tree.ProcedureRoutine
+				// Always allowing using DEFAULT expressions for input
+				// parameters since the signature of the routine might have
+				// changed even though the invocation remained the same.
+				const tryDefaultExprs = true
 				toCheck, err := definition.MatchOverload(
-					overload.Types.Types(),
-					name.Schema(),
+					ctx,
+					optCatalog,
+					&routineObj,
 					&evalCtx.SessionData().SearchPath,
-					tree.UDFRoutine|tree.BuiltinRoutine|tree.ProcedureRoutine,
+					routineType,
+					false, /* inDropContext */
+					tryDefaultExprs,
 				)
 				if err != nil || toCheck.Oid != overload.Oid || toCheck.Version != overload.Version {
-					return false, err
+					return false, maybeSwallowMetadataResolveErr(err)
 				}
 			}
 		} else {
@@ -454,14 +476,6 @@ func (md *Metadata) CheckDependencies(
 			if err != nil || overload.Version != toCheck.Version {
 				return false, maybeSwallowMetadataResolveErr(err)
 			}
-		}
-	}
-
-	// Check that the role still has execution privilege on the user defined
-	// functions.
-	for _, overload := range md.udfDeps {
-		if err := optCatalog.CheckExecutionPrivilege(ctx, overload.Oid); err != nil {
-			return false, err
 		}
 	}
 
@@ -478,6 +492,21 @@ func (md *Metadata) CheckDependencies(
 			if definition.Overloads[i].Type == tree.UDFRoutine {
 				return false, nil
 			}
+		}
+	}
+
+	// Check that the role still has the required privileges for the data sources
+	// and routines.
+	//
+	// NOTE: this check has to happen after the object resolution checks, or else
+	// we may end up returning a privilege error when the memo should have just
+	// been invalidated.
+	if err := md.checkDataSourcePrivileges(ctx, optCatalog); err != nil {
+		return false, err
+	}
+	for _, dep := range md.routineDeps {
+		if err := optCatalog.CheckExecutionPrivilege(ctx, dep.overload.Oid, optCatalog.GetCurrentUser()); err != nil {
+			return false, err
 		}
 	}
 
@@ -516,7 +545,7 @@ func (md *Metadata) checkDataSourcePrivileges(ctx context.Context, optCatalog ca
 			// privileges do not need to be checked). Ignore the "zero privilege".
 			priv := privilege.Kind(bits.TrailingZeros32(uint32(privs)))
 			if priv != 0 {
-				if err := optCatalog.CheckPrivilege(ctx, dataSource, priv); err != nil {
+				if err := optCatalog.CheckPrivilege(ctx, dataSource, optCatalog.GetCurrentUser(), priv); err != nil {
 					return err
 				}
 			}
@@ -563,23 +592,37 @@ func (md *Metadata) AllUserDefinedTypes() []*types.T {
 	return md.userDefinedTypesSlice
 }
 
-// HasUserDefinedFunctions returns true if the query references a UDF.
-func (md *Metadata) HasUserDefinedFunctions() bool {
-	return len(md.udfDeps) > 0
+// HasUserDefinedRoutines returns true if the query references a UDF or stored
+// procedure.
+func (md *Metadata) HasUserDefinedRoutines() bool {
+	return len(md.routineDeps) > 0
 }
 
-// AddUserDefinedFunction adds a user-defined function to the metadata for this
-// query. If the function was resolved by name, the name will also be tracked.
-func (md *Metadata) AddUserDefinedFunction(
-	overload *tree.Overload, name *tree.UnresolvedObjectName,
+// AddUserDefinedRoutine adds a user-defined function or stored procedure to the
+// metadata for this query. If the routine was resolved by name, the name will
+// also be tracked.
+func (md *Metadata) AddUserDefinedRoutine(
+	overload *tree.Overload, invocationTypes []*types.T, name *tree.UnresolvedObjectName,
 ) {
-	if overload.Type != tree.UDFRoutine {
+	if overload.Type == tree.BuiltinRoutine {
 		return
 	}
 	id := cat.StableID(catid.UserDefinedOIDToID(overload.Oid))
-	md.udfDeps[id] = overload
+	md.routineDeps[id] = routineDep{
+		overload:        overload,
+		invocationTypes: invocationTypes,
+	}
 	if name != nil {
 		md.objectRefsByName[id] = append(md.objectRefsByName[id], name)
+	}
+}
+
+// ForEachUserDefinedRoutine executes the given function for each user-defined
+// routine (UDF or stored procedure) overload. The order of iteration is
+// non-deterministic.
+func (md *Metadata) ForEachUserDefinedRoutine(fn func(overload *tree.Overload)) {
+	for _, dep := range md.routineDeps {
+		fn(dep.overload)
 	}
 }
 
@@ -763,6 +806,11 @@ func (md *Metadata) AllTables() []TableMeta {
 	return md.tables
 }
 
+// NumTables returns the number of tables in the metadata.
+func (md *Metadata) NumTables() int {
+	return len(md.tables)
+}
+
 // AddColumn assigns a new unique id to a column within the query and records
 // its alias and type. If the alias is empty, a "column<ID>" alias is created.
 func (md *Metadata) AddColumn(alias string, typ *types.T) ColumnID {
@@ -777,6 +825,11 @@ func (md *Metadata) AddColumn(alias string, typ *types.T) ColumnID {
 // NumColumns returns the count of columns tracked by this Metadata instance.
 func (md *Metadata) NumColumns() int {
 	return len(md.cols)
+}
+
+// MaxColumn returns the maximum column ID tracked by this Metadata instance.
+func (md *Metadata) MaxColumn() ColumnID {
+	return ColumnID(len(md.cols))
 }
 
 // ColumnMeta looks up the metadata for the column associated with the given
@@ -797,7 +850,7 @@ func (md *Metadata) ColumnMeta(colID ColumnID) *ColumnMeta {
 //     name: "tabName.columnAlias". If alwaysQualify is true, then the column
 //     alias is always prefixed with the table alias.
 func (md *Metadata) QualifiedAlias(
-	colID ColumnID, fullyQualify, alwaysQualify bool, catalog cat.Catalog,
+	ctx context.Context, colID ColumnID, fullyQualify, alwaysQualify bool, catalog cat.Catalog,
 ) string {
 	cm := md.ColumnMeta(colID)
 	if cm.Table == 0 {
@@ -839,7 +892,7 @@ func (md *Metadata) QualifiedAlias(
 
 	var sb strings.Builder
 	if fullyQualify {
-		tn, err := catalog.FullyQualifiedName(context.TODO(), md.TableMeta(cm.Table).Table)
+		tn, err := catalog.FullyQualifiedName(ctx, md.TableMeta(cm.Table).Table)
 		if err != nil {
 			panic(err)
 		}
@@ -854,7 +907,9 @@ func (md *Metadata) QualifiedAlias(
 
 // UpdateTableMeta allows the caller to replace the cat.Table struct that a
 // TableMeta instance stores.
-func (md *Metadata) UpdateTableMeta(evalCtx *eval.Context, tables map[cat.StableID]cat.Table) {
+func (md *Metadata) UpdateTableMeta(
+	ctx context.Context, evalCtx *eval.Context, tables map[cat.StableID]cat.Table,
+) {
 	for i := range md.tables {
 		oldTable := md.tables[i].Table
 		if newTable, ok := tables[oldTable.ID()]; ok {
@@ -870,7 +925,7 @@ func (md *Metadata) UpdateTableMeta(evalCtx *eval.Context, tables map[cat.Stable
 				md.SetTableAnnotation(md.tables[i].MetaID, NotNullAnnID, nil)
 			}
 			md.tables[i].Table = newTable
-			md.tables[i].CacheIndexPartitionLocalities(evalCtx)
+			md.tables[i].CacheIndexPartitionLocalities(ctx, evalCtx)
 		}
 	}
 }
@@ -952,49 +1007,43 @@ func (md *Metadata) getAllReferenceTables(
 	var tableSet intsets.Fast
 	var tableList []cat.DataSource
 	var addForeignKeyReferencedTables func(tab cat.Table)
+	var addForeignKeyReferencingTables func(tab cat.Table)
+	// handleRelatedTables is a helper function that processes the given table
+	// if it hasn't been handled yet by adding all referenced and referencing
+	// table of the given one, including via transient (recursive) FK
+	// relationships.
+	handleRelatedTables := func(tabID cat.StableID) {
+		if !tableSet.Contains(int(tabID)) {
+			tableSet.Add(int(tabID))
+			ds, _, err := catalog.ResolveDataSourceByID(ctx, cat.Flags{}, tabID)
+			if err != nil {
+				// This is a best-effort attempt to get all the tables, so don't
+				// error.
+				return
+			}
+			refTab, ok := ds.(cat.Table)
+			if !ok {
+				// This is a best-effort attempt to get all the tables, so don't
+				// error.
+				return
+			}
+			// We want to include all tables that we reference before adding
+			// ourselves, followed by all tables that reference us.
+			addForeignKeyReferencedTables(refTab)
+			tableList = append(tableList, ds)
+			addForeignKeyReferencingTables(refTab)
+		}
+	}
 	addForeignKeyReferencedTables = func(tab cat.Table) {
 		for i := 0; i < tab.OutboundForeignKeyCount(); i++ {
 			tabID := tab.OutboundForeignKey(i).ReferencedTableID()
-			if !tableSet.Contains(int(tabID)) {
-				tableSet.Add(int(tabID))
-				ds, _, err := catalog.ResolveDataSourceByID(ctx, cat.Flags{}, tabID)
-				if err != nil {
-					// This is a best-effort attempt to get all the tables, so don't error.
-					continue
-				}
-				refTab, ok := ds.(cat.Table)
-				if !ok {
-					// This is a best-effort attempt to get all the tables, so don't error.
-					continue
-				}
-				// We want to include all tables that we reference before adding
-				// ourselves.
-				addForeignKeyReferencedTables(refTab)
-				tableList = append(tableList, ds)
-			}
+			handleRelatedTables(tabID)
 		}
 	}
-	var addForeignKeyReferencingTables func(tab cat.Table)
 	addForeignKeyReferencingTables = func(tab cat.Table) {
 		for i := 0; i < tab.InboundForeignKeyCount(); i++ {
 			tabID := tab.InboundForeignKey(i).OriginTableID()
-			if !tableSet.Contains(int(tabID)) {
-				tableSet.Add(int(tabID))
-				ds, _, err := catalog.ResolveDataSourceByID(ctx, cat.Flags{}, tabID)
-				if err != nil {
-					// This is a best-effort attempt to get all the tables, so don't error.
-					continue
-				}
-				refTab, ok := ds.(cat.Table)
-				if !ok {
-					// This is a best-effort attempt to get all the tables, so don't error.
-					continue
-				}
-				// We want to include ourselves before all tables that reference
-				// us.
-				tableList = append(tableList, ds)
-				addForeignKeyReferencingTables(refTab)
-			}
+			handleRelatedTables(tabID)
 		}
 	}
 	for i := range md.tables {
@@ -1100,6 +1149,13 @@ func (md *Metadata) WithBinding(id WithID) Expr {
 	return res
 }
 
+// HasWithBinding returns true if the given WithID is already bound to an
+// expression.
+func (md *Metadata) HasWithBinding(id WithID) bool {
+	_, ok := md.withBindings[id]
+	return ok
+}
+
 // ForEachWithBinding calls fn with each bound (WithID, Expr) pair in the
 // metadata.
 func (md *Metadata) ForEachWithBinding(fn func(WithID, Expr)) {
@@ -1131,9 +1187,22 @@ func (md *Metadata) TestingDataSourceDeps() map[cat.StableID]cat.DataSource {
 	return md.dataSourceDeps
 }
 
-// TestingUDFDeps exposes the udfDeps for testing.
-func (md *Metadata) TestingUDFDeps() map[cat.StableID]*tree.Overload {
-	return md.udfDeps
+// TestingRoutineDepsEqual returns whether the routine deps of the other
+// Metadata are equal to the routine deps of this Metadata.
+func (md *Metadata) TestingRoutineDepsEqual(other *Metadata) bool {
+	if len(md.routineDeps) != len(other.routineDeps) {
+		return false
+	}
+	for id, otherDep := range other.routineDeps {
+		dep, ok := md.routineDeps[id]
+		if !ok {
+			return false
+		}
+		if dep.overload != otherDep.overload || len(dep.invocationTypes) != len(otherDep.invocationTypes) {
+			return false
+		}
+	}
+	return true
 }
 
 // TestingObjectRefsByName exposes the objectRefsByName for testing.

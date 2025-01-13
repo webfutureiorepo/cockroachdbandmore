@@ -1,20 +1,17 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { all, call, delay, put, takeLatest } from "redux-saga/effects";
-import { actions } from "./uiConfig.reducer";
-import { getUserSQLRoles } from "../../api/userApi";
-import { CACHE_INVALIDATION_PERIOD, throttleWithReset } from "../utils";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { getLogger } from "../../util";
+import { all, call, delay, put, takeLatest } from "redux-saga/effects";
+
+import { getUserSQLRoles } from "../../api/userApi";
+import { maybeError, getLogger } from "../../util";
 import { rootActions } from "../rootActions";
+import { CACHE_INVALIDATION_PERIOD, throttleWithReset } from "../utils";
+
+import { actions } from "./uiConfig.reducer";
 
 export function* refreshUserSQLRolesSaga(): any {
   yield put(actions.requestUserSQLRoles());
@@ -22,12 +19,15 @@ export function* refreshUserSQLRolesSaga(): any {
 
 export function* requestUserSQLRolesSaga(): any {
   try {
-    const result: cockroach.server.serverpb.UserSQLRolesResponse = yield call(
-      getUserSQLRoles,
-    );
+    const result: cockroach.server.serverpb.UserSQLRolesResponse =
+      yield call(getUserSQLRoles);
     yield put(actions.receivedUserSQLRoles(result.roles));
   } catch (e) {
-    getLogger().warn(e.message, /* additional context */ undefined, e);
+    getLogger().warn(
+      maybeError(e).message,
+      /* additional context */ undefined,
+      e,
+    );
   }
 }
 

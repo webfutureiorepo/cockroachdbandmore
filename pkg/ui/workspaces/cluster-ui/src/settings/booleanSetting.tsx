@@ -1,18 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import * as React from "react";
-import { CircleFilled } from "src/icon";
-import { Tooltip } from "antd";
-import "antd/lib/tooltip/style";
 import classNames from "classnames/bind";
+import * as React from "react";
+
+import { Tooltip } from "src/components/tooltip";
+import { CircleFilled } from "src/icon";
+
 import styles from "./booleanSetting.module.scss";
 
 const cx = classNames.bind(styles);
@@ -32,11 +28,7 @@ export function BooleanSetting(props: BooleanSettingProps): React.ReactElement {
   return (
     <div>
       <CircleFilled className={cx(boolClass)} />
-      <Tooltip
-        placement="bottom"
-        title={tooltipText}
-        className={cx("crl-hover-text__dashed-underline")}
-      >
+      <Tooltip placement="bottom" title={tooltipText}>
         {text} - {label}
       </Tooltip>
     </div>

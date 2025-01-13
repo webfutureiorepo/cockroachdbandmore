@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -228,6 +223,11 @@ var _ eval.WindowFunc = &nthValueWindow{}
 
 // aggregateWindowFunc aggregates over the current row's window frame, using
 // the internal eval.AggregateFunc to perform the aggregation.
+//
+// INVARIANT: the rows within a window frame are always processed in the same
+// order, regardless of whether the user specified an ordering. This means that
+// two rows with the exact same frame will produce the same result for a given
+// aggregation.
 type aggregateWindowFunc struct {
 	agg     eval.AggregateFunc
 	peerRes tree.Datum

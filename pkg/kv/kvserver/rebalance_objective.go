@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -94,13 +89,13 @@ const (
 
 // LoadBasedRebalancingObjectiveMap maps the LoadBasedRebalancingObjective enum
 // value to a string.
-var LoadBasedRebalancingObjectiveMap map[int64]string = map[int64]string{
-	int64(LBRebalancingQueries): "qps",
-	int64(LBRebalancingCPU):     "cpu",
+var LoadBasedRebalancingObjectiveMap = map[LBRebalancingObjective]string{
+	LBRebalancingQueries: "qps",
+	LBRebalancingCPU:     "cpu",
 }
 
 func (lbro LBRebalancingObjective) String() string {
-	return LoadBasedRebalancingObjectiveMap[int64(lbro)]
+	return LoadBasedRebalancingObjectiveMap[lbro]
 }
 
 // LoadBasedRebalancingObjective is a cluster setting that defines the load
@@ -263,7 +258,7 @@ func ResolveLBRebalancingObjective(
 ) LBRebalancingObjective {
 	set := LoadBasedRebalancingObjective.Get(&st.SV)
 	// Queries should always be supported, return early if set.
-	if set == int64(LBRebalancingQueries) {
+	if set == LBRebalancingQueries {
 		return LBRebalancingQueries
 	}
 	// When the cpu timekeeping utility is unsupported on this aarch, the cpu
@@ -290,5 +285,5 @@ func ResolveLBRebalancingObjective(
 	// The cluster is on a supported version and this local store is on aarch
 	// which supported the cpu timekeeping utility, return the cluster setting
 	// as is.
-	return LBRebalancingObjective(set)
+	return set
 }

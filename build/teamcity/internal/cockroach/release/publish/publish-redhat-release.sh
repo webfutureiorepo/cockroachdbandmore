@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2023 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euxo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname $(dirname $(dirname "${0}"))))))"
@@ -12,6 +18,11 @@ version=$(grep -v "^#" "$dir/../pkg/build/version.txt" | head -n1)
 if [[ $version == *"-"* ]]; then
   echo "Pushing pre-release versions to Red Hat is not implemented (there is no unstable repository for them to live)"
   exit 0
+fi
+
+PUBLISH_LATEST=
+if is_latest "$version"; then
+  PUBLISH_LATEST=true
 fi
 
 # Hard coded release number used only by the RedHat images
@@ -43,6 +54,7 @@ cat build/deploy-redhat/Dockerfile
 docker build --no-cache \
   --pull \
   --label release=$rhel_release \
+  --label version=$version \
   --tag="${rhel_repository}:${version}" \
   build/deploy-redhat
 tc_end_block "Rebuild docker image"

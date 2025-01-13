@@ -1,10 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdctest
 
@@ -16,10 +13,31 @@ import (
 	"math/rand"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/internal/sqlsmith"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
+
+type NemesesOption struct {
+	EnableFpValidator bool
+	EnableSQLSmith    bool
+}
+
+var NemesesOptions = []NemesesOption{
+	{
+		EnableFpValidator: true,
+		EnableSQLSmith:    false,
+	},
+	{
+		EnableFpValidator: false,
+		EnableSQLSmith:    true,
+	},
+}
+
+func (no NemesesOption) String() string {
+	return fmt.Sprintf("fp_validator=%t,sql_smith=%t", no.EnableFpValidator, no.EnableSQLSmith)
+}
 
 // RunNemesis runs a jepsen-style validation of whether a changefeed meets our
 // user-facing guarantees. It's driven by a state machine with various nemeses:
@@ -36,6 +54,7 @@ func RunNemesis(
 	isCloudstorage bool,
 	withLegacySchemaChanger bool,
 	rng *rand.Rand,
+	nOp NemesesOption,
 ) (Validator, error) {
 	// possible additional nemeses:
 	// - schema changes
@@ -136,7 +155,6 @@ func RunNemesis(
 	if _, err := db.Exec(`ALTER TABLE foo SPLIT AT VALUES ($1)`, ns.rowCount/2); err != nil {
 		return nil, err
 	}
-
 	// Initialize table rows by repeatedly running the `openTxn` transition,
 	// then randomly either committing or rolling back transactions. This will
 	// leave some committed rows.
@@ -156,6 +174,27 @@ func RunNemesis(
 		} else {
 			if err := rollback(fsm.Args{Ctx: ctx, Extended: ns}); err != nil {
 				return nil, err
+			}
+		}
+	}
+
+	if nOp.EnableSQLSmith {
+		queryGen, _ := sqlsmith.NewSmither(db, rng,
+			sqlsmith.MutationsOnly(),
+			sqlsmith.SetScalarComplexity(0.5),
+			sqlsmith.SetComplexity(0.1),
+			// TODO(#129072): Reenable cross joins when the likelihood of generating
+			// queries that could hang decreases.
+			sqlsmith.DisableCrossJoins(),
+			sqlsmith.SimpleDatums(),
+		)
+		defer queryGen.Close()
+		const numInserts = 100
+		for i := 0; i < numInserts; i++ {
+			query := queryGen.Generate()
+			if _, err := db.Exec(query); err != nil {
+				log.Infof(ctx, "Skipping query %s because error %s", query, err)
+				continue
 			}
 		}
 	}
@@ -183,15 +222,21 @@ func RunNemesis(
 	if err != nil {
 		return nil, err
 	}
-	fprintV, err := NewFingerprintValidator(db, `foo`, scratchTableName, foo.Partitions(), ns.maxTestColumnCount)
-	if err != nil {
-		return nil, err
-	}
-	ns.v = MakeCountValidator(Validators{
+
+	validators := Validators{
 		NewOrderValidator(`foo`),
 		baV,
-		fprintV,
-	})
+	}
+
+	if nOp.EnableFpValidator {
+		fprintV, err := NewFingerprintValidator(db, `foo`, scratchTableName, foo.Partitions(), ns.maxTestColumnCount)
+		if err != nil {
+			return nil, err
+		}
+		validators = append(validators, fprintV)
+	}
+
+	ns.v = NewCountValidator(validators)
 
 	// Initialize the actual row count, overwriting what the initialization loop did. That
 	// loop has set this to the number of modified rows, which is correct during
@@ -283,7 +328,7 @@ type nemeses struct {
 	txn                    *gosql.Tx
 	openTxnType            openTxnType
 	openTxnID              int
-	openTxnTs              string
+	openTxnTs              gosql.NullString
 
 	enumCount int
 }

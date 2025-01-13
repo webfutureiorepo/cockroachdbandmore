@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeedbuffer
 
@@ -58,8 +53,8 @@ func TestMergeKVs(t *testing.T) {
 		}
 		return kvs
 	}
-	toBuffer := func(t *testing.T, rows []row) *Buffer {
-		buf := New(len(rows))
+	toBuffer := func(t *testing.T, rows []row) *Buffer[*kvpb.RangeFeedValue] {
+		buf := New[*kvpb.RangeFeedValue](len(rows))
 		for _, r := range rows {
 			require.NoError(t, buf.Add(toRangeFeedEvent(r)))
 		}

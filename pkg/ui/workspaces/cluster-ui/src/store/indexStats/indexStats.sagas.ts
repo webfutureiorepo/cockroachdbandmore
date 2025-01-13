@@ -1,13 +1,9 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { PayloadAction } from "@reduxjs/toolkit";
 import {
   all,
@@ -17,20 +13,22 @@ import {
   takeLatest,
   takeEvery,
 } from "redux-saga/effects";
+
 import { ErrorWithKey } from "src/api/statementsApi";
-import {
-  actions as indexStatsActions,
-  ResetIndexUsageStatsPayload,
-} from "./indexStats.reducer";
 import { CACHE_INVALIDATION_PERIOD } from "src/store/utils";
-import { generateTableID } from "../../util";
+
 import {
   getIndexStats,
   resetIndexStats,
   TableIndexStatsRequest,
   TableIndexStatsResponseWithKey,
 } from "../../api/indexDetailsApi";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { generateTableID, maybeError } from "../../util";
+
+import {
+  actions as indexStatsActions,
+  ResetIndexUsageStatsPayload,
+} from "./indexStats.reducer";
 
 export function* refreshIndexStatsSaga(
   action: PayloadAction<TableIndexStatsRequest>,
@@ -53,7 +51,7 @@ export function* requestIndexStatsSaga(
     yield put(indexStatsActions.received(resultWithKey));
   } catch (e) {
     const err: ErrorWithKey = {
-      err: e,
+      err: maybeError(e),
       key,
     };
     yield put(indexStatsActions.failed(err));
@@ -93,7 +91,7 @@ export function* resetIndexStatsSaga(
     );
   } catch (e) {
     const err: ErrorWithKey = {
-      err: e,
+      err: maybeError(e),
       key,
     };
     yield put(indexStatsActions.failed(err));

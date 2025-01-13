@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package registry
 
@@ -15,15 +10,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/internal/team"
 	"github.com/cockroachdb/datadriven"
 )
 
 func init() {
 	OverrideTeams(team.Map{
-		OwnerCDC.ToTeamAlias():         {},
-		OwnerKV.ToTeamAlias():          {},
-		OwnerReplication.ToTeamAlias(): {},
+		OwnerCDC.ToTeamAlias(): {},
+		OwnerKV.ToTeamAlias():  {},
 	})
 }
 
@@ -70,7 +65,7 @@ func TestTestFilter(t *testing.T) {
 			for _, arg := range d.CmdArgs {
 				switch arg.Key {
 				case "cloud":
-					options = append(options, WithCloud(arg.Vals[0]))
+					options = append(options, WithCloud(spec.CloudFromString(arg.Vals[0])))
 				case "suite":
 					options = append(options, WithSuite(arg.Vals[0]))
 				case "owner":

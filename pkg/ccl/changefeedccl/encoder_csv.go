@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -49,12 +46,19 @@ func (e *csvEncoder) EncodeValue(
 	ctx context.Context, evCtx eventContext, updatedRow cdcevent.Row, prevRow cdcevent.Row,
 ) ([]byte, error) {
 	if updatedRow.IsDeleted() {
-		return nil, errors.Errorf(`cannot encode deleted rows into CSV format`)
+		return nil, errors.AssertionFailedf(`cannot encode deleted rows into CSV format`)
 	}
 	e.buf.Reset()
 	if err := updatedRow.ForEachColumn().Datum(func(d tree.Datum, col cdcevent.ResultColumn) error {
 		e.formatter.Reset()
-		e.formatter.FormatNode(d)
+
+		switch di := d.(type) {
+		case *tree.DCollatedString:
+			e.formatter.WriteString(di.Contents)
+		default:
+			e.formatter.FormatNode(d)
+		}
+
 		return e.writer.WriteField(&e.formatter.Buffer)
 	}); err != nil {
 		return nil, err

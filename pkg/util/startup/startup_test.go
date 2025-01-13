@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package startup_test
 
@@ -29,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/listenerutil"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -93,9 +89,9 @@ func TestStartupFailureRandomRange(t *testing.T) {
 	// of CI at all, and we also don't want to stress it in nightlies as part of
 	// a big package (where it will take a lot of time that could be spent running
 	// "faster" tests). In this package, it is the only test and so it's fine to
-	// run it under nightly (skipping nightly stressrace because race builds with
-	// many nodes are very resource intensive and tend to collapse).
-	skip.UnderStressRace(t, "6 nodes with replication is too slow for stress race")
+	// run it under nightly (skipping race builds because with many nodes they are
+	// very resource intensive and tend to collapse).
+	skip.UnderRace(t, "6 nodes with replication is too slow for race")
 	if !skip.NightlyStress() {
 		skip.IgnoreLint(t, "test takes 30s to run due to circuit breakers and timeouts")
 	}
@@ -139,7 +135,7 @@ func runCircuitBreakerTestForKey(
 
 	lReg := listenerutil.NewListenerRegistry()
 	defer lReg.Close()
-	reg := server.NewStickyVFSRegistry()
+	reg := fs.NewStickyRegistry()
 
 	// TODO: Disable expiration based leases metamorphism since it currently
 	// breaks closed timestamps and prevent rangefeeds from advancing checkpoint

@@ -1,17 +1,13 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package acceptance
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,6 +29,7 @@ var stopper = stop.NewStopper()
 
 // RunDocker runs the given acceptance test using a Docker cluster.
 func RunDocker(t *testing.T, testee func(t *testing.T)) {
+	maybeSkipTest(t)
 	t.Run(dockerTest, testee)
 }
 
@@ -72,7 +69,16 @@ func StartCluster(ctx context.Context, t *testing.T, cfg cluster.TestConfig) (c 
 
 	switch runMode {
 	case dockerTest:
-		logDir := *flagLogDir
+		var logDir string
+		isRemote := os.Getenv("REMOTE_EXEC")
+		if len(isRemote) > 0 {
+			logDir = os.Getenv("TEST_UNDECLARED_OUTPUTS_DIR")
+			if logDir != "" {
+				logDir = filepath.Join(logDir, "logs")
+			}
+		} else {
+			logDir = *flagLogDir
+		}
 		if logDir != "" {
 			logDir = filepath.Join(logDir, filepath.Clean(t.Name()))
 		}

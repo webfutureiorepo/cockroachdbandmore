@@ -1,40 +1,38 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { Button, Icon, InlineAlert } from "@cockroachlabs/ui-components";
+import classnames from "classnames/bind";
+import classNames from "classnames/bind";
+import moment from "moment-timezone";
 import React from "react";
 import { Link } from "react-router-dom";
-import classnames from "classnames/bind";
-import { Button, Icon, InlineAlert } from "@cockroachlabs/ui-components";
+
+import emptyListResultsImg from "src/assets/emptyState/empty-list-results.svg";
 import { Button as CancelButton } from "src/button";
-import { SummaryCard } from "src/summaryCard";
+import { EmptyTable } from "src/empty";
+import { ColumnDescriptor, SortedTable, SortSetting } from "src/sortedtable";
 import {
   ActivateDiagnosticsModalRef,
   DiagnosticStatusBadge,
 } from "src/statementsDiagnostics";
-import emptyListResultsImg from "src/assets/emptyState/empty-list-results.svg";
-import { filterByTimeScale, getDiagnosticsStatus } from "./diagnosticsUtils";
-import { EmptyTable } from "src/empty";
-import styles from "./diagnosticsView.module.scss";
-import { StatementDiagnosticsReport, withBasePath } from "../../api";
+import { SummaryCard } from "src/summaryCard";
 import {
   TimeScale,
   timeScale1hMinOptions,
   TimeScaleDropdown,
 } from "src/timeScaleDropdown";
-import { ColumnDescriptor, SortedTable, SortSetting } from "src/sortedtable";
-import { DATE_FORMAT_24_TZ } from "../../util";
-import { Timestamp } from "../../timestamp";
-import moment from "moment-timezone";
-import { FormattedTimescale } from "../../timeScaleDropdown/formattedTimeScale";
 import timeScaleStyles from "src/timeScaleDropdown/timeScale.module.scss";
-import classNames from "classnames/bind";
+
+import { StatementDiagnosticsReport, withBasePath } from "../../api";
+import { FormattedTimescale } from "../../timeScaleDropdown/formattedTimeScale";
+import { Timestamp } from "../../timestamp";
+import { DATE_FORMAT_24_TZ } from "../../util";
+
+import { filterByTimeScale, getDiagnosticsStatus } from "./diagnosticsUtils";
+import styles from "./diagnosticsView.module.scss";
 
 const timeScaleStylesCx = classNames.bind(timeScaleStyles);
 

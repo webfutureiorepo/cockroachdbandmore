@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -25,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
-	"github.com/cockroachdb/errors"
 )
 
 var activerecordResultRegex = regexp.MustCompile(`^(?P<test>[^\s]+#[^\s]+) = (?P<timing>\d+\.\d+ s) = (?P<result>.)$`)
@@ -33,8 +27,8 @@ var railsReleaseTagRegex = regexp.MustCompile(`^v(?P<major>\d+)\.(?P<minor>\d+)\
 
 // WARNING: DO NOT MODIFY the name of the below constant/variable without approval from the docs team.
 // This is used by docs automation to produce a list of supported versions for ORM's.
-var supportedRailsVersion = "7.0.3"
-var activerecordAdapterVersion = "v7.0.2"
+var supportedRailsVersion = "7.2.1"
+var activerecordAdapterVersion = "v7.2.0"
 
 // This test runs activerecord's full test suite against a single cockroach node.
 
@@ -49,9 +43,10 @@ func registerActiveRecord(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		startOpts := option.DefaultStartOptsInMemory()
+		startOpts := option.NewStartOpts(sqlClientsInMemoryDB)
 		startOpts.RoachprodOpts.SQLPort = config.DefaultSQLPort
-		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
+		// Activerecord uses root user with ssl disabled.
+		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(install.SecureOption(false)), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -116,11 +111,11 @@ func registerActiveRecord(r registry.Registry) {
 			t,
 			c,
 			node,
-			"install ruby 3.1",
+			"install ruby 3.3",
 			`mkdir -p ruby-install && \
         curl -fsSL https://github.com/postmodern/ruby-install/archive/v0.9.1.tar.gz | tar --strip-components=1 -C ruby-install -xz && \
         sudo make -C ruby-install install && \
-        sudo ruby-install --system ruby 3.1.4 && \
+        sudo ruby-install --system ruby 3.3.6 && \
         sudo gem update --system`,
 		); err != nil {
 			t.Fatal(err)
@@ -151,7 +146,7 @@ func registerActiveRecord(r registry.Registry) {
 			c,
 			node,
 			"installing bundler",
-			`cd /mnt/data1/activerecord-cockroachdb-adapter/ && sudo gem install bundler:2.1.4`,
+			`cd /mnt/data1/activerecord-cockroachdb-adapter/ && sudo gem install bundler:2.5.23`,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -183,9 +178,9 @@ func registerActiveRecord(r registry.Registry) {
 					`sudo RAILS_VERSION=%s RUBYOPT="-W0" TESTOPTS="-v" bundle exec rake test`, supportedRailsVersion),
 		)
 
-		// Fatal for a roachprod or SSH error. A roachprod error is when result.Err==nil.
+		// Fatal for a roachprod or transient error. A roachprod error is when result.Err==nil.
 		// Proceed for any other (command) errors
-		if err != nil && (result.Err == nil || errors.Is(err, rperrors.ErrSSH255)) {
+		if err != nil && (result.Err == nil || rperrors.IsTransient(err)) {
 			t.Fatal(err)
 		}
 
@@ -234,14 +229,9 @@ func registerActiveRecord(r registry.Registry) {
 				results.failExpectedCount++
 				results.currentFailures = append(results.currentFailures, test)
 			case !pass && !expectedFailure:
-				// The test suite is flaky and work is being done upstream to stabilize
-				// it (https://github.com/cockroachdb/cockroach/issues/108938). Until
-				// that's done, we ignore all failures from this test.
-				// results.results[test] = fmt.Sprintf("--- FAIL: %s (unexpected)", test)
-				// results.failUnexpectedCount++
-				// results.currentFailures = append(results.currentFailures, test)
-				results.results[test] = fmt.Sprintf("--- SKIP: %s due to upstream flakes (https://github.com/cockroachdb/cockroach/issues/108938)", test)
-				results.ignoredCount++
+				results.results[test] = fmt.Sprintf("--- FAIL: %s (unexpected)", test)
+				results.failUnexpectedCount++
+				results.currentFailures = append(results.currentFailures, test)
 			}
 			results.runTests[test] = struct{}{}
 		}
@@ -257,7 +247,7 @@ func registerActiveRecord(r registry.Registry) {
 		Timeout:          5 * time.Hour,
 		Cluster:          r.MakeClusterSpec(1),
 		NativeLibs:       registry.LibGEOS,
-		CompatibleClouds: registry.AllExceptAWS,
+		CompatibleClouds: registry.OnlyGCE,
 		Suites:           registry.Suites(registry.Nightly, registry.ORM),
 		Run:              runActiveRecord,
 		Leases:           registry.MetamorphicLeases,

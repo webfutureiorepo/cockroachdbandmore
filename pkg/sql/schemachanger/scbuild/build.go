@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuild
 
@@ -29,9 +24,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/redact"
 )
+
+// LogSchemaChangerEventsFn callback function returned by builder that
+// will log event log entries. This isn't a part of the plan and is executed
+// right before the statement phases.
+type LogSchemaChangerEventsFn func(ctx context.Context) error
+
+// stubLogSchemaChangerEventsFn internally used when no logging is needed.
+var stubLogSchemaChangerEventsFn = func(ctx context.Context) error {
+	return nil
+}
 
 // Build constructs a new state from an incumbent state and a statement.
 //
@@ -52,22 +58,26 @@ func Build(
 	incumbent scpb.CurrentState,
 	n tree.Statement,
 	memAcc *mon.BoundAccount,
-) (_ scpb.CurrentState, err error) {
+) (_ scpb.CurrentState, eventLogCallBack LogSchemaChangerEventsFn, err error) {
+	// This message is logged at level=1 since this is called during the planning
+	// phase to check if the statement is supported by the declarative schema
+	// changer, which makes this quite verbose.
 	defer scerrors.StartEventf(
 		ctx,
+		1, /* level */
 		"building declarative schema change targets for %s",
 		redact.Safe(n.StatementTag()),
 	).HandlePanicAndLogError(ctx, &err)
 
 	// localMemAcc tracks memory allocations for local objects.
 	var localMemAcc *mon.BoundAccount
-	defer func() {
-		localMemAcc.Clear(ctx)
-	}()
 	if monitor := memAcc.Monitor(); monitor != nil {
 		acc := monitor.MakeBoundAccount()
 		localMemAcc = &acc
+	} else {
+		localMemAcc = mon.NewStandaloneUnlimitedAccount()
 	}
+	defer localMemAcc.Clear(ctx)
 	bs := newBuilderState(ctx, dependencies, incumbent, localMemAcc)
 	els := newEventLogState(dependencies, incumbent, n)
 
@@ -76,24 +86,30 @@ func Build(
 	// VIEW statements.
 	an, err := newAstAnnotator(n)
 	if err != nil {
-		return scpb.CurrentState{}, err
+		return scpb.CurrentState{}, stubLogSchemaChangerEventsFn, err
 	}
 	b := buildCtx{
-		Context:              ctx,
-		Dependencies:         dependencies,
-		BuilderState:         bs,
-		EventLogState:        els,
-		TreeAnnotator:        an,
-		SchemaFeatureChecker: dependencies.FeatureChecker(),
+		Context:                 ctx,
+		Dependencies:            dependencies,
+		BuilderState:            bs,
+		EventLogState:           els,
+		TreeAnnotator:           an,
+		SchemaFeatureChecker:    dependencies.FeatureChecker(),
+		TemporarySchemaProvider: dependencies.TemporarySchemaProvider(),
+		NodesStatusInfo:         dependencies.NodesStatusInfo(),
+		RegionProvider:          dependencies.RegionProvider(),
 	}
 	scbuildstmt.Process(b, an.GetStatement())
 
 	// Generate redacted statement.
 	{
-		an.ValidateAnnotations()
+		if _, ok := n.(*tree.CreateRoutine); !ok {
+			// This validation fails for references to CTEs, which need not be
+			// qualified.
+			an.ValidateAnnotations()
+		}
 		currentStatementID := uint32(len(els.statements) - 1)
-		els.statements[currentStatementID].RedactedStatement = string(
-			dependencies.AstFormatter().FormatAstAsRedactableString(an.GetStatement(), &an.annotation))
+		els.statements[currentStatementID].RedactedStatement = dependencies.AstFormatter().FormatAstAsRedactableString(an.GetStatement(), &an.annotation)
 	}
 
 	// Generate returned state.
@@ -107,15 +123,20 @@ func Build(
 	}
 
 	// Write to event log and return.
-	logEvents(b, ret.TargetState, loggedTargets)
-	return ret, nil
+	eventLogCallBack = makeEventLogCallback(b, ret.TargetState, loggedTargets)
+	return ret, eventLogCallBack, nil
+}
+
+type loggedTarget struct {
+	target    scpb.Target
+	maybeInfo logpb.EventPayload
 }
 
 // makeState populates the declarative schema changer state returned by Build
 // with the targets and the statuses present in the builderState.
 func makeState(
 	version clusterversion.ClusterVersion, bs *builderState,
-) (s scpb.CurrentState, loggedTargets []scpb.Target) {
+) (s scpb.CurrentState, loggedTargets []loggedTarget) {
 	s = scpb.CurrentState{
 		TargetState: scpb.TargetState{
 			Targets:      make([]scpb.Target, 0, len(bs.output)),
@@ -124,7 +145,7 @@ func makeState(
 		Initial: make([]scpb.Status, 0, len(bs.output)),
 		Current: make([]scpb.Status, 0, len(bs.output)),
 	}
-	loggedTargets = make([]scpb.Target, 0, len(bs.output))
+	loggedTargets = make([]loggedTarget, 0, len(bs.output))
 	isElementAllowedInVersion := func(e scpb.Element) bool {
 		if !screl.VersionSupportsElementUse(e, version) {
 			// Exclude targets which are not yet usable in the currently active
@@ -144,11 +165,9 @@ func makeState(
 	// certain transitions and fences like the two version invariant.
 	// This only applies for cluster at or beyond version 23.2.
 	var descriptorIDsInSchemaChange catalog.DescriptorIDSet
-	if version.IsActive(clusterversion.V23_2) {
-		for _, e := range bs.output {
-			if isElementAllowedInVersion(e.element) && e.metadata.IsLinkedToSchemaChange() {
-				descriptorIDsInSchemaChange.Add(screl.GetDescID(e.element))
-			}
+	for _, e := range bs.output {
+		if isElementAllowedInVersion(e.element) && e.metadata.IsLinkedToSchemaChange() {
+			descriptorIDsInSchemaChange.Add(screl.GetDescID(e.element))
 		}
 	}
 	for _, e := range bs.output {
@@ -169,7 +188,8 @@ func makeState(
 		s.Initial = append(s.Initial, e.initial)
 		s.Current = append(s.Current, e.current)
 		if e.withLogEvent {
-			loggedTargets = append(loggedTargets, t)
+			lt := loggedTarget{target: t, maybeInfo: e.maybePayload}
+			loggedTargets = append(loggedTargets, lt)
 		}
 	}
 	return s, loggedTargets
@@ -198,6 +218,9 @@ type elementState struct {
 	// withLogEvent is true iff an event should be written to the event log
 	// based on this element.
 	withLogEvent bool
+	// maybePayload exists if extra details need to be passed down to our
+	// payload builder in order to log our event.
+	maybePayload logpb.EventPayload
 }
 
 // byteSize returns an estimated memory usage of `es` in bytes.
@@ -262,11 +285,12 @@ type cachedDesc struct {
 func newBuilderState(
 	ctx context.Context, d Dependencies, incumbent scpb.CurrentState, localMemAcc *mon.BoundAccount,
 ) *builderState {
+
 	bs := builderState{
 		ctx:                      ctx,
 		clusterSettings:          d.ClusterSettings(),
-		evalCtx:                  newEvalCtx(ctx, d),
-		semaCtx:                  newSemaCtx(d),
+		evalCtx:                  d.EvalCtx(),
+		semaCtx:                  d.SemaCtx(),
 		cr:                       d.CatalogReader(),
 		tr:                       d.TableReader(),
 		auth:                     d.AuthorizationAccessor(),
@@ -410,6 +434,9 @@ type buildCtx struct {
 	scbuildstmt.EventLogState
 	scbuildstmt.TreeAnnotator
 	scbuildstmt.SchemaFeatureChecker
+	TemporarySchemaProvider
+	NodesStatusInfo
+	RegionProvider
 }
 
 var _ scbuildstmt.BuildCtx = buildCtx{}

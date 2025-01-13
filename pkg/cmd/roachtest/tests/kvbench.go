@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/util/search"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
+	"github.com/cockroachdb/cockroach/pkg/workload/histogram/exporter"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/ttycolor"
 	"github.com/codahale/hdrhistogram"
@@ -67,7 +63,7 @@ func registerKVBenchSpec(r registry.Registry, b kvBenchSpec) {
 	if b.NumShards > 0 {
 		nameParts = append(nameParts, fmt.Sprintf("shards=%d", b.NumShards))
 	}
-	opts := []spec.Option{spec.CPU(b.CPUs)}
+	opts := []spec.Option{spec.CPU(b.CPUs), spec.WorkloadNode(), spec.WorkloadNodeCPU(b.CPUs)}
 	switch b.KeyDistribution {
 	case sequential:
 		nameParts = append(nameParts, "sequential")
@@ -184,13 +180,6 @@ func registerKVBench(r registry.Registry) {
 	}
 }
 
-func makeKVLoadGroup(c cluster.Cluster, numRoachNodes, numLoadNodes int) loadGroup {
-	return loadGroup{
-		roachNodes: c.Range(1, numRoachNodes),
-		loadNodes:  c.Range(numRoachNodes+1, numRoachNodes+numLoadNodes),
-	}
-}
-
 // KVBench is a benchmarking tool that runs the `kv` workload against CockroachDB based on
 // various configuration settings (see `kvBenchSpec`). The tool searches for the maximum
 // throughput that can be sustained while maintaining an average latency below a certain
@@ -200,14 +189,6 @@ func makeKVLoadGroup(c cluster.Cluster, numRoachNodes, numLoadNodes int) loadGro
 // performance characteristics of using hash sharded indexes, for sequential workloads
 // which would've otherwise created a single-range hotspot.
 func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSpec) {
-	loadGrp := makeKVLoadGroup(c, b.Nodes, 1)
-	roachNodes := loadGrp.roachNodes
-	loadNodes := loadGrp.loadNodes
-
-	if err := c.PutE(ctx, t.L(), t.DeprecatedWorkload(), "./workload", loadNodes); err != nil {
-		t.Fatal(err)
-	}
-
 	const restartWait = 15 * time.Second
 	// TODO(aayush): I do not have a good reasoning for why I chose this precision value.
 	precision := int(math.Max(1.0, float64(b.EstimatedMaxThroughput/50)))
@@ -222,14 +203,14 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 	}
 	s := search.NewLineSearcher(100 /* min */, 10000000 /* max */, b.EstimatedMaxThroughput, initStepSize, precision)
 	searchPredicate := func(maxrate int) (bool, error) {
-		m := c.NewMonitor(ctx, roachNodes)
+		m := c.NewMonitor(ctx, c.CRDBNodes())
 		// Restart
-		m.ExpectDeaths(int32(len(roachNodes)))
+		m.ExpectDeaths(int32(len(c.CRDBNodes())))
 		// Wipe cluster before starting a new run because factors like load-based
 		// splitting can significantly change the underlying layout of the table and
 		// affect benchmark results.
-		c.Wipe(ctx, false /* preserveCerts */, roachNodes)
-		c.Start(ctx, t.L(), option.DefaultStartOptsNoBackups(), install.MakeClusterSettings(), roachNodes)
+		c.Wipe(ctx, c.CRDBNodes())
+		c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), install.MakeClusterSettings(), c.CRDBNodes())
 		time.Sleep(restartWait)
 
 		// We currently only support one loadGroup.
@@ -239,13 +220,13 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 
 			var initCmd strings.Builder
 
-			fmt.Fprintf(&initCmd, `./workload init kv --num-shards=%d`,
+			fmt.Fprintf(&initCmd, `./cockroach workload init kv --num-shards=%d`,
 				b.NumShards)
 			if b.SecondaryIndex {
 				initCmd.WriteString(` --secondary-index`)
 			}
-			fmt.Fprintf(&initCmd, ` {pgurl%s}`, roachNodes)
-			if err := c.RunE(ctx, option.WithNodes(loadNodes), initCmd.String()); err != nil {
+			fmt.Fprintf(&initCmd, ` {pgurl%s}`, c.CRDBNodes())
+			if err := c.RunE(ctx, option.WithNodes(c.WorkloadNode()), initCmd.String()); err != nil {
 				return err
 			}
 
@@ -285,9 +266,9 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 			const duration = time.Second * 300
 
 			fmt.Fprintf(&workloadCmd,
-				`./workload run kv --ramp=%fs --duration=%fs {pgurl%s} --read-percent=0`+
+				`./cockroach workload run kv --ramp=%fs --duration=%fs {pgurl%s} --read-percent=0`+
 					` --concurrency=%d --histograms=%s --max-rate=%d --num-shards=%d`,
-				ramp.Seconds(), duration.Seconds(), roachNodes,
+				ramp.Seconds(), duration.Seconds(), c.CRDBNodes(),
 				b.CPUs*loadConcurrency, clusterHistPath, maxrate, b.NumShards)
 			switch b.KeyDistribution {
 			case sequential:
@@ -300,13 +281,13 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 				panic(`unexpected`)
 			}
 
-			err := c.RunE(ctx, option.WithNodes(loadNodes), workloadCmd.String())
+			err := c.RunE(ctx, option.WithNodes(c.WorkloadNode()), workloadCmd.String())
 			if err != nil {
 				return errors.Wrapf(err, `error running workload`)
 			}
 
 			localHistPath := filepath.Join(resultsDir, fmt.Sprintf(`kvbench-%d-stats.json`, maxrate))
-			if err := c.Get(ctx, t.L(), clusterHistPath, localHistPath, loadNodes); err != nil {
+			if err := c.Get(ctx, t.L(), clusterHistPath, localHistPath, c.WorkloadNode()); err != nil {
 				t.Fatal(err)
 			}
 
@@ -359,7 +340,7 @@ type kvBenchResult struct {
 // TODO(aayush): The result related logic below is similar to `workload/tpcc/result.go`,
 // so this could definitely be cleaner and better abstracted.
 func newResultFromSnapshots(
-	maxrate int, snapshots map[string][]histogram.SnapshotTick,
+	maxrate int, snapshots map[string][]exporter.SnapshotTick,
 ) *kvBenchResult {
 	var start, end time.Time
 	ret := make(map[string]*hdrhistogram.Histogram, len(snapshots))

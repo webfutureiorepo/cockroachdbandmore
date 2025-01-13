@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colfetcher
 
@@ -49,11 +44,11 @@ type colBatchScanBase struct {
 	ignoreMisplannedRanges bool
 	// tracingSpan is created when the stats should be collected for the query
 	// execution, and it will be finished when closing the operator.
-	tracingSpan               *tracing.Span
-	contentionEventsListener  execstats.ContentionEventsListener
-	scanStatsListener         execstats.ScanStatsListener
-	tenantConsumptionListener execstats.TenantConsumptionListener
-	mu                        struct {
+	tracingSpan *tracing.Span
+	execstats.ContentionEventsListener
+	execstats.ScanStatsListener
+	execstats.TenantConsumptionListener
+	mu struct {
 		syncutil.Mutex
 		// rowsRead contains the number of total rows this ColBatchScan has
 		// returned so far.
@@ -88,21 +83,6 @@ func (s *colBatchScanBase) GetRowsRead() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mu.rowsRead
-}
-
-// GetContentionTime is part of the colexecop.KVReader interface.
-func (s *colBatchScanBase) GetContentionTime() time.Duration {
-	return s.contentionEventsListener.CumulativeContentionTime
-}
-
-// GetScanStats is part of the colexecop.KVReader interface.
-func (s *colBatchScanBase) GetScanStats() execstats.ScanStats {
-	return s.scanStatsListener.ScanStats
-}
-
-// GetConsumedRU is part of the colexecop.KVReader interface.
-func (s *colBatchScanBase) GetConsumedRU() uint64 {
-	return s.tenantConsumptionListener.ConsumedRU
 }
 
 // UsedStreamer is part of the colexecop.KVReader interface.
@@ -148,7 +128,7 @@ func newColBatchScanBase(
 ) (*colBatchScanBase, *kvpb.BoundedStalenessHeader, *cFetcherTableArgs, error) {
 	// NB: we hit this with a zero NodeID (but !ok) with multi-tenancy.
 	if nodeID, ok := flowCtx.NodeID.OptionalNodeID(); nodeID == 0 && ok {
-		return nil, nil, nil, errors.Errorf("attempting to create a ColBatchScan with uninitialized NodeID")
+		return nil, nil, nil, errors.AssertionFailedf("attempting to create a ColBatchScan with uninitialized NodeID")
 	}
 	var bsHeader *kvpb.BoundedStalenessHeader
 	if aost := flowCtx.EvalCtx.AsOfSystemTime; aost != nil && aost.BoundedStaleness {
@@ -239,7 +219,7 @@ func (s *ColBatchScan) Init(ctx context.Context) {
 	}
 	s.Ctx, s.tracingSpan = execinfra.ProcessorSpan(
 		s.Ctx, s.flowCtx, "colbatchscan", s.processorID,
-		&s.contentionEventsListener, &s.scanStatsListener, &s.tenantConsumptionListener,
+		&s.ContentionEventsListener, &s.ScanStatsListener, &s.TenantConsumptionListener,
 	)
 	limitBatches := !s.parallelize
 	if err := s.cf.StartScan(
@@ -348,12 +328,15 @@ func NewColBatchScan(
 		flowCtx.Txn,
 		bsHeader,
 		spec.Reverse,
+		tableArgs.RequiresRawMVCCValues(),
 		spec.LockingStrength,
 		spec.LockingWaitPolicy,
 		spec.LockingDurability,
 		flowCtx.EvalCtx.SessionData().LockTimeout,
+		flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 		kvFetcherMemAcc,
 		flowCtx.EvalCtx.TestingKnobs.ForceProductionValues,
+		spec.FetchSpec.External,
 	)
 	fetcher := cFetcherPool.Get().(*cFetcher)
 	fetcher.cFetcherArgs = cFetcherArgs{

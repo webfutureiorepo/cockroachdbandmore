@@ -5,7 +5,11 @@ go_library(
     srcs = ["ctxgroup.go"],
     importpath = "github.com/cockroachdb/cockroach/pkg/util/ctxgroup",
     visibility = ["//visibility:public"],
-    deps = ["@org_golang_x_sync//errgroup"],
+    deps = [
+        "//pkg/util/syncutil",
+        "@com_github_cockroachdb_errors//:errors",
+        "@org_golang_x_sync//errgroup",
+    ],
 )
 
 go_test(
@@ -13,13 +17,10 @@ go_test(
     size = "small",
     srcs = ["ctxgroup_test.go"],
     embed = [":ctxgroup"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/testutils",
         "//pkg/util/leaktest",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_stretchr_testify//require",
     ],
 )

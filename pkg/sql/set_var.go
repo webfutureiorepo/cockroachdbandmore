@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -35,6 +30,7 @@ import (
 
 // setVarNode represents a SET {SESSION | LOCAL} statement.
 type setVarNode struct {
+	zeroInputPlanNode
 	name  string
 	local bool
 	v     sessionVar
@@ -43,7 +39,9 @@ type setVarNode struct {
 }
 
 // resetAllNode represents a RESET ALL statement.
-type resetAllNode struct{}
+type resetAllNode struct {
+	zeroInputPlanNode
+}
 
 // SetVar sets session variables.
 // Privileges: None.
@@ -94,7 +92,7 @@ func (p *planner) SetVar(ctx context.Context, n *tree.SetVar) (planNode, error) 
 
 				var dummyHelper tree.IndexedVarHelper
 				typedValue, err := p.analyzeExpr(
-					ctx, expr, nil, dummyHelper, types.String, false, "SET SESSION "+name)
+					ctx, expr, dummyHelper, types.String, false, "SET SESSION "+name)
 				if err != nil {
 					return nil, wrapSetVarError(err, name, expr.String())
 				}
@@ -364,7 +362,7 @@ func makeTimeoutVarGetter(
 		case *tree.DString:
 			return string(*v), nil
 		case *tree.DInterval:
-			timeout, err = intervalToDuration(v)
+			timeout, err = durationToTotalNanos(v.Duration)
 			if err != nil {
 				return "", wrapSetVarError(err, varName, values[0].String())
 			}
@@ -378,7 +376,7 @@ func makeTimeoutVarGetter(
 func validateTimeoutVar(
 	style duration.IntervalStyle, timeString string, varName string,
 ) (time.Duration, error) {
-	interval, err := tree.ParseDIntervalWithTypeMetadata(
+	interval, err := tree.ParseIntervalWithTypeMetadata(
 		style,
 		timeString,
 		types.IntervalTypeMetadata{
@@ -390,7 +388,7 @@ func validateTimeoutVar(
 	if err != nil {
 		return 0, wrapSetVarError(err, varName, timeString)
 	}
-	timeout, err := intervalToDuration(interval)
+	timeout, err := durationToTotalNanos(interval)
 	if err != nil {
 		return 0, wrapSetVarError(err, varName, timeString)
 	}
@@ -427,6 +425,20 @@ func lockTimeoutVarSet(ctx context.Context, m sessionDataMutator, s string) erro
 	}
 
 	m.SetLockTimeout(timeout)
+	return nil
+}
+
+func deadlockTimeoutVarSet(ctx context.Context, m sessionDataMutator, s string) error {
+	timeout, err := validateTimeoutVar(
+		m.data.GetIntervalStyle(),
+		s,
+		"deadlock_timeout",
+	)
+	if err != nil {
+		return err
+	}
+
+	m.SetDeadlockTimeout(timeout)
 	return nil
 }
 
@@ -474,8 +486,8 @@ func idleInTransactionSessionTimeoutVarSet(
 	return nil
 }
 
-func intervalToDuration(interval *tree.DInterval) (time.Duration, error) {
-	nanos, _, _, err := interval.Encode()
+func durationToTotalNanos(duration duration.Duration) (time.Duration, error) {
+	nanos, _, _, err := duration.Encode()
 	if err != nil {
 		return 0, err
 	}

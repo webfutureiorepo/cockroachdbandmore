@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catkv
 
@@ -90,16 +85,16 @@ func (c *SystemDatabaseCache) lookupDescriptor(
 // lookupDescriptorID looks for the corresponding descriptor name -> ID entry in
 // the cache.
 func (c *SystemDatabaseCache) lookupDescriptorID(
-	version clusterversion.ClusterVersion, key catalog.NameKey,
+	version clusterversion.ClusterVersion, key descpb.NameInfo,
 ) (descpb.ID, hlc.Timestamp) {
-	if key.GetParentID() == descpb.InvalidID &&
-		key.GetParentSchemaID() == descpb.InvalidID &&
-		key.GetName() == catconstants.SystemDatabaseName {
+	if key.ParentID == descpb.InvalidID &&
+		key.ParentSchemaID == descpb.InvalidID &&
+		key.Name == catconstants.SystemDatabaseName {
 		return keys.SystemDatabaseID, hlc.Timestamp{}
 	}
-	if key.GetParentID() == keys.SystemDatabaseID &&
-		key.GetParentSchemaID() == descpb.InvalidID &&
-		key.GetName() == catconstants.PublicSchemaName {
+	if key.ParentID == keys.SystemDatabaseID &&
+		key.ParentSchemaID == descpb.InvalidID &&
+		key.Name == catconstants.PublicSchemaName {
 		return keys.SystemPublicSchemaID, hlc.Timestamp{}
 	}
 	if c == nil {
@@ -177,7 +172,7 @@ func (c *SystemDatabaseCache) nameCandidatesForUpdate(
 	}
 	diff := make([]nstree.NamespaceEntry, 0, len(systemNames))
 	for _, e := range systemNames {
-		if cached.LookupNamespaceEntry(e) == nil {
+		if cached.LookupNamespaceEntry(catalog.MakeNameInfo(e)) == nil {
 			diff = append(diff, e)
 		}
 	}

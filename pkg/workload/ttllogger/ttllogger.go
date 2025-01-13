@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttllogger
 
@@ -86,10 +81,6 @@ var logChars = []rune("abdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ !.")
 func (l *ttlLogger) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(l, l.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -118,7 +109,7 @@ func (l *ttlLogger) Ops(
 		return workload.QueryLoad{}, errors.Newf("concurrency must be divisible by 2")
 	}
 
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	for len(ql.WorkerFns) < l.connFlags.Concurrency {
 		rng := rand.New(rand.NewSource(l.seed + int64(len(ql.WorkerFns))))
 		hists := reg.GetHandle()
@@ -182,6 +173,8 @@ func (l ttlLogger) Tables() []workload.Table {
 	}
 }
 
-func (l ttlLogger) Flags() workload.Flags {
-	return l.flags
-}
+// Flags implements the Flagser interface.
+func (l ttlLogger) Flags() workload.Flags { return l.flags }
+
+// ConnFlags implements the ConnFlagser interface.
+func (l ttlLogger) ConnFlags() *workload.ConnFlags { return l.connFlags }

@@ -1,19 +1,18 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import { util } from "@cockroachlabs/cluster-ui";
+import has from "lodash/has";
+import isEmpty from "lodash/isEmpty";
+import isNil from "lodash/isNil";
+import join from "lodash/join";
+import round from "lodash/round";
 import Long from "long";
 import moment from "moment-timezone";
 
 import * as protos from "src/js/protos";
-import { util } from "@cockroachlabs/cluster-ui";
 
 export const dateFormat = "Y-MM-DD HH:mm:ss";
 
@@ -26,16 +25,16 @@ export function PrintReplicaID(
   storeID?: number,
   replicaID?: Long,
 ) {
-  if (!_.isNil(rep)) {
+  if (!isNil(rep)) {
     return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${
       rep.replica_id
     }`;
   }
   // Fall back to the passed in node, store and replica IDs. If those are nil,
   // use a question mark instead.
-  const nodeIDString = _.isNil(nodeID) ? "?" : nodeID.toString();
-  const storeIDString = _.isNil(storeID) ? "?" : storeID.toString();
-  const replicaIDString = _.isNil(replicaID) ? "?" : replicaID.toString();
+  const nodeIDString = isNil(nodeID) ? "?" : nodeID.toString();
+  const storeIDString = isNil(storeID) ? "?" : storeID.toString();
+  const replicaIDString = isNil(replicaID) ? "?" : replicaID.toString();
   return `n${nodeIDString} s${storeIDString} r${rangeID.toString()}/${replicaIDString}`;
 }
 
@@ -49,11 +48,11 @@ export function PrintTimestamp(
     | protos.google.protobuf.ITimestamp,
 ) {
   let time: moment.Moment = null;
-  if (_.has(timestamp, "wall_time")) {
+  if (has(timestamp, "wall_time")) {
     time = util.LongToMoment(
       (timestamp as protos.cockroach.util.hlc.ITimestamp).wall_time,
     );
-  } else if (_.has(timestamp, "seconds") || _.has(timestamp, "nanos")) {
+  } else if (has(timestamp, "seconds") || has(timestamp, "nanos")) {
     time = util.TimestampToMoment(
       timestamp as protos.google.protobuf.ITimestamp,
     );
@@ -77,21 +76,21 @@ export function PrintDuration(duration: moment.Duration) {
   if (duration.seconds() > 0) {
     results.push(`${duration.seconds()}s`);
   }
-  const ms = _.round(duration.milliseconds());
+  const ms = round(duration.milliseconds());
   if (ms > 0) {
     results.push(`${ms}ms`);
   }
-  if (_.isEmpty(results)) {
+  if (isEmpty(results)) {
     return "0s";
   }
-  return _.join(results, " ");
+  return join(results, " ");
 }
 
 export function PrintTimestampDelta(
   newTimestamp: protos.cockroach.util.hlc.ITimestamp,
   oldTimestamp: protos.cockroach.util.hlc.ITimestamp,
 ) {
-  if (_.isNil(oldTimestamp) || _.isNil(newTimestamp)) {
+  if (isNil(oldTimestamp) || isNil(newTimestamp)) {
     return "";
   }
   const newTime = util.LongToMoment(newTimestamp.wall_time);
@@ -107,7 +106,7 @@ export function PrintTimestampDeltaFromNow(
   timestamp: protos.cockroach.util.hlc.ITimestamp,
   now: moment.Moment,
 ): string {
-  if (_.isNil(timestamp)) {
+  if (isNil(timestamp)) {
     return "";
   }
   const time: moment.Moment = util.LongToMoment(timestamp.wall_time);

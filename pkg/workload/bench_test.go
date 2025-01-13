@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package workload_test
 
@@ -15,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
@@ -24,14 +20,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/workload/tpch"
 )
 
-func columnByteSize(col coldata.Vec) int64 {
+func columnByteSize(col *coldata.Vec) int64 {
 	switch t := col.Type(); col.CanonicalTypeFamily() {
 	case types.IntFamily:
 		switch t.Width() {
 		case 0, 64:
-			return int64(len(col.Int64()) * 8)
+			return int64(len(col.Int64())) * memsize.Int64
 		case 16:
-			return int64(len(col.Int16()) * 2)
+			return int64(len(col.Int16())) * memsize.Int16
 		default:
 			panic(fmt.Sprintf("unexpected int width: %d", t.Width()))
 		}
@@ -40,6 +36,8 @@ func columnByteSize(col coldata.Vec) int64 {
 	case types.BytesFamily:
 		// We subtract the overhead to be in line with Int64 and Float64 cases.
 		return col.Bytes().Size() - coldata.FlatBytesOverhead
+	case types.TimestampTZFamily:
+		return int64(col.Timestamp().Len()) * memsize.Time
 	default:
 		panic(fmt.Sprintf(`unhandled type %s`, t))
 	}

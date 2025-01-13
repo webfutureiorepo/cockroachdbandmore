@@ -1,22 +1,20 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
-import { EmptyTable, EmptyTableProps } from "src/empty";
-import { Anchor } from "src/anchor";
-import { statementsTable, tabAttr, viewAttr } from "src/util";
-import magnifyingGlassImg from "../assets/emptyState/magnifying-glass.svg";
-import emptyTableResultsImg from "../assets/emptyState/empty-table-results.svg";
-import { StatementViewType } from "./statementPageTypes";
 import { Link } from "react-router-dom";
+
+import { Anchor } from "src/anchor";
 import { commonStyles } from "src/common";
+import { EmptyTable, EmptyTableProps } from "src/empty";
+import { statementsTable, tabAttr, viewAttr } from "src/util";
+
+import emptyTableResultsImg from "../assets/emptyState/empty-table-results.svg";
+import magnifyingGlassImg from "../assets/emptyState/magnifying-glass.svg";
+
+import { StatementViewType } from "./statementPageTypes";
 
 const footer = (
   <Anchor href={statementsTable} target="_blank">

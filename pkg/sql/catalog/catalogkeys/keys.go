@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package catalogkeys describes keys used by the SQL catalog.
 package catalogkeys
@@ -63,10 +58,11 @@ const (
 	ConstraintCommentType CommentType = 5
 	// FunctionCommentType comment on a function.
 	FunctionCommentType CommentType = 6
-
+	// TypeCommentType comment on a type
+	TypeCommentType CommentType = 7
 	// MaxCommentTypeValue is the max possible integer of CommentType type.
 	// Update this whenever a new comment type is added.
-	MaxCommentTypeValue = FunctionCommentType
+	MaxCommentTypeValue = TypeCommentType
 )
 
 // AllCommentTypes is a slice of all valid schema comment types.
@@ -78,6 +74,7 @@ var AllCommentTypes = []CommentType{
 	SchemaCommentType,
 	ConstraintCommentType,
 	FunctionCommentType,
+	TypeCommentType,
 }
 
 // IsValidCommentType checks if a given comment type is in the valid value

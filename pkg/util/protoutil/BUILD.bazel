@@ -20,6 +20,7 @@ go_library(
         "@com_github_gogo_protobuf//jsonpb",
         "@com_github_gogo_protobuf//proto",
         "@com_github_grpc_ecosystem_grpc_gateway//runtime:go_default_library",
+        "@org_golang_google_protobuf//proto",
     ],
 )
 
@@ -27,10 +28,6 @@ go_test(
     name = "protoutil_test",
     size = "small",
     srcs = ["clone_test.go"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         ":protoutil",
         "//pkg/config/zonepb",

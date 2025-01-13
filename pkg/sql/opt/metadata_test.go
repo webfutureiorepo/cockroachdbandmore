@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opt_test
 
@@ -109,8 +104,9 @@ func TestMetadata(t *testing.T) {
 	}
 
 	udfName := tree.MakeQualifiedRoutineName("t", "public", "udf")
-	md.AddUserDefinedFunction(
+	md.AddUserDefinedRoutine(
 		&tree.Overload{Oid: catid.FuncIDToOID(1111)},
+		types.OneIntCol,
 		udfName.ToUnresolvedObjectName(),
 	)
 
@@ -179,11 +175,8 @@ func TestMetadata(t *testing.T) {
 		}
 	}
 
-	newUDFDeps, oldUDFDeps := mdNew.TestingUDFDeps(), md.TestingUDFDeps()
-	for id, overload := range oldUDFDeps {
-		if newUDFDeps[id] != overload {
-			t.Fatalf("expected UDF dependency to be copied")
-		}
+	if !mdNew.TestingRoutineDepsEqual(md) {
+		t.Fatalf("expected user-defined routine dependency to be copied")
 	}
 
 	newNamesByID, oldNamesByID := mdNew.TestingObjectRefsByName(), md.TestingObjectRefsByName()

@@ -1,23 +1,22 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { PayloadAction } from "@reduxjs/toolkit";
 import { all, call, put, takeLatest } from "redux-saga/effects";
+
 import {
   ErrorWithKey,
   getStatementDetails,
   StatementDetailsRequest,
   StatementDetailsResponseWithKey,
 } from "src/api/statementsApi";
-import { actions as sqlDetailsStatsActions } from "./statementDetails.reducer";
 import { generateStmtDetailsToID } from "src/util/appStats";
+
+import { maybeError } from "../../util";
+
+import { actions as sqlDetailsStatsActions } from "./statementDetails.reducer";
 
 export function* refreshSQLDetailsStatsSaga(
   action: PayloadAction<StatementDetailsRequest>,
@@ -45,7 +44,7 @@ export function* requestSQLDetailsStatsSaga(
     yield put(sqlDetailsStatsActions.received(resultWithKey));
   } catch (e) {
     const err: ErrorWithKey = {
-      err: e,
+      err: maybeError(e),
       key,
     };
     yield put(sqlDetailsStatsActions.failed(err));

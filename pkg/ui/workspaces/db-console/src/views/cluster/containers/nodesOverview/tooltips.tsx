@@ -1,20 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
+
 import { Anchor, Tooltip, Text } from "src/components";
-import { nodeLivenessIssues, howItWork, capacityMetrics } from "src/util/docs";
-import { LivenessStatus } from "src/redux/nodes";
-import { NodeStatusRow } from "src/views/cluster/containers/nodesOverview/index";
-import { AggregatedNodeStatus } from ".";
 import { TooltipProps } from "src/components/tooltip/tooltip";
+import { LivenessStatus } from "src/redux/nodes";
+import { nodeLivenessIssues, howItWork, capacityMetrics } from "src/util/docs";
+import { NodeStatusRow } from "src/views/cluster/containers/nodesOverview/index";
+
+import { AggregatedNodeStatus } from ".";
 
 export const getStatusDescription = (status: LivenessStatus) => {
   switch (status) {

@@ -117,10 +117,15 @@ WHERE "eventType" = 'alter_table'
 1  {"EventType": "alter_table", "MutationID": 1, "Statement": "ALTER TABLE test.public.a ADD COLUMN val INT8", "TableName": "test.public.a", "Tag": "ALTER TABLE", "User": "root"}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' FROM system.eventlog
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'LatencyNanos' FROM system.eventlog
 WHERE "eventType" = 'finish_schema_change'
 ----
 1  {"EventType": "finish_schema_change", "InstanceID": 1}
+
+# Verify that LatencyNanos is populated.
+statement ok
+SELECT 1 / coalesce((info::JSONB->'LatencyNanos')::INT, 0) FROM system.eventlog
+WHERE "eventType" = 'finish_schema_change'
 
 query I
 SELECT "reportingID" FROM system.eventlog
@@ -156,20 +161,20 @@ ORDER BY "timestamp", info
 1  {"EventType": "create_index", "IndexName": "foo", "MutationID": 1, "Statement": "ALTER TABLE test.public.a ADD CONSTRAINT foo UNIQUE (val)", "TableName": "test.public.a", "Tag": "ALTER TABLE", "User": "root"}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID'  FROM system.eventlog
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'LatencyNanos' FROM system.eventlog
 WHERE "eventType" = 'finish_schema_change'
 ----
 1  {"EventType": "finish_schema_change", "InstanceID": 1}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'Error'
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'Error' - 'LatencyNanos'
   FROM system.eventlog
 WHERE "eventType" = 'reverse_schema_change'
 ----
 1  {"EventType": "reverse_schema_change", "InstanceID": 1, "SQLSTATE": "23505"}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' FROM system.eventlog
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'LatencyNanos' FROM system.eventlog
 WHERE "eventType" = 'finish_schema_change_rollback'
 ----
 1  {"EventType": "finish_schema_change_rollback", "InstanceID": 1}
@@ -188,7 +193,7 @@ WHERE "eventType" = 'create_index'
 1  {"EventType": "create_index", "IndexName": "a_foo", "MutationID": 1, "Statement": "CREATE INDEX a_foo ON test.public.a (val)", "TableName": "test.public.a", "Tag": "CREATE INDEX", "User": "root"}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' FROM system.eventlog
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'LatencyNanos' FROM system.eventlog
 WHERE "eventType" = 'finish_schema_change'
 ORDER BY "timestamp", info
 ----
@@ -206,7 +211,7 @@ WHERE "eventType" = 'create_index'
 1  {"EventType": "create_index", "IndexName": "a_val_idx", "MutationID": 1, "Statement": "CREATE INDEX ON test.public.a (val)", "TableName": "test.public.a", "Tag": "CREATE INDEX", "User": "root"}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' FROM system.eventlog
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'LatencyNanos' FROM system.eventlog
 WHERE "eventType" = 'finish_schema_change'
 ORDER BY "timestamp", info
 ----
@@ -228,7 +233,7 @@ WHERE "eventType" = 'drop_index'
 1  {"EventType": "drop_index", "IndexName": "a_foo", "MutationID": 1, "Statement": "DROP INDEX test.public.a@a_foo", "TableName": "test.public.a", "Tag": "DROP INDEX", "User": "root"}
 
 query IT
-SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' FROM system.eventlog
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' - 'LatencyNanos' FROM system.eventlog
 WHERE "eventType" = 'finish_schema_change'
 ORDER BY "timestamp", info
 ----
@@ -477,7 +482,7 @@ AND info NOT LIKE '%sql.testing%'
 AND info NOT LIKE '%sql.stats%'
 ORDER BY "timestamp", info
 ----
-1  {"ApplicationName": "$ internal-optInToDiagnosticsStatReporting", "EventType": "set_cluster_setting", "SettingName": "diagnostics.reporting.enabled", "Statement": "SET CLUSTER SETTING \"diagnostics.reporting.enabled\" = true", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "true"}
+1  {"ApplicationName": "$ internal-optInToDiagnosticsStatReporting", "EventType": "set_cluster_setting", "SettingName": "diagnostics.reporting.enabled", "Statement": "SET CLUSTER SETTING \"diagnostics.reporting.enabled\" = true", "Tag": "SET CLUSTER SETTING", "User": "node", "Value": "true"}
 1  {"EventType": "set_cluster_setting", "SettingName": "sql.crdb_internal.table_row_statistics.as_of_time", "Statement": "SET CLUSTER SETTING \"sql.crdb_internal.table_row_statistics.as_of_time\" = e'-1\\u00B5s'", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "-00:00:00.000001"}
 1  {"EventType": "set_cluster_setting", "SettingName": "kv.allocator.load_based_lease_rebalancing.enabled", "Statement": "SET CLUSTER SETTING \"kv.allocator.load_based_lease_rebalancing.enabled\" = false", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "false"}
 1  {"EventType": "set_cluster_setting", "SettingName": "kv.allocator.load_based_lease_rebalancing.enabled", "Statement": "SET CLUSTER SETTING \"kv.allocator.load_based_lease_rebalancing.enabled\" = DEFAULT", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "DEFAULT"}
@@ -496,15 +501,23 @@ AND info NOT LIKE '%sql.testing%'
 AND info NOT LIKE '%sql.stats%'
 ORDER BY "timestamp", info
 ----
-1  {"ApplicationName": "$ internal-optInToDiagnosticsStatReporting", "EventType": "set_cluster_setting", "SettingName": "diagnostics.reporting.enabled", "Statement": "SET CLUSTER SETTING \"diagnostics.reporting.enabled\" = true", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "true"}
+1  {"ApplicationName": "$ internal-optInToDiagnosticsStatReporting", "EventType": "set_cluster_setting", "SettingName": "diagnostics.reporting.enabled", "Statement": "SET CLUSTER SETTING \"diagnostics.reporting.enabled\" = true", "Tag": "SET CLUSTER SETTING", "User": "node", "Value": "true"}
 1  {"EventType": "set_cluster_setting", "SettingName": "sql.crdb_internal.table_row_statistics.as_of_time", "Statement": "SET CLUSTER SETTING \"sql.crdb_internal.table_row_statistics.as_of_time\" = e'-1\\u00B5s'", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "-00:00:00.000001"}
 1  {"EventType": "set_cluster_setting", "PlaceholderValues": ["'some string'"], "SettingName": "cluster.label", "Statement": "SET CLUSTER SETTING \"cluster.label\" = $1", "Tag": "SET CLUSTER SETTING", "User": "root", "Value": "'some string'"}
 
 # Set and unset zone configs
 ##################
 
+skipif config 3node-tenant-default-configs
 statement ok
-CREATE TABLE a (id INT PRIMARY KEY)
+ALTER DATABASE test CONFIGURE ZONE USING range_max_bytes = 67108865, range_min_bytes = 16777216
+
+skipif config 3node-tenant-default-configs
+statement ok
+ALTER DATABASE test CONFIGURE ZONE DISCARD
+
+statement ok
+CREATE TABLE a (id INT PRIMARY KEY, foo INT, INDEX bar (foo))
 
 skipif config 3node-tenant-default-configs
 statement ok
@@ -514,30 +527,42 @@ skipif config 3node-tenant-default-configs
 statement ok
 ALTER TABLE a CONFIGURE ZONE DISCARD
 
+skipif config 3node-tenant-default-configs
+statement ok
+ALTER INDEX a@a_pkey CONFIGURE ZONE USING gc.ttlseconds = 13000
+
+skipif config 3node-tenant-default-configs
+statement ok
+ALTER INDEX a@bar CONFIGURE ZONE USING gc.ttlseconds = 15000
+
 # verify zone config changes are logged
 ##################
-skipif config 3node-tenant-default-configs
+skipif config 3node-tenant-default-configs local-mixed-24.3
 query IT
-SELECT "reportingID", "info"::JSONB - 'Timestamp' - 'DescriptorID'
+SELECT "reportingID", "info"::JSONB - 'Timestamp' - 'DescriptorID' - 'Statement'
 FROM system.eventlog
 WHERE "eventType" = 'set_zone_config'
 ORDER BY "timestamp", info
 ----
-1  {"ApplicationName": "$ internal-set-SpanStatsTenantBoundariesTable-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "Statement": "ALTER TABLE \"\".system.span_stats_tenant_boundaries CONFIGURE ZONE USING \"gc.ttlseconds\" = $1", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.span_stats_tenant_boundaries", "User": "root"}
-1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "Statement": "ALTER TABLE \"\".system.statement_statistics CONFIGURE ZONE USING \"gc.ttlseconds\" = $1", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.statement_statistics", "User": "root"}
-1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "Statement": "ALTER TABLE \"\".system.transaction_statistics CONFIGURE ZONE USING \"gc.ttlseconds\" = $1", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.transaction_statistics", "User": "root"}
-1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "Statement": "ALTER TABLE \"\".system.statement_activity CONFIGURE ZONE USING \"gc.ttlseconds\" = $1", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.statement_activity", "User": "root"}
-1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "Statement": "ALTER TABLE \"\".system.transaction_activity CONFIGURE ZONE USING \"gc.ttlseconds\" = $1", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.transaction_activity", "User": "root"}
-1  {"EventType": "set_zone_config", "Options": ["range_max_bytes = 67108865", "range_min_bytes = 16777216"], "Statement": "ALTER TABLE \"\".\"\".a CONFIGURE ZONE USING range_max_bytes = 67108865, range_min_bytes = 16777216", "Tag": "CONFIGURE ZONE", "Target": "TABLE test.public.a", "User": "root"}
+1  {"ApplicationName": "$ internal-set-SpanStatsTenantBoundariesTable-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:5 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.span_stats_tenant_boundaries", "User": "node"}
+1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:5 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.statement_statistics", "User": "node"}
+1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:5 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.transaction_statistics", "User": "node"}
+1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:5 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.statement_activity", "User": "node"}
+1  {"ApplicationName": "$ internal-set-SQLStatsTables-TTL", "EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 3600"], "PlaceholderValues": ["3600"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:5 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "TABLE system.public.transaction_activity", "User": "node"}
+1  {"EventType": "set_zone_config", "Options": ["range_max_bytes = 67108865", "range_min_bytes = 16777216"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:3 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "DATABASE test", "User": "root"}
+1  {"EventType": "set_zone_config", "Options": ["range_max_bytes = 67108865", "range_min_bytes = 16777216"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:3 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "TABLE test.public.a", "User": "root"}
+1  {"EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 13000"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:3 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "INDEX test.public.a@a_pkey", "User": "root"}
+1  {"EventType": "set_zone_config", "Options": ["\"gc.ttlseconds\" = 15000"], "ResolvedOldConfig": "range_min_bytes:134217728 range_max_bytes:536870912 gc:<ttl_seconds:14400 > num_replicas:3 inherited_constraints:false null_voter_constraints_is_empty:true inherited_lease_preferences:false ", "Tag": "CONFIGURE ZONE", "Target": "INDEX test.public.a@bar", "User": "root"}
 
 skipif config 3node-tenant-default-configs
 query IT
-SELECT "reportingID", "info"::JSONB - 'Timestamp' - 'DescriptorID'
+SELECT "reportingID", "info"::JSONB - 'Timestamp' - 'DescriptorID' - 'Statement'
 FROM system.eventlog
 WHERE "eventType" = 'remove_zone_config'
 ORDER BY "timestamp", info
 ----
-1  {"EventType": "remove_zone_config", "Statement": "ALTER TABLE \"\".\"\".a CONFIGURE ZONE DISCARD", "Tag": "CONFIGURE ZONE", "Target": "TABLE test.public.a", "User": "root"}
+1  {"EventType": "remove_zone_config", "Tag": "CONFIGURE ZONE", "Target": "DATABASE test", "User": "root"}
+1  {"EventType": "remove_zone_config", "Tag": "CONFIGURE ZONE", "Target": "TABLE test.public.a", "User": "root"}
 
 statement ok
 DROP TABLE a
@@ -707,9 +732,9 @@ FROM system.eventlog
 WHERE "eventType" = 'create_schema'
 ORDER BY "timestamp", info
 ----
-1  {"EventType": "create_schema", "Owner": "root", "SchemaName": "test.sc", "Statement": "CREATE SCHEMA \"\".sc", "Tag": "CREATE SCHEMA", "User": "root"}
-1  {"EventType": "create_schema", "Owner": "root", "SchemaName": "test.s", "Statement": "CREATE SCHEMA \"\".s", "Tag": "CREATE SCHEMA", "User": "root"}
-1  {"EventType": "create_schema", "Owner": "u", "SchemaName": "test.u", "Statement": "CREATE SCHEMA AUTHORIZATION u", "Tag": "CREATE SCHEMA", "User": "root"}
+1  {"EventType": "create_schema", "Owner": "root", "SchemaName": "test.sc", "Statement": "CREATE SCHEMA test.sc", "Tag": "CREATE SCHEMA", "User": "root"}
+1  {"EventType": "create_schema", "Owner": "root", "SchemaName": "test.s", "Statement": "CREATE SCHEMA test.s", "Tag": "CREATE SCHEMA", "User": "root"}
+1  {"EventType": "create_schema", "Owner": "u", "SchemaName": "test.u", "Statement": "CREATE SCHEMA test.u AUTHORIZATION u", "Tag": "CREATE SCHEMA", "User": "root"}
 
 statement ok
 ALTER SCHEMA u RENAME TO t
@@ -815,7 +840,7 @@ NULL    NULL      NULL  NULL      t     testuser
 NULL    NULL      NULL  NULL      v     testuser
 NULL    NULL      _ty   testuser  NULL  NULL
 NULL    NULL      ty    testuser  NULL  NULL
-public  admin     NULL  NULL      NULL  NULL
+public  root      NULL  NULL      NULL  NULL
 sc      testuser  NULL  NULL      NULL  NULL
 
 statement ok
@@ -836,13 +861,13 @@ ALTER DATABASE atest OWNER TO u;
 query TTTTTT rowsort
 EXECUTE showOwners('atest')
 ----
-NULL    NULL   NULL  NULL  s     testuser
-NULL    NULL   NULL  NULL  t     u
-NULL    NULL   NULL  NULL  v     testuser
-NULL    NULL   _ty   u     NULL  NULL
-NULL    NULL   ty    u     NULL  NULL
-public  admin  NULL  NULL  NULL  NULL
-sc      u      NULL  NULL  NULL  NULL
+NULL    NULL  NULL  NULL  s     testuser
+NULL    NULL  NULL  NULL  t     u
+NULL    NULL  NULL  NULL  v     testuser
+NULL    NULL  _ty   u     NULL  NULL
+NULL    NULL  ty    u     NULL  NULL
+public  root  NULL  NULL  NULL  NULL
+sc      u     NULL  NULL  NULL  NULL
 
 # Verify that events were logged.
 query ITT
@@ -876,13 +901,13 @@ REASSIGN OWNED BY testuser TO v
 query TTTTTT rowsort
 EXECUTE showOwners('atest')
 ----
-NULL    NULL   NULL  NULL  s     v
-NULL    NULL   NULL  NULL  t     v
-NULL    NULL   NULL  NULL  v     v
-NULL    NULL   _ty   v     NULL  NULL
-NULL    NULL   ty    v     NULL  NULL
-public  admin  NULL  NULL  NULL  NULL
-sc      v      NULL  NULL  NULL  NULL
+NULL    NULL  NULL  NULL  s     v
+NULL    NULL  NULL  NULL  t     v
+NULL    NULL  NULL  NULL  v     v
+NULL    NULL  _ty   v     NULL  NULL
+NULL    NULL  ty    v     NULL  NULL
+public  root  NULL  NULL  NULL  NULL
+sc      v     NULL  NULL  NULL  NULL
 
 # Verify that the ownership was transferred to v even including the view and sequence.
 query ITT
@@ -1136,4 +1161,23 @@ ORDER BY "timestamp" DESC, info
 LIMIT 2
 ----
 drop_function    {"EventType": "drop_function", "FunctionName": "defaultdb.public.f", "Statement": "DROP FUNCTION \"\".\"\".f", "Tag": "DROP FUNCTION", "User": "root"}
-create_function  {"EventType": "create_function", "FunctionName": "defaultdb.public.f", "Statement": "CREATE FUNCTION defaultdb.public.f(IN input INT8)\n\tRETURNS INT8\n\tSTABLE\n\tLANGUAGE SQL\n\tAS $$SELECT 123;$$", "Tag": "CREATE FUNCTION", "User": "root"}
+create_function  {"EventType": "create_function", "FunctionName": "defaultdb.public.f", "Statement": "CREATE FUNCTION defaultdb.public.f(input INT8)\n\tRETURNS INT8\n\tSTABLE\n\tLANGUAGE SQL\n\tAS $$SELECT 123;$$", "Tag": "CREATE FUNCTION", "User": "root"}
+
+subtest event_logs_not_on_explain
+
+statement ok
+CREATE TABLE t1(n int);
+
+statement ok
+EXPLAIN (DDL) ALTER TABLE t1 ADD COLUMN j int;
+
+query IT
+SELECT "reportingID", info::JSONB - 'Timestamp' - 'DescriptorID' FROM system.eventlog
+WHERE "eventType" = 'alter_table'
+AND info::JSONB->>'Statement' LIKE 'ALTER TABLE t1%'
+ORDER BY "timestamp" DESC, info
+----
+
+
+statement ok
+DROP table t1;

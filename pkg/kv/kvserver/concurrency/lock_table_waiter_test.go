@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package concurrency
 
@@ -115,8 +110,7 @@ func setupLockTableWaiterTest() (
 ) {
 	ir := &mockIntentResolver{}
 	st := cluster.MakeTestingClusterSettings()
-	LockTableLivenessPushDelay.Override(context.Background(), &st.SV, 0)
-	LockTableDeadlockDetectionPushDelay.Override(context.Background(), &st.SV, 0)
+	LockTableDeadlockOrLivenessDetectionPushDelay.Override(context.Background(), &st.SV, 0)
 	manual := timeutil.NewManualTime(lockTableWaiterTestClock.GoTime())
 	guard := &mockLockTableGuard{
 		signal: make(chan struct{}, 1),
@@ -169,10 +163,6 @@ func TestLockTableWaiterWithTxn(t *testing.T) {
 	t.Run("state", func(t *testing.T) {
 		t.Run("waitFor", func(t *testing.T) {
 			testWaitPush(t, waitFor, makeReq, expPushTS())
-		})
-
-		t.Run("waitForDistinguished", func(t *testing.T) {
-			testWaitPush(t, waitForDistinguished, makeReq, expPushTS())
 		})
 
 		t.Run("waitElsewhere", func(t *testing.T) {
@@ -246,12 +236,7 @@ func TestLockTableWaiterWithNonTxn(t *testing.T) {
 
 	t.Run("state", func(t *testing.T) {
 		t.Run("waitFor", func(t *testing.T) {
-			t.Log("waitFor does not cause non-transactional requests to push")
-			testWaitNoopUntilDone(t, waitFor, makeReq)
-		})
-
-		t.Run("waitForDistinguished", func(t *testing.T) {
-			testWaitPush(t, waitForDistinguished, makeReq, reqHeaderTS)
+			testWaitPush(t, waitFor, makeReq, reqHeaderTS)
 		})
 
 		t.Run("waitElsewhere", func(t *testing.T) {
@@ -467,10 +452,6 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 			testErrorWaitPush(t, waitFor, makeHighPriReq, expPushTS, reasonWaitPolicy)
 		})
 
-		t.Run("waitForDistinguished", func(t *testing.T) {
-			testErrorWaitPush(t, waitForDistinguished, makeReq, expPushTS, reasonWaitPolicy)
-		})
-
 		t.Run("waitElsewhere", func(t *testing.T) {
 			testErrorWaitPush(t, waitElsewhere, makeReq, expPushTS, reasonWaitPolicy)
 		})
@@ -637,10 +618,6 @@ func TestLockTableWaiterWithLockTimeout(t *testing.T) {
 		t.Run("state", func(t *testing.T) {
 			t.Run("waitFor", func(t *testing.T) {
 				testWaitPushWithTimeout(t, waitFor, makeReq)
-			})
-
-			t.Run("waitForDistinguished", func(t *testing.T) {
-				testWaitPushWithTimeout(t, waitForDistinguished, makeReq)
 			})
 
 			t.Run("waitElsewhere", func(t *testing.T) {
@@ -820,7 +797,7 @@ func TestLockTableWaiterIntentResolverError(t *testing.T) {
 		pusheeTxn := makeTxnProto("pushee")
 		lockHeld := sync
 		g.state = waitingState{
-			kind:          waitForDistinguished,
+			kind:          waitFor,
 			txn:           &pusheeTxn.TxnMeta,
 			key:           keyA,
 			held:          lockHeld,
@@ -1011,7 +988,7 @@ func TestContentionEventTracer(t *testing.T) {
 		events = append(events, ev)
 	})
 	h.notify(ctx, waitingState{
-		kind: waitForDistinguished,
+		kind: waitFor,
 		key:  roachpb.Key("a"),
 		txn:  &txn1.TxnMeta,
 	})
@@ -1068,7 +1045,7 @@ func TestContentionEventTracer(t *testing.T) {
 	// emit an event.
 	manual.Advance(12)
 	h.notify(ctx, waitingState{
-		kind: waitForDistinguished,
+		kind: waitFor,
 		key:  roachpb.Key("b"),
 		txn:  &txn2.TxnMeta,
 	})

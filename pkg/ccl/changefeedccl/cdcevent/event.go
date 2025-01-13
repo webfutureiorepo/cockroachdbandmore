@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdcevent
 
@@ -12,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
@@ -25,10 +23,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cache"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
+	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -45,7 +45,6 @@ type Metadata struct {
 	FamilyID         descpb.FamilyID          // Column family ID.
 	FamilyName       string                   // Column family name.
 	HasOtherFamilies bool                     // True if the table multiple families.
-	HasVirtual       bool                     // True if table has virtual columns.
 	SchemaTS         hlc.Timestamp            // Schema timestamp for table descriptor.
 }
 
@@ -121,20 +120,17 @@ func (r Row) DatumNamed(n string) (Iterator, error) {
 	return iter{r: r, cols: []int{idx}}, nil
 }
 
-// DatumAt returns Datum at specified position.
-func (r Row) DatumAt(at int) (tree.Datum, error) {
-	if at >= len(r.cols) {
-		return nil, errors.AssertionFailedf("column at %d out of bounds", at)
+// DatumsNamed returns the datums with the specified column names, in the form of an Iterator.
+func (r Row) DatumsNamed(names []string) (Iterator, error) {
+	cols := make([]int, 0, len(names))
+	for _, n := range names {
+		idx, ok := r.EventDescriptor.colsByName[n]
+		if !ok {
+			return nil, errors.AssertionFailedf("No column with name %s in this row", n)
+		}
+		cols = append(cols, idx)
 	}
-	col := r.cols[at]
-	if col.ord >= len(r.datums) {
-		return nil, errors.AssertionFailedf("column ordinal at %d out of bounds", col.ord)
-	}
-	encDatum := r.datums[col.ord]
-	if err := encDatum.EnsureDecoded(col.Typ, r.alloc); err != nil {
-		return nil, errors.Wrapf(err, "error decoding column %q as type %s", col.Name, col.Typ.String())
-	}
-	return encDatum.Datum, nil
+	return iter{r: r, cols: cols}, nil
 }
 
 // IsDeleted returns true if event corresponds to a deletion event.
@@ -177,31 +173,47 @@ func (r Row) DebugString() string {
 	return sb.String()
 }
 
+func (r Row) ToJSON() (*tree.DJSON, error) {
+	builder := json.NewObjectBuilder(len(r.cols))
+	err := r.ForAllColumns().Datum(func(d tree.Datum, col ResultColumn) error {
+		val, err := tree.AsJSON(
+			d,
+			sessiondatapb.DataConversionConfig{},
+			time.UTC,
+		)
+		if err != nil {
+			return err
+		}
+		builder.Add(col.Name, val)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDJSON(builder.Build()), nil
+}
+
 // forEachColumn is a helper which invokes fn for reach column in the ordColumn list.
 func (r Row) forEachDatum(fn DatumFn, colIndexes []int) error {
-	numVirtualCols := 0
 	for _, colIdx := range colIndexes {
 		col := r.cols[colIdx]
-		// A datum row will never contain virtual columns. If we encounter a column that is virtual,
-		// then we need to offset each subsequent col.ord by 1. This offset is tracked by numVirtualCols.
-		physicalOrd := col.ord - numVirtualCols
-		if physicalOrd < len(r.datums) {
-			encDatum := r.datums[physicalOrd]
-			if err := encDatum.EnsureDecoded(col.Typ, r.alloc); err != nil {
-				return errors.Wrapf(err, "error decoding column %q as type %s", col.Name, col.Typ.String())
-			}
-
-			if err := fn(encDatum.Datum, col); err != nil {
-				return iterutil.Map(err)
-			}
-		} else if col.ord == virtualColOrd {
+		switch {
+		case col.ord == virtualColOrd:
+			// A datum row will never contain virtual columns.
 			// Insert null values as placeholders for virtual columns.
 			if err := fn(tree.DNull, col); err != nil {
 				return iterutil.Map(err)
 			}
-			numVirtualCols++
-		} else {
-			return errors.AssertionFailedf("index [%d] out of range for column %q", physicalOrd, col.Name)
+		case col.ord < len(r.datums):
+			encDatum := r.datums[col.ord]
+			if err := encDatum.EnsureDecoded(col.Typ, r.alloc); err != nil {
+				return errors.Wrapf(err, "error decoding column %q as type %s", col.Name, col.Typ.String())
+			}
+			if err := fn(encDatum.Datum, col); err != nil {
+				return iterutil.Map(err)
+			}
+		default:
+			return errors.AssertionFailedf("index [%d] out of range for column %q", col.ord, col.Name)
 		}
 	}
 	return nil
@@ -221,6 +233,7 @@ func (r Row) forEachColumn(fn ColumnFn, colIndexes []int) error {
 // such column expected to be found.
 type ResultColumn struct {
 	colinfo.ResultColumn
+	Computed  bool
 	ord       int
 	sqlString string
 }
@@ -247,11 +260,12 @@ type EventDescriptor struct {
 	cols []ResultColumn
 
 	// Precomputed index lists into cols.
+	// TODO(yang): Consider refactoring so that valueCols is empty when keyOnly.
 	keyCols    []int          // Primary key columns.
-	valueCols  []int          // All column family columns.
-	udtCols    []int          // Columns containing UDTs.
-	allCols    []int          // Contains all the columns
-	colsByName map[string]int // All columns, map[col.GetName()]idx in cols
+	valueCols  []int          // Column family (+ virtual if includeVirtualColumns) columns / primary key columns (if keyOnly).
+	udtCols    []int          // UDT columns.
+	allCols    []int          // All columns.
+	colsByName map[string]int // All columns, map[col.GetName()]idx in cols.
 }
 
 // NewEventDescriptor returns EventDescriptor for specified table and family descriptors.
@@ -285,6 +299,7 @@ func NewEventDescriptor(
 				TableID:        desc.GetID(),
 				PGAttributeNum: uint32(col.GetPGAttributeNum()),
 			},
+			Computed:  col.IsComputed(),
 			ord:       ord,
 			sqlString: col.ColumnDesc().SQLStringNotHumanReadable(),
 		}
@@ -303,50 +318,63 @@ func NewEventDescriptor(
 	// appear in the primary key index.
 	primaryIdx := desc.GetPrimaryIndex()
 	colOrd := catalog.ColumnIDToOrdinalMap(desc.PublicColumns())
-	sd.keyCols = make([]int, primaryIdx.NumKeyColumns())
+	writeOnlyAndPublic := catalog.ColumnIDToOrdinalMap(desc.WritableColumns())
 	var primaryKeyOrdinal catalog.TableColMap
 
+	ordIdx := 0
 	for i := 0; i < primaryIdx.NumKeyColumns(); i++ {
 		ord, ok := colOrd.Get(primaryIdx.GetKeyColumnID(i))
+		// Columns going through mutation can exist in the PK, but not
+		// be public, since a later primary index will make these fully
+		// public.
 		if !ok {
+			if _, isWriteOnlyColumn := writeOnlyAndPublic.Get(primaryIdx.GetKeyColumnID(i)); isWriteOnlyColumn {
+				continue
+			}
 			return nil, errors.AssertionFailedf("expected to find column %d", ord)
 		}
-		primaryKeyOrdinal.Set(desc.PublicColumns()[ord].GetID(), i)
+		primaryKeyOrdinal.Set(desc.PublicColumns()[ord].GetID(), ordIdx)
+		ordIdx += 1
 	}
+	sd.keyCols = make([]int, ordIdx)
 
-	// Remaining columns go in same order as public columns,
-	// with the exception that virtual columns are reordered
-	// to be at the end.
-	inFamily := catalog.MakeTableColSet(family.ColumnIDs...)
-	ord := 0
-	for _, col := range desc.PublicColumns() {
-		isInFamily := inFamily.Contains(col.GetID())
-		if col.IsVirtual() {
-			sd.HasVirtual = true
-		}
-		virtual := col.IsVirtual() && includeVirtualColumns
-		pKeyOrd, isPKey := primaryKeyOrdinal.Get(col.GetID())
-		if keyOnly {
-			if isPKey {
-				colIdx := addColumn(col, ord)
-				sd.valueCols = append(sd.valueCols, colIdx)
-				sd.keyCols[pKeyOrd] = colIdx
-				ord++
+	switch {
+	case keyOnly:
+		ord := 0
+		for _, col := range desc.PublicColumns() {
+			pKeyOrd, isPKey := primaryKeyOrdinal.Get(col.GetID())
+			if !isPKey {
+				continue
 			}
-		} else {
-			if isInFamily || isPKey {
-				colIdx := addColumn(col, ord)
-				ord++
-				if isInFamily {
-					sd.valueCols = append(sd.valueCols, colIdx)
-				}
-				if isPKey {
-					sd.keyCols[pKeyOrd] = colIdx
-				}
-			} else if virtual {
+			colIdx := addColumn(col, ord)
+			ord++
+			sd.keyCols[pKeyOrd] = colIdx
+			sd.valueCols = append(sd.valueCols, colIdx)
+		}
+	default:
+		// Remaining columns go in same order as public columns,
+		// with the exception that virtual columns are assigned
+		// a sentinel ordinal position of virtualColOrd.
+		inFamily := catalog.MakeTableColSet(family.ColumnIDs...)
+		ord := 0
+		for _, col := range desc.PublicColumns() {
+			if isVirtual := col.IsVirtual(); isVirtual && includeVirtualColumns {
 				colIdx := addColumn(col, virtualColOrd)
 				sd.valueCols = append(sd.valueCols, colIdx)
-				ord++
+				continue
+			}
+			pKeyOrd, isPKey := primaryKeyOrdinal.Get(col.GetID())
+			isInFamily := inFamily.Contains(col.GetID())
+			if !isPKey && !isInFamily {
+				continue
+			}
+			colIdx := addColumn(col, ord)
+			ord++
+			if isPKey {
+				sd.keyCols[pKeyOrd] = colIdx
+			}
+			if isInFamily {
+				sd.valueCols = append(sd.valueCols, colIdx)
 			}
 		}
 	}
@@ -473,6 +501,13 @@ func NewEventDecoder(
 		return nil, err
 	}
 
+	return NewEventDecoderWithCache(ctx, rfCache, includeVirtual, keyOnly), nil
+}
+
+// NewEventDecoderWithCache returns key value decoder.
+func NewEventDecoderWithCache(
+	ctx context.Context, rfCache *rowFetcherCache, includeVirtual bool, keyOnly bool,
+) Decoder {
 	eventDescriptorCache := cache.NewUnorderedCache(DefaultCacheConfig)
 	getEventDescriptor := func(
 		desc catalog.TableDescriptor,
@@ -485,7 +520,7 @@ func NewEventDecoder(
 	return &eventDecoder{
 		getEventDescriptor: getEventDescriptor,
 		rfCache:            rfCache,
-	}, nil
+	}
 }
 
 // RowType is the type of the row being decoded.
@@ -503,6 +538,11 @@ func (d *eventDecoder) DecodeKV(
 	r, err := d.decodeKV(ctx, kv, rt, schemaTS, keyOnly)
 	if err == nil {
 		return r, nil
+	}
+	// Unwatched family errors aren't terminal so return early and let caller
+	// decide what to do with it.
+	if errors.Is(err, ErrUnwatchedFamily) {
+		return Row{}, err
 	}
 
 	// Failure to decode roachpb.KeyValue we received from rangefeed is pretty bad.
@@ -582,7 +622,10 @@ func (d *eventDecoder) initForKey(
 // In particular, when decoding previous row, we strip table OID column
 // since it makes little sense to include it in the previous row value.
 var systemColumns = []descpb.ColumnDescriptor{
-	colinfo.MVCCTimestampColumnDesc, colinfo.TableOIDColumnDesc,
+	colinfo.MVCCTimestampColumnDesc,
+	colinfo.TableOIDColumnDesc,
+	colinfo.OriginIDColumnDesc,
+	colinfo.OriginTimestampColumnDesc,
 }
 
 type fetcher struct {

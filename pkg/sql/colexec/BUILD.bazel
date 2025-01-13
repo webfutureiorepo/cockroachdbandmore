@@ -73,15 +73,19 @@ go_library(
         "//pkg/sql/sem/catid",
         "//pkg/sql/sem/eval",
         "//pkg/sql/sem/tree",
+        "//pkg/sql/sessiondata",
         "//pkg/sql/sqltelemetry",  # keep
         "//pkg/sql/types",
-        "//pkg/util",
+        "//pkg/storage/enginepb",
         "//pkg/util/buildutil",
+        "//pkg/util/cancelchecker",
         "//pkg/util/duration",  # keep
         "//pkg/util/encoding",  # keep
         "//pkg/util/intsets",
         "//pkg/util/json",  # keep
         "//pkg/util/log",
+        "//pkg/util/metamorphic",
+        "//pkg/util/mon",
         "//pkg/util/stringarena",
         "//pkg/util/tracing",
         "@com_github_cockroachdb_apd_v3//:apd",  # keep
@@ -135,10 +139,6 @@ go_test(
         "values_test.go",
     ],
     embed = [":colexec"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     shard_count = 16,
     deps = [
         "//pkg/col/coldata",

@@ -1,19 +1,13 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -41,21 +35,17 @@ func TestWindowerAccountingForResults(t *testing.T) {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	monitor := mon.NewMonitorWithLimit(
-		"test-monitor",
-		mon.MemoryResource,
-		100000,        /* limit */
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		5000,          /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
+	monitor := mon.NewMonitor(mon.Options{
+		Name:      mon.MakeMonitorName("test-monitor"),
+		Limit:     100000,
+		Increment: 5000,
+		Settings:  st,
+	})
 	evalCtx := eval.MakeTestingEvalContextWithMon(st, monitor)
 	defer evalCtx.Stop(ctx)
 	diskMonitor := execinfra.NewTestDiskMonitor(ctx, st)
 	defer diskMonitor.Stop(ctx)
-	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec, nil /* statsCollector */)
 	if err != nil {
 		t.Fatal(err)
 	}

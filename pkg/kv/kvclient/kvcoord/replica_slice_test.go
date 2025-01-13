@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -17,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -31,7 +27,7 @@ type mockNodeStore struct {
 	nodes []roachpb.NodeDescriptor
 }
 
-var _ NodeDescStore = &mockNodeStore{}
+var _ kvclient.NodeDescStore = &mockNodeStore{}
 
 // GetNodeDescriptor is part of the NodeDescStore interface.
 func (ns *mockNodeStore) GetNodeDescriptor(nodeID roachpb.NodeID) (*roachpb.NodeDescriptor, error) {
@@ -326,7 +322,7 @@ func TestReplicaSliceOptimizeReplicaOrder(t *testing.T) {
 			}
 			// Randomize the input order, as it's not supposed to matter.
 			shuffle.Shuffle(test.slice)
-			test.slice.OptimizeReplicaOrder(st, test.nodeID, healthFn, latencyFn, test.locality)
+			test.slice.OptimizeReplicaOrder(context.Background(), st, test.nodeID, healthFn, latencyFn, test.locality)
 			var sortedNodes []roachpb.NodeID
 			sortedNodes = append(sortedNodes, test.slice[0].NodeID)
 			for i := 1; i < len(test.slice); i++ {

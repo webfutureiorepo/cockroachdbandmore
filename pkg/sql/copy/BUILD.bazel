@@ -10,15 +10,13 @@ go_test(
         "main_test.go",
     ],
     data = glob(["testdata/**"]),
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     shard_count = 4,
     deps = [
         "//pkg/base",
+        "//pkg/ccl",
         "//pkg/cli/clisqlclient",
         "//pkg/kv",
+        "//pkg/kv/kvclient/kvcoord",
         "//pkg/kv/kvpb",
         "//pkg/kv/kvserver/kvserverbase",
         "//pkg/security/securityassets",

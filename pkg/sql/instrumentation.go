@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -14,7 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -24,13 +19,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxrecommendations"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/indexrec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
@@ -40,8 +35,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
@@ -145,6 +142,9 @@ type instrumentationHelper struct {
 
 	inFlightTraceCollector
 
+	// topLevelStats are the statistics collected for every query execution.
+	topLevelStats topLevelQueryStats
+
 	queryLevelStatsWithErr *execstats.QueryLevelStatsWithErr
 
 	// If savePlanForStats is true and the explainPlan was collected, the
@@ -155,6 +155,16 @@ type instrumentationHelper struct {
 	distribution     physicalplan.PlanDistribution
 	vectorized       bool
 	containsMutation bool
+	// generic is true if the plan can be fully-optimized once and re-used
+	// without re-optimization. Plans without placeholders and fold-able stable
+	// expressions, and plans utilizing the placeholder fast-path are always
+	// considered "generic". Plans that are fully optimized with placeholders
+	// present via the force_generic_plan or auto settings for plan_cache_mode
+	// are also considered "generic".
+	generic bool
+	// optimized is true if the plan was optimized or re-optimized during the
+	// current execution.
+	optimized bool
 
 	traceMetadata execNodeTraceMetadata
 
@@ -204,18 +214,18 @@ type instrumentationHelper struct {
 	nanosSinceStatsForecasted time.Duration
 
 	// joinTypeCounts records the number of times each type of logical join was
-	// used in the query.
-	joinTypeCounts map[descpb.JoinType]int
+	// used in the query, up to 255.
+	joinTypeCounts [execbuilder.NumRecordedJoinTypes]uint8
 
-	// joinAlgorithmCounts records the number of times each type of join algorithm
-	// was used in the query.
-	joinAlgorithmCounts map[exec.JoinAlgorithm]int
+	// joinAlgorithmCounts records the number of times each type of join
+	// algorithm was used in the query, up to 255.
+	joinAlgorithmCounts [exec.NumJoinAlgorithms]uint8
 
 	// scanCounts records the number of times scans were used in the query.
 	scanCounts [exec.NumScanCountTypes]int
 
 	// indexesUsed list the indexes used in the query with format tableID@indexID.
-	indexesUsed []string
+	indexesUsed execbuilder.IndexesUsed
 
 	// schemachangerMode indicates which schema changer mode was used to execute
 	// the query.
@@ -391,8 +401,6 @@ func (ih *instrumentationHelper) finalizeSetup(ctx context.Context, cfg *Executo
 		// helper setup.
 		ih.traceMetadata = make(execNodeTraceMetadata)
 	}
-	// Make sure that the builtins use the correct context.
-	ih.evalCtx.SetDeprecatedContext(ctx)
 	if ih.collectBundle {
 		if pollInterval := inFlightTraceCollectorPollInterval.Get(cfg.SV()); pollInterval > 0 {
 			ih.startInFlightTraceCollector(ctx, cfg.InternalDB.Executor(), pollInterval)
@@ -407,15 +415,15 @@ func (ih *instrumentationHelper) finalizeSetup(ctx context.Context, cfg *Executo
 func (ih *instrumentationHelper) Setup(
 	ctx context.Context,
 	cfg *ExecutorConfig,
-	statsCollector sqlstats.StatsCollector,
+	statsCollector *sslocal.StatsCollector,
 	p *planner,
 	stmtDiagnosticsRecorder *stmtdiagnostics.Registry,
-	fingerprint string,
+	stmt *Statement,
 	implicitTxn bool,
 	txnPriority roachpb.UserPriority,
 	collectTxnExecStats bool,
 ) (newCtx context.Context) {
-	ih.fingerprint = fingerprint
+	ih.fingerprint = stmt.StmtNoConstants
 	ih.implicitTxn = implicitTxn
 	ih.txnPriority = txnPriority
 	ih.codec = cfg.Codec
@@ -423,6 +431,7 @@ func (ih *instrumentationHelper) Setup(
 	ih.evalCtx = p.EvalContext()
 	ih.isTenant = execinfra.IncludeRUEstimateInExplainAnalyze.Get(cfg.SV()) && cfg.DistSQLSrv != nil &&
 		cfg.DistSQLSrv.TenantCostController != nil
+	ih.topLevelStats = topLevelQueryStats{}
 
 	switch ih.outputMode {
 	case explainAnalyzeDebugOutput:
@@ -438,14 +447,16 @@ func (ih *instrumentationHelper) Setup(
 
 	default:
 		ih.collectBundle, ih.diagRequestID, ih.diagRequest =
-			stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, fingerprint, "" /* planGist */)
+			stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, stmt.StmtNoConstants, "" /* planGist */)
+		// IsRedacted will be false when ih.collectBundle is false.
+		ih.explainFlags.RedactValues = ih.explainFlags.RedactValues || ih.diagRequest.IsRedacted()
 	}
 
 	ih.stmtDiagnosticsRecorder = stmtDiagnosticsRecorder
 	ih.withStatementTrace = cfg.TestingKnobs.WithStatementTrace
 
 	var previouslySampled bool
-	previouslySampled, ih.savePlanForStats = statsCollector.ShouldSample(fingerprint, implicitTxn, p.SessionData().Database)
+	previouslySampled, ih.savePlanForStats = statsCollector.ShouldSample(stmt.StmtNoConstants, implicitTxn, p.SessionData().Database)
 
 	defer func() { ih.finalizeSetup(newCtx, cfg) }()
 
@@ -469,18 +480,29 @@ func (ih *instrumentationHelper) Setup(
 		}
 	}
 
-	ih.collectExecStats = collectTxnExecStats
+	shouldSampleFirstEncounter := func() bool {
+		if stmt.AST.StatementType() == tree.TypeTCL {
+			// We don't collect stats for TCL statements so
+			// there's no need to trace them.
+			return false
+		}
 
-	// Don't collect it if Stats Collection is disabled. If it is disabled the
-	// stats are not stored, so it always returns false for previouslySampled.
-	if !collectTxnExecStats && (!previouslySampled && sqlstats.StmtStatsEnable.Get(&cfg.Settings.SV)) {
-		// We don't collect the execution stats for statements in this txn, but
-		// this is the first time we see this statement ever, so we'll collect
-		// its execution stats anyway (unless the user disabled txn stats
-		// collection entirely).
-		statsCollectionDisabled := collectTxnStatsSampleRate.Get(&cfg.Settings.SV) == 0
-		ih.collectExecStats = !statsCollectionDisabled
+		// If this is the first time we see this statement in the current stats
+		// container, we'll collect its execution stats anyway (unless the user
+		// disabled txn or stmt stats collection entirely).
+		// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
+		if collectTxnStatsSampleRate.Get(&cfg.Settings.SV) == 0 ||
+			!sqlstats.StmtStatsEnable.Get(&cfg.Settings.SV) {
+			return false
+		}
+
+		// We don't want to collect the stats if the stats container is full,
+		// since previouslySampled will always return false for statements
+		// not already in the container.
+		return !previouslySampled && !statsCollector.StatementsContainerFull()
 	}
+
+	ih.collectExecStats = collectTxnExecStats || shouldSampleFirstEncounter()
 
 	if !ih.collectBundle && ih.withStatementTrace == nil && ih.outputMode == unmodifiedOutput {
 		if ih.collectExecStats {
@@ -521,6 +543,8 @@ func (ih *instrumentationHelper) setupWithPlanGist(
 ) context.Context {
 	ih.collectBundle, ih.diagRequestID, ih.diagRequest =
 		ih.stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, fingerprint, planGist)
+	// IsRedacted will be false when ih.collectBundle is false.
+	ih.explainFlags.RedactValues = ih.explainFlags.RedactValues || ih.diagRequest.IsRedacted()
 	if ih.collectBundle {
 		ih.needFinish = true
 		ih.collectExecStats = true
@@ -560,7 +584,7 @@ func (ih *instrumentationHelper) setupWithPlanGist(
 
 func (ih *instrumentationHelper) Finish(
 	cfg *ExecutorConfig,
-	statsCollector sqlstats.StatsCollector,
+	statsCollector *sslocal.StatsCollector,
 	txnStats *execstats.QueryLevelStats,
 	collectExecStats bool,
 	p *planner,
@@ -626,7 +650,7 @@ func (ih *instrumentationHelper) Finish(
 			ob := ih.emitExplainAnalyzePlanToOutputBuilder(ctx, ih.explainFlags, phaseTimes, queryLevelStats)
 			warnings = ob.GetWarnings()
 			var payloadErr error
-			if pwe, ok := retPayload.(payloadWithError); ok {
+			if pwe, ok2 := retPayload.(payloadWithError); ok2 {
 				payloadErr = pwe.errorCause()
 			}
 			bundleCtx := ctx
@@ -659,10 +683,45 @@ func (ih *instrumentationHelper) Finish(
 			if ih.planGistMatchingBundle {
 				// We don't have the plan string available since the stmt bundle
 				// collection was enabled _after_ the optimizer was done.
-				planString = "-- plan elided due to gist matching"
+				// Instead, we do have the gist available, so we'll decode it
+				// and use that as the plan string.
+				var sb strings.Builder
+				sb.WriteString("-- plan is incomplete due to gist matching: ")
+				sb.WriteString(ih.planGist.String())
+				// Perform best-effort decoding ignoring all errors.
+				if it, err := ie.QueryIterator(
+					bundleCtx, "plan-gist-decoding" /* opName */, nil, /* txn */
+					fmt.Sprintf("SELECT * FROM crdb_internal.decode_plan_gist('%s')", ih.planGist.String()),
+				); err == nil {
+					defer func() {
+						_ = it.Close()
+					}()
+					sb.WriteString("\n")
+					// Ignore the errors returned on Next call.
+					for ok, _ = it.Next(bundleCtx); ok; ok, _ = it.Next(bundleCtx) {
+						row := it.Cur()
+						var line string
+						// Be conservative in case the output format changes.
+						if len(row) == 1 {
+							var ds tree.DString
+							ds, ok = tree.AsDString(row[0])
+							line = string(ds)
+						} else {
+							ok = false
+						}
+						if !ok && buildutil.CrdbTestBuild {
+							return errors.AssertionFailedf("unexpected output format for decoding plan gist %s", ih.planGist.String())
+						}
+						if ok {
+							sb.WriteString("\n")
+							sb.WriteString(line)
+						}
+					}
+				}
+				planString = sb.String()
 			}
 			bundle = buildStatementBundle(
-				bundleCtx, ih.explainFlags, cfg.DB, ie.(*InternalExecutor),
+				bundleCtx, ih.explainFlags, cfg.DB, p, ie.(*InternalExecutor),
 				stmtRawSQL, &p.curPlan, planString, trace, placeholders, res.ErrAllowReleased(),
 				payloadErr, retErr, &p.extendedEvalCtx.Settings.SV, ih.inFlightTraceCollector,
 			)
@@ -753,11 +812,13 @@ func (ih *instrumentationHelper) RecordExplainPlan(explainPlan *explain.Plan) {
 
 // RecordPlanInfo records top-level information about the plan.
 func (ih *instrumentationHelper) RecordPlanInfo(
-	distribution physicalplan.PlanDistribution, vectorized, containsMutation bool,
+	distribution physicalplan.PlanDistribution, vectorized, containsMutation, generic, optimized bool,
 ) {
 	ih.distribution = distribution
 	ih.vectorized = vectorized
 	ih.containsMutation = containsMutation
+	ih.generic = generic
+	ih.optimized = optimized
 }
 
 // PlanForStats returns the plan as an ExplainTreePlanNode tree, if it was
@@ -773,6 +834,7 @@ func (ih *instrumentationHelper) PlanForStats(ctx context.Context) *appstatspb.E
 	})
 	ob.AddDistribution(ih.distribution.String())
 	ob.AddVectorized(ih.vectorized)
+	ob.AddPlanType(ih.generic, ih.optimized)
 	if err := emitExplain(ctx, ob, ih.evalCtx, ih.codec, ih.explainPlan); err != nil {
 		log.Warningf(ctx, "unable to emit explain plan tree: %v", err)
 		return nil
@@ -798,6 +860,7 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 	ob.AddExecutionTime(phaseTimes.GetRunLatency())
 	ob.AddDistribution(ih.distribution.String())
 	ob.AddVectorized(ih.vectorized)
+	ob.AddPlanType(ih.generic, ih.optimized)
 
 	if queryStats != nil {
 		if queryStats.KVRowsRead != 0 {
@@ -815,6 +878,9 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 		ob.AddMaxDiskUsage(queryStats.MaxDiskUsage)
 		if len(queryStats.Regions) > 0 {
 			ob.AddRegionsStats(queryStats.Regions)
+		}
+		if queryStats.UsedFollowerRead {
+			ob.AddTopLevelField("used follower read", "")
 		}
 
 		if !ih.containsMutation && ih.vectorized && grunning.Supported() {
@@ -839,11 +905,13 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 
 	qos := sessiondatapb.Normal
 	iso := isolation.Serializable
+	var asOfSystemTime *eval.AsOfSystemTime
 	if ih.evalCtx != nil {
 		qos = ih.evalCtx.QualityOfService()
 		iso = ih.evalCtx.TxnIsoLevel
+		asOfSystemTime = ih.evalCtx.AsOfSystemTime
 	}
-	ob.AddTxnInfo(iso, ih.txnPriority, qos)
+	ob.AddTxnInfo(iso, ih.txnPriority, qos, asOfSystemTime)
 
 	if err := emitExplain(ctx, ob, ih.evalCtx, ih.codec, ih.explainPlan); err != nil {
 		ob.AddField("error emitting plan", fmt.Sprint(err))
@@ -942,10 +1010,10 @@ func (m execNodeTraceMetadata) annotateExplain(
 	statsMap := execinfrapb.ExtractStatsFromSpans(spans, makeDeterministic)
 
 	// Retrieve which region each node is on.
-	regionsInfo := make(map[int64]string)
+	sqlInstanceIDToRegion := make(map[int64]string)
 	for componentId := range statsMap {
 		if componentId.Region != "" {
-			regionsInfo[int64(componentId.SQLInstanceID)] = componentId.Region
+			sqlInstanceIDToRegion[int64(componentId.SQLInstanceID)] = componentId.Region
 		}
 	}
 
@@ -958,18 +1026,26 @@ func (m execNodeTraceMetadata) annotateExplain(
 			var nodeStats exec.ExecutionStats
 
 			incomplete := false
-			var nodes intsets.Fast
-			regionsMap := make(map[string]struct{})
+			var sqlInstanceIDs, kvNodeIDs intsets.Fast
+			var regions []string
 			for _, c := range components {
 				if c.Type == execinfrapb.ComponentID_PROCESSOR {
-					nodes.Add(int(c.SQLInstanceID))
-					regionsMap[regionsInfo[int64(c.SQLInstanceID)]] = struct{}{}
+					sqlInstanceIDs.Add(int(c.SQLInstanceID))
+					if region := sqlInstanceIDToRegion[int64(c.SQLInstanceID)]; region != "" {
+						// Add only if the region is not an empty string (it
+						// will be an empty string if the region is not setup).
+						regions = util.InsertUnique(regions, region)
+					}
 				}
 				stats := statsMap[c]
 				if stats == nil {
 					incomplete = true
 					break
 				}
+				for _, kvNodeID := range stats.KV.NodeIDs {
+					kvNodeIDs.Add(int(kvNodeID))
+				}
+				regions = util.CombineUnique(regions, stats.KV.Regions)
 				nodeStats.RowCount.MaybeAdd(stats.Output.NumTuples)
 				nodeStats.KVTime.MaybeAdd(stats.KV.KVTime)
 				nodeStats.KVContentionTime.MaybeAdd(stats.KV.ContentionTime)
@@ -995,23 +1071,18 @@ func (m execNodeTraceMetadata) annotateExplain(
 					// component_stats.go.
 					nodeStats.SQLCPUTime.MaybeAdd(stats.Exec.CPUTime)
 				}
+				nodeStats.UsedFollowerRead = nodeStats.UsedFollowerRead || stats.KV.UsedFollowerRead
 			}
 			// If we didn't get statistics for all processors, we don't show the
 			// incomplete results. In the future, we may consider an incomplete flag
 			// if we want to show them with a warning.
 			if !incomplete {
-				for i, ok := nodes.Next(0); ok; i, ok = nodes.Next(i + 1) {
-					nodeStats.Nodes = append(nodeStats.Nodes, fmt.Sprintf("n%d", i))
+				for i, ok := sqlInstanceIDs.Next(0); ok; i, ok = sqlInstanceIDs.Next(i + 1) {
+					nodeStats.SQLNodes = append(nodeStats.SQLNodes, fmt.Sprintf("n%d", i))
 				}
-				regions := make([]string, 0, len(regionsMap))
-				for r := range regionsMap {
-					// Add only if the region is not an empty string (it will be an
-					// empty string if the region is not setup).
-					if r != "" {
-						regions = append(regions, r)
-					}
+				for i, ok := kvNodeIDs.Next(0); ok; i, ok = kvNodeIDs.Next(i + 1) {
+					nodeStats.KVNodes = append(nodeStats.KVNodes, fmt.Sprintf("n%d", i))
 				}
-				sort.Strings(regions)
 				nodeStats.Regions = regions
 				n.Annotate(exec.ExecutionStatsID, &nodeStats)
 			}
@@ -1037,6 +1108,15 @@ func (m execNodeTraceMetadata) annotateExplain(
 	}
 	for i := range plan.Checks {
 		walk(plan.Checks[i])
+	}
+	for _, trigger := range plan.Triggers {
+		// We don't want to create new plans if they haven't been cached - all
+		// necessary plans must have been created during the actual execution of
+		// the query.
+		const createPlanIfMissing = false
+		if tp, _ := trigger.GetExplainPlan(ctx, createPlanIfMissing); tp != nil {
+			m.annotateExplain(ctx, tp.(*explain.Plan), spans, makeDeterministic, p)
+		}
 	}
 }
 

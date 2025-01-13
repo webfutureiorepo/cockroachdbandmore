@@ -205,7 +205,7 @@ CREATE TABLE t8 (
 )
 
 # TODO(mgartner): Lift this restriction. See #96924.
-statement error column "c" cannot be dropped because it is referenced by partial index "t8_a_idx1"
+statement error cannot drop column "c" because it is referenced by partial index "t8_a_idx1"\nHINT: drop the partial index first, then drop the column
 ALTER TABLE t8 DROP COLUMN c
 
 query TT
@@ -564,23 +564,32 @@ SELECT * FROM h@a_b_foo_idx WHERE b = 'foo'
 1  foo
 
 # Backfill a partial index with a user defined type when a new table is created
-# in the same transaction.
+# in the same transaction. Use a high priority to make it less likely for the
+# transaction to be aborted.
 
+# Skip 3node-tenant config since it's prone to hitting a txn retry error
+# (#126763).
+skipif config 3node-tenant
 statement ok
-BEGIN
+BEGIN PRIORITY HIGH
 
+skipif config 3node-tenant
 statement ok
 CREATE TABLE i (a INT, b enum)
 
+skipif config 3node-tenant
 statement ok
 INSERT INTO i VALUES (1, 'foo'), (2, 'bar')
 
+skipif config 3node-tenant
 statement ok
 CREATE INDEX a_b_foo_idx ON i (a) WHERE b = 'foo'
 
+skipif config 3node-tenant
 statement ok
 COMMIT
 
+skipif config 3node-tenant
 query IT rowsort
 SELECT * FROM i@a_b_foo_idx WHERE b = 'foo'
 ----
@@ -1160,10 +1169,10 @@ SHOW CREATE TABLE enum_table_show
 ----
 enum_table_show  CREATE TABLE public.enum_table_show (
                    a INT8 NULL,
-                   b test.public.enum_type NULL,
+                   b public.enum_type NULL,
                    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
                    CONSTRAINT enum_table_show_pkey PRIMARY KEY (rowid ASC),
-                   INDEX i (a ASC) WHERE b IN ('foo':::test.public.enum_type, 'bar':::test.public.enum_type),
+                   INDEX i (a ASC) WHERE b IN ('foo':::public.enum_type, 'bar':::public.enum_type),
                    FAMILY fam_0_a_b_rowid (a, b, rowid)
                  )
 
@@ -1499,7 +1508,8 @@ CREATE TABLE t52318 (
 )
 
 statement ok
-BEGIN; CREATE INDEX i ON t52318 (a) WHERE b > 5
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+CREATE INDEX i ON t52318 (a) WHERE b > 5
 
 statement ok
 INSERT INTO t52318 (a, b) VALUES (1, 1), (6, 6)
@@ -1808,6 +1818,7 @@ CREATE TABLE t61414_c (
   FAMILY (k, a, c)
 )
 
+skipif config #110873 weak-iso-level-configs
 statement ok
 UPSERT INTO t61414_c (k, a, b, d) VALUES (1, 2, 3, 4)
 
@@ -1867,7 +1878,7 @@ statement ok
 CREATE TABLE t79613 (i INT PRIMARY KEY);
 
 statement error pgcode 0A000 cannot create partial index on column "k" \(2\) which is not public
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1;
    CREATE INDEX idx ON t79613(i) WHERE (k > 1);
 
@@ -1875,7 +1886,7 @@ statement ok
 ROLLBACK
 
 statement error pgcode 0A000 cannot create partial index on column "k" \(2\) which is not public
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1;
    CREATE UNIQUE INDEX idx ON t79613(i) WHERE (k > 1);
 
@@ -1883,7 +1894,7 @@ statement ok
 ROLLBACK
 
 statement error pgcode 0A000 cannot create partial index on column "k" \(2\) which is not public
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1;
    ALTER TABLE t79613 ADD CONSTRAINT c UNIQUE (k) WHERE (k > 1);
 
@@ -1898,39 +1909,47 @@ DROP TABLE t79613
 # synchronously.
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    CREATE TABLE t79613 (i INT PRIMARY KEY);
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1;
    CREATE INDEX idx ON t79613(i) WHERE (k > 1);
 COMMIT;
 SELECT * FROM t79613;
+
+statement ok
 DROP TABLE t79613;
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    CREATE TABLE t79613 (i INT PRIMARY KEY);
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1;
    CREATE UNIQUE INDEX idx ON t79613(i) WHERE (k > 1);
 COMMIT;
 SELECT * FROM t79613;
+
+statement ok
 DROP TABLE t79613;
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    CREATE TABLE t79613 (i INT PRIMARY KEY);
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1;
    ALTER TABLE t79613 ADD CONSTRAINT c UNIQUE (k) WHERE (k > 1);
 COMMIT;
 SELECT * FROM t79613;
+
+statement ok
 DROP TABLE t79613;
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
    CREATE TABLE t79613 (i INT PRIMARY KEY);
    ALTER TABLE t79613 ADD COLUMN k INT DEFAULT 1,
        ADD CONSTRAINT c UNIQUE (k) WHERE (k > 1);
 COMMIT;
 SELECT * FROM t79613;
+
+statement ok
 DROP TABLE t79613;
 
 # Regression test for #96924 to disallow dropping a column that is referenced in
@@ -1965,7 +1984,7 @@ CREATE TABLE t96924 (
 statement ok
 ALTER TABLE t96924 DROP COLUMN a
 
-statement error pq: column "b" cannot be dropped because it is referenced by partial index "t96924_b_key"
+statement error pq: cannot drop column "b" because it is referenced by partial index "t96924_b_key"\nHINT: drop the partial index first, then drop the column
 ALTER TABLE t96924 DROP COLUMN b
 
 statement ok
@@ -1974,7 +1993,7 @@ DROP INDEX t96924_b_key CASCADE
 statement ok
 ALTER TABLE t96924 DROP COLUMN b
 
-statement error pq: column "c" cannot be dropped because it is referenced by partial index "t96924_c_key"
+statement error pq: cannot drop column "c" because it is referenced by partial index "t96924_c_key"\nHINT: drop the partial index first, then drop the column
 ALTER TABLE t96924 DROP COLUMN c
 
 statement ok
@@ -1983,7 +2002,7 @@ DROP INDEX t96924_c_key CASCADE
 statement ok
 ALTER TABLE t96924 DROP COLUMN c
 
-statement error pq: column "d" cannot be dropped because it is referenced by partial unique constraint "unique_d"
+statement error pq: cannot drop column "d" because it is referenced by partial unique constraint "unique_d"\nHINT: drop the unique constraint first, then drop the column
 ALTER TABLE t96924 DROP COLUMN d
 
 statement ok
@@ -1992,7 +2011,7 @@ ALTER TABLE t96924 DROP CONSTRAINT unique_d
 statement ok
 ALTER TABLE t96924 DROP COLUMN d
 
-statement error pq: column "e" cannot be dropped because it is referenced by partial index "t96924_e_f_idx"
+statement error pq: cannot drop column "e" because it is referenced by partial index "t96924_e_f_idx"\nHINT: drop the partial index first, then drop the column
 ALTER TABLE t96924 DROP COLUMN e
 
 statement ok
@@ -2008,7 +2027,7 @@ ALTER TABLE t96924 DROP COLUMN f
 
 # Column `h` is used in the predicate of another index that does not key on `h`,
 # we will prevent dropping column `h` as well.
-statement error pq: column "h" cannot be dropped because it is referenced by partial index "t96924_g_idx"
+statement error pq: cannot drop column "h" because it is referenced by partial index "t96924_g_idx"\nHINT: drop the partial index first, then drop the column
 ALTER TABLE t96924 DROP COLUMN h
 
 statement ok
@@ -2019,7 +2038,7 @@ ALTER TABLE t96924 DROP COLUMN h
 
 # Similarly, column `i` cannot be dropped since it's used in the predicate of
 # of a UWI constraint.
-statement error pq: column "i" cannot be dropped because it is referenced by partial unique constraint "unique_g"
+statement error pq: cannot drop column "i" because it is referenced by partial unique constraint "unique_g"\nHINT: drop the unique constraint first, then drop the column
 ALTER TABLE t96924 DROP COLUMN i
 
 statement ok
@@ -2044,7 +2063,7 @@ statement ok
 CREATE INDEX t96924_idx_1 ON t96924(a) WHERE (rowid > 0);
 
 skipif config local-legacy-schema-changer
-statement error column "rowid" cannot be dropped because it is referenced by partial index "t96924_idx_1"
+statement error cannot drop column "rowid" because it is referenced by partial index "t96924_idx_1"\nHINT: drop the partial index first, then drop the column
 ALTER TABLE t96924 ALTER PRIMARY KEY USING COLUMNS (a);
 
 statement ok

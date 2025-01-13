@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer_test
 
@@ -131,6 +126,7 @@ func TestExportImportBank(t *testing.T) {
 			schema := bank.FromRows(1).Tables()[0].Schema
 			exportedFiles := filepath.Join(exportDir, "*")
 			db.Exec(t, fmt.Sprintf("CREATE TABLE bank2 %s", schema))
+			defer db.Exec(t, "DROP TABLE bank2")
 			db.Exec(t, fmt.Sprintf(`IMPORT INTO bank2 CSV DATA ($1) WITH delimiter = '|'%s`, nullIf), exportedFiles)
 
 			db.CheckQueryResults(t,
@@ -140,7 +136,6 @@ func TestExportImportBank(t *testing.T) {
 				`SELECT fingerprint FROM [SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE bank2]`,
 				db.QueryStr(t, `SELECT fingerprint FROM [SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE bank]`),
 			)
-			db.Exec(t, "DROP TABLE bank2")
 		})
 	}
 }
@@ -613,7 +608,7 @@ func TestProcessorEncountersUncertaintyError(t *testing.T) {
 				0: {
 					Knobs: base.TestingKnobs{
 						SQLExecutor: &sql.ExecutorTestingKnobs{
-							DistSQLReceiverPushCallbackFactory: func(query string) func(rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata) (rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata) {
+							DistSQLReceiverPushCallbackFactory: func(_ context.Context, query string) func(rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata) (rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata) {
 								if strings.Contains(query, "EXPORT") {
 									return func(row rowenc.EncDatumRow, batch coldata.Batch, meta *execinfrapb.ProducerMetadata) (rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata) {
 										if meta != nil && meta.Err != nil {

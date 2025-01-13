@@ -1,18 +1,13 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
 import (
 	"context"
-	"sort"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -41,7 +36,7 @@ func (s *systemStatusServer) ProblemRanges(
 	if len(req.NodeID) > 0 {
 		requestedNodeID, _, err := s.parseNodeID(req.NodeID)
 		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, err.Error())
+			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		isLiveMap = map[roachpb.NodeID]livenesspb.NodeVitality{requestedNodeID: s.nodeLiveness.GetNodeVitalityFromCache(requestedNodeID)}
 	} else {
@@ -80,7 +75,7 @@ func (s *systemStatusServer) ProblemRanges(
 					// Context completed, response no longer needed.
 				}
 			}); err != nil {
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, status.Error(codes.Internal, err.Error())
 		}
 	}
 
@@ -141,20 +136,25 @@ func (s *systemStatusServer) ProblemRanges(
 					problems.PausedReplicaIDs =
 						append(problems.PausedReplicaIDs, info.State.Desc.RangeID)
 				}
+				if info.Problems.RangeTooLarge {
+					problems.TooLargeRangeIds =
+						append(problems.TooLargeRangeIds, info.State.Desc.RangeID)
+				}
 			}
-			sort.Sort(roachpb.RangeIDSlice(problems.UnavailableRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.RaftLeaderNotLeaseHolderRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.NoRaftLeaderRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.NoLeaseRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.UnderreplicatedRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.OverreplicatedRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.QuiescentEqualsTickingRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.RaftLogTooLargeRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.CircuitBreakerErrorRangeIDs))
-			sort.Sort(roachpb.RangeIDSlice(problems.PausedReplicaIDs))
+			slices.Sort(problems.UnavailableRangeIDs)
+			slices.Sort(problems.RaftLeaderNotLeaseHolderRangeIDs)
+			slices.Sort(problems.NoRaftLeaderRangeIDs)
+			slices.Sort(problems.NoLeaseRangeIDs)
+			slices.Sort(problems.UnderreplicatedRangeIDs)
+			slices.Sort(problems.OverreplicatedRangeIDs)
+			slices.Sort(problems.QuiescentEqualsTickingRangeIDs)
+			slices.Sort(problems.RaftLogTooLargeRangeIDs)
+			slices.Sort(problems.CircuitBreakerErrorRangeIDs)
+			slices.Sort(problems.PausedReplicaIDs)
+			slices.Sort(problems.TooLargeRangeIds)
 			response.ProblemsByNodeID[resp.nodeID] = problems
 		case <-ctx.Done():
-			return nil, status.Errorf(codes.DeadlineExceeded, ctx.Err().Error())
+			return nil, status.Error(codes.DeadlineExceeded, ctx.Err().Error())
 		}
 	}
 

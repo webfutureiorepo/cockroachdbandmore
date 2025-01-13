@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -294,6 +289,7 @@ func TestClientURLFlagEquivalence(t *testing.T) {
 	defer func() { _ = cleanup2() }()
 
 	anyCmd := []string{"sql", "node drain"}
+	anyClientNonSQLCmd := []string{"gen haproxy"}
 	anyNonSQL := []string{"node drain", "init"}
 	anySQL := []string{"sql"}
 	sqlShell := []string{"sql"}
@@ -320,7 +316,7 @@ func TestClientURLFlagEquivalence(t *testing.T) {
 		{anyNonSQLShell, []string{"--url=postgresql://foo/bar"}, []string{"--host=foo" /*db ignored*/}, "", ""},
 
 		{anySQL, []string{"--url=postgresql://foo@"}, []string{"--user=foo"}, "", ""},
-		{anyNonSQL, []string{"--url=postgresql://foo@bar"}, []string{"--host=bar" /*user ignored*/}, "", ""},
+		{anyNonSQL, []string{"--url=postgresql://foo@bar"}, []string{"--user=foo", "--host=bar"}, "", ""},
 
 		{sqlShell, []string{"--url=postgresql://a@b:12345/d"}, []string{"--user=a", "--host=b", "--port=12345", "--database=d"}, "", ""},
 		{sqlShell, []string{"--url=postgresql://a@b:c/d"}, nil, `invalid port ":c" after host`, ""},
@@ -385,6 +381,10 @@ func TestClientURLFlagEquivalence(t *testing.T) {
 		{anyNonSQL, []string{"--url=postgresql://foo?sslmode=verify-full&sslrootcert=blih/loh.crt"}, nil, `invalid file name for "sslrootcert": expected .* got .*`, ""},
 		{anyNonSQL, []string{"--url=postgresql://foo?sslmode=verify-full&sslcert=blih/loh.crt"}, nil, `invalid file name for "sslcert": expected .* got .*`, ""},
 		{anyNonSQL, []string{"--url=postgresql://foo?sslmode=verify-full&sslkey=blih/loh.crt"}, nil, `invalid file name for "sslkey": expected .* got .*`, ""},
+		// Check that client commands take username into account when enforcing
+		// client cert names. Concretely, it's looking for 'timapples' in the client
+		// cert key file name, not 'root'.
+		{anyClientNonSQLCmd, []string{"--url=postgresql://timapples@foo?sslmode=verify-full&sslkey=/certs/client.roachprod.key"}, nil, `invalid file name for "sslkey": expected "client.timapples.key", got .*`, ""},
 
 		// Check that not specifying a certs dir will cause Go to use root trust store.
 		{anyCmd, []string{"--url=postgresql://foo?sslmode=verify-full"}, []string{"--host=foo"}, "", ""},
@@ -867,6 +867,117 @@ func TestLocalityAdvAddrFlag(t *testing.T) {
 	}
 }
 
+func TestLocalityFileFlag(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Avoid leaking configuration changes after the tests end.
+	defer initCLIDefaults()
+
+	tmpDir, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// These files have leading and trailing whitespaces to test the logic where
+	// we trim those before parsing.
+
+	emptyLocalityFile, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(emptyLocalityFile.Name(), []byte("  "), 0777))
+
+	invalidLocalityFile, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(invalidLocalityFile.Name(), []byte("  invalid  "), 0777))
+
+	validLocalityFile, err := os.CreateTemp(tmpDir, "")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(validLocalityFile.Name(), []byte("  region=us-east1,az=1  \n"), 0777))
+
+	mtf := mtStartSQLCmd.Flags()
+	f := startCmd.Flags()
+	testData := []struct {
+		args        []string
+		expLocality roachpb.Locality
+		expError    string
+	}{
+		// Both flags are incompatible.
+		{
+			args:     []string{"start", "--locality=region=us-east1", "--locality-file=foo"},
+			expError: `--locality is incompatible with --locality-file`,
+		},
+		// File does not exist.
+		{
+			args:     []string{"start", "--locality-file=donotexist"},
+			expError: `invalid argument .* no such file or directory`,
+		},
+		// File is empty.
+		{
+			args:     []string{"start", fmt.Sprintf("--locality-file=%s", emptyLocalityFile.Name())},
+			expError: `invalid locality data "" .* can't have empty locality`,
+		},
+		// File is invalid.
+		{
+			args:     []string{"start", fmt.Sprintf("--locality-file=%s", invalidLocalityFile.Name())},
+			expError: `invalid locality data "invalid" .* tier must be in the form "key=value"`,
+		},
+		// mt start-sql with --locality-file and --tenant-id-file should defer.
+		{
+			args:        []string{"mt", "start-sql", "--tenant-id-file=tid", fmt.Sprintf("--locality-file=%s", validLocalityFile.Name())},
+			expLocality: roachpb.Locality{},
+		},
+		// mt start-sql with --locality-file.
+		{
+			args: []string{"mt", "start-sql", fmt.Sprintf("--locality-file=%s", validLocalityFile.Name())},
+			expLocality: roachpb.Locality{
+				Tiers: []roachpb.Tier{
+					{Key: "region", Value: "us-east1"},
+					{Key: "az", Value: "1"},
+				},
+			},
+		},
+		// Only --locality.
+		{
+			args: []string{"start", "--locality=region=us-central1"},
+			expLocality: roachpb.Locality{
+				Tiers: []roachpb.Tier{
+					{Key: "region", Value: "us-central1"},
+				},
+			},
+		},
+		// Only --locality-file.
+		{
+			args: []string{"start", fmt.Sprintf("--locality-file=%s", validLocalityFile.Name())},
+			expLocality: roachpb.Locality{
+				Tiers: []roachpb.Tier{
+					{Key: "region", Value: "us-east1"},
+					{Key: "az", Value: "1"},
+				},
+			},
+		},
+	}
+	for i, td := range testData {
+		t.Run(strings.Join(td.args, " "), func(t *testing.T) {
+			initCLIDefaults()
+			var err error
+			if td.args[0] == "start" {
+				require.NoError(t, f.Parse(td.args))
+				err = extraServerFlagInit(startCmd)
+			} else {
+				require.NoError(t, mtf.Parse(td.args))
+				err = extraServerFlagInit(mtStartSQLCmd)
+			}
+			if td.expError == "" {
+				require.NoError(t, err)
+				require.Equal(t, td.expLocality, serverCfg.Locality)
+			} else {
+				require.Regexp(t, td.expError, err.Error(),
+					"%d. expected '%s', but got '%s'. td.args was '%#v'.",
+					i, td.expError, err.Error(), td.args)
+			}
+		})
+	}
+}
+
 func TestServerJoinSettings(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1222,6 +1333,7 @@ Available Commands:
   debug             debugging commands
   sqlfmt            format SQL statements
   workload          generators for data and query loads
+  encode-uri        encode a CRDB connection URL
   help              Help about any command
 
 Flags:
@@ -1343,7 +1455,7 @@ func TestSQLPodStorageDefaults(t *testing.T) {
 
 	defer initCLIDefaults()
 
-	expectedDefaultDir, err := base.GetAbsoluteStorePath("", "cockroach-data-tenant-9")
+	expectedDefaultDir, err := base.GetAbsoluteFSPath("", "cockroach-data-tenant-9")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1412,6 +1524,34 @@ func TestTenantID(t *testing.T) {
 			} else {
 				assert.ErrorContains(t, err, tt.errContains)
 				assert.Equal(t, roachpb.TenantID{}, cfgTenantID)
+			}
+		})
+	}
+}
+
+func TestTenantName(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	tests := []struct {
+		name        string
+		arg         string
+		errContains string
+	}{
+		{"empty tenant name text", "", "invalid tenant name: \"\""},
+		{"tenant name not valid", "a+bc", "invalid tenant name: \"a+bc\""},
+		{"tenant name \"abc\" is valid", "abc", ""},
+		{"tenant name \"system\" is valid", "system", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tns := tenantNameSetter{tenantNames: &[]roachpb.TenantName{}}
+			err := tns.Set(tt.arg)
+			if tt.errContains == "" {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.arg, tns.String())
+			} else {
+				assert.True(t, strings.Contains(err.Error(), tt.errContains))
 			}
 		})
 	}

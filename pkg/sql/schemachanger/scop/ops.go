@@ -1,15 +1,12 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package scop describes ops within a schema change.
 package scop
+
+import "github.com/cockroachdb/redact"
 
 // Op represents an action to be taken on a single descriptor.
 type Op interface {
@@ -19,6 +16,11 @@ type Op interface {
 // Type represents the type of operation for an Op. Ops can be grouped into the
 // same Stage only if they share a type.
 type Type int
+
+var _ redact.SafeValue = Type(0)
+
+// SafeValue implements the redact.SafeValue interface.
+func (t Type) SafeValue() {}
 
 //go:generate stringer -type=Type
 

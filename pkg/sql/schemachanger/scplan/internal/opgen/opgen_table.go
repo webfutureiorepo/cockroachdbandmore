@@ -1,21 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/errors"
 )
 
 func init() {
@@ -47,28 +39,9 @@ func init() {
 			),
 			to(scpb.Status_ABSENT,
 				emit(func(this *scpb.Table, md *opGenContext) *scop.CreateGCJobForTable {
-					if !md.ActiveVersion.IsActive(clusterversion.V23_1) {
-						return &scop.CreateGCJobForTable{
-							TableID:             this.TableID,
-							DatabaseID:          databaseIDFromDroppedNamespaceTarget(md, this.TableID),
-							StatementForDropJob: statementForDropJob(this, md),
-						}
-					}
 					return nil
 				}),
 			),
 		),
 	)
-}
-
-func databaseIDFromDroppedNamespaceTarget(md *opGenContext, objectID descpb.ID) descpb.ID {
-	for _, t := range md.Targets {
-		switch e := t.Element().(type) {
-		case *scpb.Namespace:
-			if t.TargetStatus != scpb.ToPublic.Status() && e.DescriptorID == objectID {
-				return e.DatabaseID
-			}
-		}
-	}
-	panic(errors.AssertionFailedf("no ABSENT scpb.Namespace target found with object ID %d", objectID))
 }

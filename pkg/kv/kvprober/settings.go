@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvprober
 
@@ -134,3 +129,10 @@ var quarantineWriteInterval = settings.RegisterDurationSetting(
 		"kv.prober.write.timeout controls the max time kvprober can be blocked",
 	10*time.Second,
 	settings.PositiveDuration)
+
+var tracingEnabled = settings.RegisterBoolSetting(
+	settings.ApplicationLevel,
+	"kv.prober.tracing.enabled",
+	"whether the KV prober should collect traces, in order to log info about"+
+		"leaseholders of ranges probed",
+	false)

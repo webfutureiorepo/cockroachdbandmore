@@ -1,20 +1,8 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { cockroach } from "src/js/protos";
-import { useDispatch, useSelector } from "react-redux";
-import React, { useRef, useEffect, useState, useContext } from "react";
-import { Helmet } from "react-helmet";
-import { refreshHotRanges } from "src/redux/apiReducers";
-import HotRangesTable from "./hotRangesTable";
-import ErrorBoundary from "../app/components/errorMessage/errorBoundary";
 import {
   Loading,
   Text,
@@ -23,7 +11,12 @@ import {
   TimezoneContext,
 } from "@cockroachlabs/cluster-ui";
 import classNames from "classnames/bind";
-import styles from "./hotRanges.module.styl";
+import React, { useRef, useEffect, useState, useContext } from "react";
+import { Helmet } from "react-helmet";
+import { useDispatch, useSelector } from "react-redux";
+
+import { cockroach } from "src/js/protos";
+import { refreshHotRanges } from "src/redux/apiReducers";
 import {
   hotRangesSelector,
   isLoadingSelector,
@@ -34,6 +27,11 @@ import {
 import { selectNodeLocalities } from "src/redux/localities";
 import { performanceBestPracticesHotSpots } from "src/util/docs";
 import { HotRangesFilter } from "src/views/hotRanges/hotRangesFilter";
+
+import ErrorBoundary from "../app/components/errorMessage/errorBoundary";
+
+import styles from "./hotRanges.module.styl";
+import HotRangesTable from "./hotRangesTable";
 
 const cx = classNames.bind(styles);
 const HotRangesRequest = cockroach.server.serverpb.HotRangesRequest;

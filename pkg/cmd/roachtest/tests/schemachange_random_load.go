@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -41,10 +36,11 @@ func registerSchemaChangeRandomLoad(r registry.Registry) {
 			spec.AWSZones("us-east-2b,us-west-1a,eu-west-1a"),
 		),
 		// TODO(radu): enable this test on AWS.
-		CompatibleClouds: registry.AllExceptAWS,
-		Suites:           registry.Suites(registry.Nightly),
-		Leases:           registry.MetamorphicLeases,
-		NativeLibs:       registry.LibGEOS,
+		CompatibleClouds:           registry.AllExceptAWS,
+		Suites:                     registry.Suites(registry.Nightly),
+		Leases:                     registry.MetamorphicLeases,
+		NativeLibs:                 registry.LibGEOS,
+		RequiresDeprecatedWorkload: true, // uses schemachange
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			maxOps := 5000
 			concurrency := 20
@@ -90,19 +86,20 @@ func runSchemaChangeRandomLoad(
 			t.Fatalf("found %d invalid objects", numInvalidObjects)
 		}
 	}
-
 	loadNode := c.Node(1)
 	roachNodes := c.Range(1, c.Spec().NodeCount)
 	t.Status("copying binaries")
 	c.Put(ctx, t.DeprecatedWorkload(), "./workload", loadNode)
 
 	t.Status("starting cockroach nodes")
-	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), roachNodes)
-	pgurl, err := roachtestutil.DefaultPGUrl(ctx, c, t.L(), c.Nodes(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Run(ctx, option.WithNodes(loadNode), fmt.Sprintf("./workload init schemachange '%s'", pgurl))
+
+	settings := install.MakeClusterSettings(install.ClusterSettingsOption{
+		"sql.log.all_statements.enabled": "true",
+	})
+
+	c.Start(ctx, t.L(), option.DefaultStartOpts(), settings, roachNodes)
+
+	c.Run(ctx, option.WithNodes(loadNode), "./workload init schemachange {pgurl:1}")
 
 	result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(c.Node(1)), "echo", "-n", "{store-dir}")
 	if err != nil {
@@ -113,13 +110,18 @@ func runSchemaChangeRandomLoad(
 	runCmd := []string{
 		"./workload run schemachange --verbose=1",
 		"--tolerate-errors=false",
-		// Save the histograms so that they can be reported to https://roachperf.crdb.dev/.
-		" --histograms=" + t.PerfArtifactsDir() + "/stats.json",
 		fmt.Sprintf("--max-ops %d", maxOps),
 		fmt.Sprintf("--concurrency %d", concurrency),
 		fmt.Sprintf("--txn-log %s", filepath.Join(storeDirectory, txnLogFile)),
 		fmt.Sprintf("{pgurl%s}", loadNode),
 	}
+
+	extraLabels := map[string]string{
+		"concurrency": fmt.Sprintf("%d", concurrency),
+		"max-ops":     fmt.Sprintf("%d", maxOps),
+	}
+
+	runCmd = append(runCmd, roachtestutil.GetWorkloadHistogramArgs(t, c, extraLabels))
 	t.Status("running schemachange workload")
 	err = c.RunE(ctx, option.WithNodes(loadNode), runCmd...)
 	if err != nil {
@@ -155,12 +157,15 @@ func saveArtifacts(ctx context.Context, t test.Test, c cluster.Cluster, storeDir
 	defer db.Close()
 
 	// Save a backup file called schemachange to the store directory.
-	_, err := db.Exec("BACKUP DATABASE schemachange to 'nodelocal://1/schemachange'")
+	_, err := db.Exec("BACKUP DATABASE schemachange INTO 'nodelocal://1/schemachange'")
 	if err != nil {
 		t.L().Printf("Failed execute backup command on node 1: %v\n", err.Error())
 	}
-
-	remoteBackupFilePath := filepath.Join(storeDirectory, "extern", "schemachange")
+	var backupPath string
+	if err := db.QueryRow("SELECT path FROM [SHOW BACKUPS IN 'nodelocal://1/schemachange']").Scan(&backupPath); err != nil {
+		t.L().Printf("Failed to get backup path from node 1: %v\n", err.Error())
+	}
+	remoteBackupFilePath := filepath.Join(storeDirectory, "extern", "schemachange", backupPath)
 	localBackupFilePath := filepath.Join(t.ArtifactsDir(), "backup")
 	remoteTransactionsFilePath := filepath.Join(storeDirectory, txnLogFile)
 	localTransactionsFilePath := filepath.Join(t.ArtifactsDir(), txnLogFile)

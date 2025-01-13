@@ -1,19 +1,14 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package ui embeds the assets for the web UI into the Cockroach binary.
 //
-// By default, it serves a stub web UI. Linking with distoss or distccl will
-// replace the stubs with the OSS UI or the CCL UI, respectively. The exported
-// symbols in this package are thus function pointers instead of functions so
-// that they can be mutated by init hooks.
+// By default, it serves a stub web UI. Linking with distccl will replace the
+// stubs with the OSS UI or the CCL UI, respectively. The exported symbols in
+// this package are thus function pointers instead of functions so that they can
+// be mutated by init hooks.
 package ui
 
 import (
@@ -29,8 +24,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const (
@@ -51,6 +48,15 @@ var _ = settings.RegisterEnumSetting(
 		// See pkg/ui/workspaces/cluster-ui/webpack.config.js
 		// and pkg/ui/workspaces/db-console/webpack.config.js.
 	},
+	settings.WithPublic)
+
+// TODO(davidh): This setting can be removed after 24.3 since it only
+// affects legacy DB page.
+var DatabaseLocalityMetadataEnabled = settings.RegisterBoolSetting(
+	settings.ApplicationLevel,
+	"ui.database_locality_metadata.enabled",
+	"if enabled shows extended locality data about databases and tables in DB Console which can be expensive to compute",
+	true,
 	settings.WithPublic)
 
 // Assets is used for embedded JS assets required for UI.
@@ -92,6 +98,10 @@ type indexHTMLArgs struct {
 	FeatureFlags     serverpb.FeatureFlags
 
 	OIDCGenerateJWTAuthTokenEnabled bool
+
+	LicenseType               string
+	SecondsUntilLicenseExpiry int64
+	IsManaged                 bool
 }
 
 // OIDCUIConf is a variable that stores data required by the
@@ -129,6 +139,7 @@ type Config struct {
 	GetUser  func(ctx context.Context) *string
 	OIDC     OIDCUI
 	Flags    serverpb.FeatureFlags
+	Settings *cluster.Settings
 }
 
 var uiConfigPath = regexp.MustCompile("^/uiconfig$")
@@ -158,18 +169,30 @@ func Handler(cfg Config) http.Handler {
 	buildInfo := build.GetInfo()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		licenseType, err := base.LicenseType(cfg.Settings)
+		if err != nil {
+			log.Errorf(context.Background(), "unable to get license type: %+v", err)
+		}
+		licenseTTL := base.GetLicenseTTL(r.Context(), cfg.Settings, timeutil.DefaultTimeSource{})
 		oidcConf := cfg.OIDC.GetOIDCConf()
+		major, minor := build.BranchReleaseSeries()
 		args := indexHTMLArgs{
 			Insecure:         cfg.Insecure,
 			LoggedInUser:     cfg.GetUser(r.Context()),
 			Tag:              buildInfo.Tag,
-			Version:          build.BinaryVersionPrefix(),
+			Version:          fmt.Sprintf("v%d.%d", major, minor),
 			OIDCAutoLogin:    oidcConf.AutoLogin,
 			OIDCLoginEnabled: oidcConf.Enabled,
 			OIDCButtonText:   oidcConf.ButtonText,
 			FeatureFlags:     cfg.Flags,
 
 			OIDCGenerateJWTAuthTokenEnabled: oidcConf.GenerateJWTAuthTokenEnabled,
+
+			LicenseType:               licenseType,
+			SecondsUntilLicenseExpiry: licenseTTL,
+			// log.RedactionPolicyManaged is set to true only when cluster is running under
+			// managed service control.
+			IsManaged: log.RedactionPolicyManaged,
 		}
 		if cfg.NodeID != nil {
 			args.NodeID = cfg.NodeID.String()

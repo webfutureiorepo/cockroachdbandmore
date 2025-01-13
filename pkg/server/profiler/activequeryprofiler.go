@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/server/debug"
 	"github.com/cockroachdb/cockroach/pkg/server/dumpstore"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/util/cgroups"
@@ -63,6 +59,13 @@ const (
 	QueryFileNameSuffix = ".csv"
 )
 
+var activeQueryCombinedFileSize = settings.RegisterByteSizeSetting(
+	settings.ApplicationLevel,
+	"server.active_query.total_dump_size_limit",
+	"maximum combined disk size of preserved active query profiles",
+	64<<20, // 64MiB
+)
+
 // NewActiveQueryProfiler creates a NewQueryProfiler. dir is the directory in which
 // profiles are to be stored.
 func NewActiveQueryProfiler(
@@ -72,7 +75,7 @@ func NewActiveQueryProfiler(
 		return nil, errors.AssertionFailedf("need to specify dir for NewQueryProfiler")
 	}
 
-	dumpStore := dumpstore.NewStore(dir, maxCombinedFileSize, st)
+	dumpStore := dumpstore.NewStore(dir, activeQueryCombinedFileSize, st)
 
 	maxMem, warn, err := memLimitFn()
 	if err != nil {

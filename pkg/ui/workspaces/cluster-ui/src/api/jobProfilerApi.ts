@@ -1,21 +1,18 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+
+import { propsToQueryString } from "../util";
+
 import { fetchData } from "./fetchData";
 import {
   SqlExecutionRequest,
   executeInternalSql,
   LONG_TIMEOUT,
 } from "./sqlApi";
-import { propsToQueryString } from "../util";
 
 const JOB_PROFILER_PATH = "_status/job_profiler_execution_details";
 
@@ -66,10 +63,10 @@ export type CollectExecutionDetailsResponse = {
   req_resp: boolean;
 };
 
-export function collectExecutionDetails({
-  job_id,
-}: CollectExecutionDetailsRequest): Promise<CollectExecutionDetailsResponse> {
-  const args: any = [job_id.toString()];
+export function collectExecutionDetails(
+  execDetailsReq: CollectExecutionDetailsRequest,
+): Promise<CollectExecutionDetailsResponse> {
+  const args = [execDetailsReq.job_id.toString()];
 
   const collectExecutionDetails = {
     sql: `SELECT crdb_internal.request_job_execution_details($1::INT) as req_resp`,

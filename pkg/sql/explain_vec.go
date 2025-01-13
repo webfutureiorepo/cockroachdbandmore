@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -41,9 +36,9 @@ type explainVecNode struct {
 func (n *explainVecNode) startExec(params runParams) error {
 	n.run.values = make(tree.Datums, 1)
 	distSQLPlanner := params.extendedEvalCtx.DistSQLPlanner
-	distribution := getPlanDistribution(
+	distribution, _ := getPlanDistribution(
 		params.ctx, params.p.Descriptors().HasUncommittedTypes(),
-		params.extendedEvalCtx.SessionData().DistSQLMode, n.plan.main,
+		params.extendedEvalCtx.SessionData(), n.plan.main, &params.p.distSQLVisitor,
 	)
 	outerSubqueries := params.p.curPlan.subqueryPlans
 	planCtx := newPlanningCtxForExplainPurposes(distSQLPlanner, params, n.plan.subqueryPlans, distribution)
@@ -62,8 +57,7 @@ func (n *explainVecNode) startExec(params runParams) error {
 
 	finalizePlanWithRowCount(params.ctx, planCtx, physPlan, n.plan.mainRowCount)
 	flows := physPlan.GenerateFlowSpecs()
-	flowCtx, cleanup := newFlowCtxForExplainPurposes(params.ctx, params.p)
-	defer cleanup()
+	flowCtx := newFlowCtxForExplainPurposes(params.ctx, params.p)
 
 	// We want to get the vectorized plan which would be executed with the
 	// current 'vectorize' option. If 'vectorize' is set to 'off', then the
@@ -90,22 +84,17 @@ func (n *explainVecNode) startExec(params runParams) error {
 	return nil
 }
 
-func newFlowCtxForExplainPurposes(
-	ctx context.Context, p *planner,
-) (_ *execinfra.FlowCtx, cleanup func()) {
-	monitor := mon.NewMonitor(
-		"explain", /* name */
-		mon.MemoryResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		p.execCfg.Settings,
-	)
-	monitor.StartNoReserved(ctx, p.Mon())
-	cleanup = func() {
-		monitor.Stop(ctx)
-	}
+func newFlowCtxForExplainPurposes(ctx context.Context, p *planner) *execinfra.FlowCtx {
+	monitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("explain"),
+		Settings: p.execCfg.Settings,
+	})
+	// Note that we do not use planner's monitor here in order to not link any
+	// monitors created later to the planner's monitor (since we might not close
+	// the components that use them). This also allows us to not close this
+	// monitor because eventually the whole monitor tree rooted in this monitor
+	// will be garbage collected.
+	monitor.Start(ctx, nil /* pool */, mon.NewStandaloneBudget(math.MaxInt64))
 	return &execinfra.FlowCtx{
 		NodeID:  p.EvalContext().NodeID,
 		EvalCtx: p.EvalContext(),
@@ -119,7 +108,7 @@ func newFlowCtxForExplainPurposes(
 		},
 		Descriptors: p.Descriptors(),
 		DiskMonitor: &mon.BytesMonitor{},
-	}, cleanup
+	}
 }
 
 func newPlanningCtxForExplainPurposes(
@@ -128,9 +117,9 @@ func newPlanningCtxForExplainPurposes(
 	subqueryPlans []subquery,
 	distribution physicalplan.PlanDistribution,
 ) *PlanningCtx {
-	distribute := DistributionType(DistributionTypeNone)
+	distribute := DistributionType(LocalDistribution)
 	if distribution.WillDistribute() {
-		distribute = DistributionTypeAlways
+		distribute = FullDistribution
 	}
 	planCtx := distSQLPlanner.NewPlanningCtx(params.ctx, params.extendedEvalCtx,
 		params.p, params.p.txn, distribute)
@@ -156,4 +145,22 @@ func (n *explainVecNode) Next(runParams) (bool, error) {
 func (n *explainVecNode) Values() tree.Datums { return n.run.values }
 func (n *explainVecNode) Close(ctx context.Context) {
 	n.plan.close(ctx)
+}
+
+func (n *explainVecNode) InputCount() int {
+	// We check whether planNode is nil because the input might be represented
+	// physically, which we can't traverse into currently.
+	// TODO(yuzefovich/mgartner): Figure out a way to traverse into physical
+	// plans, if necessary.
+	if n.plan.main.planNode != nil {
+		return 1
+	}
+	return 0
+}
+
+func (n *explainVecNode) Input(i int) (planNode, error) {
+	if i == 0 && n.plan.main.planNode != nil {
+		return n.plan.main.planNode, nil
+	}
+	return nil, errors.AssertionFailedf("input index %d is out of range", i)
 }

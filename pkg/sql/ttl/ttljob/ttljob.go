@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttljob
 
@@ -16,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/jobs/joberror"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -50,7 +46,17 @@ type rowLevelTTLResumer struct {
 var _ jobs.Resumer = (*rowLevelTTLResumer)(nil)
 
 // Resume implements the jobs.Resumer interface.
-func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) error {
+func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) (retErr error) {
+	defer func() {
+		if retErr == nil {
+			return
+		} else if joberror.IsPermanentBulkJobError(retErr) {
+			retErr = jobs.MarkAsPermanentJobError(retErr)
+		} else {
+			retErr = jobs.MarkAsRetryJobError(retErr)
+		}
+	}()
+
 	jobExecCtx := execCtx.(sql.JobExecContext)
 	execCfg := jobExecCtx.ExecCfg()
 	db := execCfg.DB
@@ -120,44 +126,30 @@ func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) err
 	ttlExpr := rowLevelTTL.GetTTLExpr()
 
 	labelMetrics := rowLevelTTL.LabelMetrics
-	group := ctxgroup.WithContext(ctx)
+	statsCtx, statsCancel := context.WithCancelCause(ctx)
+	defer statsCancel(nil)
+	statsGroup := ctxgroup.WithContext(statsCtx)
 	err := func() error {
-		statsCloseCh := make(chan struct{})
-		defer close(statsCloseCh)
 		if rowLevelTTL.RowStatsPollInterval != 0 {
-
+			defer statsCancel(errors.New("cancelling TTL stats query because TTL job completed"))
 			metrics := execCfg.JobRegistry.MetricsStruct().RowLevelTTL.(*RowLevelTTLAggMetrics).loadMetrics(
 				labelMetrics,
 				relationName,
 			)
 
-			group.GoCtx(func(ctx context.Context) error {
-
-				handleError := func(err error) error {
-					if err == nil {
-						return nil
-					}
-					if knobs.ReturnStatsError {
-						return err
-					}
-					log.Warningf(ctx, "failed to get statistics for table id %d: %v", details.TableID, err)
-					return nil
-				}
-
+			statsGroup.GoCtx(func(ctx context.Context) error {
 				// Do once initially to ensure we have some base statistics.
-				err := metrics.fetchStatistics(ctx, execCfg, relationName, details, aostDuration, ttlExpr)
-				if err := handleError(err); err != nil {
+				if err := metrics.fetchStatistics(ctx, execCfg, relationName, details, aostDuration, ttlExpr); err != nil {
 					return err
 				}
 				// Wait until poll interval is reached, or early exit when we are done
 				// with the TTL job.
 				for {
 					select {
-					case <-statsCloseCh:
+					case <-ctx.Done():
 						return nil
 					case <-time.After(rowLevelTTL.RowStatsPollInterval):
-						err := metrics.fetchStatistics(ctx, execCfg, relationName, details, aostDuration, ttlExpr)
-						if err := handleError(err); err != nil {
+						if err := metrics.fetchStatistics(ctx, execCfg, relationName, details, aostDuration, ttlExpr); err != nil {
 							return err
 						}
 					}
@@ -174,7 +166,7 @@ func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) err
 		if err != nil {
 			return err
 		}
-		spanPartitions, err := distSQLPlanner.PartitionSpans(ctx, planCtx, []roachpb.Span{entirePKSpan})
+		spanPartitions, err := distSQLPlanner.PartitionSpans(ctx, planCtx, []roachpb.Span{entirePKSpan}, sql.PartitionSpansBoundDefault)
 		if err != nil {
 			return err
 		}
@@ -194,7 +186,7 @@ func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) err
 		deleteBatchSize := ttlbase.GetDeleteBatchSize(settingsValues, rowLevelTTL)
 		selectRateLimit := ttlbase.GetSelectRateLimit(settingsValues, rowLevelTTL)
 		deleteRateLimit := ttlbase.GetDeleteRateLimit(settingsValues, rowLevelTTL)
-		disableChangefeedReplication := ttlbase.GetChangefeedReplicationDisabled(settingsValues)
+		disableChangefeedReplication := ttlbase.GetChangefeedReplicationDisabled(settingsValues, rowLevelTTL)
 		newTTLSpec := func(spans []roachpb.Span) *execinfrapb.TTLSpec {
 			return &execinfrapb.TTLSpec{
 				JobID:                        jobID,
@@ -222,7 +214,11 @@ func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) err
 			func(_ isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
 				progress := md.Progress
 				rowLevelTTL := progress.Details.(*jobspb.Progress_RowLevelTTL).RowLevelTTL
-				rowLevelTTL.JobSpanCount = int64(jobSpanCount)
+				rowLevelTTL.JobTotalSpanCount = int64(jobSpanCount)
+				rowLevelTTL.JobProcessedSpanCount = 0
+				progress.Progress = &jobspb.Progress_FractionCompleted{
+					FractionCompleted: 0,
+				}
 				ju.UpdateProgress(progress)
 				return nil
 			},
@@ -288,7 +284,15 @@ func (t rowLevelTTLResumer) Resume(ctx context.Context, execCtx interface{}) err
 		return err
 	}
 
-	return group.Wait()
+	if err := statsGroup.Wait(); err != nil {
+		// If the stats group was cancelled, use that error instead.
+		err = errors.CombineErrors(context.Cause(statsCtx), err)
+		if knobs.ReturnStatsError {
+			return err
+		}
+		log.Warningf(ctx, "failed to get statistics for table id %d: %v", details.TableID, err)
+	}
+	return nil
 }
 
 // OnFailOrCancel implements the jobs.Resumer interface.

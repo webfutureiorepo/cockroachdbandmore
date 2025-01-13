@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -20,12 +15,15 @@ import (
 // topKNode represents a node that returns only the top K rows according to the
 // ordering, in the order specified.
 type topKNode struct {
-	plan     planNode
+	singleInputPlanNode
 	k        int64
 	ordering colinfo.ColumnOrdering
 	// When alreadyOrderedPrefix is non-zero, the input is already ordered on
 	// the prefix ordering[:alreadyOrderedPrefix].
 	alreadyOrderedPrefix int
+	// estimatedInputRowCount, when set, is the estimated number of rows that
+	// this topKNode will read from its input.
+	estimatedInputRowCount uint64
 }
 
 func (n *topKNode) startExec(params runParams) error {
@@ -41,5 +39,5 @@ func (n *topKNode) Values() tree.Datums {
 }
 
 func (n *topKNode) Close(ctx context.Context) {
-	n.plan.Close(ctx)
+	n.input.Close(ctx)
 }

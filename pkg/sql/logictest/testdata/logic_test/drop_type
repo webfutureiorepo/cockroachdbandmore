@@ -1,5 +1,8 @@
 statement ok
 SET sql_safe_updates = false;
+
+onlyif config local-legacy-schema-changer local-mixed-24.3
+statement ok
 SET enable_experimental_alter_column_type_general = true;
 
 # Basic test -- create and drop a type.
@@ -21,7 +24,7 @@ statement ok
 CREATE TYPE t AS ENUM ('hello');
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 DROP TYPE t;
 
 statement error pq: type \"t\" does not exist
@@ -97,9 +100,13 @@ CREATE TYPE t AS ENUM ('hello');
 statement ok
 ALTER TABLE t1 ADD COLUMN x STRING;
 
+# This is skipped for the legacy schema changer because in that mode there isn't
+# any support for alter column types that require a backfill.
+skipif config local-legacy-schema-changer
 statement ok
 ALTER TABLE t1 ALTER COLUMN x SET DATA TYPE t USING x::t
 
+skipif config local-legacy-schema-changer
 statement error pq: cannot drop type "t" because other objects \(\[test.public.t1\]\) still depend on it
 DROP TYPE t
 
@@ -209,7 +216,7 @@ CREATE TYPE t4 AS ENUM ('cheers')
 # the dependencies are picked up.
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE expr ADD COLUMN x BOOL DEFAULT ('hello'::t1 = 'hello'::t1)
 
 statement error pq: cannot drop type "t1" because other objects \(\[test.public.expr\]\) still depend on it
@@ -219,7 +226,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE expr ADD COLUMN y STRING AS ('howdy'::t2::STRING) STORED
 
 statement error pq: cannot drop type "t2" because other objects \(\[test.public.expr\]\) still depend on it
@@ -229,7 +236,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE expr ADD CONSTRAINT "check" CHECK ('hi'::t3::string = 'hi')
 
 statement error pq: cannot drop type "t3" because other objects \(\[test.public.expr\]\) still depend on it
@@ -239,7 +246,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 CREATE INDEX i ON expr (rowid) WHERE ('cheers'::t4 = 'cheers'::t4)
 
 statement error pq: cannot drop type "t4" because other objects \(\[test.public.expr\]\) still depend on it

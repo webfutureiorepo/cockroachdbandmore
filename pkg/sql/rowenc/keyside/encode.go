@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package keyside
 
@@ -145,6 +140,12 @@ func Encode(b []byte, val tree.Datum, dir encoding.Direction) ([]byte, error) {
 		}
 		return encoding.EncodeBytesDescending(b, data), nil
 	case *tree.DTuple:
+		// TODO(49975): due to the fact that we're not adding any "tuple
+		// marker", this encoding is faulty since it can lead to incorrect
+		// decoding: e.g. tuple (NULL, NULL) is encoded as [0, 0], but when
+		// decoding it, encoding.PeekLength will return 1 leaving the second
+		// zero in the buffer which could later result in corruption of the
+		// datum for the next column.
 		for _, datum := range t.D {
 			var err error
 			b, err = Encode(b, datum, dir)

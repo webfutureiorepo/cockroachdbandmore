@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package aws
 
@@ -35,9 +30,16 @@ import (
 const awsStartupScriptTemplate = `#!/usr/bin/env bash
 # Script for setting up a AWS machine for roachprod use.
 
-set -x
+# ensure any failure fails the entire script
+set -eux
 
-if [ -e /mnt/data1/.roachprod-initialized ]; then
+# Redirect output to stdout/err and a log file
+exec &> >(tee -a {{ .StartupLogs }})
+
+# Log the startup of the script with a timestamp
+echo "startup script starting: $(date -u)"
+
+if [ -e {{ .DisksInitializedFile }} ]; then
   echo "Already initialized, exiting."
   exit 0
 fi
@@ -45,24 +47,69 @@ fi
 sudo apt-get update
 sudo apt-get install -qy --no-install-recommends mdadm
 
-mount_opts="defaults"
+{{ if not .Zfs }}
+mount_opts="defaults,nofail"
 {{if .ExtraMountOpts}}mount_opts="${mount_opts},{{.ExtraMountOpts}}"{{end}}
+{{ end }}
 
 use_multiple_disks='{{if .UseMultipleDisks}}true{{end}}'
 
-disks=()
 mount_prefix="/mnt/data"
+
+# if the use_multiple_disks is not set and there are more than 1 disk (excluding the boot disk),
+# then the disks will be selected for RAID'ing. If there are both EC2 NVMe Instance Storage and
+# EBS, RAID'ing in this case can cause performance differences. So, to avoid this,
+# EC2 NVMe Instance Storage are ignored.
+# Scenarios: 
+#   (local SSD = 0, Network Disk - 1)  - no RAID'ing and mount network disk
+#   (local SSD = 1, Network Disk - 0)  - no RAID'ing and mount local SSD
+#   (local SSD >= 1, Network Disk = 1) - no RAID'ing and mount network disk
+#   (local SSD > 1, Network Disk = 0)  - local SSDs selected for RAID'ing
+#   (local SSD >= 0, Network Disk > 1) - network disks selected for RAID'ing
+# Keep track of the Local SSDs and EBS volumes for RAID'ing
+local_disks=()
+ebs_volumes=()
+
+{{ if .Zfs }}
+	apt-get update -q
+	apt-get install -yq zfsutils-linux
+{{ end }}
 
 # On different machine types, the drives are either called nvme... or xvdd.
 for d in $(ls /dev/nvme?n1 /dev/xvdd); do
-  if ! mount | grep ${d}; then
-    disks+=("${d}")
+mounted="no"
+{{ if .Zfs }}
+  # Check if the disk is already part of a zpool or mounted; skip if so.
+  if (zpool list -v -P | grep -q ${d}) || (mount | grep -q ${d}); then
+		mounted="yes"
+	fi
+{{ else }}
+  # Skip already mounted disks.
+  if mount | grep -q ${d}; then
+		mounted="yes"
+	fi
+{{ end }}
+  if [ "$mounted" == "no" ]; then
+		if udevadm info --query=property --name=${d} | grep "ID_MODEL=Amazon Elastic Block Store">/dev/null; then
+			ebs_volumes+=("${d}")
+		else
+			local_disks+=("${d}")
+		fi
     echo "Disk ${d} not mounted, need to mount..."
   else
     echo "Disk ${d} already mounted, skipping..."
   fi
 done
 
+# use only EBS volumes if available and ignore EC2 NVMe Instance Storage
+disks=()
+if [ "${#ebs_volumes[@]}" -gt "0" ]; then
+  echo "Using only EBS disks: ${ebs_volumes[@]}"
+	disks=("${ebs_volumes[@]}")
+else
+	echo "Using only local disks: ${local_disks[@]}"
+	disks=("${local_disks[@]}")
+fi
 
 if [ "${#disks[@]}" -eq "0" ]; then
   mountpoint="${mount_prefix}1"
@@ -77,30 +124,48 @@ elif [ "${#disks[@]}" -eq "1" ] || [ -n "$use_multiple_disks" ]; then
     disknum=$((disknum + 1 ))
     echo "Mounting ${disk} at ${mountpoint}"
     mkdir -p ${mountpoint}
+{{ if .Zfs }}
+    zpool create -f $(basename $mountpoint) -m ${mountpoint} ${disk}
+    # NOTE: we don't need an /etc/fstab entry for ZFS. It will handle this itself.
+{{ else }}
     mkfs.ext4 -F ${disk}
     mount -o ${mount_opts} ${disk} ${mountpoint}
-    chmod 777 ${mountpoint}
     echo "${disk} ${mountpoint} ext4 ${mount_opts} 1 1" | tee -a /etc/fstab
     tune2fs -m 0 ${disk}
+{{ end }}
+    chmod 777 ${mountpoint}
   done
 else
   mountpoint="${mount_prefix}1"
   echo "${#disks[@]} disks mounted, creating ${mountpoint} using RAID 0"
   mkdir -p ${mountpoint}
+{{ if .Zfs }}
+  zpool create -f $(basename $mountpoint) -m ${mountpoint} ${disks[@]}
+  # NOTE: we don't need an /etc/fstab entry for ZFS. It will handle this itself.
+{{ else }}
   raiddisk="/dev/md0"
   mdadm --create ${raiddisk} --level=0 --raid-devices=${#disks[@]} "${disks[@]}"
   mkfs.ext4 -F ${raiddisk}
   mount -o ${mount_opts} ${raiddisk} ${mountpoint}
-  chmod 777 ${mountpoint}
   echo "${raiddisk} ${mountpoint} ext4 ${mount_opts} 1 1" | tee -a /etc/fstab
   tune2fs -m 0 ${raiddisk}
+{{ end }}
+  chmod 777 ${mountpoint}
 fi
 
 # Print the block device and FS usage output. This is useful for debugging.
 lsblk
 df -h
+{{ if .Zfs }}
+zpool list
+{{ end }}
 
 sudo apt-get install -qy chrony
+
+# Uninstall unattended-upgrades
+sudo service unattended-upgrades stop
+sudo rm -rf /var/log/unattended-upgrades
+sudo apt-get purge -y unattended-upgrades
 
 # Override the chrony config. In particular,
 # log aggressively when clock is adjusted (0.01s)
@@ -125,7 +190,9 @@ sudo /etc/init.d/chrony restart
 sudo chronyc -a waitsync 30 0.01 | sudo tee -a /root/chrony.log
 
 # sshguard can prevent frequent ssh connections to the same host. Disable it.
-sudo service sshguard stop
+if service sshguard status > /dev/null 2>&1; then
+    sudo service sshguard stop
+fi
 # increase the number of concurrent unauthenticated connections to the sshd
 # daemon. See https://en.wikibooks.org/wiki/OpenSSH/Cookbook/Load_Balancing.
 # By default, only 10 unauthenticated connections are permitted before sshd
@@ -177,10 +244,18 @@ sysctl --system  # reload sysctl settings
 sudo hostnamectl set-hostname {{.VMName}}
 
 {{ if .EnableFIPS }}
-sudo ua enable fips --assume-yes
+sudo apt-get install -yq ubuntu-advantage-tools jq
+# Enable FIPS (in practice, it's often already enabled at this point).
+if [ $(sudo pro status --format json | jq '.services[] | select(.name == "fips") | .status') != '"enabled"' ]; then
+  sudo ua enable fips --assume-yes
+fi
 {{ end }}
 
-sudo touch /mnt/data1/.roachprod-initialized
+sudo sed -i 's/#LoginGraceTime .*/LoginGraceTime 0/g' /etc/ssh/sshd_config
+sudo service ssh restart
+
+sudo touch {{ .DisksInitializedFile }}
+sudo touch {{ .OSInitializedFile }}
 `
 
 // writeStartupScript writes the startup script to a temp file.
@@ -190,20 +265,28 @@ sudo touch /mnt/data1/.roachprod-initialized
 // extraMountOpts, if not empty, is appended to the default mount options. It is
 // a comma-separated list of options for the "mount -o" flag.
 func writeStartupScript(
-	name string, extraMountOpts string, useMultiple bool, enableFips bool,
+	name string, extraMountOpts string, fileSystem string, useMultiple bool, enableFips bool,
 ) (string, error) {
 	type tmplParams struct {
-		VMName           string
-		ExtraMountOpts   string
-		UseMultipleDisks bool
-		EnableFIPS       bool
+		VMName               string
+		ExtraMountOpts       string
+		UseMultipleDisks     bool
+		Zfs                  bool
+		EnableFIPS           bool
+		DisksInitializedFile string
+		OSInitializedFile    string
+		StartupLogs          string
 	}
 
 	args := tmplParams{
-		VMName:           name,
-		ExtraMountOpts:   extraMountOpts,
-		UseMultipleDisks: useMultiple,
-		EnableFIPS:       enableFips,
+		VMName:               name,
+		ExtraMountOpts:       extraMountOpts,
+		UseMultipleDisks:     useMultiple,
+		Zfs:                  fileSystem == vm.Zfs,
+		EnableFIPS:           enableFips,
+		DisksInitializedFile: vm.DisksInitializedFile,
+		OSInitializedFile:    vm.OSInitializedFile,
+		StartupLogs:          vm.StartupLogs,
 	}
 
 	tmpfile, err := os.CreateTemp("", "aws-startup-script")

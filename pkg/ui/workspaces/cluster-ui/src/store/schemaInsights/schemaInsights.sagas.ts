@@ -1,18 +1,15 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { PayloadAction } from "@reduxjs/toolkit";
 import { all, call, put, takeLatest } from "redux-saga/effects";
 
-import { actions } from "./schemaInsights.reducer";
 import { SchemaInsightReqParams, getSchemaInsights } from "../../api";
-import { PayloadAction } from "@reduxjs/toolkit";
+import { maybeError } from "../../util";
+
+import { actions } from "./schemaInsights.reducer";
 
 export function* refreshSchemaInsightsSaga(
   action: PayloadAction<SchemaInsightReqParams>,
@@ -27,7 +24,7 @@ export function* requestSchemaInsightsSaga(
     const result = yield call(getSchemaInsights, action.payload);
     yield put(actions.received(result));
   } catch (e) {
-    yield put(actions.failed(e));
+    yield put(actions.failed(maybeError(e)));
   }
 }
 

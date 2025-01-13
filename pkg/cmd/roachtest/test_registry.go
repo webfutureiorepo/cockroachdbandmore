@@ -1,19 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +23,7 @@ import (
 
 type testRegistryImpl struct {
 	m                map[string]*registry.TestSpec
+	ops              map[string]*registry.OperationSpec
 	snapshotPrefixes map[string]struct{}
 
 	promRegistry *prometheus.Registry
@@ -37,6 +35,7 @@ var _ registry.Registry = (*testRegistryImpl)(nil)
 func makeTestRegistry() testRegistryImpl {
 	return testRegistryImpl{
 		m:                make(map[string]*registry.TestSpec),
+		ops:              make(map[string]*registry.OperationSpec),
 		snapshotPrefixes: make(map[string]struct{}),
 		promRegistry:     prometheus.NewRegistry(),
 	}
@@ -65,6 +64,19 @@ func (r *testRegistryImpl) Add(spec registry.TestSpec) {
 	r.m[spec.Name] = &spec
 }
 
+// AddOperation adds an operation to the registry.
+func (r *testRegistryImpl) AddOperation(spec registry.OperationSpec) {
+	if _, ok := r.ops[spec.Name]; ok {
+		fmt.Fprintf(os.Stderr, "operation %s already registered\n", spec.Name)
+		os.Exit(1)
+	}
+	if err := r.prepareOpSpec(&spec); err != nil {
+		fmt.Fprintf(os.Stderr, "%+v\n", err)
+		os.Exit(1)
+	}
+	r.ops[spec.Name] = &spec
+}
+
 // MakeClusterSpec makes a cluster spec. It should be used over `spec.MakeClusterSpec`
 // because this method also adds options baked into the registry.
 func (r *testRegistryImpl) MakeClusterSpec(nodeCount int, opts ...spec.Option) spec.ClusterSpec {
@@ -72,6 +84,32 @@ func (r *testRegistryImpl) MakeClusterSpec(nodeCount int, opts ...spec.Option) s
 }
 
 const testNameRE = "^[a-zA-Z0-9-_=/,]+$"
+
+// prepareOpSpec validates a spec and does minor massaging of its fields.
+func (r *testRegistryImpl) prepareOpSpec(spec *registry.OperationSpec) error {
+	// Operations follow the same naming conventions as tests and have the same
+	// alphabet of allowable characters in names.
+	if matched, err := regexp.MatchString(testNameRE, spec.Name); err != nil || !matched {
+		return fmt.Errorf("%s: Name must match this regexp: %s", spec.Name, testNameRE)
+	}
+
+	spec.CompatibleClouds.AssertInitialized()
+
+	if spec.Run == nil {
+		return fmt.Errorf("%s: must specify Run", spec.Name)
+	}
+
+	// All operations must have an owner so the release team knows who signs off on
+	// failures and so the github issue poster knows who to assign it to.
+	if spec.Owner == `` {
+		return fmt.Errorf(`%s: unspecified owner`, spec.Name)
+	}
+	if !spec.Owner.IsValid() {
+		return fmt.Errorf(`%s: unknown owner %q`, spec.Name, spec.Owner)
+	}
+
+	return nil
+}
 
 // prepareSpec validates a spec and does minor massaging of its fields.
 func (r *testRegistryImpl) prepareSpec(spec *registry.TestSpec) error {
@@ -125,8 +163,20 @@ func (r testRegistryImpl) AllTests() []registry.TestSpec {
 	for _, t := range r.m {
 		tests = append(tests, *t)
 	}
-	sort.Slice(tests, func(i, j int) bool {
-		return tests[i].Name < tests[j].Name
+	slices.SortFunc(tests, func(i, j registry.TestSpec) int {
+		return cmp.Compare(i.Name, j.Name)
 	})
 	return tests
+}
+
+// AllOperations returns all the operation specs, sorted by name.
+func (r testRegistryImpl) AllOperations() []registry.OperationSpec {
+	var ops []registry.OperationSpec
+	for _, t := range r.ops {
+		ops = append(ops, *t)
+	}
+	sort.Slice(ops, func(i, j int) bool {
+		return ops[i].Name < ops[j].Name
+	})
+	return ops
 }

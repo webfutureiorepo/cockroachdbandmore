@@ -45,14 +45,10 @@ go_test(
         "profilestore_test.go",
     ],
     embed = [":profiler"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
-        "//pkg/clusterversion",
         "//pkg/server/dumpstore",
         "//pkg/settings/cluster",
+        "//pkg/util/log",
         "//pkg/util/mon",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_redact//:redact",

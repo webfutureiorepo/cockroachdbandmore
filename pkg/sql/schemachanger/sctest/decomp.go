@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctest
 
@@ -21,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdecomp"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps/sctestdeps"
@@ -83,6 +79,14 @@ func runDecomposeTest(
 			return nil
 		})
 		require.NotNilf(t, desc, "descriptor with name %q not found", name)
+
+		// Resolve all types from the descriptors we just read. This is required so
+		// that the ColumnType element, which contains the type name, includes the
+		// proper name.
+		testState := sctestdeps.NewTestDependencies(sctestdeps.WithDescriptors(allDescs.Catalog))
+		err := typedesc.HydrateTypesInDescriptor(ctx, desc, testState)
+		require.NoError(t, err)
+
 		m := make(map[scpb.Element]scpb.Status)
 		visitor := func(status scpb.Status, element scpb.Element) {
 			m[element] = status

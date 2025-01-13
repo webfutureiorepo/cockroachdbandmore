@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecagg
 
@@ -18,16 +13,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/mon"
 )
 
 // NewAggregatorArgs encompasses all arguments necessary to instantiate either
 // of the aggregators.
 type NewAggregatorArgs struct {
-	Allocator *colmem.Allocator
-	// MemAccount should be the same as the one used by Allocator and will be
-	// used by aggregatorHelper to handle DISTINCT clause.
-	MemAccount     *mon.BoundAccount
+	// Allocator will be utilized for miscellaneous allocations in the
+	// aggregators.
+	//
+	// In the in-memory hash aggregator it will be used for:
+	// - aggregateFuncAlloc
+	// - DISTINCT and FILTER helpers
+	// - aggBucketAlloc
+	// - AppendOnlyBufferedBatch for buffered tuples.
+	Allocator      *colmem.Allocator
 	Input          colexecop.Operator
 	InputTypes     []*types.T
 	Spec           *execinfrapb.AggregatorSpec
@@ -35,6 +34,12 @@ type NewAggregatorArgs struct {
 	Constructors   []execagg.AggregateConstructor
 	ConstArguments []tree.Datums
 	OutputTypes    []*types.T
+	// EstimatedRowCount, if set, is the number of rows that will be output by
+	// the aggregator (i.e. total number of groups). At time of this writing it
+	// is only used for initialAllocSize in the hash aggregator.
+	// TODO(yuzefovich): consider using this information for other things too
+	// (e.g. sizing the output batch).
+	EstimatedRowCount uint64
 
 	TestingKnobs struct {
 		// HashTableNumBuckets if positive will override the initial number of

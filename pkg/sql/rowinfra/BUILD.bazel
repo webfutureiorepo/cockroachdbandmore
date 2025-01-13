@@ -9,7 +9,8 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/rowinfra",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/util",
+        "//pkg/testutils/skip",
+        "//pkg/util/metamorphic",
         "//pkg/util/metric",
     ],
 )

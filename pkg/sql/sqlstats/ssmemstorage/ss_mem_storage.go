@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sqlstats is a subsystem that is responsible for tracking the
 // statistics of statements and transactions.
@@ -47,7 +42,6 @@ type stmtKey struct {
 // sampledPlanKey is used by the Optimizer to determine if we should build a full EXPLAIN plan.
 type sampledPlanKey struct {
 	stmtNoConstants string
-	failed          bool
 	implicitTxn     bool
 	database        string
 }
@@ -57,9 +51,6 @@ func (p sampledPlanKey) size() int64 {
 }
 
 func (s stmtKey) String() string {
-	if s.failed {
-		return "!" + s.stmtNoConstants
-	}
 	return s.stmtNoConstants
 }
 
@@ -100,9 +91,8 @@ type Container struct {
 	txnCounts transactionCounts
 	mon       *mon.BytesMonitor
 
-	knobs              *sqlstats.TestingKnobs
-	insights           insights.Writer
-	latencyInformation insights.LatencyInformation
+	knobs     *sqlstats.TestingKnobs
+	anomalies *insights.AnomalyDetector
 }
 
 var _ sqlstats.ApplicationStats = &Container{}
@@ -114,17 +104,15 @@ func New(
 	mon *mon.BytesMonitor,
 	appName string,
 	knobs *sqlstats.TestingKnobs,
-	insightsWriter insights.Writer,
-	latencyInformation insights.LatencyInformation,
+	anomalies *insights.AnomalyDetector,
 ) *Container {
 	s := &Container{
-		st:                 st,
-		appName:            appName,
-		mon:                mon,
-		knobs:              knobs,
-		insights:           insightsWriter,
-		latencyInformation: latencyInformation,
-		uniqueServerCount:  uniqueServerCount,
+		st:                st,
+		appName:           appName,
+		mon:               mon,
+		knobs:             knobs,
+		anomalies:         anomalies,
+		uniqueServerCount: uniqueServerCount,
 	}
 
 	if mon != nil {
@@ -224,8 +212,7 @@ func NewTempContainerFromExistingStmtStats(
 		nil, /* mon */
 		appName,
 		nil, /* knobs */
-		nil, /* insights */
-		nil, /*latencyInformation */
+		nil, /*anomalies */
 	)
 
 	for i := range statistics {
@@ -235,7 +222,6 @@ func NewTempContainerFromExistingStmtStats(
 		key := stmtKey{
 			sampledPlanKey: sampledPlanKey{
 				stmtNoConstants: statistics[i].Key.KeyData.Query,
-				failed:          statistics[i].Key.KeyData.Failed,
 				implicitTxn:     statistics[i].Key.KeyData.ImplicitTxn,
 				database:        statistics[i].Key.KeyData.Database,
 			},
@@ -252,7 +238,7 @@ func NewTempContainerFromExistingStmtStats(
 		stmtStats.mu.data.Add(&statistics[i].Stats)
 
 		// Setting all metadata fields.
-		if stmtStats.mu.data.SensitiveInfo.LastErr == "" && key.failed {
+		if stmtStats.mu.data.SensitiveInfo.LastErr == "" {
 			stmtStats.mu.data.SensitiveInfo.LastErr = statistics[i].Stats.SensitiveInfo.LastErr
 		}
 
@@ -299,22 +285,24 @@ func NewTempContainerFromExistingTxnStats(
 		nil, /* mon */
 		appName,
 		nil, /* knobs */
-		nil, /* insights */
-		nil, /* latencyInformation */
+		nil, /* anomalies */
 	)
 
 	for i := range statistics {
 		if currentAppName := statistics[i].StatsData.App; currentAppName != appName {
 			return container, statistics[i:], nil
 		}
-		txnStats, _, throttled :=
-			container.getStatsForTxnWithKeyLocked(
-				statistics[i].StatsData.TransactionFingerprintID,
-				statistics[i].StatsData.StatementFingerprintIDs,
-				true /* createIfNonexistent */)
+		// Since we just created the container and haven't exposed it yet, we
+		// don't need to take a lock on it.
+		txnStats, _, throttled := container.getStatsForTxnWithKeyLocked(
+			statistics[i].StatsData.TransactionFingerprintID,
+			statistics[i].StatsData.StatementFingerprintIDs,
+			true /* createIfNonexistent */)
 		if throttled {
 			return nil /* container */, nil /* remaining */, ErrFingerprintLimitReached
 		}
+		// No need for a lock here given that we're the only ones who has access
+		// to this txnStats object.
 		txnStats.mu.data.Add(&statistics[i].StatsData.Stats)
 	}
 
@@ -324,8 +312,6 @@ func NewTempContainerFromExistingTxnStats(
 // NewApplicationStatsWithInheritedOptions implements the
 // sqlstats.ApplicationStats interface.
 func (s *Container) NewApplicationStatsWithInheritedOptions() sqlstats.ApplicationStats {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return New(
 		s.st,
 		// There is no need to constraint txn fingerprint limit since in temporary
@@ -334,8 +320,7 @@ func (s *Container) NewApplicationStatsWithInheritedOptions() sqlstats.Applicati
 		s.mon,
 		s.appName,
 		s.knobs,
-		s.insights,
-		s.latencyInformation,
+		s.anomalies,
 	)
 }
 
@@ -349,7 +334,8 @@ type txnStats struct {
 	}
 }
 
-func (t *txnStats) sizeUnsafe() int64 {
+func (t *txnStats) sizeUnsafeLocked() int64 {
+	t.mu.AssertHeld()
 	const txnStatsShallowSize = int64(unsafe.Sizeof(txnStats{}))
 	stmtFingerprintIDsSize := int64(cap(t.statementFingerprintIDs)) *
 		int64(unsafe.Sizeof(appstatspb.StmtFingerprintID(0)))
@@ -360,12 +346,6 @@ func (t *txnStats) sizeUnsafe() int64 {
 		int64(t.mu.data.Size())
 
 	return txnStatsShallowSize + stmtFingerprintIDsSize + dataSize
-}
-
-func (t *txnStats) mergeStats(stats *appstatspb.TransactionStatistics) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.mu.data.Add(stats)
 }
 
 // stmtStats holds per-statement statistics.
@@ -401,7 +381,7 @@ type stmtStats struct {
 	}
 }
 
-func (s *stmtStats) sizeUnsafe() int64 {
+func (s *stmtStats) sizeUnsafeLocked() int64 {
 	const stmtStatsShallowSize = int64(unsafe.Sizeof(stmtStats{}))
 	databaseNameSize := int64(len(s.mu.database))
 
@@ -446,7 +426,7 @@ func (s *stmtStats) mergeStatsLocked(statistics *appstatspb.CollectedStatementSt
 	s.mu.data.Add(&statistics.Stats)
 
 	// Setting all metadata fields.
-	if s.mu.data.SensitiveInfo.LastErr == "" && statistics.Key.Failed {
+	if s.mu.data.SensitiveInfo.LastErr == "" {
 		s.mu.data.SensitiveInfo.LastErr = statistics.Stats.SensitiveInfo.LastErr
 	}
 
@@ -469,7 +449,6 @@ func (s *Container) getStatsForStmt(
 	stmtNoConstants string,
 	implicitTxn bool,
 	database string,
-	failed bool,
 	planHash uint64,
 	transactionFingerprintID appstatspb.TransactionFingerprintID,
 	createIfNonexistent bool,
@@ -485,7 +464,6 @@ func (s *Container) getStatsForStmt(
 	key = stmtKey{
 		sampledPlanKey: sampledPlanKey{
 			stmtNoConstants: stmtNoConstants,
-			failed:          failed,
 			implicitTxn:     implicitTxn,
 			database:        database,
 		},
@@ -594,12 +572,88 @@ func (s *Container) SaveToLog(ctx context.Context, appName string) {
 	log.Infof(ctx, "statistics for %q:\n%s", appName, buf.String())
 }
 
+// PopAllStats returns all collected statement and transaction stats in memory to the caller and clears SQL stats
+// make sure that new arriving stats won't be interfering with existing one.
+func (s *Container) PopAllStats(
+	ctx context.Context,
+) ([]*appstatspb.CollectedStatementStatistics, []*appstatspb.CollectedTransactionStatistics) {
+	statementStats := make([]*appstatspb.CollectedStatementStatistics, 0)
+	var stmts map[stmtKey]*stmtStats
+
+	transactionStats := make([]*appstatspb.CollectedTransactionStatistics, 0)
+	var txns map[appstatspb.TransactionFingerprintID]*txnStats
+
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		stmts = s.mu.stmts
+		txns = s.mu.txns
+		// Reset statementStats and transactions after they're assigned to local variables.
+		s.clearLocked(ctx)
+	}()
+
+	var data appstatspb.StatementStatistics
+	var distSQLUsed, vectorized, fullScan bool
+	var database, querySummary string
+
+	for key, stmt := range stmts {
+		func() {
+			stmt.mu.Lock()
+			defer stmt.mu.Unlock()
+			data = stmt.mu.data
+			distSQLUsed = stmt.mu.distSQLUsed
+			vectorized = stmt.mu.vectorized
+			fullScan = stmt.mu.fullScan
+			database = stmt.mu.database
+			querySummary = stmt.mu.querySummary
+		}()
+
+		statementStats = append(statementStats, &appstatspb.CollectedStatementStatistics{
+			Key: appstatspb.StatementStatisticsKey{
+				Query:                    key.stmtNoConstants,
+				QuerySummary:             querySummary,
+				DistSQL:                  distSQLUsed,
+				Vec:                      vectorized,
+				ImplicitTxn:              key.implicitTxn,
+				FullScan:                 fullScan,
+				App:                      s.appName,
+				Database:                 database,
+				PlanHash:                 key.planHash,
+				TransactionFingerprintID: key.transactionFingerprintID,
+			},
+			ID:    stmt.ID,
+			Stats: data,
+		})
+	}
+
+	for key, txn := range txns {
+		var stats appstatspb.TransactionStatistics
+		func() {
+			txn.mu.Lock()
+			defer txn.mu.Unlock()
+			stats = txn.mu.data
+		}()
+		transactionStats = append(transactionStats, &appstatspb.CollectedTransactionStatistics{
+			StatementFingerprintIDs:  txn.statementFingerprintIDs,
+			App:                      s.appName,
+			Stats:                    stats,
+			TransactionFingerprintID: key,
+		})
+	}
+	return statementStats, transactionStats
+}
+
 // Clear clears the data stored in this Container and prepare the Container
 // for reuse.
 func (s *Container) Clear(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.clearLocked(ctx)
+}
 
+func (s *Container) clearLocked(ctx context.Context) {
+	// We must call freeLocked before clearing the containers as freeLocked
+	// reads the size of each container to reset the counters.
 	s.freeLocked(ctx)
 
 	// Clear the map, to release the memory; make the new map somewhat already
@@ -607,6 +661,9 @@ func (s *Container) Clear(ctx context.Context) {
 	s.mu.stmts = make(map[stmtKey]*stmtStats, len(s.mu.stmts)/2)
 	s.mu.txns = make(map[appstatspb.TransactionFingerprintID]*txnStats, len(s.mu.txns)/2)
 	s.mu.sampledPlanMetadataCache = make(map[sampledPlanKey]time.Time, len(s.mu.sampledPlanMetadataCache)/2)
+	if s.knobs != nil && s.knobs.OnAfterClear != nil {
+		s.knobs.OnAfterClear()
+	}
 }
 
 // Free frees the accounted resources from the Container. The Container is
@@ -631,19 +688,16 @@ func (s *Container) freeLocked(ctx context.Context) {
 func (s *Container) MergeApplicationStatementStats(
 	ctx context.Context,
 	other sqlstats.ApplicationStats,
-	transformer func(*appstatspb.CollectedStatementStatistics),
+	transactionFingerprintID appstatspb.TransactionFingerprintID,
 ) (discardedStats uint64) {
 	if err := other.IterateStatementStats(
 		ctx,
 		sqlstats.IteratorOptions{},
 		func(ctx context.Context, statistics *appstatspb.CollectedStatementStatistics) error {
-			if transformer != nil {
-				transformer(statistics)
-			}
+			statistics.Key.TransactionFingerprintID = transactionFingerprintID
 			key := stmtKey{
 				sampledPlanKey: sampledPlanKey{
 					stmtNoConstants: statistics.Key.Query,
-					failed:          statistics.Key.Failed,
 					implicitTxn:     statistics.Key.ImplicitTxn,
 					database:        statistics.Key.Database,
 				},
@@ -670,39 +724,6 @@ func (s *Container) MergeApplicationStatementStats(
 			return nil
 		},
 	); err != nil {
-		// Calling Iterate.*Stats() function with a visitor function that does not
-		// return error should not cause any error.
-		panic(
-			errors.NewAssertionErrorWithWrappedErrf(err, "unexpected error returned when iterating through application stats"),
-		)
-	}
-
-	return discardedStats
-}
-
-// MergeApplicationTransactionStats implements the sqlstats.ApplicationStats interface.
-func (s *Container) MergeApplicationTransactionStats(
-	ctx context.Context, other sqlstats.ApplicationStats,
-) (discardedStats uint64) {
-	if err := other.IterateTransactionStats(
-		ctx,
-		sqlstats.IteratorOptions{},
-		func(ctx context.Context, statistics *appstatspb.CollectedTransactionStatistics) error {
-			txnStats, _, throttled :=
-				s.getStatsForTxnWithKey(
-					statistics.TransactionFingerprintID,
-					statistics.StatementFingerprintIDs,
-					true, /* createIfNonexistent */
-				)
-
-			if throttled {
-				discardedStats++
-				return nil
-			}
-
-			txnStats.mergeStats(&statistics.Stats)
-			return nil
-		}); err != nil {
 		// Calling Iterate.*Stats() function with a visitor function that does not
 		// return error should not cause any error.
 		panic(
@@ -757,7 +778,7 @@ func (s *Container) Add(ctx context.Context, other *Container) (err error) {
 			// If we created a new entry for the fingerprint, we check if we have
 			// exceeded our memory budget.
 			if created {
-				estimatedAllocBytes := stats.sizeUnsafe() + k.size() + 8 /* stmtKey hash */
+				estimatedAllocBytes := stats.sizeUnsafeLocked() + k.size() + 8 /* stmtKey hash */
 				// We still want to continue this loop to merge stats that are already
 				// present in our map that do not require allocation.
 				if latestErr := func() error {
@@ -827,7 +848,7 @@ func (s *Container) Add(ctx context.Context, other *Container) (err error) {
 			defer t.mu.Unlock()
 
 			if created {
-				estimatedAllocBytes := t.sizeUnsafe() + k.Size() + 8 /* TransactionFingerprintID hash */
+				estimatedAllocBytes := t.sizeUnsafeLocked() + k.Size() + 8 /* TransactionFingerprintID hash */
 				// We still want to continue this loop to merge stats that are already
 				// present in our map that do not require allocation.
 				if latestErr := func() error {
@@ -929,6 +950,6 @@ type transactionCounts struct {
 
 func constructStatementFingerprintIDFromStmtKey(key stmtKey) appstatspb.StmtFingerprintID {
 	return appstatspb.ConstructStatementFingerprintID(
-		key.stmtNoConstants, key.failed, key.implicitTxn, key.database,
+		key.stmtNoConstants, key.implicitTxn, key.database,
 	)
 }

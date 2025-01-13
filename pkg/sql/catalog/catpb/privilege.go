@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catpb
 
@@ -190,15 +185,13 @@ func NewBaseDatabasePrivilegeDescriptor(owner username.SQLUsername) *PrivilegeDe
 }
 
 // NewPublicSchemaPrivilegeDescriptor is used to construct a privilege
-// descriptor owned by the admin user which has CREATE and USAGE privilege for
-// the public role, and ALL privileges for superusers. It is used for the
-// public schema.
-func NewPublicSchemaPrivilegeDescriptor(includeCreatePriv bool) *PrivilegeDescriptor {
-	// In postgres, the user "postgres" is the owner of the public schema in a
-	// newly created db. In CockroachDB, admin is our substitute for the postgres
-	// user.
-	p := NewBasePrivilegeDescriptor(username.AdminRoleName())
-
+// descriptor owned by the given user which has USAGE privilege, and optionally
+// CREATE privilege, for the public role, and ALL privileges for superusers. It
+// is used for the public schema.
+func NewPublicSchemaPrivilegeDescriptor(
+	owner username.SQLUsername, includeCreatePriv bool,
+) *PrivilegeDescriptor {
+	p := NewBasePrivilegeDescriptor(owner)
 	if includeCreatePriv {
 		p.Grant(username.PublicRoleName(), privilege.List{privilege.CREATE, privilege.USAGE}, false)
 	} else {
@@ -220,9 +213,6 @@ func NewBaseFunctionPrivilegeDescriptor(owner username.SQLUsername) *PrivilegeDe
 func (p *PrivilegeDescriptor) CheckGrantOptions(
 	user username.SQLUsername, privList privilege.List,
 ) bool {
-	if p.Owner() == user {
-		return true
-	}
 	userPriv, exists := p.FindUser(user)
 	if !exists {
 		return false

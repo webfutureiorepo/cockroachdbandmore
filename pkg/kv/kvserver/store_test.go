@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -39,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/storepool"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowdispatch"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/node_rac2"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
@@ -46,8 +42,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -74,8 +73,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -236,14 +233,19 @@ func createTestStoreWithoutStart(
 	cfg.Transport = NewRaftTransport(
 		cfg.AmbientCtx,
 		cfg.Settings,
-		cfg.Tracer(),
+		stopper,
+		cfg.Clock,
 		cfg.NodeDialer,
 		server,
-		stopper,
 		kvflowdispatch.NewDummyDispatch(),
 		NoopStoresFlowControlIntegration{},
 		NoopRaftTransportDisconnectListener{},
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, /* PiggybackedAdmittedResponseScheduler */
 		nil, /* knobs */
+	)
+	cfg.StoreLivenessTransport = storeliveness.NewTransport(
+		cfg.AmbientCtx, stopper, cfg.Clock, cfg.NodeDialer, server, nil, /* knobs */
 	)
 
 	stores := NewStores(cfg.AmbientCtx, cfg.Clock)
@@ -467,26 +469,31 @@ func TestStoreConfigSetDefaultsNumStores(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	testcases := map[string]struct {
-		conc        int
-		defaultConc int
-		numStores   int
-		expectConc  int
+		conc                   int
+		defaultConc            int
+		defaultMinConcPerStore int
+		numStores              int
+		expectConc             int
 	}{
-		"zero default is retained":         {defaultConc: 0, numStores: 4, expectConc: 0},
-		"negative default is retained":     {defaultConc: -1, numStores: 4, expectConc: -1},
-		"zero stores retains default":      {defaultConc: 4, expectConc: 4},
-		"explicit value not distributed":   {conc: 4, numStores: 2, expectConc: 4},
-		"explicit value overrides default": {conc: 4, defaultConc: 16, numStores: 2, expectConc: 4},
-		"default value is distributed":     {defaultConc: 16, numStores: 4, expectConc: 4},
-		"default value uses ceil division": {defaultConc: 16, numStores: 5, expectConc: 4},
-		"all stores have at least 1":       {defaultConc: 4, numStores: 10, expectConc: 1},
+		"zero default is retained":                            {defaultConc: 0, numStores: 4, expectConc: 0},
+		"negative default is retained":                        {defaultConc: -1, numStores: 4, expectConc: -1},
+		"zero stores retains default":                         {defaultConc: 4, expectConc: 4},
+		"explicit value not distributed":                      {conc: 4, numStores: 2, expectConc: 4},
+		"explicit value overrides default":                    {conc: 4, defaultConc: 16, numStores: 2, expectConc: 4},
+		"default value is distributed":                        {defaultConc: 16, numStores: 4, expectConc: 4},
+		"default value is distributed with per-store min":     {defaultConc: 16, defaultMinConcPerStore: 8, numStores: 4, expectConc: 8},
+		"default value uses ceil division":                    {defaultConc: 16, numStores: 5, expectConc: 4},
+		"default value uses ceil division with per-store min": {defaultConc: 16, defaultMinConcPerStore: 8, numStores: 5, expectConc: 8},
+		"all stores have at least 1":                          {defaultConc: 4, numStores: 10, expectConc: 1},
 	}
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			defer func(original int) {
-				defaultRaftSchedulerConcurrency = original // restore global default
-			}(defaultRaftSchedulerConcurrency)
+			defer func(originalConc, originalMinConcPerStore int) {
+				defaultRaftSchedulerConcurrency = originalConc // restore global default
+				defaultRaftSchedulerMinConcurrencyPerStore = originalMinConcPerStore
+			}(defaultRaftSchedulerConcurrency, defaultRaftSchedulerMinConcurrencyPerStore)
 			defaultRaftSchedulerConcurrency = tc.defaultConc
+			defaultRaftSchedulerMinConcurrencyPerStore = tc.defaultMinConcPerStore
 			cfg := StoreConfig{RaftSchedulerConcurrency: tc.conc}
 			cfg.SetDefaults(tc.numStores)
 			require.Equal(t, tc.expectConc, cfg.RaftSchedulerConcurrency)
@@ -541,7 +548,7 @@ func TestInitializeEngineErrors(t *testing.T) {
 	require.NoError(t, eng.PutUnversioned(roachpb.Key("foo"), []byte("bar")))
 
 	cfg := TestStoreConfig(nil)
-	cfg.Transport = NewDummyRaftTransport(cfg.Settings, cfg.AmbientCtx.Tracer)
+	cfg.Transport = NewDummyRaftTransport(cfg.AmbientCtx, cfg.Settings, cfg.Clock)
 	store := NewStore(ctx, cfg, eng, &roachpb.NodeDescriptor{NodeID: 1})
 
 	// Can't init as haven't bootstrapped.
@@ -692,10 +699,12 @@ func TestReplicasByKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	rep.raftMu.Lock()
 	rep.mu.Lock()
-	desc := *rep.mu.state.Desc // shallow copy to replace desc wholesale
+	desc := *rep.shMu.state.Desc // shallow copy to replace desc wholesale
 	desc.EndKey = roachpb.RKey("e")
-	rep.mu.state.Desc = &desc
+	rep.shMu.state.Desc = &desc
+	rep.raftMu.Unlock()
 	rep.mu.Unlock()
 
 	// Ensure that this shrinkage is recognized by future additions to replicasByKey.
@@ -922,7 +931,11 @@ func TestMarkReplicaInitialized(t *testing.T) {
 		ReplicaID: 1,
 	}}
 	desc.NextReplicaID = 2
-	r.setDescRaftMuLocked(ctx, desc)
+	func() {
+		r.raftMu.Lock()
+		defer r.raftMu.Unlock()
+		r.setDescRaftMuLocked(ctx, desc)
+	}()
 	expectedResult = "not in uninitReplicas"
 	func() {
 		r.mu.Lock()
@@ -1229,7 +1242,7 @@ func TestStoreSendWithClockOffset(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	cfg := TestStoreConfig(hlc.NewClock(timeutil.NewManualTime(timeutil.Unix(0, 123)),
-		time.Millisecond /* maxOffset */, time.Millisecond /* toleratedOffset */))
+		time.Millisecond /* maxOffset */, time.Millisecond /* toleratedOffset */, hlc.PanicLogger))
 	store := createTestStoreWithConfig(ctx, t, stopper, testStoreOpts{createSystemRanges: true}, &cfg)
 	args := getArgs([]byte("a"))
 	// Set args timestamp to exceed max offset.
@@ -1379,7 +1392,7 @@ func TestStoreResolveWriteIntent(t *testing.T) {
 
 	manual := timeutil.NewManualTime(timeutil.Unix(0, 123))
 	cfg := TestStoreConfig(hlc.NewClock(
-		manual, 1000*time.Nanosecond /* maxOffset */, 1000*time.Nanosecond /* toleratedOffset */))
+		manual, 1000*time.Nanosecond /* maxOffset */, 1000*time.Nanosecond /* toleratedOffset */, hlc.PanicLogger))
 	cfg.TestingKnobs.EvalKnobs.TestingEvalFilter =
 		func(filterArgs kvserverbase.FilterArgs) *kvpb.Error {
 			pr, ok := filterArgs.Req.(*kvpb.PushTxnRequest)
@@ -2169,11 +2182,11 @@ func TestStoreSkipLockedTSCache(t *testing.T) {
 			// Verify the timestamp cache has been set for "a" and "c", but not for "b".
 			t2TS := makeTS(t2.UnixNano(), 0)
 			rTS, _ := store.tsCache.GetMax(ctx, roachpb.Key("a"), nil)
-			require.True(t, rTS.EqOrdering(t2TS))
+			require.Equal(t, t2TS, rTS)
 			rTS, _ = store.tsCache.GetMax(ctx, roachpb.Key("b"), nil)
 			require.True(t, rTS.Less(t2TS))
 			rTS, _ = store.tsCache.GetMax(ctx, roachpb.Key("c"), nil)
-			require.True(t, rTS.EqOrdering(t2TS))
+			require.Equal(t, t2TS, rTS)
 		})
 	}
 }
@@ -2776,7 +2789,7 @@ func TestStoreGCThreshold(t *testing.T) {
 			t.Fatal(err)
 		}
 		repl.mu.Lock()
-		gcThreshold := *repl.mu.state.GCThreshold
+		gcThreshold := *repl.shMu.state.GCThreshold
 		pgcThreshold, err := repl.mu.stateLoader.LoadGCThreshold(context.Background(), store.TODOEngine())
 		repl.mu.Unlock()
 		if err != nil {
@@ -3439,11 +3452,11 @@ func TestReserveSnapshotQueueTimeoutAvoidsStarvation(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	tsc := TestStoreConfig(nil)
-	// Set the concurrency to 1 explicitly, in case the default ever changes.
-	tsc.SnapshotApplyLimit = 1
 	tc := testContext{}
 	tc.StartWithStoreConfig(ctx, t, stopper, tsc)
 	s := tc.store
+	// Set the concurrency to 1 explicitly, in case the default ever changes.
+	s.snapshotApplyQueue.UpdateConcurrencyLimit(1)
 	snapshotReservationQueueTimeoutFraction.Override(ctx, &s.ClusterSettings().SV, timeoutFrac)
 
 	var done int64
@@ -3502,9 +3515,14 @@ func TestSnapshotRateLimit(t *testing.T) {
 	require.Equal(t, int64(32<<20), limit)
 }
 
+type entry struct {
+	conf   roachpb.SpanConfig
+	bounds roachpb.Span
+}
+
 type mockSpanConfigReader struct {
 	real      spanconfig.StoreReader
-	overrides map[string]roachpb.SpanConfig
+	overrides map[string]entry
 }
 
 func (m *mockSpanConfigReader) NeedsSplit(
@@ -3521,9 +3539,9 @@ func (m *mockSpanConfigReader) ComputeSplitKey(
 
 func (m *mockSpanConfigReader) GetSpanConfigForKey(
 	ctx context.Context, key roachpb.RKey,
-) (roachpb.SpanConfig, error) {
-	if conf, ok := m.overrides[string(key)]; ok {
-		return conf, nil
+) (roachpb.SpanConfig, roachpb.Span, error) {
+	if e, ok := m.overrides[string(key)]; ok {
+		return e.conf, roachpb.Span{}, nil
 	}
 	return m.GetSpanConfigForKey(ctx, key)
 }
@@ -3976,8 +3994,14 @@ func TestAllocatorCheckRange(t *testing.T) {
 			if tc.spanConfig != nil {
 				mockSr := &mockSpanConfigReader{
 					real: cfg.SystemConfigProvider.GetSystemConfig(),
-					overrides: map[string]roachpb.SpanConfig{
-						"a": *tc.spanConfig,
+					overrides: map[string]entry{
+						"a": {
+							conf: *tc.spanConfig,
+							bounds: roachpb.Span{
+								Key:    []byte("a"),
+								EndKey: []byte("b"),
+							},
+						},
 					},
 				}
 
@@ -4073,7 +4097,7 @@ func TestManuallyEnqueueUninitializedReplica(t *testing.T) {
 		StoreID:   tc.store.StoreID(),
 		ReplicaID: 7,
 	})
-	_, _, err := tc.store.Enqueue(
+	_, err := tc.store.Enqueue(
 		ctx, "replicaGC", repl, true /* skipShouldQueue */, false, /* async */
 	)
 	require.Error(t, err)

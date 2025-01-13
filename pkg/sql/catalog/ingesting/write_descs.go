@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ingesting
 
@@ -219,7 +214,7 @@ func WriteDescriptors(
 	}
 
 	for _, kv := range extra {
-		b.InitPut(kv.Key, &kv.Value, false)
+		b.CPut(kv.Key, &kv.Value, nil /* expValue */)
 	}
 	if err := txn.Run(ctx, b); err != nil {
 		if errors.HasType(err, (*kvpb.ConditionFailedError)(nil)) {
@@ -233,7 +228,7 @@ func WriteDescriptors(
 func processTableForMultiRegion(
 	ctx context.Context, txn *kv.Txn, descsCol *descs.Collection, table catalog.TableDescriptor,
 ) error {
-	dbDesc, err := descsCol.ByID(txn).WithoutDropped().Get().Database(ctx, table.GetParentID())
+	dbDesc, err := descsCol.ByIDWithoutLeased(txn).WithoutDropped().Get().Database(ctx, table.GetParentID())
 	if err != nil {
 		return err
 	}

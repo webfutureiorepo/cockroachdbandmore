@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -18,6 +13,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
@@ -168,16 +164,45 @@ func (m *monitorImpl) startNodeMonitor() {
 			}
 
 			for info := range eventsCh {
-				_, isDeath := info.Event.(install.MonitorProcessDead)
-				isExpectedDeath := isDeath && atomic.AddInt32(&m.expDeaths, -1) >= 0
 				var expectedDeathStr string
-				if isExpectedDeath {
-					expectedDeathStr = ": expected"
-				}
-				m.l.Printf("Monitor event: %s%s", info, expectedDeathStr)
+				var retErr error
 
-				if isDeath && !isExpectedDeath {
-					return fmt.Errorf("unexpected node event: %s", info)
+				switch e := info.Event.(type) {
+				case install.MonitorError:
+					if !errors.Is(e.Err, install.MonitorNoCockroachProcessesError) {
+						// Monitor errors should only occur when something went
+						// wrong in the monitor logic itself or test infrastructure
+						// (SSH flakes, VM preemption, etc). These should be sent
+						// directly to TestEng.
+						//
+						// NOTE: we ignore `MonitorNoCockroachProcessesError` as a
+						// lot of monitors uses in current tests would fail with
+						// this error if we returned it and current uses are
+						// harmless.  In the future, the monitor should be able to
+						// detect when new cockroach processes start running on a
+						// node instead of assuming that the processes are running
+						// when the monitor starts.
+						retErr = registry.ErrorWithOwner(
+							registry.OwnerTestEng,
+							e.Err,
+							registry.WithTitleOverride("monitor_failure"),
+							registry.InfraFlake,
+						)
+					}
+				case install.MonitorProcessDead:
+					isExpectedDeath := atomic.AddInt32(&m.expDeaths, -1) >= 0
+					if isExpectedDeath {
+						expectedDeathStr = ": expected"
+					}
+
+					if !isExpectedDeath {
+						retErr = fmt.Errorf("unexpected node event: %s", info)
+					}
+				}
+
+				m.l.Printf("Monitor event: %s%s", info, expectedDeathStr)
+				if retErr != nil {
+					return retErr
 				}
 			}
 
@@ -204,11 +229,5 @@ func (m *monitorImpl) wait() error {
 	// goroutines after wait() returns.
 	monitorErr := m.WaitForNodeDeath()
 
-	// For better error messages in roachtest failures, we make the
-	// "context canceled" error secondary.
-	if errors.Is(userErr, context.Canceled) {
-		return errors.CombineErrors(monitorErr, userErr)
-	}
-
-	return errors.CombineErrors(userErr, monitorErr)
+	return errors.Join(userErr, monitorErr)
 }

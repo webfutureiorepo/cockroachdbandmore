@@ -1,0 +1,90 @@
+# Tests the behaviour of the `preserve_downgrade_randomizer` mutator.
+
+add-mutators preserve_downgrade_option_randomizer
+----
+ok
+
+mixed-version-test predecessors=(21.2.29, 22.1.8, 22.2.3, 23.1.10, 23.2.4) num_upgrades=5 mutator_probabilities=(preserve_downgrade_option_randomizer, 1)
+----
+ok
+
+in-mixed-version name=(my mixed-version feature)
+----
+ok
+
+on-startup name=(do something)
+----
+ok
+
+plan debug=true
+----
+Seed:               12345
+Upgrades:           v21.2.29 → v22.1.8 → v22.2.3 → v23.1.10 → v23.2.4 → <current>
+Deployment mode:    system-only
+Mutators:           preserve_downgrade_option_randomizer
+Plan:
+├── install fixtures for version "v21.2.29" (1) [stage=system-setup]
+├── start cluster at version "v21.2.29" (2) [stage=system-setup]
+├── wait for all nodes (:1-4) to acknowledge cluster version '21.2' on system tenant (3) [stage=system-setup]
+├── upgrade cluster from "v21.2.29" to "v22.1.8"
+│   ├── prevent auto-upgrades on system tenant by setting `preserve_downgrade_option` (4) [stage=init]
+│   ├── upgrade nodes :1-4 from "v21.2.29" to "v22.1.8"
+│   │   ├── restart node 2 with binary version v22.1.8 (5) [stage=last-upgrade]
+│   │   ├── allow upgrade to happen on system tenant by resetting `preserve_downgrade_option` (6) [stage=last-upgrade]
+│   │   ├── restart node 4 with binary version v22.1.8 (7) [stage=last-upgrade]
+│   │   ├── wait for 5m0s (8) [stage=last-upgrade]
+│   │   ├── restart node 1 with binary version v22.1.8 (9) [stage=last-upgrade]
+│   │   └── restart node 3 with binary version v22.1.8 (10) [stage=last-upgrade]
+│   └── wait for all nodes (:1-4) to acknowledge cluster version '22.1' on system tenant (11) [stage=running-upgrade-migrations,finalizing]
+├── upgrade cluster from "v22.1.8" to "v22.2.3"
+│   ├── prevent auto-upgrades on system tenant by setting `preserve_downgrade_option` (12) [stage=init]
+│   ├── upgrade nodes :1-4 from "v22.1.8" to "v22.2.3"
+│   │   ├── restart node 4 with binary version v22.2.3 (13) [stage=last-upgrade]
+│   │   ├── restart node 1 with binary version v22.2.3 (14) [stage=last-upgrade]
+│   │   ├── restart node 2 with binary version v22.2.3 (15) [stage=last-upgrade]
+│   │   ├── allow upgrade to happen on system tenant by resetting `preserve_downgrade_option` (16) [stage=last-upgrade]
+│   │   └── restart node 3 with binary version v22.2.3 (17) [stage=last-upgrade]
+│   └── wait for all nodes (:1-4) to acknowledge cluster version '22.2' on system tenant (18) [stage=running-upgrade-migrations,finalizing]
+├── run "do something" (19) [stage=on-startup]
+├── upgrade cluster from "v22.2.3" to "v23.1.10"
+│   ├── prevent auto-upgrades on system tenant by setting `preserve_downgrade_option` (20) [stage=init]
+│   ├── upgrade nodes :1-4 from "v22.2.3" to "v23.1.10"
+│   │   ├── restart node 3 with binary version v23.1.10 (21) [stage=last-upgrade]
+│   │   ├── restart node 1 with binary version v23.1.10 (22) [stage=last-upgrade]
+│   │   ├── run "my mixed-version feature" (23) [stage=last-upgrade]
+│   │   ├── restart node 4 with binary version v23.1.10 (24) [stage=last-upgrade]
+│   │   └── restart node 2 with binary version v23.1.10 (25) [stage=last-upgrade]
+│   ├── allow upgrade to happen on system tenant by resetting `preserve_downgrade_option` (26) [stage=running-upgrade-migrations,finalizing]
+│   └── wait for all nodes (:1-4) to acknowledge cluster version '23.1' on system tenant (27) [stage=running-upgrade-migrations,finalizing]
+├── upgrade cluster from "v23.1.10" to "v23.2.4"
+│   ├── prevent auto-upgrades on system tenant by setting `preserve_downgrade_option` (28) [stage=init]
+│   ├── upgrade nodes :1-4 from "v23.1.10" to "v23.2.4"
+│   │   ├── allow upgrade to happen on system tenant by resetting `preserve_downgrade_option` (29) [stage=last-upgrade]
+│   │   ├── restart node 3 with binary version v23.2.4 (30) [stage=last-upgrade]
+│   │   ├── restart node 4 with binary version v23.2.4 (31) [stage=last-upgrade]
+│   │   ├── run "my mixed-version feature" (32) [stage=last-upgrade]
+│   │   ├── restart node 1 with binary version v23.2.4 (33) [stage=last-upgrade]
+│   │   └── restart node 2 with binary version v23.2.4 (34) [stage=last-upgrade]
+│   └── wait for all nodes (:1-4) to acknowledge cluster version '23.2' on system tenant (35) [stage=running-upgrade-migrations,finalizing]
+└── upgrade cluster from "v23.2.4" to "<current>"
+   ├── prevent auto-upgrades on system tenant by setting `preserve_downgrade_option` (36) [stage=init]
+   ├── upgrade nodes :1-4 from "v23.2.4" to "<current>"
+   │   ├── restart node 1 with binary version <current> (37) [stage=temporary-upgrade]
+   │   ├── restart node 3 with binary version <current> (38) [stage=temporary-upgrade]
+   │   ├── restart node 4 with binary version <current> (39) [stage=temporary-upgrade]
+   │   ├── run "my mixed-version feature" (40) [stage=temporary-upgrade]
+   │   └── restart node 2 with binary version <current> (41) [stage=temporary-upgrade]
+   ├── downgrade nodes :1-4 from "<current>" to "v23.2.4"
+   │   ├── restart node 2 with binary version v23.2.4 (42) [stage=rollback-upgrade]
+   │   ├── restart node 3 with binary version v23.2.4 (43) [stage=rollback-upgrade]
+   │   ├── run "my mixed-version feature" (44) [stage=rollback-upgrade]
+   │   ├── restart node 1 with binary version v23.2.4 (45) [stage=rollback-upgrade]
+   │   └── restart node 4 with binary version v23.2.4 (46) [stage=rollback-upgrade]
+   ├── upgrade nodes :1-4 from "v23.2.4" to "<current>"
+   │   ├── restart node 2 with binary version <current> (47) [stage=last-upgrade]
+   │   ├── run "my mixed-version feature" (48) [stage=last-upgrade]
+   │   ├── restart node 3 with binary version <current> (49) [stage=last-upgrade]
+   │   ├── restart node 1 with binary version <current> (50) [stage=last-upgrade]
+   │   ├── allow upgrade to happen on system tenant by resetting `preserve_downgrade_option` (51) [stage=last-upgrade]
+   │   └── restart node 4 with binary version <current> (52) [stage=last-upgrade]
+   └── wait for all nodes (:1-4) to acknowledge cluster version <current> on system tenant (53) [stage=running-upgrade-migrations,finalizing]

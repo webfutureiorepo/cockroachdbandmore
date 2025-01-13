@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemachange_test
 
@@ -35,7 +32,8 @@ import (
 func TestWorkload(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer ccl.TestingEnableEnterprise()()
-	skip.UnderRace(t, "test connections can be too slow under race option.")
+	skip.UnderDeadlock(t, "test connections can be too slow under expensive configs")
+	skip.UnderRace(t, "test connections can be too slow under expensive configs")
 
 	scope := log.Scope(t)
 	defer scope.Close(t)
@@ -94,12 +92,13 @@ func TestWorkload(t *testing.T) {
 				FROM system.descriptor
 				LEFT JOIN system.namespace ON namespace.id = descriptor.id
 		`))
-		tdb.Exec(t, "BACKUP DATABASE schemachange TO 'nodelocal://1/backup'")
+		tdb.Exec(t, "BACKUP DATABASE schemachange INTO 'nodelocal://1/backup'")
 		t.Logf("backup, tracing data, and system table dumps in %s", dir)
 	}()
 
 	pgURL, cleanup := sqlutils.PGUrl(t, tc.Server(0).AdvSQLAddr(), t.Name(), url.User("testuser"))
 	defer cleanup()
+	pgURL.Path = wl.Meta().Name
 
 	const concurrency = 2
 	require.NoError(t, wl.Flags().Parse([]string{

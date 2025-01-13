@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package admission
 
@@ -15,12 +10,14 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -187,11 +184,9 @@ type WorkInfo struct {
 	// work within a (TenantID, Priority) pair -- earlier CreateTime is given
 	// preference.
 	CreateTime int64
-	// BypassAdmission allows the work to bypass admission control, but allows
-	// for it to be accounted for. Ignored unless TenantID is the
-	// SystemTenantID. It should be used for high-priority intra-KV work, and
-	// when KV work generates other KV work (to avoid deadlock). Ignored
-	// otherwise.
+	// BypassAdmission allows the work to bypass admission control, but allows for
+	// it to be accounted for. It should be used for high-priority intra-KV work,
+	// and when KV work generates other KV work (to avoid deadlock).
 	BypassAdmission bool
 	// RequestedCount is the requested number of tokens or slots. If unset:
 	// - For slot-based queues we treat it as an implicit request of 1;
@@ -216,13 +211,22 @@ type ReplicatedWorkInfo struct {
 	// RangeID identifies the raft group on behalf of which work is being
 	// admitted.
 	RangeID roachpb.RangeID
+	// Replica that asked for admission.
+	ReplicaID roachpb.ReplicaID
+	// LeaderTerm is the term of the leader that asked for this entry to be
+	// appended.
+	LeaderTerm uint64
+	// LogPosition is the point on the raft log where the write was replicated.
+	LogPosition LogPosition
 	// Origin is the node at which this work originated. It's used for
 	// replication admission control to inform the origin of admitted work
 	// (after which flow tokens are released, permitting more replicated
-	// writes).
+	// writes). Only populated for RACv1.
 	Origin roachpb.NodeID
-	// LogPosition is the point on the raft log where the write was replicated.
-	LogPosition LogPosition
+	// RaftPri is the raft priority of the entry. Only populated for RACv2.
+	RaftPri raftpb.Priority
+	// IsV2Protocol is true iff the v2 protocol requested this admission.
+	IsV2Protocol bool
 	// Ingested captures whether the write work corresponds to an ingest
 	// (for sstables, for example). This is used alongside RequestedCount to
 	// maintain accurate linear models for L0 growth due to ingests and
@@ -285,12 +289,7 @@ type WorkQueue struct {
 
 	onAdmittedReplicatedWork onAdmittedReplicatedWork
 
-	// Prevents more than one caller to be in Admit and calling tryGet or adding
-	// to the queue. It allows WorkQueue to release mu before calling tryGet and
-	// be assured that it is not competing with another Admit.
-	// Lock ordering is admitMu < mu.
-	admitMu syncutil.Mutex
-	mu      struct {
+	mu struct {
 		syncutil.Mutex
 		// Tenants with waiting work.
 		tenantHeap tenantHeap
@@ -598,11 +597,10 @@ func (q *WorkQueue) Admit(ctx context.Context, info WorkInfo) (enabled bool, err
 	q.metrics.incRequested(info.Priority)
 	tenantID := info.TenantID.ToUint64()
 
-	// The code in this method does not use defer to unlock the mutexes because
-	// it needs the flexibility of selectively unlocking one of these on a
-	// certain code path. When changing the code, be careful in making sure the
-	// mutexes are properly unlocked on all code paths.
-	q.admitMu.Lock()
+	// The code in this method does not use defer to unlock the mutex because it
+	// needs the flexibility of selectively unlocking on a certain code path.
+	// When changing the code, be careful in making sure the mutex is properly
+	// unlocked on all code paths.
 	q.mu.Lock()
 	tenant, ok := q.mu.tenants[tenantID]
 	if !ok {
@@ -624,13 +622,12 @@ func (q *WorkQueue) Admit(ctx context.Context, info WorkInfo) (enabled bool, err
 			panic("unexpected ReplicatedWrite.Enabled on slot-based queue")
 		}
 	}
-	if info.BypassAdmission && roachpb.IsSystemTenantID(tenantID) && q.workKind == KVWork {
+	if info.BypassAdmission && q.workKind == KVWork {
 		tenant.used += uint64(info.RequestedCount)
 		if isInTenantHeap(tenant) {
 			q.mu.tenantHeap.fix(tenant)
 		}
 		q.mu.Unlock()
-		q.admitMu.Unlock()
 		q.granter.tookWithoutPermission(info.RequestedCount)
 		q.metrics.incAdmitted(info.Priority)
 		q.metrics.recordBypassedAdmission(info.Priority)
@@ -648,8 +645,10 @@ func (q *WorkQueue) Admit(ctx context.Context, info WorkInfo) (enabled bool, err
 		// Optimistically update used to avoid locking again.
 		tenant.used += uint64(info.RequestedCount)
 		q.mu.Unlock()
+		// We have unlocked q.mu, so another concurrent request can also do tryGet
+		// and get ahead of this request. We don't need to be fair for such
+		// concurrent requests.
 		if q.granter.tryGet(info.RequestedCount) {
-			q.admitMu.Unlock()
 			q.metrics.incAdmitted(info.Priority)
 			if info.ReplicatedWorkInfo.Enabled {
 				// TODO(irfansharif): There's a race here, and could lead to
@@ -724,11 +723,10 @@ func (q *WorkQueue) Admit(ctx context.Context, info WorkInfo) (enabled bool, err
 		// Already canceled. More likely to happen if cpu starvation is
 		// causing entering into the work queue to be delayed.
 		q.mu.Unlock()
-		q.admitMu.Unlock()
 		q.metrics.incErrored(info.Priority)
 		deadline, _ := ctx.Deadline()
 		return true,
-			errors.Newf("work %s deadline already expired: deadline: %v, now: %v",
+			errors.Wrapf(ctx.Err(), "work %s context canceled before queueing: deadline: %v, now: %v",
 				q.workKind, deadline, startTime)
 	}
 	// Push onto heap(s).
@@ -750,16 +748,18 @@ func (q *WorkQueue) Admit(ctx context.Context, info WorkInfo) (enabled bool, err
 	}
 	// Else already in tenantHeap.
 
-	// Release all locks.
+	// Release the lock.
 	q.mu.Unlock()
-	q.admitMu.Unlock()
 
 	q.metrics.recordStartWait(info.Priority)
 	if info.ReplicatedWorkInfo.Enabled {
 		if log.V(1) {
+			q.mu.Lock()
+			queueLen := tenant.waitingWorkHeap.Len()
+			q.mu.Unlock()
+
 			log.Infof(ctx, "async-path: len(waiting-work)=%d: enqueued t%d pri=%s r%s origin=n%s log-position=%s ingested=%t",
-				tenant.waitingWorkHeap.Len(),
-				tenant.id, info.Priority,
+				queueLen, tenantID, info.Priority,
 				info.ReplicatedWorkInfo.RangeID,
 				info.ReplicatedWorkInfo.Origin,
 				info.ReplicatedWorkInfo.LogPosition,
@@ -908,6 +908,9 @@ func (q *WorkQueue) granted(grantChainID grantChainID) int64 {
 	// releasing Admit can notice that item is no longer in the heap and call
 	// releaseWaitingWork to return item to the waitingWorkPool.
 	requestedCount := item.requestedCount
+	// Cannot read tenant after release q.mu, since tenant may get GC'd and
+	// reused.
+	tenantID := tenant.id
 	q.mu.Unlock()
 
 	if !item.replicated.Enabled {
@@ -917,9 +920,12 @@ func (q *WorkQueue) granted(grantChainID grantChainID) int64 {
 		// NB: We don't use grant chains for store tokens, so they don't apply
 		// to replicated writes.
 		if log.V(1) {
+			q.mu.Lock()
+			queueLen := tenant.waitingWorkHeap.Len()
+			q.mu.Unlock()
+
 			log.Infof(q.ambientCtx, "async-path: len(waiting-work)=%d dequeued t%d pri=%s r%s origin=n%s log-position=%s ingested=%t",
-				tenant.waitingWorkHeap.Len(),
-				tenant.id, item.priority,
+				queueLen, tenantID, item.priority,
 				item.replicated.RangeID,
 				item.replicated.Origin,
 				item.replicated.LogPosition,
@@ -928,7 +934,7 @@ func (q *WorkQueue) granted(grantChainID grantChainID) int64 {
 		}
 		defer releaseWaitingWork(item)
 		q.onAdmittedReplicatedWork.admittedReplicatedWork(
-			roachpb.MustMakeTenantID(tenant.id),
+			roachpb.MustMakeTenantID(tenantID),
 			item.priority,
 			item.replicated,
 			item.requestedCount,
@@ -1014,27 +1020,33 @@ func (q *WorkQueue) SafeFormat(s redact.SafePrinter, _ rune) {
 		s.Printf("\n tenant-id: %d used: %d, w: %d, fifo: %d", tenant.id, tenant.used,
 			tenant.weight, tenant.fifoPriorityThreshold)
 		if len(tenant.waitingWorkHeap) > 0 {
+			// Sort items within waitingWorkHeap
+			sortedWaitingWorkHeap := slices.Clone(tenant.waitingWorkHeap)
+			sort.Sort(&sortedWaitingWorkHeap)
 			s.Printf(" waiting work heap:")
-			for i := range tenant.waitingWorkHeap {
+			for i := range sortedWaitingWorkHeap {
 				var workOrdering string
-				if tenant.waitingWorkHeap[i].arrivalTimeWorkOrdering == lifoWorkOrdering {
+				if sortedWaitingWorkHeap[i].arrivalTimeWorkOrdering == lifoWorkOrdering {
 					workOrdering = ", lifo-ordering"
 				}
 				s.Printf(" [%d: pri: %d, ct: %d, epoch: %d, qt: %d%s]", i,
-					tenant.waitingWorkHeap[i].priority,
-					tenant.waitingWorkHeap[i].createTime/int64(time.Millisecond),
-					tenant.waitingWorkHeap[i].epoch,
-					tenant.waitingWorkHeap[i].enqueueingTime.UnixNano()/int64(time.Millisecond), workOrdering)
+					sortedWaitingWorkHeap[i].priority,
+					sortedWaitingWorkHeap[i].createTime/int64(time.Millisecond),
+					sortedWaitingWorkHeap[i].epoch,
+					sortedWaitingWorkHeap[i].enqueueingTime.UnixNano()/int64(time.Millisecond), workOrdering)
 			}
 		}
 		if len(tenant.openEpochsHeap) > 0 {
+			// Sort items within openEpochsHeap
+			sortedOpenEpochsHeap := slices.Clone(tenant.openEpochsHeap)
+			sort.Sort(&sortedOpenEpochsHeap)
 			s.Printf(" open epochs heap:")
-			for i := range tenant.openEpochsHeap {
+			for i := range sortedOpenEpochsHeap {
 				s.Printf(" [%d: pri: %d, ct: %d, epoch: %d, qt: %d]", i,
-					tenant.openEpochsHeap[i].priority,
-					tenant.openEpochsHeap[i].createTime/int64(time.Millisecond),
-					tenant.openEpochsHeap[i].epoch,
-					tenant.openEpochsHeap[i].enqueueingTime.UnixNano()/int64(time.Millisecond))
+					sortedOpenEpochsHeap[i].priority,
+					sortedOpenEpochsHeap[i].createTime/int64(time.Millisecond),
+					sortedOpenEpochsHeap[i].epoch,
+					sortedOpenEpochsHeap[i].enqueueingTime.UnixNano()/int64(time.Millisecond))
 			}
 		}
 	}
@@ -1405,7 +1417,15 @@ func (th *tenantHeap) Len() int {
 }
 
 func (th *tenantHeap) Less(i, j int) bool {
-	// used_i/weight_i < used_j/weight_j
+	// For tenant fairness, use used_i/weight_i < used_j/weight_j to determine
+	// order. In case of a tie, prioritize items with higher weight, and then
+	// items with lower tenant id.
+	if (*th)[i].used*uint64((*th)[j].weight) == (*th)[j].used*uint64((*th)[i].weight) {
+		if (*th)[i].weight == (*th)[j].weight {
+			return (*th)[i].id < (*th)[j].id
+		}
+		return (*th)[i].weight > (*th)[j].weight
+	}
 	return (*th)[i].used*uint64((*th)[j].weight) < (*th)[j].used*uint64((*th)[i].weight)
 }
 
@@ -1737,8 +1757,8 @@ func addName(name string, meta metric.Metadata) metric.Metadata {
 // instead of by setting values.
 type WorkQueueMetrics struct {
 	name       string
-	total      workQueueMetricsSingle
-	byPriority sync.Map
+	total      *workQueueMetricsSingle
+	byPriority syncutil.Map[admissionpb.WorkPriority, workQueueMetricsSingle]
 	registry   *metric.Registry
 }
 
@@ -1747,7 +1767,7 @@ type WorkQueueMetrics struct {
 // TODO(abaptist): Until https://github.com/cockroachdb/cockroach/issues/88846
 // is fixed, this code is not useful since late registered metrics are not
 // visible.
-func (m *WorkQueueMetrics) getOrCreate(priority admissionpb.WorkPriority) workQueueMetricsSingle {
+func (m *WorkQueueMetrics) getOrCreate(priority admissionpb.WorkPriority) *workQueueMetricsSingle {
 	// Try loading from the map first.
 	val, ok := m.byPriority.Load(priority)
 	if !ok {
@@ -1762,7 +1782,7 @@ func (m *WorkQueueMetrics) getOrCreate(priority admissionpb.WorkPriority) workQu
 			m.registry.AddMetricStruct(val)
 		}
 	}
-	return val.(workQueueMetricsSingle)
+	return val
 }
 
 type workQueueMetricsSingle struct {
@@ -1845,8 +1865,8 @@ func makeWorkQueueMetrics(
 	return wqm
 }
 
-func makeWorkQueueMetricsSingle(name string) workQueueMetricsSingle {
-	return workQueueMetricsSingle{
+func makeWorkQueueMetricsSingle(name string) *workQueueMetricsSingle {
+	return &workQueueMetricsSingle{
 		Requested: metric.NewCounter(addName(name, requestedMeta)),
 		Admitted:  metric.NewCounter(addName(name, admittedMeta)),
 		Errored:   metric.NewCounter(addName(name, erroredMeta)),
@@ -2072,29 +2092,59 @@ func (q *StoreWorkQueue) admittedReplicatedWork(
 	// revisit -- one possibility is to add this to a notification queue and
 	// have a separate goroutine invoke these callbacks (without holding
 	// coord.mu). We could directly invoke here too if not holding the lock.
-	q.onLogEntryAdmitted.AdmittedLogEntry(
-		q.q[wc].ambientCtx,
-		rwi.Origin,
-		pri,
-		q.storeID,
-		rwi.RangeID,
-		rwi.LogPosition,
-	)
+	cbState := LogEntryAdmittedCallbackState{
+		StoreID:      q.storeID,
+		RangeID:      rwi.RangeID,
+		ReplicaID:    rwi.ReplicaID,
+		LeaderTerm:   rwi.LeaderTerm,
+		Pos:          rwi.LogPosition,
+		Pri:          pri,
+		Origin:       rwi.Origin,
+		RaftPri:      rwi.RaftPri,
+		IsV2Protocol: rwi.IsV2Protocol,
+	}
+	q.onLogEntryAdmitted.AdmittedLogEntry(q.q[wc].ambientCtx, cbState)
 }
 
-// OnLogEntryAdmitted is used to observe the specific entries (identified by
-// rangeID + log position) that were admitted. Since admission control for log
-// entries is asynchronous/non-blocking, this allows callers to do requisite
+// OnLogEntryAdmitted is used to observe the specific entries that were
+// admitted. Since admission control for log entries is
+// asynchronous/non-blocking, this allows callers to do requisite
 // post-admission bookkeeping.
 type OnLogEntryAdmitted interface {
-	AdmittedLogEntry(
-		ctx context.Context,
-		origin roachpb.NodeID, /* node where the entry originated */
-		pri admissionpb.WorkPriority, /* admission priority of the entry */
-		storeID roachpb.StoreID, /* store on which the entry was admitted */
-		rangeID roachpb.RangeID, /* identifying range for the log entry */
-		pos LogPosition, /* log position of the entry that was admitted*/
-	)
+	AdmittedLogEntry(ctx context.Context, cbState LogEntryAdmittedCallbackState)
+}
+
+// LogEntryAdmittedCallbackState is passed to AdmittedLogEntry.
+type LogEntryAdmittedCallbackState struct {
+	// Store on which the entry was admitted.
+	StoreID roachpb.StoreID
+	// Range that contained that entry.
+	RangeID roachpb.RangeID
+	// Replica that asked for admission.
+	ReplicaID roachpb.ReplicaID
+	// LeaderTerm is the term of the leader that asked for this entry to be
+	// appended.
+	LeaderTerm uint64
+	// Pos is the position of the entry in the log.
+	//
+	// TODO(sumeer): when the RACv1 protocol is deleted, drop the Term from this
+	// struct, and replace LeaderTerm/Pos.Index with a LogMark.
+	Pos LogPosition
+	// Pri is the admission priority used for admission.
+	Pri admissionpb.WorkPriority
+	// Origin is the node where the entry originated. It is only populated for
+	// replication admission control v1 (RACv1).
+	Origin roachpb.NodeID
+	// RaftPri is only populated for replication admission control v2 (RACv2).
+	// It is the raft priority for the entry. Technically, it could be derived
+	// from Pri, but we do not want the admission package to be aware of this
+	// translation.
+	RaftPri raftpb.Priority
+	// IsV2Protocol is true iff the v2 protocol requested this admission. It is
+	// used for de-multiplexing the callback correctly.
+	//
+	// TODO(sumeer): remove when the RACv1 protocol is deleted.
+	IsV2Protocol bool
 }
 
 // AdmittedWorkDone indicates to the queue that the admitted work has completed.
@@ -2192,7 +2242,7 @@ func makeStoreWorkQueue(
 	storeID roachpb.StoreID,
 	granters [admissionpb.NumWorkClasses]granterWithStoreReplicatedWorkAdmitted,
 	settings *cluster.Settings,
-	metrics *WorkQueueMetrics,
+	metrics [admissionpb.NumWorkClasses]*WorkQueueMetrics,
 	opts workQueueOptions,
 	knobs *TestingKnobs,
 	onLogEntryAdmitted OnLogEntryAdmitted,
@@ -2225,7 +2275,7 @@ func makeStoreWorkQueue(
 		} else if i == int(admissionpb.ElasticWorkClass) {
 			queueKind = "kv-elastic-store-queue"
 		}
-		initWorkQueue(&q.q[i], ambientCtx, KVWork, queueKind, granters[i], settings, metrics, opts, knobs)
+		initWorkQueue(&q.q[i], ambientCtx, KVWork, queueKind, granters[i], settings, metrics[i], opts, knobs)
 		q.q[i].onAdmittedReplicatedWork = q
 	}
 	// Arbitrary initial value. This will be replaced before any meaningful

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -15,12 +10,11 @@ import (
 	"context"
 	gosql "database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,11 +34,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/jobutils"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
+	"github.com/cockroachdb/cockroach/pkg/workload/histogram/exporter"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -96,11 +90,9 @@ func importBankDataSplit(
 ) string {
 	dest := destinationName(c)
 
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload")
-
 	// NB: starting the cluster creates the logs dir as a side effect,
 	// needed below.
-	c.Start(ctx, t.L(), option.DefaultStartOptsNoBackups(), install.MakeClusterSettings())
+	c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), install.MakeClusterSettings())
 	runImportBankDataSplit(ctx, rows, ranges, t, c)
 	return dest
 }
@@ -212,18 +204,19 @@ func registerBackupNodeShutdown(r registry.Registry) {
 	}
 
 	r.Add(registry.TestSpec{
-		Name:              fmt.Sprintf("backup/nodeShutdown/worker/%s", backupNodeRestartSpec),
-		Owner:             registry.OwnerDisasterRecovery,
-		Cluster:           backupNodeRestartSpec,
-		EncryptionSupport: registry.EncryptionMetamorphic,
-		Leases:            registry.MetamorphicLeases,
-		CompatibleClouds:  registry.AllExceptAWS,
-		Suites:            registry.Suites(registry.Nightly),
+		Name:                      fmt.Sprintf("backup/nodeShutdown/worker/%s", backupNodeRestartSpec),
+		Owner:                     registry.OwnerDisasterRecovery,
+		Cluster:                   backupNodeRestartSpec,
+		EncryptionSupport:         registry.EncryptionMetamorphic,
+		Leases:                    registry.MetamorphicLeases,
+		CompatibleClouds:          registry.AllExceptAWS,
+		Suites:                    registry.Suites(registry.Nightly),
+		TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			gatewayNode := 2
 			nodeToShutdown := 3
 			dest := loadBackupData(ctx, t, c)
-			backupQuery := `BACKUP bank.bank TO 'nodelocal://1/` + dest + `' WITH DETACHED`
+			backupQuery := `BACKUP bank.bank INTO 'nodelocal://1/` + dest + `' WITH DETACHED`
 			startBackup := func(c cluster.Cluster, l *logger.Logger) (jobID jobspb.JobID, err error) {
 				gatewayDB := c.Conn(ctx, l, gatewayNode)
 				defer gatewayDB.Close()
@@ -236,18 +229,19 @@ func registerBackupNodeShutdown(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:              fmt.Sprintf("backup/nodeShutdown/coordinator/%s", backupNodeRestartSpec),
-		Owner:             registry.OwnerDisasterRecovery,
-		Cluster:           backupNodeRestartSpec,
-		EncryptionSupport: registry.EncryptionMetamorphic,
-		Leases:            registry.MetamorphicLeases,
-		CompatibleClouds:  registry.AllExceptAWS,
-		Suites:            registry.Suites(registry.Nightly),
+		Name:                      fmt.Sprintf("backup/nodeShutdown/coordinator/%s", backupNodeRestartSpec),
+		Owner:                     registry.OwnerDisasterRecovery,
+		Cluster:                   backupNodeRestartSpec,
+		EncryptionSupport:         registry.EncryptionMetamorphic,
+		Leases:                    registry.MetamorphicLeases,
+		CompatibleClouds:          registry.AllExceptAWS,
+		Suites:                    registry.Suites(registry.Nightly),
+		TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			gatewayNode := 2
 			nodeToShutdown := 2
 			dest := loadBackupData(ctx, t, c)
-			backupQuery := `BACKUP bank.bank TO 'nodelocal://1/` + dest + `' WITH DETACHED`
+			backupQuery := `BACKUP bank.bank INTO 'nodelocal://1/` + dest + `' WITH DETACHED`
 			startBackup := func(c cluster.Cluster, l *logger.Logger) (jobID jobspb.JobID, err error) {
 				gatewayDB := c.Conn(ctx, l, gatewayNode)
 				defer gatewayDB.Close()
@@ -292,21 +286,28 @@ func fingerprint(ctx context.Context, conn *gosql.DB, db, table string) (string,
 
 // initBulkJobPerfArtifacts registers a histogram, creates a performance
 // artifact directory and returns a method that when invoked records a tick.
-func initBulkJobPerfArtifacts(testName string, timeout time.Duration) (func(), *bytes.Buffer) {
+func initBulkJobPerfArtifacts(
+	timeout time.Duration, t test.Test, e exporter.Exporter,
+) (func(), *bytes.Buffer) {
 	// Register a named histogram to track the total time the bulk job took.
 	// Roachperf uses this information to display information about this
 	// roachtest.
-	reg := histogram.NewRegistry(
+
+	reg := histogram.NewRegistryWithExporter(
 		timeout,
 		histogram.MockWorkloadName,
+		e,
 	)
-	reg.GetHandle().Get(testName)
+	reg.GetHandle().Get(t.Name())
 
 	bytesBuf := bytes.NewBuffer([]byte{})
-	jsonEnc := json.NewEncoder(bytesBuf)
+	writer := io.Writer(bytesBuf)
+
+	e.Init(&writer)
+
 	tick := func() {
 		reg.Tick(func(tick histogram.Tick) {
-			_ = jsonEnc.Encode(tick.Snapshot())
+			_ = tick.Exporter.SnapshotAndWrite(tick.Hist, tick.Now, tick.Elapsed, &tick.Name)
 		})
 	}
 
@@ -314,90 +315,82 @@ func initBulkJobPerfArtifacts(testName string, timeout time.Duration) (func(), *
 }
 
 func registerBackup(r registry.Registry) {
-
 	backup2TBSpec := r.MakeClusterSpec(10)
 	r.Add(registry.TestSpec{
-		Name:              fmt.Sprintf("backup/2TB/%s", backup2TBSpec),
-		Owner:             registry.OwnerDisasterRecovery,
-		Benchmark:         true,
-		Cluster:           backup2TBSpec,
-		CompatibleClouds:  registry.AllExceptAWS,
-		Suites:            registry.Suites(registry.Nightly),
-		EncryptionSupport: registry.EncryptionAlwaysDisabled,
+		Name:      fmt.Sprintf("backup/2TB/%s", backup2TBSpec),
+		Owner:     registry.OwnerDisasterRecovery,
+		Benchmark: true,
+		Cluster:   backup2TBSpec,
+		// The default storage on Azure Standard_D4ds_v5 is only 150 GiB compared
+		// to 400 on GCE, which is not enough for this test. We could request a
+		// larger volume size and set spec.LocalSSDDisable if we wanted to run
+		// this on Azure.
+		CompatibleClouds:          registry.OnlyGCE,
+		Suites:                    registry.Suites(registry.Nightly),
+		TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
+		EncryptionSupport:         registry.EncryptionAlwaysDisabled,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			rows := rows2TiB
 			if c.IsLocal() {
 				rows = 100
 			}
 			dest := importBankData(ctx, rows, t, c)
-			tick, perfBuf := initBulkJobPerfArtifacts("backup/2TB", 2*time.Hour)
+			exporter := roachtestutil.CreateWorkloadHistogramExporter(t, c)
+			tick, perfBuf := initBulkJobPerfArtifacts(2*time.Hour, t, exporter)
+			defer roachtestutil.CloseExporter(ctx, exporter, t, c, perfBuf, c.Node(1), "")
 
 			m := c.NewMonitor(ctx)
 			m.Go(func(ctx context.Context) error {
 				t.Status(`running backup`)
-				pgurl, err := roachtestutil.DefaultPGUrl(ctx, c, t.L(), c.Node(1))
-				if err != nil {
-					return err
-				}
 				// Tick once before starting the backup, and once after to capture the
 				// total elapsed time. This is used by roachperf to compute and display
 				// the average MB/sec per node.
 				tick()
-				c.Run(ctx, option.WithNodes(c.Node(1)), `./cockroach sql --insecure --url=`+pgurl+` -e "
-				BACKUP bank.bank TO 'gs://`+backupTestingBucket+`/`+dest+`?AUTH=implicit'"`)
+				conn := c.Conn(ctx, t.L(), 1)
+				defer conn.Close()
+				var jobID jobspb.JobID
+				uri := `gs://` + backupTestingBucket + `/` + dest + `?AUTH=implicit`
+				if err := conn.QueryRowContext(ctx, fmt.Sprintf("BACKUP bank.bank INTO '%s' WITH detached", uri)).Scan(&jobID); err != nil {
+					return err
+				}
+				if err := AssertReasonableFractionCompleted(ctx, t.L(), c, jobID, 2); err != nil {
+					return err
+				}
 				tick()
-
-				// Upload the perf artifacts to any one of the nodes so that the test
-				// runner copies it into an appropriate directory path.
-				dest := filepath.Join(t.PerfArtifactsDir(), "stats.json")
-				if err := c.RunE(ctx, option.WithNodes(c.Node(1)), "mkdir -p "+filepath.Dir(dest)); err != nil {
-					log.Errorf(ctx, "failed to create perf dir: %+v", err)
-				}
-				if err := c.PutString(ctx, perfBuf.String(), dest, 0755, c.Node(1)); err != nil {
-					log.Errorf(ctx, "failed to upload perf artifacts to node: %s", err.Error())
-				}
 				return nil
 			})
 			m.Wait()
 		},
 	})
 
-	for _, item := range []struct {
-		cloudProvider string
-		machine       string
-	}{
-		{cloudProvider: "GCS", machine: spec.GCE},
-		{cloudProvider: "AWS", machine: spec.AWS},
-	} {
-		item := item
+	// Skip running on aws because the roachtest env does not have the proper
+	// credentials. See 127062
+	for _, cloudProvider := range []spec.Cloud{spec.GCE} {
 		r.Add(registry.TestSpec{
-			Name:              fmt.Sprintf("backup/assume-role/%s", item.cloudProvider),
-			Owner:             registry.OwnerDisasterRecovery,
-			Cluster:           r.MakeClusterSpec(3),
-			EncryptionSupport: registry.EncryptionMetamorphic,
-			Leases:            registry.MetamorphicLeases,
-			CompatibleClouds:  registry.AllExceptAWS,
-			Suites:            registry.Suites(registry.Nightly),
+			Name:                      fmt.Sprintf("backup/assume-role/%s", cloudProvider),
+			Owner:                     registry.OwnerDisasterRecovery,
+			Cluster:                   r.MakeClusterSpec(3),
+			EncryptionSupport:         registry.EncryptionMetamorphic,
+			Leases:                    registry.MetamorphicLeases,
+			CompatibleClouds:          registry.Clouds(cloudProvider),
+			Suites:                    registry.Suites(registry.Nightly),
+			TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-				if c.Cloud() != item.machine {
-					t.Skip("backup assumeRole is only configured to run on "+item.machine, "")
-				}
-
 				rows := 100
 
 				dest := importBankData(ctx, rows, t, c)
 
 				var backupPath, kmsURI string
 				var err error
-				switch item.cloudProvider {
-				case "AWS":
+				switch cloudProvider {
+				case spec.AWS:
 					if backupPath, err = getAWSBackupPath(dest); err != nil {
 						t.Fatal(err)
 					}
 					if kmsURI, err = getAWSKMSAssumeRoleURI(); err != nil {
 						t.Fatal(err)
 					}
-				case "GCS":
+				case spec.GCE:
 					if backupPath, err = getGCSBackupPath(dest); err != nil {
 						t.Fatal(err)
 					}
@@ -451,28 +444,17 @@ func registerBackup(r registry.Registry) {
 		})
 	}
 	KMSSpec := r.MakeClusterSpec(3)
-	for _, item := range []struct {
-		kmsProvider string
-		machine     string
-		clouds      registry.CloudSet
-	}{
-		{kmsProvider: "GCS", machine: spec.GCE, clouds: registry.AllExceptAWS},
-		{kmsProvider: "AWS", machine: spec.AWS, clouds: registry.OnlyAWS},
-	} {
-		item := item
+	for _, cloudProvider := range []spec.Cloud{spec.GCE, spec.AWS} {
 		r.Add(registry.TestSpec{
-			Name:              fmt.Sprintf("backup/KMS/%s/%s", item.kmsProvider, KMSSpec.String()),
-			Owner:             registry.OwnerDisasterRecovery,
-			Cluster:           KMSSpec,
-			EncryptionSupport: registry.EncryptionMetamorphic,
-			Leases:            registry.MetamorphicLeases,
-			CompatibleClouds:  item.clouds,
-			Suites:            registry.Suites(registry.Nightly),
+			Name:                      fmt.Sprintf("backup/KMS/%s/%s", cloudProvider, KMSSpec.String()),
+			Owner:                     registry.OwnerDisasterRecovery,
+			Cluster:                   KMSSpec,
+			EncryptionSupport:         registry.EncryptionMetamorphic,
+			Leases:                    registry.MetamorphicLeases,
+			CompatibleClouds:          registry.Clouds(cloudProvider),
+			Suites:                    registry.Suites(registry.Nightly),
+			TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-				if c.Cloud() != item.machine {
-					t.Skip("backupKMS roachtest is only configured to run on "+item.machine, "")
-				}
-
 				// ~10GiB - which is 30Gib replicated.
 				rows := rows30GiB
 				if c.IsLocal() {
@@ -492,12 +474,12 @@ func registerBackup(r registry.Registry) {
 				m.Wait()
 				var kmsURIA, kmsURIB string
 				var err error
-				backupPath := fmt.Sprintf("nodelocal://1/kmsbackup/%s/%s", item.kmsProvider, dest)
+				backupPath := fmt.Sprintf("nodelocal://1/kmsbackup/%s/%s", cloudProvider, dest)
 
 				m = c.NewMonitor(ctx)
 				m.Go(func(ctx context.Context) error {
-					switch item.kmsProvider {
-					case "AWS":
+					switch cloudProvider {
+					case spec.AWS:
 						t.Status(`running encrypted backup with AWS KMS`)
 						kmsURIA, err = getAWSKMSURI(KMSRegionAEnvVar, KMSKeyARNAEnvVar)
 						if err != nil {
@@ -508,7 +490,7 @@ func registerBackup(r registry.Registry) {
 						if err != nil {
 							return err
 						}
-					case "GCS":
+					case spec.GCE:
 						t.Status(`running encrypted backup with GCS KMS`)
 						kmsURIA, err = getGCSKMSURI(KMSKeyNameAEnvVar)
 						if err != nil {
@@ -522,7 +504,7 @@ func registerBackup(r registry.Registry) {
 					}
 
 					kmsOptions := fmt.Sprintf("KMS=('%s', '%s')", kmsURIA, kmsURIB)
-					_, err := conn.ExecContext(ctx, `BACKUP bank.bank TO '`+backupPath+`' WITH `+kmsOptions)
+					_, err := conn.ExecContext(ctx, `BACKUP bank.bank INTO '`+backupPath+`' WITH `+kmsOptions)
 					return err
 				})
 				m.Wait()
@@ -532,7 +514,7 @@ func registerBackup(r registry.Registry) {
 				m.Go(func(ctx context.Context) error {
 					t.Status(`restore using KMSURIA`)
 					if _, err := conn.ExecContext(ctx,
-						`RESTORE bank.bank FROM $1 WITH into_db=restoreA, kms=$2`,
+						`RESTORE TABLE bank.bank FROM LATEST IN $1 WITH into_db=restoreA, kms=$2`,
 						backupPath, kmsURIA,
 					); err != nil {
 						return err
@@ -540,7 +522,7 @@ func registerBackup(r registry.Registry) {
 
 					t.Status(`restore using KMSURIB`)
 					if _, err := conn.ExecContext(ctx,
-						`RESTORE bank.bank FROM $1 WITH into_db=restoreB, kms=$2`,
+						`RESTORE TABLE bank.bank FROM LATEST IN $1 WITH into_db=restoreB, kms=$2`,
 						backupPath, kmsURIB,
 					); err != nil {
 						return err
@@ -581,12 +563,12 @@ func registerBackup(r registry.Registry) {
 		Cluster:           r.MakeClusterSpec(3, spec.CPU(8)),
 		Leases:            registry.MetamorphicLeases,
 		EncryptionSupport: registry.EncryptionMetamorphic,
-		CompatibleClouds:  registry.AllExceptAWS,
-		Suites:            registry.Suites(registry.Nightly),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds:          registry.Clouds(spec.GCE, spec.Local),
+		Suites:                    registry.Suites(registry.Nightly),
+		TestSelectionOptOutSuites: registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if c.Cloud() != spec.GCE && !c.IsLocal() {
-				t.Skip("uses gs://cockroach-fixtures-us-east1; see https://github.com/cockroachdb/cockroach/issues/105968")
-			}
 			runBackupMVCCRangeTombstones(ctx, t, c, mvccRangeTombstoneConfig{})
 		},
 	})
@@ -630,22 +612,20 @@ func runBackupMVCCRangeTombstones(
 	ctx context.Context, t test.Test, c cluster.Cluster, config mvccRangeTombstoneConfig,
 ) {
 	if !config.skipClusterSetup {
-		c.Put(ctx, t.DeprecatedWorkload(), "./workload") // required for tpch
-		c.Start(ctx, t.L(), option.DefaultStartOptsNoBackups(), install.MakeClusterSettings())
+		c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), install.MakeClusterSettings())
 	}
 	t.Status("starting csv servers")
 	c.Run(ctx, option.WithNodes(c.All()), `./cockroach workload csv-server --port=8081 &> logs/workload-csv-server.log < /dev/null &`)
 
-	conn := c.Conn(ctx, t.L(), 1, option.TenantName(config.tenantName))
+	// c2c tests still use the old multitenant API, which does not support non root authentication
+	conn := c.Conn(ctx, t.L(), 1, option.VirtualClusterName(config.tenantName), option.AuthMode(install.AuthRootCert))
 
 	// Configure cluster.
 	t.Status("configuring cluster")
-	_, err := conn.Exec(`SET CLUSTER SETTING kv.bulk_ingest.max_index_buffer_size = '2gb'`)
-	require.NoError(t, err)
-	_, err = conn.Exec(`SET CLUSTER SETTING server.debug.default_vmodule = 'txn=2,sst_batcher=4,revert=2'`)
+	_, err := conn.Exec(`SET CLUSTER SETTING server.debug.default_vmodule = 'txn=2,sst_batcher=4,revert=2'`)
 	require.NoError(t, err)
 	// Wait for ranges to upreplicate.
-	require.NoError(t, WaitFor3XReplication(ctx, t, conn))
+	require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
 	// Create the orders table. It's about 16 GB across 8 files.
 	t.Status("creating table")
@@ -1037,7 +1017,7 @@ func getAWSBackupPath(dest string) (string, error) {
 		AssumeRoleAWSKeyIDEnvVar:     amazon.AWSAccessKeyParam,
 		AssumeRoleAWSSecretKeyEnvVar: amazon.AWSSecretParam,
 		AssumeRoleAWSRoleEnvVar:      amazon.AssumeRoleParam,
-		KMSRegionAEnvVar:             amazon.KMSRegionParam,
+		KMSRegionAEnvVar:             amazon.S3RegionParam,
 	}
 	for env, param := range expect {
 		v := os.Getenv(env)

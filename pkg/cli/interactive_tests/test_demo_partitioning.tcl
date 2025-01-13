@@ -118,14 +118,14 @@ end_test
 
 # Test interaction of -e and license acquisition.
 start_test "Ensure we can run licensed commands with -e"
-send "$argv demo -e \"ALTER TABLE users PARTITION BY LIST (city) (PARTITION p1 VALUES IN ('new york'))\"\r"
+send "$argv demo -e \"ALTER TABLE users PARTITION BY LIST (city) (PARTITION p1 VALUES IN ('new york'))\" --log-dir=logs \r"
 eexpect "ALTER TABLE"
 eexpect $prompt
 end_test
 
-start_test "Ensure that licensed commands with -e error when license acquisition is disabled"
-send "$argv demo --disable-demo-license -e \"ALTER TABLE users PARTITION BY LIST (city) (PARTITION p1 VALUES IN ('new york'))\"\r"
-eexpect "ERROR: use of partitions requires an enterprise license"
+start_test "Ensure that we can run licensed commands with -e when license acquisition is disabled"
+send "$argv demo --disable-demo-license -e \"ALTER TABLE users PARTITION BY LIST (city) (PARTITION p1 VALUES IN ('new york'))\" --log-dir=logs \r"
+eexpect "ALTER TABLE"
 eexpect $prompt
 end_test
 

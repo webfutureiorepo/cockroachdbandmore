@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -122,7 +117,22 @@ func (p *planner) initializeReducedAuditConfig(ctx context.Context) {
 	p.reducedAuditConfig.Initialized = true
 
 	user := p.User()
-	userRoles, err := p.MemberOfWithAdminOption(ctx, user)
+	userRoles, err := func() (map[username.SQLUsername]bool, error) {
+		if p.Txn() != nil {
+			return p.MemberOfWithAdminOption(ctx, user)
+		} else {
+			// If there is no open transaction, then we need to create an internal
+			// one. This is the case for logging BEGIN statements, since the
+			// transaction is not opened until after BEGIN is logged.
+			var userRoles map[username.SQLUsername]bool
+			innerErr := p.ExecCfg().InternalDB.DescsTxn(ctx, func(ctx context.Context, txn descs.Txn) error {
+				var err error
+				userRoles, err = MemberOfWithAdminOption(ctx, p.ExecCfg(), txn, user)
+				return err
+			})
+			return userRoles, innerErr
+		}
+	}()
 	if err != nil {
 		log.Errorf(ctx, "initialize reduced audit config: error getting user role memberships: %v", err)
 		return
@@ -134,11 +144,11 @@ func (p *planner) initializeReducedAuditConfig(ctx context.Context) {
 // shouldNotRoleBasedAudit checks if we should do any auditing work for
 // RoleBasedAuditEvents.
 func (p *planner) shouldNotRoleBasedAudit(execType executorType) bool {
+	// Do not emit audit events for internal executors.
 	// Do not do audit work if role-based auditing is not enabled.
 	// Do not emit audit events for reserved users/roles. This does not omit the
 	// root user.
-	// Do not emit audit events for internal executors.
-	return !auditlogging.UserAuditEnabled(p.execCfg.Settings) ||
-		p.User().IsReserved() ||
-		execType == executorTypeInternal
+	return execType == executorTypeInternal ||
+		!auditlogging.UserAuditEnabled(p.execCfg.Settings) ||
+		p.User().IsReserved()
 }

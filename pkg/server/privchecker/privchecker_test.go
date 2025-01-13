@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package privchecker_test
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 )
@@ -64,14 +60,14 @@ func TestAdminPrivilegeChecker(t *testing.T) {
 	execCfg := ts.ExecutorConfig().(sql.ExecutorConfig)
 	kvDB := ts.DB()
 
-	plannerFn := func(opName string) (sql.AuthorizationAccessor, func()) {
+	plannerFn := func(opName redact.SafeString) (sql.AuthorizationAccessor, func()) {
 		// This is a hack to get around a Go package dependency cycle. See comment
 		// in sql/jobs/registry.go on planHookMaker.
 		txn := kvDB.NewTxn(ctx, "test")
 		p, cleanup := sql.NewInternalPlanner(
 			opName,
 			txn,
-			username.RootUserName(),
+			username.NodeUserName(),
 			&sql.MemoryMetrics{},
 			&execCfg,
 			sql.NewInternalSessionData(ctx, execCfg.Settings, opName),

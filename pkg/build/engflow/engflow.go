@@ -1,29 +1,30 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package engflow
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	bes "github.com/cockroachdb/cockroach/pkg/build/bazel/bes"
 	bazelutil "github.com/cockroachdb/cockroach/pkg/build/util"
+	"github.com/cockroachdb/cockroach/pkg/cmd/bazci/githubpost"
+	"github.com/cockroachdb/cockroach/pkg/cmd/bazci/githubpost/issues"
 	//lint:ignore SA1019 grandfathered
 	gproto "github.com/golang/protobuf/proto"
 	"golang.org/x/net/http2"
@@ -61,6 +62,7 @@ type InvocationInfo struct {
 	InvocationId       string
 	StartedTimeMillis  int64
 	FinishTimeMillis   int64
+	Finished           bool
 	ExitCode           int32
 	ExitCodeName       string
 	TestResults        map[string][]*TestResultWithXml
@@ -75,6 +77,15 @@ type JsonReport struct {
 	ExitCode       int32                       `json:"exit_code"`
 	ExitCodeName   string                      `json:"exit_code_name"`
 	ResultsByLabel map[string][]JsonTestResult `json:"results_by_label"`
+
+	GitHubRunId      int64  `json:"github_run_id,omitempty"`
+	GitHubJob        string `json:"github_job,omitempty"`
+	GitHubRunAttempt int64  `json:"github_run_attempt,omitempty"`
+
+	TeamCityBuildTypeId string `json:"teamcity_buildtype_id,omitempty"`
+	TeamCityBuildId     int64  `json:"teamcity_build_id,omitempty"`
+
+	Branch string `json:"branch,omitempty"`
 }
 
 type JsonTestResult struct {
@@ -238,6 +249,7 @@ func LoadInvocationInfo(
 		case *bes.BuildEventId_BuildFinished:
 			finished := event.GetFinished()
 			ret.FinishTimeMillis = finished.FinishTimeMillis
+			ret.Finished = true
 			exitCode := finished.ExitCode
 			ret.ExitCode = exitCode.Code
 			ret.ExitCodeName = exitCode.Name
@@ -246,7 +258,8 @@ func LoadInvocationInfo(
 
 	unread := buf.Unread()
 	if len(unread) != 0 {
-		return nil, fmt.Errorf("didn't read entire file: %d bytes remaining", len(unread))
+		fmt.Fprintf(os.Stderr, "did not read entire BES file: %d bytes remaining (was the bazel invocation interrupted?)", len(unread))
+		// We should be fine to proceed though we may be missing data.
 	}
 
 	// Download test xml's and build action output.
@@ -349,15 +362,29 @@ func stringToMillis(s string) (int64, error) {
 // be parsed or was not fetched, then the report will be missing those test
 // results, but everything else will be present. If errs is empty, then the
 // report is complete.
+//
+// In addition to the passed-in arguments, we also consult the following
+// environment variables for supplemental data: GITHUB_RUN_ID, GITHUB_JOB,
+// GITHUB_RUN_ATTEMPT, TC_BUILDTYPE_ID, TC_BUILD_ID, GITHUB_ACTIONS_BRANCH and
+// TC_BUILD_BRANCH. These are environment variables that either GitHub sets for us (see
+// https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables),
+// we set in TeamCity, or we set as part of the GitHub workflow definition (see
+// github-actions-essential-ci.yml).
 func ConstructJSONReport(invocation *InvocationInfo, serverName string) (JsonReport, []error) {
 	ret := JsonReport{
-		Server:         serverName,
-		InvocationId:   invocation.InvocationId,
-		StartedAt:      timeMillisToString(invocation.StartedTimeMillis),
-		FinishedAt:     timeMillisToString(invocation.FinishTimeMillis),
-		ExitCode:       invocation.ExitCode,
-		ExitCodeName:   invocation.ExitCodeName,
-		ResultsByLabel: make(map[string][]JsonTestResult),
+		Server:              serverName,
+		InvocationId:        invocation.InvocationId,
+		StartedAt:           timeMillisToString(invocation.StartedTimeMillis),
+		FinishedAt:          timeMillisToString(invocation.FinishTimeMillis),
+		ExitCode:            invocation.ExitCode,
+		ExitCodeName:        invocation.ExitCodeName,
+		ResultsByLabel:      make(map[string][]JsonTestResult),
+		GitHubRunId:         tryParseInt(os.Getenv("GITHUB_RUN_ID")),
+		GitHubJob:           os.Getenv("GITHUB_JOB"),
+		GitHubRunAttempt:    tryParseInt(os.Getenv("GITHUB_RUN_ATTEMPT")),
+		TeamCityBuildTypeId: os.Getenv("TC_BUILDTYPE_ID"),
+		TeamCityBuildId:     tryParseInt(os.Getenv("TC_BUILD_ID")),
+		Branch:              getBranch(),
 	}
 	var errs []error
 
@@ -401,4 +428,81 @@ func ConstructJSONReport(invocation *InvocationInfo, serverName string) (JsonRep
 	}
 
 	return ret, errs
+}
+
+func postOptions(res *TestResultWithXml, opts FailurePosterOptions) *issues.Options {
+	return &issues.Options{
+		Token:  opts.GithubApiToken,
+		Org:    "cockroachdb",
+		Repo:   "cockroach",
+		SHA:    opts.Sha,
+		Branch: getBranch(),
+		EngFlowOptions: &issues.EngFlowOptions{
+			Attempt:      int(res.Attempt),
+			InvocationID: opts.InvocationId,
+			Label:        res.Label,
+			Run:          int(res.Run),
+			Shard:        int(res.Shard),
+			ServerURL:    fmt.Sprintf("https://%s.cluster.engflow.com/", opts.ServerName),
+		},
+		GetBinaryVersion: build.BinaryVersion,
+	}
+}
+
+type FailurePosterOptions struct {
+	Sha, InvocationId, ServerName, GithubApiToken string
+	ExtraParams                                   []string
+}
+
+// FailurePoster returns a githubpost.FailurePoster that's appropriate for use
+// with githubpost.PostFromTestXMLWithFailurePoster.
+func FailurePoster(res *TestResultWithXml, opts FailurePosterOptions) githubpost.FailurePoster {
+	postOpts := postOptions(res, opts)
+	formatter := func(ctx context.Context, failure githubpost.Failure) (issues.IssueFormatter, issues.PostRequest) {
+		fmter, req := githubpost.DefaultFormatter(ctx, failure)
+		// We don't want an artifacts link: there are none on EngFlow.
+		req.Artifacts = ""
+		if req.ExtraParams == nil {
+			req.ExtraParams = make(map[string]string)
+		}
+		if res.Run != 0 {
+			req.ExtraParams["run"] = fmt.Sprintf("%d", res.Run)
+		}
+		if res.Shard != 0 {
+			req.ExtraParams["shard"] = fmt.Sprintf("%d", res.Shard)
+		}
+		if res.Attempt != 0 {
+			req.ExtraParams["attempt"] = fmt.Sprintf("%d", res.Attempt)
+		}
+		if len(opts.ExtraParams) > 0 {
+			for _, key := range opts.ExtraParams {
+				req.ExtraParams[key] = "true"
+			}
+		}
+		return fmter, req
+	}
+	return func(ctx context.Context, failure githubpost.Failure) error {
+		fmter, req := formatter(ctx, failure)
+		_, err := issues.Post(ctx, log.Default(), fmter, req, postOpts)
+		return err
+	}
+}
+
+func tryParseInt(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	i, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return i
+}
+
+func getBranch() string {
+	b := os.Getenv("GITHUB_ACTIONS_BRANCH")
+	if b != "" {
+		return b
+	}
+	return strings.TrimPrefix(os.Getenv("TC_BUILD_BRANCH"), "refs/heads/")
 }

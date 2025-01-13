@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ptcache_test
 
@@ -86,6 +81,7 @@ func TestCacheBasic(t *testing.T) {
 			Knobs: base.TestingKnobs{
 				ProtectedTS: &protectedts.TestingKnobs{
 					DisableProtectedTimestampForMultiTenant: true,
+					UseMetaTable:                            true,
 				},
 			},
 		})
@@ -95,6 +91,7 @@ func TestCacheBasic(t *testing.T) {
 	insqlDB := s.InternalDB().(isql.DB)
 	m := ptstorage.New(s.ClusterSettings(), &protectedts.TestingKnobs{
 		DisableProtectedTimestampForMultiTenant: true,
+		UseMetaTable:                            true,
 	})
 	p := withDatabase(m, insqlDB)
 
@@ -157,6 +154,7 @@ func TestRefresh(t *testing.T) {
 	st := &scanTracker{}
 	ptsKnobs := &protectedts.TestingKnobs{
 		DisableProtectedTimestampForMultiTenant: true,
+		UseMetaTable:                            true,
 	}
 	srv := serverutils.StartServerOnly(t,
 		base.TestServerArgs{
@@ -302,6 +300,7 @@ func TestStart(t *testing.T) {
 				Knobs: base.TestingKnobs{
 					ProtectedTS: &protectedts.TestingKnobs{
 						DisableProtectedTimestampForMultiTenant: true,
+						UseMetaTable:                            true,
 					},
 				},
 			})
@@ -351,6 +350,7 @@ func TestQueryRecord(t *testing.T) {
 	db := s.InternalDB().(isql.DB)
 	storage := ptstorage.New(s.ClusterSettings(), &protectedts.TestingKnobs{
 		DisableProtectedTimestampForMultiTenant: true,
+		UseMetaTable:                            true,
 	})
 	p := withDatabase(storage, db)
 	// Set the poll interval to be very long.
@@ -415,6 +415,7 @@ func TestIterate(t *testing.T) {
 	db := s.InternalDB().(isql.DB)
 	m := ptstorage.New(s.ClusterSettings(), &protectedts.TestingKnobs{
 		DisableProtectedTimestampForMultiTenant: true,
+		UseMetaTable:                            true,
 	})
 	p := withDatabase(m, db)
 
@@ -485,6 +486,7 @@ func TestGetProtectionTimestamps(t *testing.T) {
 			Knobs: base.TestingKnobs{
 				ProtectedTS: &protectedts.TestingKnobs{
 					DisableProtectedTimestampForMultiTenant: true,
+					UseMetaTable:                            true,
 				},
 			},
 		})
@@ -565,6 +567,7 @@ func TestGetProtectionTimestamps(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			storage := ptstorage.New(s.ClusterSettings(), &protectedts.TestingKnobs{
 				DisableProtectedTimestampForMultiTenant: true,
+				UseMetaTable:                            true,
 			})
 			p := withDatabase(storage, s.InternalDB().(isql.DB))
 			c := ptcache.New(ptcache.Config{
@@ -595,6 +598,7 @@ func TestSettingChangedLeadsToFetch(t *testing.T) {
 	db := s.InternalDB().(isql.DB)
 	m := ptstorage.New(s.ClusterSettings(), &protectedts.TestingKnobs{
 		DisableProtectedTimestampForMultiTenant: true,
+		UseMetaTable:                            true,
 	})
 
 	// Set the poll interval to be very long.

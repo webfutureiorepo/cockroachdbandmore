@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -547,6 +542,10 @@ func TestRejectedLeaseDoesntDictateClosedTimestamp(t *testing.T) {
 				},
 				Store: &kvserver.StoreTestingKnobs{
 					DisableConsistencyQueue: true,
+					// We set AllowLeaseRequestProposalsWhenNotLeader to true so that the
+					// lease acquisition request (TestingAcquireLease) can be proposed
+					// regardless of the raft state.
+					AllowLeaseRequestProposalsWhenNotLeader: true,
 					EvalKnobs: kvserverbase.BatchEvalTestingKnobs{
 						TestingPostEvalFilter: func(args kvserverbase.FilterArgs) *kvpb.Error {
 							blockWrites(args)

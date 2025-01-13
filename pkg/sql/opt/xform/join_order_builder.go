@@ -1,16 +1,12 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
 import (
+	"context"
 	"math"
 	"math/bits"
 
@@ -273,6 +269,7 @@ type OnAddJoinFunc func(left, right, all, joinRefs, selectRefs []memo.RelExpr, o
 // Citations: [8]
 type JoinOrderBuilder struct {
 	f       *norm.Factory
+	ctx     context.Context
 	evalCtx *eval.Context
 
 	// vertexes is the set of base relations that form the vertexes of the join
@@ -317,9 +314,9 @@ type JoinOrderBuilder struct {
 	// once does not exceed the session limit.
 	joinCount int
 
-	// equivs is an EquivSet used to keep track of equivalence relations when
-	// assembling filters.
-	equivs props.EquivSet
+	// equivs is an EquivGroups set used to keep track of equivalence relations
+	// when assembling filters.
+	equivs props.EquivGroups
 
 	// rebuildAllJoins is true when the filters in the original matched join tree
 	// were not pushed down as far as possible. When this is true, all joins
@@ -337,17 +334,17 @@ type JoinOrderBuilder struct {
 // Init initializes a new JoinOrderBuilder with the given factory. The join
 // graph is reset, so a JoinOrderBuilder can be reused. Callback functions are
 // not reset.
-func (jb *JoinOrderBuilder) Init(f *norm.Factory, evalCtx *eval.Context) {
+func (jb *JoinOrderBuilder) Init(ctx context.Context, f *norm.Factory, evalCtx *eval.Context) {
 	// This initialization pattern ensures that fields are not unwittingly
 	// reused. Field reuse must be explicit.
 	*jb = JoinOrderBuilder{
 		f:               f,
+		ctx:             ctx,
 		evalCtx:         evalCtx,
 		plans:           make(map[vertexSet]memo.RelExpr),
 		applicableEdges: make(map[vertexSet]edgeSet),
 		onReorderFunc:   jb.onReorderFunc,
 		onAddJoinFunc:   jb.onAddJoinFunc,
-		equivs:          props.NewEquivSet(),
 	}
 }
 
@@ -706,13 +703,13 @@ func (jb *JoinOrderBuilder) addJoins(s1, s2 vertexSet) {
 func (jb *JoinOrderBuilder) makeInnerEdge(op *operator, filters memo.FiltersExpr) {
 	if len(filters) == 0 {
 		// This is a cross join. Create a single edge for the empty FiltersExpr.
-		jb.edges = append(jb.edges, *jb.makeEdge(op, filters))
+		jb.edges = append(jb.edges, jb.makeEdge(op, filters))
 		jb.innerEdges.Add(len(jb.edges) - 1)
 		return
 	}
 	for i := range filters {
 		// Create an edge for each conjunct.
-		jb.edges = append(jb.edges, *jb.makeEdge(op, filters[i:i+1]))
+		jb.edges = append(jb.edges, jb.makeEdge(op, filters[i:i+1]))
 		jb.innerEdges.Add(len(jb.edges) - 1)
 	}
 }
@@ -721,7 +718,7 @@ func (jb *JoinOrderBuilder) makeInnerEdge(op *operator, filters memo.FiltersExpr
 // join. For any given non-inner join, exactly one edge is constructed.
 func (jb *JoinOrderBuilder) makeNonInnerEdge(op *operator, filters memo.FiltersExpr) {
 	// Always create a single edge from a non-inner join.
-	jb.edges = append(jb.edges, *jb.makeEdge(op, filters))
+	jb.edges = append(jb.edges, jb.makeEdge(op, filters))
 	jb.nonInnerEdges.Add(len(jb.edges) - 1)
 }
 
@@ -773,13 +770,13 @@ func (jb *JoinOrderBuilder) makeTransitiveEdge(col1, col2 opt.ColumnID) {
 	filters := memo.FiltersExpr{jb.f.ConstructFiltersItem(condition)}
 
 	// Add the edge to the join graph.
-	jb.edges = append(jb.edges, *jb.makeEdge(op, filters))
+	jb.edges = append(jb.edges, jb.makeEdge(op, filters))
 	jb.innerEdges.Add(len(jb.edges) - 1)
 }
 
 // makeEdge returns a new edge given an operator and set of filters.
-func (jb *JoinOrderBuilder) makeEdge(op *operator, filters memo.FiltersExpr) (e *edge) {
-	e = &edge{op: op, filters: filters}
+func (jb *JoinOrderBuilder) makeEdge(op *operator, filters memo.FiltersExpr) (e edge) {
+	e = edge{op: op, filters: filters}
 	e.calcNullRejectedRels(jb)
 	e.calcSES(jb)
 	e.calcTES(jb.edges)
@@ -889,8 +886,8 @@ func (jb *JoinOrderBuilder) addJoin(
 }
 
 // areFiltersRedundant returns true if the given FiltersExpr contains a single
-// equality filter that is already represented by the given FuncDepSet.
-func areFiltersRedundant(equivs *props.EquivSet, filters memo.FiltersExpr) bool {
+// equality filter that is already represented by the given EquivGroups set.
+func areFiltersRedundant(equivs *props.EquivGroups, filters memo.FiltersExpr) bool {
 	if len(filters) != 1 {
 		return false
 	}
@@ -1236,7 +1233,7 @@ func (e *edge) calcNullRejectedRels(jb *JoinOrderBuilder) {
 	var nullRejectedCols opt.ColSet
 	for i := range e.filters {
 		if constraints := e.filters[i].ScalarProps().Constraints; constraints != nil {
-			nullRejectedCols.UnionWith(constraints.ExtractNotNullCols(jb.evalCtx))
+			nullRejectedCols.UnionWith(constraints.ExtractNotNullCols(jb.ctx, jb.evalCtx))
 		}
 	}
 	e.nullRejectedRels = jb.getRelations(nullRejectedCols)

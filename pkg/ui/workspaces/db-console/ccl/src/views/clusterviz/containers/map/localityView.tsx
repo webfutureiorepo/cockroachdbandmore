@@ -1,31 +1,28 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 import { RouteComponentProps } from "react-router";
 import { withRouter } from "react-router-dom";
 
 import { LocalityTree } from "src/redux/localities";
+import { sumNodeStats, LivenessStatus } from "src/redux/nodes";
 import { CLUSTERVIZ_ROOT } from "src/routes/visualization";
 import {
   generateLocalityRoute,
   getLocalityLabel,
   getLeaves,
 } from "src/util/localities";
-
-import { sumNodeStats, LivenessStatus } from "src/redux/nodes";
 import { pluralize } from "src/util/pluralize";
 import { trustIcon } from "src/util/trust";
-import localityIcon from "!!raw-loader!assets/localityIcon.svg";
-import liveIcon from "!!raw-loader!assets/livenessIcons/live.svg";
-import { Sparklines } from "src/views/clusterviz/components/nodeOrLocality/sparklines";
 import { CapacityArc } from "src/views/clusterviz/components/nodeOrLocality/capacityArc";
 import { Labels } from "src/views/clusterviz/components/nodeOrLocality/labels";
+import { Sparklines } from "src/views/clusterviz/components/nodeOrLocality/sparklines";
+
+import liveIcon from "!!raw-loader!assets/livenessIcons/live.svg";
+import localityIcon from "!!raw-loader!assets/localityIcon.svg";
 
 interface LocalityViewProps {
   localityTree: LocalityTree;

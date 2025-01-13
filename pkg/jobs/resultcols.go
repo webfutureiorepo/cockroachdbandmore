@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -26,7 +21,24 @@ var BulkJobExecutionResultHeader = colinfo.ResultColumns{
 	{Name: "bytes", Typ: types.Int},
 }
 
-// DetachedJobExecutionResultHeader is a the header for various job commands when
+var BackupRestoreJobResultHeader = colinfo.ResultColumns{
+	{Name: "job_id", Typ: types.Int},
+	{Name: "status", Typ: types.String},
+	{Name: "fraction_completed", Typ: types.Float},
+	{Name: "rows", Typ: types.Int},
+}
+
+// OnlineRestoreJobExecutionResultHeader is the header for an online restore
+// job, which provides a header different from the usual bulk job execution
+var OnlineRestoreJobExecutionResultHeader = colinfo.ResultColumns{
+	{Name: "job_id", Typ: types.Int},
+	{Name: "tables", Typ: types.Int},
+	{Name: "approx_rows", Typ: types.Int},
+	{Name: "approx_bytes", Typ: types.Int},
+	{Name: "background_download_job_id", Typ: types.Int},
+}
+
+// DetachedJobExecutionResultHeader is the header for various job commands when
 // job executes in detached mode (i.e. the caller doesn't wait for job completion).
 var DetachedJobExecutionResultHeader = colinfo.ResultColumns{
 	{Name: "job_id", Typ: types.Int},

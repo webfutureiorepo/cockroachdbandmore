@@ -1,19 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -109,8 +104,8 @@ func (c *connectionTrackerForFlowControl) testingPrint() string {
 	}
 
 	var buf strings.Builder
-	sort.Sort(roachpb.StoreIDSlice(storeIDs))
-	sort.Sort(roachpb.NodeIDSlice(nodeIDs))
+	slices.Sort(storeIDs)
+	slices.Sort(nodeIDs)
 	buf.WriteString(fmt.Sprintf("connected-stores (server POV): %s\n", roachpb.StoreIDSlice(storeIDs)))
 	buf.WriteString(fmt.Sprintf("connected-nodes  (client POV): %s\n", roachpb.NodeIDSlice(nodeIDs)))
 	return buf.String()

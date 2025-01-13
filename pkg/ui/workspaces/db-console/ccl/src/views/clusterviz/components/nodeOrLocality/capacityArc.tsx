@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { util } from "@cockroachlabs/cluster-ui";
 import React from "react";
+
+import {
+  NodeArcPercentageTooltip,
+  NodeArcUsedCapacityTooltip,
+  NodeArcTotalCapacityTooltip,
+} from "src/views/clusterviz/components/nodeOrLocality/tooltips";
 import * as PathMath from "src/views/clusterviz/util/pathmath";
 import {
   BACKGROUND_BLUE,
@@ -14,12 +18,6 @@ import {
   LIGHT_TEXT_BLUE,
   MAIN_BLUE,
 } from "src/views/shared/colors";
-import { util } from "@cockroachlabs/cluster-ui";
-import {
-  NodeArcPercentageTooltip,
-  NodeArcUsedCapacityTooltip,
-  NodeArcTotalCapacityTooltip,
-} from "src/views/clusterviz/components/nodeOrLocality/tooltips";
 
 const ARC_INNER_RADIUS = 56;
 const ARC_WIDTH = 6;

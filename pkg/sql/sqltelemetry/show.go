@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqltelemetry
 
@@ -62,6 +57,10 @@ const (
 	SuperRegions
 	// CreateExternalConnection represents the SHOW CREATE EXTERNAL CONNECTION command.
 	CreateExternalConnection
+	// ExternalConnection represents the SHOW EXTERNAL CONNECTION command.
+	ExternalConnection
+	// LogicalReplicationJobs represents the SHOW LOGICAL REPLICATION JOBS command.
+	LogicalReplicationJobs
 )
 
 var showTelemetryNameMap = map[ShowTelemetryType]string{
@@ -85,6 +84,8 @@ var showTelemetryNameMap = map[ShowTelemetryType]string{
 	FullTableScans:           "full_table_scans",
 	SuperRegions:             "super_regions",
 	CreateExternalConnection: "create_external_connection",
+	ExternalConnection:       "external_connection",
+	LogicalReplicationJobs:   "logical_replication_jobs",
 }
 
 func (s ShowTelemetryType) String() string {

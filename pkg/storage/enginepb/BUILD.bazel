@@ -49,7 +49,6 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/kv/kvnemesis/kvnemesisutil",
-        "//pkg/util/buildutil",
         "//pkg/util/hlc",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_redact//:redact",
@@ -65,10 +64,6 @@ go_test(
         "mvcc_test.go",
     ],
     embed = [":enginepb"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/kv/kvserver/concurrency/isolation",
         "//pkg/roachpb",

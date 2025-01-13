@@ -1,18 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
 import (
 	"context"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -59,12 +53,12 @@ type ManagerTestingKnobs struct {
 	// To disable the deletion of orphaned leases at server startup.
 	DisableDeleteOrphanedLeases bool
 
-	// VersionPollIntervalForRangefeeds controls the polling interval for the
-	// check whether the requisite version for rangefeed-based notifications has
-	// been finalized.
-	//
-	// TODO(ajwerner): Remove this and replace it with a callback.
-	VersionPollIntervalForRangefeeds time.Duration
+	// DisableRangeFeedCheckpoint is used to disable rangefeed checkpoints.
+	DisableRangeFeedCheckpoint bool
+
+	// RangeFeedReset channel is closed to indicate that the range feed
+	// has been reset.
+	RangeFeedResetChannel chan struct{}
 
 	LeaseStoreTestingKnobs StorageTestingKnobs
 }

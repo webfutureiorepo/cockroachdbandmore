@@ -1,19 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { TimestampToNumber, DurationToNumber } from "src/util/convert";
-
-import { FixLong } from "src/util/fixLong";
-import { uniqueLong, unique } from "src/util/arrays";
 import Long from "long";
+
+import { uniqueLong, unique } from "src/util/arrays";
+import { TimestampToNumber, DurationToNumber } from "src/util/convert";
+import { FixLong } from "src/util/fixLong";
 
 export type StatementStatistics = cockroach.sql.IStatementStatistics;
 export type ExecStats = cockroach.sql.IExecStats;
@@ -206,6 +201,7 @@ export function addStatementStats(
 
   return {
     count: a.count.add(b.count),
+    failure_count: a.failure_count.add(b.failure_count),
     first_attempt_count: a.first_attempt_count.add(b.first_attempt_count),
     max_retries: a.max_retries.greaterThan(b.max_retries)
       ? a.max_retries
@@ -252,7 +248,9 @@ export function addStatementStats(
         ? a.last_exec_timestamp
         : b.last_exec_timestamp,
     nodes: uniqueLong([...a.nodes, ...b.nodes]),
+    kv_node_ids: unique([...a.kv_node_ids, ...b.kv_node_ids]),
     regions: regions,
+    used_follower_read: a.used_follower_read || b.used_follower_read,
     plan_gists: planGists,
     index_recommendations: indexRec,
     indexes: indexes,
@@ -273,7 +271,6 @@ export interface ExecutionStatistics {
   vec: boolean;
   implicit_txn: boolean;
   full_scan: boolean;
-  failed: boolean;
   node_id: number;
   txn_fingerprint_ids: Long[];
   stats: StatementStatistics;
@@ -294,7 +291,6 @@ export function flattenStatementStats(
     vec: stmt.key.key_data.vec,
     implicit_txn: stmt.key.key_data.implicit_txn,
     full_scan: stmt.key.key_data.full_scan,
-    failed: stmt.key.key_data.failed,
     node_id: stmt.key.node_id,
     txn_fingerprint_ids: stmt.txn_fingerprint_ids,
     stats: stmt.stats,

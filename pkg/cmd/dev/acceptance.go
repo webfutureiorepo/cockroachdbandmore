@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -77,9 +72,7 @@ func (d *dev) acceptance(cmd *cobra.Command, commandLine []string) error {
 
 	var args []string
 	args = append(args, "test", "//pkg/acceptance:acceptance_test")
-	if numCPUs != 0 {
-		args = append(args, fmt.Sprintf("--local_cpu_resources=%d", numCPUs))
-	}
+	addCommonBazelArguments(&args)
 	if filter != "" {
 		args = append(args, fmt.Sprintf("--test_filter=%s", filter))
 	}
@@ -95,6 +88,7 @@ func (d *dev) acceptance(cmd *cobra.Command, commandLine []string) error {
 	args = append(args, fmt.Sprintf("--test_arg=-l=%s", logDir))
 	args = append(args, fmt.Sprintf("--sandbox_writable_path=%s", logDir))
 	args = append(args, "--test_env=TZ=America/New_York")
+	args = append(args, "--test_env=COCKROACH_RUN_ACCEPTANCE=true")
 	args = append(args, fmt.Sprintf("--test_arg=-b=%s", cockroachBin))
 	args = append(args, additionalBazelArgs...)
 

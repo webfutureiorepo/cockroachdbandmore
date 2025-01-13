@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package democluster
 
@@ -14,7 +9,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cli/clicfg"
-	"github.com/cockroachdb/cockroach/pkg/server/autoconfig/acprovider"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 )
 
@@ -111,10 +105,6 @@ type Context struct {
 	// DisableServerController is true if we want to avoid the server
 	// controller to instantiate tenant secondary servers.
 	DisableServerController bool
-
-	// AutoConfigProvider provides auto-configuration tasks to apply on
-	// the cluster during server initialization.
-	AutoConfigProvider acprovider.Provider
 }
 
 // IsInteractive returns true if the demo cluster configuration

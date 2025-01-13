@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -34,6 +29,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/stats"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -100,6 +97,10 @@ type TestCLIParams struct {
 	// UseSystemTenant is used to force the test to target the system tenant
 	// in a shared process multitenant test.
 	UseSystemTenant bool
+
+	// DisableAutoStats is used to disable the collection of automatic table statistics
+	// for the entire cluster.
+	DisableAutoStats bool
 }
 
 // testTempFilePrefix is a sentinel marker to be used as the prefix of a
@@ -145,6 +146,11 @@ func newCLITestWithArgs(params TestCLIParams, argsFn func(args *base.TestServerA
 
 	c.cleanupFunc = func() error { return nil }
 
+	settings := makeClusterSettings()
+	if params.DisableAutoStats {
+		stats.AutomaticStatisticsClusterMode.Override(context.Background(), &settings.SV, false)
+	}
+
 	if !params.NoServer {
 		if !params.Insecure {
 			c.cleanupFunc = securitytest.CreateTestCerts(certsDir)
@@ -154,6 +160,7 @@ func newCLITestWithArgs(params TestCLIParams, argsFn func(args *base.TestServerA
 			DefaultTestTenant: base.TestControlsTenantsExplicitly,
 
 			Insecure:      params.Insecure,
+			Settings:      settings,
 			SSLCertsDir:   c.certsDir,
 			StoreSpecs:    params.StoreSpecs,
 			Locality:      params.Locality,
@@ -176,6 +183,15 @@ func newCLITestWithArgs(params TestCLIParams, argsFn func(args *base.TestServerA
 
 		log.Infof(context.Background(), "server started at %s", c.Server.AdvRPCAddr())
 		log.Infof(context.Background(), "SQL listener at %s", c.Server.AdvSQLAddr())
+
+		// When run under leader leases, requests will not heartbeat NodeLiveness on
+		// the lease acquisition codepath. This may then cause CLI commands
+		// (such as status or ls) which require a NodeLiveness record to fail. Explicitly
+		// heartbeat the NodeLiveness record to prevent tests from flaking.
+		err = testutils.SucceedsSoonError(c.Server.HeartbeatNodeLiveness)
+		if err != nil {
+			log.Fatalf(context.Background(), "Couldn't heartbeat node liveness: %s", err)
+		}
 	}
 
 	if params.TenantArgs != nil && params.SharedProcessTenantArgs != nil {
@@ -346,6 +362,14 @@ func captureOutput(f func()) (out string, err error) {
 		if x := recover(); x != nil {
 			err = errors.Errorf("panic: %v", x)
 		}
+		// Replace any series of 'retrieving SQL data for ...' messages with a
+		// single '<dumping SQL tables>' message so that these tests are agnostic to
+		// both specific names and total number of system and internal tables that
+		// are exported. The regex matches the rest of the line after the prefix
+		// unless the line contains an uppercase E to avoid trimming "ERROR" message
+		// lines, which are expected (and tested) for certain tables.
+		out = regexp.MustCompile(`(.*retrieving SQL data for ([^E\n])*\n)+`).
+			ReplaceAllString(out, "<dumping SQL tables>\n")
 	}()
 
 	// Run the command. The output will be returned in the defer block.

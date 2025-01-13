@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -24,6 +19,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
@@ -121,13 +117,13 @@ func runSyncer(
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 
-	db, err := OpenEngine(dir, stopper)
+	db, err := OpenEngine(dir, stopper, fs.ReadWrite)
 	if err != nil {
 		if expSeq == 0 {
 			// Failed on first open, before we tried to corrupt anything. Hard stop.
 			return 0, err
 		}
-		fmt.Fprintln(stderr, "RocksDB directory", dir, "corrupted:", err)
+		fmt.Fprintln(stderr, "store directory", dir, "corrupted:", err)
 		return 0, nil // trigger reset
 	}
 
@@ -150,7 +146,7 @@ func runSyncer(
 
 	fmt.Fprintf(stderr, "verifying existing sequence numbers...")
 	err = db.MVCCIterate(ctx, roachpb.KeyMin, roachpb.KeyMax, storage.MVCCKeyAndIntentsIterKind,
-		storage.IterKeyTypePointsOnly, storage.UnknownReadCategory, check)
+		storage.IterKeyTypePointsOnly, fs.UnknownReadCategory, check)
 	if err != nil {
 		return 0, err
 	}

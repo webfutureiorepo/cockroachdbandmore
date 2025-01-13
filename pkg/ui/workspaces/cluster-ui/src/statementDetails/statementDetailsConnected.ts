@@ -1,56 +1,55 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { withRouter } from "react-router-dom";
 import { connect } from "react-redux";
+import { withRouter, RouteComponentProps } from "react-router-dom";
 import { Dispatch } from "redux";
-import { RouteComponentProps } from "react-router-dom";
-import {
-  StatementDetails,
-  StatementDetailsDispatchProps,
-} from "./statementDetails";
-import { AppState, uiConfigActions } from "../store";
-import {
-  selectStatementDetails,
-  selectStatementDetailsUiConfig,
-} from "./statementDetails.selectors";
-import {
-  selectIsTenant,
-  selectHasViewActivityRedactedRole,
-  selectHasAdminRole,
-} from "../store/uiConfig";
-import { nodeRegionsByIDSelector } from "../store/nodes";
-import { actions as sqlDetailsStatsActions } from "src/store/statementDetails";
-import { actions as sqlStatsActions } from "src/store/sqlStats";
-import {
-  actions as statementDiagnosticsActions,
-  selectDiagnosticsReportsByStatementFingerprint,
-} from "src/store/statementDiagnostics";
-import { actions as analyticsActions } from "src/store/analytics";
-import { actions as localStorageActions } from "src/store/localStorage";
-import { actions as nodesActions } from "../store/nodes";
-import { actions as nodeLivenessActions } from "../store/liveness";
-import { selectTimeScale } from "../store/utils/selectors";
-import {
-  actions as statementFingerprintInsightActions,
-  selectStatementFingerprintInsights,
-} from "src/store/insights/statementFingerprintInsights";
+
 import {
   StmtInsightsReq,
   InsertStmtDiagnosticRequest,
   StatementDetailsRequest,
   StatementDiagnosticsReport,
 } from "src/api";
-import { TimeScale } from "../timeScaleDropdown";
-import { getMatchParamByName, statementAttr } from "src/util";
 import { selectRequestTime } from "src/statementsPage/statementsPage.selectors";
+import { actions as analyticsActions } from "src/store/analytics";
+import {
+  actions as statementFingerprintInsightActions,
+  selectStatementFingerprintInsights,
+} from "src/store/insights/statementFingerprintInsights";
+import { actions as localStorageActions } from "src/store/localStorage";
+import { actions as sqlStatsActions } from "src/store/sqlStats";
+import { actions as sqlDetailsStatsActions } from "src/store/statementDetails";
+import {
+  actions as statementDiagnosticsActions,
+  selectDiagnosticsReportsByStatementFingerprint,
+} from "src/store/statementDiagnostics";
+import { getMatchParamByName, statementAttr } from "src/util";
+
+import { AppState, uiConfigActions } from "../store";
+import { actions as nodeLivenessActions } from "../store/liveness";
+import {
+  nodeRegionsByIDSelector,
+  actions as nodesActions,
+} from "../store/nodes";
+import {
+  selectIsTenant,
+  selectHasViewActivityRedactedRole,
+  selectHasAdminRole,
+} from "../store/uiConfig";
+import { selectTimeScale } from "../store/utils/selectors";
+import { TimeScale } from "../timeScaleDropdown";
+
+import {
+  StatementDetails,
+  StatementDetailsDispatchProps,
+} from "./statementDetails";
+import {
+  selectStatementDetails,
+  selectStatementDetailsUiConfig,
+} from "./statementDetails.selectors";
 
 // For tenant cases, we don't show information about node, regions and
 // diagnostics.
@@ -187,6 +186,6 @@ const mapDispatchToProps = (
     ),
 });
 
-export const ConnectedStatementDetailsPage = withRouter<any, any>(
+export const ConnectedStatementDetailsPage = withRouter(
   connect(mapStateToProps, mapDispatchToProps)(StatementDetails),
 );

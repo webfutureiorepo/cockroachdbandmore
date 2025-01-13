@@ -1,4 +1,6 @@
-FROM ubuntu:focal
+# We use a docker image mirror to avoid pulling from 3rd party repos, which sometimes have reliability issues.
+# See https://cockroachlabs.atlassian.net/wiki/spaces/devinf/pages/3462594561/Docker+image+sync for the details.
+FROM us-east1-docker.pkg.dev/crl-docker-sync/docker-io/library/ubuntu:focal
 ARG TARGETPLATFORM
 
 RUN apt-get update \
@@ -71,18 +73,6 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key a
     google-cloud-sdk \
     google-cloud-cli-gke-gcloud-auth-plugin \
     && apt-get clean
-
-# chrome is needed for UI tests. Unfortunately it is only distributed for x86_64
-# and not for ARM. Chrome shouldn't need to be installed when we migrate away
-# from Karma for UI testing.
-RUN case ${TARGETPLATFORM} in \
-    "linux/amd64") \
-      curl -fsSL https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-      && echo "deb [arch=amd64] https://dl.google.com/linux/chrome/deb/ stable main" | tee /etc/apt/sources.list.d/google.list \
-      && apt-get update \
-      && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      google-chrome-stable ;; \
-    esac
 
 RUN apt-get purge -y \
     apt-transport-https \

@@ -1,22 +1,18 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import Analytics from "analytics-node";
 import { Location } from "history";
-import _ from "lodash";
+import each from "lodash/each";
+import isEmpty from "lodash/isEmpty";
 import { Store } from "redux";
 
 import * as protos from "src/js/protos";
+import { history } from "src/redux/history";
 import { versionsSelector } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
-import { history } from "src/redux/history";
 import { COCKROACHLABS_ADDR } from "src/util/cockroachlabsAPI";
 
 type ClusterResponse = protos.cockroach.server.serverpb.IClusterResponse;
@@ -157,7 +153,7 @@ export class AnalyticsSync {
     }
 
     // If there are any queued pages, push them.
-    _.each(this.queuedPages, l => this.pushPage(cluster_id, l));
+    each(this.queuedPages, l => this.pushPage(cluster_id, l));
     this.queuedPages = [];
 
     // Push the page that was just accessed.
@@ -188,7 +184,7 @@ export class AnalyticsSync {
     // Do nothing if version information is not yet available.
     const state = this.deprecatedStore.getState();
     const versions = versionsSelector(state);
-    if (_.isEmpty(versions)) {
+    if (isEmpty(versions)) {
       return;
     }
 
@@ -277,7 +273,7 @@ export class AnalyticsSync {
   };
 
   private redact(path: string): string {
-    _.each(this.redactions, r => {
+    each(this.redactions, r => {
       if (r.match.test(path)) {
         // Apparently TypeScript doesn't know how to dispatch functions.
         // If there are two function overloads defined (as with

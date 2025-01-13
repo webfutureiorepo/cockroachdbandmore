@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -26,10 +21,10 @@ import (
 // Assumption: 1. The metricNames parameter should consist of string literals
 // that match the metadata names used for metric counters. 2. Each metric name
 // provided in `metricNames` must exist, unique and be a counter type.
-func (nm nodeMetrics) getNodeCounterMetrics(metricsName []string) (map[string]int64, error) {
+func (nm *nodeMetrics) getNodeCounterMetrics(metricsName []string) (map[string]int64, error) {
 	metricCountMap := make(map[string]int64)
 	getFirstNodeMetric := func(metricName string) int64 {
-		metricsStruct := reflect.ValueOf(nm)
+		metricsStruct := reflect.ValueOf(*nm)
 		for i := 0; i < metricsStruct.NumField(); i++ {
 			field := metricsStruct.Field(i)
 			switch t := field.Interface().(type) {

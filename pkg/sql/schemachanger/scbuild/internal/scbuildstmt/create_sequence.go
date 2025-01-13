@@ -1,16 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -29,6 +25,12 @@ import (
 )
 
 func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
+	doCreateSequence(b, n)
+}
+
+// doCreateSequence creates a sequence and returns the sequence element that
+// has been created.
+func doCreateSequence(b BuildCtx, n *tree.CreateSequence) *scpb.Sequence {
 	dbElts, scElts := b.ResolveTargetObject(n.Name.ToUnresolvedObjectName(), privilege.CREATE)
 	_, _, schemaElem := scpb.FindSchema(scElts)
 	_, _, dbElem := scpb.FindDatabase(dbElts)
@@ -41,18 +43,41 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 	owner := b.CurrentUser()
 
 	// Detect duplicate sequence names.
-	ers := b.ResolveSequence(n.Name.ToUnresolvedObjectName(),
+	ers := b.ResolveRelation(n.Name.ToUnresolvedObjectName(),
 		ResolveParams{
 			IsExistenceOptional: true,
 			RequiredPrivilege:   privilege.USAGE,
 			WithOffline:         true, // We search sequence with provided name, including offline ones.
+			ResolveTypes:        true, // Check for collisions with type names.
 		})
 	if ers != nil && !ers.IsEmpty() {
 		if n.IfNotExists {
-			return
+			return nil
 		}
 		panic(sqlerrors.NewRelationAlreadyExistsError(n.Name.FQString()))
 	}
+
+	if n.Persistence.IsTemporary() {
+		if !b.SessionData().TempTablesEnabled {
+			panic(errors.WithTelemetry(
+				pgerror.WithCandidateCode(
+					errors.WithHint(
+						errors.WithIssueLink(
+							errors.Newf("temporary tables are only supported experimentally"),
+							errors.IssueLink{IssueURL: build.MakeIssueURL(46260)},
+						),
+						"You can enable temporary tables by running `SET experimental_enable_temp_tables = 'on'`.",
+					),
+					pgcode.ExperimentalFeature,
+				),
+				"sql.schema.temp_tables_disabled",
+			))
+		}
+		// Resolve the temporary schema element.
+		scElts = MaybeCreateOrResolveTemporarySchema(b)
+		schemaElem = scElts.FilterSchema().MustGetOneElement()
+	}
+
 	// Sanity check for duplication options on the sequence.
 	optionsSeen := map[string]bool{}
 	var sequenceOwnedBy *tree.ColumnItem
@@ -94,7 +119,7 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 	sequenceID := b.GenerateUniqueDescID()
 	sequenceElem := &scpb.Sequence{
 		SequenceID:  sequenceID,
-		IsTemporary: false,
+		IsTemporary: n.Persistence.IsTemporary(),
 	}
 	if restartWith != nil {
 		sequenceElem.RestartWith = *restartWith
@@ -109,6 +134,18 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 		Name:         string(n.Name.ObjectName),
 	}
 	b.Add(sequenceNamespace)
+	// Set up a schema child entry. This will be a no-op for relations.
+	sequenceSchemaChild := &scpb.SchemaChild{
+		ChildObjectID: sequenceID,
+		SchemaID:      schemaElem.SchemaID,
+	}
+	b.Add(sequenceSchemaChild)
+	// Add a table data element, this go public with the descriptor.
+	tableData := &scpb.TableData{
+		TableID:    sequenceID,
+		DatabaseID: dbElem.DatabaseID,
+	}
+	b.Add(tableData)
 	// Add any sequence options.
 	options := scdecomp.GetSequenceOptions(sequenceElem.SequenceID, &tempSequenceOpts)
 	for _, opt := range options {
@@ -126,8 +163,8 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 	b.Add(&scpb.ColumnType{
 		TableID:                 sequenceID,
 		ColumnID:                tabledesc.SequenceColumnID,
-		TypeT:                   scpb.TypeT{Type: types.Int},
-		ElementCreationMetadata: &scpb.ElementCreationMetadata{In_23_1OrLater: true},
+		TypeT:                   newTypeT(types.Int),
+		ElementCreationMetadata: scdecomp.NewElementCreationMetadata(b.EvalCtx().Settings.Version.ActiveVersion(b)),
 	})
 	b.Add(&scpb.ColumnNotNull{
 		TableID:  sequenceID,
@@ -168,6 +205,7 @@ func CreateSequence(b BuildCtx, n *tree.CreateSequence) {
 	}
 	// Log the creation of this sequence.
 	b.LogEventForExistingTarget(sequenceElem)
+	return sequenceElem
 }
 
 func maybeAssignSequenceOwner(b BuildCtx, sequence *scpb.Namespace, owner *tree.ColumnItem) {

@@ -1,19 +1,16 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
-import { DOMAIN_NAME } from "../utils";
-import { StatementsRequest } from "src/api/statementsApi";
 import moment from "moment-timezone";
-import { StatementsResponse } from "../sqlStats";
+
+import { StatementsRequest } from "src/api/statementsApi";
 import { createInitialState, RequestState } from "src/api/types";
+
+import { StatementsResponse } from "../sqlStats";
+import { DOMAIN_NAME } from "../utils";
 
 // Note that we request transactions from the
 // statements api, hence the StatementsResponse type here.

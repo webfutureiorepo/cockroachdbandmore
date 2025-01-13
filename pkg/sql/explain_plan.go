@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -35,6 +30,7 @@ import (
 // explainPlanNode implements EXPLAIN (PLAN) and EXPLAIN (DISTSQL); it produces
 // the output of EXPLAIN given an explain.Plan.
 type explainPlanNode struct {
+	zeroInputPlanNode
 	optColumnsSlot
 
 	options *tree.ExplainOptions
@@ -62,9 +58,9 @@ func (e *explainPlanNode) startExec(params runParams) error {
 		// Note that we delay adding the annotation about the distribution until
 		// after the plan is finalized (when the physical plan is successfully
 		// created).
-		distribution := getPlanDistribution(
+		distribution, _ := getPlanDistribution(
 			params.ctx, params.p.Descriptors().HasUncommittedTypes(),
-			params.extendedEvalCtx.SessionData().DistSQLMode, plan.main,
+			params.extendedEvalCtx.SessionData(), plan.main, &params.p.distSQLVisitor,
 		)
 
 		outerSubqueries := params.p.curPlan.subqueryPlans
@@ -112,7 +108,7 @@ func (e *explainPlanNode) startExec(params runParams) error {
 			if e.options.Mode == tree.ExplainDistSQL {
 				flags := execinfrapb.DiagramFlags{
 					ShowInputTypes:    e.options.Flags[tree.ExplainFlagTypes],
-					MakeDeterministic: e.flags.Deflake.Has(explain.DeflakeAll) || params.p.execCfg.TestingKnobs.DeterministicExplain,
+					MakeDeterministic: e.flags.Deflake.HasAny(explain.DeflakeAll) || params.p.execCfg.TestingKnobs.DeterministicExplain,
 				}
 				diagram, err := execinfrapb.GeneratePlanDiagram(params.p.stmt.String(), flows, flags)
 				if err != nil {
@@ -211,7 +207,7 @@ func emitExplain(
 		}
 		tabDesc := table.(*optTable).desc
 		idx := index.(*optIndex).idx
-		spans, err := generateScanSpans(evalCtx, codec, tabDesc, idx, scanParams)
+		spans, err := generateScanSpans(ctx, evalCtx, codec, tabDesc, idx, scanParams)
 		if err != nil {
 			return err.Error()
 		}
@@ -230,7 +226,7 @@ func emitExplain(
 		return catalogkeys.PrettySpans(idx, spans, skip)
 	}
 
-	return explain.Emit(ctx, explainPlan, ob, spanFormatFn)
+	return explain.Emit(ctx, evalCtx, explainPlan, ob, spanFormatFn)
 }
 
 func (e *explainPlanNode) Next(params runParams) (bool, error) { return e.run.results.Next(params) }
@@ -265,6 +261,14 @@ func closeExplainPlan(ctx context.Context, ep *explain.Plan) {
 	}
 	for i := range ep.Checks {
 		closeExplainNode(ctx, ep.Checks[i].WrappedNode())
+	}
+	for _, trigger := range ep.Triggers {
+		// We don't want to create new plans if they haven't been cached - all
+		// necessary plans must have been created already in explain.Emit call.
+		const createPlanIfMissing = false
+		if tp, _ := trigger.GetExplainPlan(ctx, createPlanIfMissing); tp != nil {
+			closeExplainPlan(ctx, tp.(*explain.Plan))
+		}
 	}
 }
 

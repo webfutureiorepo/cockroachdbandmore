@@ -1,17 +1,11 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 package sql
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 
@@ -22,9 +16,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
-	"github.com/cockroachdb/cockroach/pkg/obs"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/server/license"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
@@ -286,16 +280,16 @@ func startConnExecutor(
 	nodeID := base.TestingIDContainer
 	distSQLMetrics := execinfra.MakeDistSQLMetrics(time.Hour /* histogramWindow */)
 	gw := gossip.MakeOptionalGossip(nil)
-	tempEngine, tempFS, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, tempFS, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec, nil /* statsCollector */)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
 	defer tempEngine.Close()
 	ambientCtx := log.MakeTestingAmbientCtxWithNewTracer()
-	pool := mon.NewUnlimitedMonitor(
-		context.Background(), "test", mon.MemoryResource,
-		nil /* curCount */, nil /* maxHist */, math.MaxInt64, st,
-	)
+	pool := mon.NewUnlimitedMonitor(ctx, mon.Options{
+		Name:     mon.MakeMonitorName("test"),
+		Settings: st,
+	})
 	// This pool should never be Stop()ed because, if the test is failing, memory
 	// is not properly released.
 	collectionFactory := descs.NewBareBonesCollectionFactory(st, keys.SystemSQLCodec)
@@ -315,7 +309,7 @@ func startConnExecutor(
 		},
 		Codec: keys.SystemSQLCodec,
 		DistSQLPlanner: NewDistSQLPlanner(
-			ctx, execinfra.Version, st, 1, /* sqlInstanceID */
+			ctx, st, 1, /* sqlInstanceID */
 			nil, /* rpcCtx */
 			distsql.NewServer(
 				ctx,
@@ -337,6 +331,7 @@ func startConnExecutor(
 			stopper,
 			func(base.SQLInstanceID) bool { return true }, // everybody is available
 			nil, /* connHealthCheckerSystem */
+			nil, /* instanceConnHealthChecker */
 			nil, /* sqlInstanceDialer */
 			keys.SystemSQLCodec,
 			nil, /* sqlAddressResolver */
@@ -347,10 +342,11 @@ func startConnExecutor(
 		StmtDiagnosticsRecorder: stmtdiagnostics.NewRegistry(nil, st),
 		HistogramWindowInterval: base.DefaultHistogramWindowInterval(),
 		CollectionFactory:       collectionFactory,
+		LicenseEnforcer:         license.NewEnforcer(nil),
 	}
 
-	s := NewServer(cfg, pool, obs.NoopEventsExporter{})
-	buf := NewStmtBuf()
+	s := NewServer(cfg, pool)
+	buf := NewStmtBuf(0 /* toReserve */)
 	syncResults := make(chan []*streamingCommandResult, 1)
 	resultChannel := newAsyncIEResultChannel()
 	var cc ClientComm = &internalClientComm{
@@ -403,7 +399,7 @@ func TestSessionCloseWithPendingTempTableInTxn(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	srv := s.SQLServer().(*Server)
-	stmtBuf := NewStmtBuf()
+	stmtBuf := NewStmtBuf(0 /* toReserve */)
 	flushed := make(chan []*streamingCommandResult)
 	clientComm := &internalClientComm{
 		sync: func(res []*streamingCommandResult) {

@@ -1,16 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcostserver
 
 import (
 	"context"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
@@ -27,15 +23,14 @@ func (s *instance) ReconfigureTokenBucket(
 	ctx context.Context,
 	txn isql.Txn,
 	tenantID roachpb.TenantID,
-	availableRU float64,
+	availableTokens float64,
 	refillRate float64,
-	maxBurstRU float64,
-	asOf time.Time,
-	asOfConsumedRequestUnits float64,
+	maxBurstTokens float64,
 ) error {
 	if err := s.checkTenantID(ctx, txn, tenantID); err != nil {
 		return err
 	}
+
 	h := makeSysTableHelper(ctx, tenantID)
 	state, err := h.readTenantState(txn)
 	if err != nil {
@@ -43,11 +38,8 @@ func (s *instance) ReconfigureTokenBucket(
 	}
 	now := s.timeSource.Now()
 	state.update(now)
-	state.Bucket.Reconfigure(
-		ctx, tenantID, availableRU, refillRate, maxBurstRU, asOf, asOfConsumedRequestUnits,
-		now, state.Consumption.RU,
-	)
-	if err := h.updateTenantState(txn, state); err != nil {
+	state.Bucket.Reconfigure(ctx, tenantID, availableTokens, refillRate, maxBurstTokens)
+	if err := h.updateTenantAndInstanceState(txn, &state, nil); err != nil {
 		return err
 	}
 	return nil

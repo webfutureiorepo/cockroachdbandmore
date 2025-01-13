@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package geomfn
 
@@ -251,7 +246,7 @@ func TestMakePolygon(t *testing.T) {
 			}
 			polygon, err := MakePolygon(outer, interior...)
 			if tc.err != nil {
-				require.Errorf(t, err, tc.err.Error())
+				require.Error(t, err, tc.err.Error())
 				require.EqualError(t, err, tc.err.Error())
 			} else {
 				require.NoError(t, err)
@@ -359,7 +354,7 @@ func TestMakePolygonFromMultiLineString(t *testing.T) {
 			g := geo.MustParseGeometry(tc.g)
 			polygon, err := MakePolygonFromMultiLineString(g, tc.srid)
 			if tc.err != nil {
-				require.Errorf(t, err, tc.err.Error())
+				require.Error(t, err, tc.err.Error())
 			} else {
 				require.NoError(t, err)
 				expected := geo.MustParseGeometry(tc.expected)

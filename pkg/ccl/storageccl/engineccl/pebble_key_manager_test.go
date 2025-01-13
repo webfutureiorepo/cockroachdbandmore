@@ -1,10 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package engineccl
 
@@ -21,8 +18,10 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl/engineccl/enginepbccl"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
@@ -32,8 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func writeToFile(t *testing.T, fs vfs.FS, filename string, b []byte) {
-	f, err := fs.Create(filename)
+func writeToFile(t *testing.T, vfs vfs.FS, filename string, b []byte) {
+	f, err := vfs.Create(filename, fs.UnspecifiedWriteCategory)
 	require.NoError(t, err)
 	breader := bytes.NewReader(b)
 	_, err = io.Copy(f, breader)
@@ -159,7 +158,7 @@ func TestStoreKeyManager(t *testing.T) {
 	{
 		skm := &StoreKeyManager{fs: memFS, activeKeyFilename: "plain", oldKeyFilename: "plain"}
 		require.NoError(t, skm.Load(context.Background()))
-		key, err := skm.ActiveKey(context.Background())
+		key, err := skm.ActiveKeyForWriter(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, keyPlain.String(), key.String())
 		key, err = skm.GetKey("plain")
@@ -171,7 +170,7 @@ func TestStoreKeyManager(t *testing.T) {
 	{
 		skm := &StoreKeyManager{fs: memFS, activeKeyFilename: "16.key", oldKeyFilename: "24.key"}
 		require.NoError(t, skm.Load(context.Background()))
-		key, err := skm.ActiveKey(context.Background())
+		key, err := skm.ActiveKeyForWriter(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, key16.String(), key.String())
 		key, err = skm.GetKey(keyID128)
@@ -186,7 +185,7 @@ func TestStoreKeyManager(t *testing.T) {
 	{
 		skm := &StoreKeyManager{fs: memFS, activeKeyFilename: "32.key", oldKeyFilename: "plain"}
 		require.NoError(t, skm.Load(context.Background()))
-		key, err := skm.ActiveKey(context.Background())
+		key, err := skm.ActiveKeyForWriter(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, key32.String(), key.String())
 		key, err = skm.GetKey(keyID256)
@@ -314,7 +313,18 @@ func TestDataKeyManager(t *testing.T) {
 			case "set-active-store-key":
 				var id string
 				d.ScanArgs(t, "id", &id)
-				return setActiveStoreKey(dkm, id, enginepbccl.EncryptionType_AES128_CTR)
+				version := 1
+				d.MaybeScanArgs(t, "version", &version)
+				var et enginepbccl.EncryptionType
+				switch version {
+				case 1:
+					et = enginepbccl.EncryptionType_AES128_CTR
+				case 2:
+					et = enginepbccl.EncryptionType_AES_128_CTR_V2
+				default:
+					t.Fatalf("unknown version %d", version)
+				}
+				return setActiveStoreKey(dkm, id, et)
 			case "set-active-store-key-plain":
 				var id string
 				d.ScanArgs(t, "id", &id)
@@ -322,7 +332,7 @@ func TestDataKeyManager(t *testing.T) {
 			case "check-exposed":
 				var val bool
 				d.ScanArgs(t, "val", &val)
-				for _, key := range dkm.mu.keyRegistry.DataKeys {
+				for _, key := range dkm.writeMu.mu.keyRegistry.DataKeys {
 					if key.Info.WasExposed != val {
 						return fmt.Sprintf(
 							"WasExposed: actual: %t, expected: %t\n", key.Info.WasExposed, val)
@@ -330,7 +340,7 @@ func TestDataKeyManager(t *testing.T) {
 				}
 				return ""
 			case "get-active-data-key":
-				key, err := dkm.ActiveKey(context.Background())
+				key, err := dkm.ActiveKeyForWriter(context.Background())
 				if err != nil {
 					return err.Error()
 				}
@@ -343,7 +353,7 @@ func TestDataKeyManager(t *testing.T) {
 				keyInfo.KeyId = ""
 				return strings.TrimSpace(keyInfo.String()) + "\n"
 			case "get-active-store-key":
-				id := dkm.mu.keyRegistry.ActiveStoreKeyId
+				id := dkm.writeMu.mu.keyRegistry.ActiveStoreKeyId
 				if id == "" {
 					return "none\n"
 				}
@@ -351,12 +361,12 @@ func TestDataKeyManager(t *testing.T) {
 			case "get-store-key":
 				var id string
 				d.ScanArgs(t, "id", &id)
-				if dkm.mu.keyRegistry.StoreKeys != nil && dkm.mu.keyRegistry.StoreKeys[id] != nil {
-					return strings.TrimSpace(dkm.mu.keyRegistry.StoreKeys[id].String()) + "\n"
+				if dkm.writeMu.mu.keyRegistry.StoreKeys != nil && dkm.writeMu.mu.keyRegistry.StoreKeys[id] != nil {
+					return strings.TrimSpace(dkm.writeMu.mu.keyRegistry.StoreKeys[id].String()) + "\n"
 				}
 				return "none\n"
 			case "record-active-data-key":
-				key, err := dkm.ActiveKey(context.Background())
+				key, err := dkm.ActiveKeyForWriter(context.Background())
 				if err != nil {
 					return err.Error()
 				}
@@ -365,7 +375,7 @@ func TestDataKeyManager(t *testing.T) {
 				}
 				return ""
 			case "compare-active-data-key":
-				key, err := dkm.ActiveKey(context.Background())
+				key, err := dkm.ActiveKeyForWriter(context.Background())
 				if err != nil {
 					return err.Error()
 				}
@@ -373,7 +383,7 @@ func TestDataKeyManager(t *testing.T) {
 				lastActiveDataKey = key
 				return rv
 			case "check-all-recorded-data-keys":
-				actual := fmt.Sprint(dkm.mu.keyRegistry.DataKeys)
+				actual := fmt.Sprint(dkm.writeMu.mu.keyRegistry.DataKeys)
 				expected := fmt.Sprint(keyMap)
 				require.Equal(t, expected, actual)
 				return ""
@@ -466,9 +476,9 @@ type loggingFS struct {
 	w io.Writer
 }
 
-func (fs loggingFS) Create(name string) (vfs.File, error) {
+func (fs loggingFS) Create(name string, category vfs.DiskWriteCategory) (vfs.File, error) {
 	fmt.Fprintf(fs.w, "create(%q)\n", name)
-	f, err := fs.FS.Create(name)
+	f, err := fs.FS.Create(name, category)
 	if err != nil {
 		return nil, err
 	}
@@ -508,16 +518,18 @@ func (fs loggingFS) Rename(oldname, newname string) error {
 	return fs.FS.Rename(oldname, newname)
 }
 
-func (fs loggingFS) ReuseForWrite(oldname, newname string) (vfs.File, error) {
+func (fs loggingFS) ReuseForWrite(
+	oldname, newname string, category vfs.DiskWriteCategory,
+) (vfs.File, error) {
 	fmt.Fprintf(fs.w, "reuseForWrite(%q, %q)\n", oldname, newname)
-	f, err := fs.FS.ReuseForWrite(oldname, newname)
+	f, err := fs.FS.ReuseForWrite(oldname, newname, category)
 	if err == nil {
 		f = loggingFile{f, newname, fs.w}
 	}
 	return f, err
 }
 
-func (fs loggingFS) Stat(path string) (os.FileInfo, error) {
+func (fs loggingFS) Stat(path string) (vfs.FileInfo, error) {
 	fmt.Fprintf(fs.w, "stat(%q)\n", path)
 	return fs.FS.Stat(path)
 }
@@ -551,4 +563,30 @@ func (f loggingFile) Close() error {
 func (f loggingFile) Sync() error {
 	fmt.Fprintf(f.w, "sync(%q)\n", f.name)
 	return f.File.Sync()
+}
+
+func TestDataKeyManagerBlockedWriteAllowsRead(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	mem := vfs.NewMem()
+	fs := &fs.BlockingWriteFSForTesting{FS: mem}
+	dkm := &DataKeyManager{fs: fs, dbDir: "", rotationPeriod: 10000}
+	require.NoError(t, dkm.Load(ctx))
+	require.Equal(t, "", setActiveStoreKey(dkm, "foo", enginepbccl.EncryptionType_AES128_CTR))
+	activeKey, err := dkm.ActiveKeyForWriter(ctx)
+	require.NoError(t, err)
+	activeKeyID := activeKey.Info.KeyId
+	fs.Block()
+	go func() {
+		require.Equal(t, "", setActiveStoreKey(dkm, "bar", enginepbccl.EncryptionType_AES128_CTR))
+	}()
+	time.Sleep(time.Millisecond)
+	k, err := dkm.GetKey(activeKeyID)
+	require.NoError(t, err)
+	require.NotNil(t, k)
+	require.NotNil(t, dkm.ActiveKeyInfoForStats())
+	fs.WaitForBlockAndUnblock()
+	require.NoError(t, dkm.Close())
 }

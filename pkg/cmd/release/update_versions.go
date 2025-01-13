@@ -1,17 +1,13 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -36,8 +32,10 @@ Epic: None
 Release justification: non-production (release infra) change.
 `
 
-const releasedVersionFlag = "released-version"
-const nextVersionFlag = "next-version"
+const (
+	releasedVersionFlag = "released-version"
+	nextVersionFlag     = "next-version"
+)
 
 var updateVersionsFlags = struct {
 	dryRun             bool
@@ -90,12 +88,18 @@ func init() {
 type prRepo struct {
 	owner string
 	repo  string
+	// pushToOrigin tells if the PR branch should be pushed to the origin repo.
+	// This is required for the repos, where auto-merge is enabled in order to
+	// grant proper permissions to the corresponding GitHub Actions.
+	pushToOrigin bool
 	// what branch should be used as the PR base
 	branch         string
 	commitMessage  string
 	githubUsername string
 	prBranch       string
 	fn             func(gitDir string) error
+	// workOnRepoError is set to workOnRepo() result
+	workOnRepoError error
 }
 
 func (r prRepo) String() string {
@@ -107,14 +111,19 @@ func (r prRepo) name() string {
 }
 
 func (r prRepo) checkoutDir() string {
-	return fmt.Sprintf("%s_%s_%s", r.owner, r.repo, r.branch)
+	return fmt.Sprintf("%s_%s_%s", r.owner, r.repo, r.prBranch)
 }
 
 func (r prRepo) pushURL() string {
-	if token := os.Getenv("GH_TOKEN"); token != "" {
-		return fmt.Sprintf("https://%s:%s@github.com/%s/%s", r.githubUsername, token, r.githubUsername, r.repo)
+	pushOwner := r.githubUsername
+	if r.pushToOrigin {
+		pushOwner = r.owner
 	}
-	return fmt.Sprintf("git@github.com:%s/%s.git", r.githubUsername, r.repo)
+
+	if token := os.Getenv("GH_TOKEN"); token != "" {
+		return fmt.Sprintf("https://%s:%s@github.com/%s/%s", r.githubUsername, token, pushOwner, r.repo)
+	}
+	return fmt.Sprintf("git@github.com:%s/%s.git", pushOwner, r.repo)
 }
 
 func (r prRepo) clone() error {
@@ -205,8 +214,19 @@ func (r prRepo) push() error {
 }
 
 func (r prRepo) createPullRequest() (string, error) {
-	parts := []string{"gh", "pr", "create", "--base", r.branch, "--fill", "--head",
-		fmt.Sprintf("%s:%s", r.githubUsername, r.prBranch)}
+	head := fmt.Sprintf("%s:%s", r.githubUsername, r.prBranch)
+	if r.pushToOrigin {
+		head = r.prBranch
+	}
+	parts := []string{
+		"gh", "pr", "create", "--base", r.branch, "--head", head,
+	}
+	title, body, _ := strings.Cut(r.commitMessage, "\n")
+	if title == "" {
+		parts = append(parts, "--fill")
+	} else {
+		parts = append(parts, "--title", title, "--body", body)
+	}
 	cmd := exec.Command(parts[0], parts[1:]...)
 	log.Printf("creating PR by running `%s`", strings.Join(parts, " "))
 	cmd.Dir = r.checkoutDir()
@@ -260,33 +280,32 @@ func updateVersions(_ *cobra.Command, _ []string) error {
 	// This way we can fail early and avoid unnecessary work closing the PRs we were able to create.
 	log.Printf("repos to work on: %s\n", reposToWorkOn)
 	var prs []string
+	var workOnRepoErrors []error
 	for _, repo := range reposToWorkOn {
-		log.Printf("Cloning repo %s", repo.name())
-		if err := repo.clone(); err != nil {
-			return fmt.Errorf("cannot clone %s: %w", repo.name(), err)
-		}
-		log.Printf("Branching repo %s", repo.name())
-		if err := repo.checkout(); err != nil {
-			return fmt.Errorf("cannot create branch %s: %w", repo.name(), err)
-		}
-		log.Printf("Munging repo %s", repo.name())
-		if err := repo.apply(); err != nil {
-			return fmt.Errorf("cannot mutate repo %s: %w", repo.name(), err)
-		}
-		log.Printf("commiting changes to repo %s", repo.name())
-		if err := repo.commit(); err != nil {
-			return fmt.Errorf("cannot commit changes in repo %s: %w", repo.name(), err)
+		err := workOnRepo(repo)
+		repo.workOnRepoError = err
+		if repo.workOnRepoError != nil {
+			err = fmt.Errorf("workOnRepo: error occurred while working on repo %s: %w", repo.name(), err)
+			workOnRepoErrors = append(workOnRepoErrors, err)
+			log.Printf("%s", err)
 		}
 	}
 
 	// Now that our local changes are staged, we can try and publish them.
 	for _, repo := range reposToWorkOn {
+		if repo.workOnRepoError != nil {
+			log.Printf("PR creation skipped due to previous errors while working on %s: %s", repo.name(), repo.workOnRepoError)
+			continue
+		}
 		dest := path.Join(globalWorkDir, repo.checkoutDir())
 		// We avoid creating duplicated PRs to allow this command to be
 		// run multiple times.
 		prDesc, err := repo.prExists()
 		if err != nil {
-			return fmt.Errorf("checking pr: %w", err)
+			err = fmt.Errorf("error while checking if pull request exists for repo %s: %w", repo.name(), err)
+			workOnRepoErrors = append(workOnRepoErrors, err)
+			log.Printf("%s", err)
+			continue
 		}
 		if prDesc != "" {
 			log.Printf("pull request for %s already exists: %s", repo.name(), prDesc)
@@ -294,19 +313,30 @@ func updateVersions(_ *cobra.Command, _ []string) error {
 		}
 		log.Printf("pushing changes to repo %s in %s", repo.name(), dest)
 		if err := repo.push(); err != nil {
-			return fmt.Errorf("cannot push changes for %s: %w", repo.name(), err)
+			err = fmt.Errorf("error while pushing changes to repo %s: %w", repo.name(), err)
+			workOnRepoErrors = append(workOnRepoErrors, err)
+			log.Printf("%s", err)
+			continue
 		}
 		log.Printf("creating pull request for %s in %s", repo.name(), dest)
 		pr, err := repo.createPullRequest()
 		if err != nil {
-			return fmt.Errorf("cannot create pull request for %s: %w", repo.name(), err)
+			err = fmt.Errorf("error creating pull request for %s: %w", repo.name(), err)
+			workOnRepoErrors = append(workOnRepoErrors, err)
+			log.Printf("%s", err)
+			continue
 		}
 		log.Printf("Created PR: %s\n", pr)
 		prs = append(prs, pr)
 	}
 
 	if err := sendPrReport(releasedVersion, prs, smtpPassword); err != nil {
-		return fmt.Errorf("cannot send email: %w", err)
+		err = fmt.Errorf("error sending email: %w", err)
+		workOnRepoErrors = append(workOnRepoErrors, err)
+		log.Printf("%s", err)
+	}
+	if len(workOnRepoErrors) > 0 {
+		return errors.Join(workOnRepoErrors...)
 	}
 	return nil
 }
@@ -342,7 +372,7 @@ func sendPrReport(version *semver.Version, prs []string, smtpPassword string) er
 
 func randomString(n int) string {
 	r := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
-	var alphanumerics = []rune("abcdefghijklmnopqrstuvwxyz0123456789")
+	alphanumerics := []rune("abcdefghijklmnopqrstuvwxyz0123456789")
 
 	s := make([]rune, n)
 	for i := range s {
@@ -401,6 +431,11 @@ func generateRepoList(
 	log.Printf("will bump version in the following branches: %s", strings.Join(maybeVersionBumpBranches, ", "))
 
 	for _, branch := range maybeVersionBumpBranches {
+		// skip extraordinary and baking branches
+		if strings.HasPrefix(branch, "staging-") || strings.HasSuffix(branch, "-rc") {
+			log.Printf("not bumping version on staging/backing branch %s", branch)
+			continue
+		}
 		ok, err := fileExistsInGit(branch, versionFile)
 		if err != nil {
 			return []prRepo{}, fmt.Errorf("checking version file: %w", err)
@@ -441,6 +476,7 @@ func generateRepoList(
 		reposToWorkOn = append(reposToWorkOn, prRepo{
 			owner:          owner,
 			repo:           prefix + "homebrew-tap",
+			pushToOrigin:   true,
 			branch:         "master",
 			githubUsername: "cockroach-teamcity",
 			prBranch:       fmt.Sprintf("update-versions-%s-%s", releasedVersion.Original(), randomString(4)),
@@ -459,6 +495,7 @@ func generateRepoList(
 		reposToWorkOn = append(reposToWorkOn, prRepo{
 			owner:          owner,
 			repo:           prefix + "helm-charts",
+			pushToOrigin:   true,
 			branch:         "master",
 			githubUsername: "cockroach-teamcity",
 			prBranch:       fmt.Sprintf("update-versions-%s-%s", releasedVersion.Original(), randomString(4)),
@@ -476,13 +513,72 @@ func generateRepoList(
 			branch:         "master",
 			githubUsername: "cockroach-teamcity",
 			prBranch:       fmt.Sprintf("update-orchestration-versions-%s-%s", releasedVersion.Original(), randomString(4)),
-			commitMessage:  generateCommitMessage("release", releasedVersion, nextVersion),
+			commitMessage:  generateCommitMessage("orchestration", releasedVersion, nextVersion),
 			fn: func(gitDir string) error {
 				return updateOrchestration(gitDir, releasedVersion.Original())
 			},
 		})
 	}
+	// 5. Merge baking branch back to the release branch.
+	maybeBakingbranches := []string{
+		fmt.Sprintf("release-%s-rc", releasedVersion.String()), // e.g. release-23.1.17-rc
+		fmt.Sprintf("staging-%s", releasedVersion.Original()),  // e.g. staging-v23.1.17
+	}
+	var bakingBranches []string
+	for _, branch := range maybeBakingbranches {
+		maybeMergeBranches, err := listRemoteBranches(branch)
+		if err != nil {
+			return []prRepo{}, fmt.Errorf("listing merge branch %s: %w", branch, err)
+		}
+		bakingBranches = append(bakingBranches, maybeMergeBranches...)
+	}
+	if len(bakingBranches) > 1 {
+		return []prRepo{}, fmt.Errorf("too many baking branches: %s", strings.Join(maybeBakingbranches, ", "))
+	}
+	for _, mergeBranch := range bakingBranches {
+		baseBranch := fmt.Sprintf("release-%d.%d", releasedVersion.Major(), releasedVersion.Minor())
+		repo := prRepo{
+			owner:          owner,
+			repo:           prefix + "cockroach",
+			branch:         baseBranch,
+			prBranch:       fmt.Sprintf("merge-%s-to-%s-%s", mergeBranch, baseBranch, randomString(4)),
+			githubUsername: "cockroach-teamcity",
+			commitMessage:  generateCommitMessage(fmt.Sprintf("merge %s to %s", mergeBranch, baseBranch), releasedVersion, nextVersion),
+			fn: func(gitDir string) error {
+				cmd := exec.Command("git", "merge", "-s", "ours", "--no-commit", "origin/"+mergeBranch)
+				cmd.Dir = gitDir
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					return fmt.Errorf("failed running '%s' with message '%s': %w", cmd.String(), string(out), err)
+				}
+				log.Printf("ran '%s': %s\n", cmd.String(), string(out))
+				return nil
+			},
+		}
+		reposToWorkOn = append(reposToWorkOn, repo)
+	}
 	return reposToWorkOn, nil
+}
+
+func workOnRepo(repo prRepo) error {
+	log.Printf("Cloning repo %s", repo.name())
+	if err := repo.clone(); err != nil {
+		return fmt.Errorf("cannot clone %s: %w", repo.name(), err)
+	}
+	log.Printf("Branching repo %s", repo.name())
+	if err := repo.checkout(); err != nil {
+		return fmt.Errorf("cannot create branch %s: %w", repo.name(), err)
+	}
+	log.Printf("Munging repo %s", repo.name())
+	if err := repo.apply(); err != nil {
+		return fmt.Errorf("cannot mutate repo %s: %w", repo.name(), err)
+	}
+	log.Printf("commiting changes to repo %s", repo.name())
+	if err := repo.commit(); err != nil {
+		return fmt.Errorf("cannot commit changes in repo %s: %w", repo.name(), err)
+	}
+
+	return nil
 }
 
 func isLatestStableBranch(version *semver.Version) (bool, error) {

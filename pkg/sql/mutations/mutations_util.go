@@ -1,33 +1,28 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mutations
 
 import (
 	"sync/atomic"
 
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 )
 
 const productionMaxBatchSize = 10000
 
 var maxBatchSize = defaultMaxBatchSize
 
-var defaultMaxBatchSize = int64(util.ConstantWithMetamorphicTestRange(
+var defaultMaxBatchSize = int64(metamorphic.ConstantWithTestRange(
 	"max-batch-size",
 	productionMaxBatchSize, /* defaultValue */
 	1,                      /* min */
 	productionMaxBatchSize, /* max */
 ))
 
-var testingMaxBatchByteSize = util.ConstantWithMetamorphicTestRange(
+var testingMaxBatchByteSize = metamorphic.ConstantWithTestRange(
 	"max-batch-byte-size",
 	0,      // we'll use the cluster setting instead if we see zero.
 	1,      /* min */

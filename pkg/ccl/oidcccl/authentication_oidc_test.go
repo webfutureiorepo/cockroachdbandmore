@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package oidcccl
 
@@ -15,17 +12,23 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/authserver"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -120,17 +123,18 @@ func TestOIDCEnabled(t *testing.T) {
 		NewOIDCManager = realNewManager
 	}()
 
-	// Set minimum settings to successfully enable the OIDC client
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	sqlDB.Exec(t, fmt.Sprintf(`CREATE USER %s with password 'unused'`, usernameUnderTest))
-	sqlDB.Exec(t, `SET CLUSTER SETTING server.oidc_authentication.provider_url = "providerURL"`)
-	sqlDB.Exec(t, `SET CLUSTER SETTING server.oidc_authentication.client_id = "fake_client_id"`)
-	sqlDB.Exec(t, `SET CLUSTER SETTING server.oidc_authentication.client_secret = "fake_client_secret"`)
-	sqlDB.Exec(t, `SET CLUSTER SETTING server.oidc_authentication.redirect_url = "https://cockroachlabs.com/oidc/v1/callback"`)
-	sqlDB.Exec(t, `set cluster setting server.oidc_authentication.claim_json_key = "email"`)
-	sqlDB.Exec(t, `set cluster setting server.oidc_authentication.principal_regex = '^([^@]+)@[^@]+$'`)
-	sqlDB.Exec(t, `SET CLUSTER SETTING server.oidc_authentication.enabled = "true"`)
-	sqlDB.Exec(t, fmt.Sprintf(`SET CLUSTER SETTING server.http.base_path = "%s"`, basePath))
+
+	// Set minimum settings to successfully enable the OIDC client
+	OIDCProviderURL.Override(ctx, &s.ClusterSettings().SV, "providerURL")
+	OIDCClientID.Override(ctx, &s.ClusterSettings().SV, "fake_client_id")
+	OIDCClientSecret.Override(ctx, &s.ClusterSettings().SV, "fake_client_secret")
+	OIDCRedirectURL.Override(ctx, &s.ClusterSettings().SV, "https://cockroachlabs.com/oidc/v1/callback")
+	OIDCClaimJSONKey.Override(ctx, &s.ClusterSettings().SV, "email")
+	OIDCPrincipalRegex.Override(ctx, &s.ClusterSettings().SV, "^([^@]+)@[^@]+$")
+	server.ServerHTTPBasePath.Override(ctx, &s.ClusterSettings().SV, basePath)
+	OIDCEnabled.Override(ctx, &s.ClusterSettings().SV, true)
 
 	testCertsContext := s.NewClientRPCContext(ctx, username.TestUserName())
 	client, err := testCertsContext.GetHTTPClient()
@@ -203,7 +207,7 @@ func TestOIDCEnabled(t *testing.T) {
 		t.Fatalf("expected 307 status code but got: %d", resp.StatusCode)
 	}
 	if resp.Header.Get("Location") != basePath {
-		t.Fatalf("expected to be redirected to root")
+		t.Fatalf("expected to be redirected to %s", basePath)
 	}
 	foundCookie := false
 	for _, c := range resp.Cookies() {
@@ -409,4 +413,196 @@ func Test_getRegionSpecificRedirectURL(t *testing.T) {
 			require.Equal(t, got, tt.want)
 		})
 	}
+}
+
+func TestOIDCManagerInitialisationUnderNetworkAvailability(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	srv := serverutils.StartServerOnly(t, base.TestServerArgs{})
+	defer srv.Stopper().Stop(ctx)
+	s := srv.ApplicationLayer()
+
+	basePath := "/some/random/path"
+	testUserName := "testcrl"
+	networkAvailable := false
+
+	// Intercept the call to NewOIDCManager and return the mocked NewOIDCManager function
+	defer testutils.TestingHook(
+		&NewOIDCManager,
+		func(ctx context.Context, conf oidcAuthenticationConf, redirectURL string, scopes []string) (IOIDCManager, error) {
+			if !networkAvailable {
+				return nil, fmt.Errorf("network unavailable, check your network connection")
+			}
+			c := &oauth2.Config{
+				ClientID:     conf.clientID,
+				ClientSecret: conf.clientSecret,
+				RedirectURL:  redirectURL,
+				Endpoint: oauth2.Endpoint{
+					AuthURL: conf.providerURL,
+				},
+				Scopes: scopes,
+			}
+			return &mockOidcManager{oauth2Config: c, claimEmail: fmt.Sprintf("%s@example.com", testUserName)}, nil
+		})()
+
+	// Set/Override minimum settings to successfully enable the OIDC client
+	OIDCProviderURL.Override(ctx, &s.ClusterSettings().SV, "providerURL")
+	OIDCClientID.Override(ctx, &s.ClusterSettings().SV, "fake_client_id")
+	OIDCClientSecret.Override(ctx, &s.ClusterSettings().SV, "fake_client_secret")
+	OIDCRedirectURL.Override(ctx, &s.ClusterSettings().SV, "https://cockroachlabs.com/oidc/v1/callback")
+	OIDCClaimJSONKey.Override(ctx, &s.ClusterSettings().SV, "email")
+	OIDCPrincipalRegex.Override(ctx, &s.ClusterSettings().SV, "^([^@]+)@[^@]+$")
+	server.ServerHTTPBasePath.Override(ctx, &s.ClusterSettings().SV, basePath)
+	OIDCEnabled.Override(ctx, &s.ClusterSettings().SV, true)
+
+	for _, tc := range []struct {
+		testName  string
+		network   bool
+		wantError bool
+	}{
+		{
+			testName:  "network unavailable test",
+			network:   false,
+			wantError: true,
+		},
+		{
+			testName:  "network available test",
+			network:   true,
+			wantError: false,
+		},
+	} {
+		t.Run(tc.testName, func(t *testing.T) {
+			networkAvailable = tc.network
+			testOIDCManagerInitialisation := s.NewClientRPCContext(ctx, username.TestUserName())
+			client, err := testOIDCManagerInitialisation.GetHTTPClient()
+			require.NoError(t, err)
+
+			// Don't follow redirects as we are only testing setting of oidc  manager, expecting 302
+			// status code on success
+			client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+
+			resp, err := client.Get(s.AdminURL().WithPath("/oidc/v1/login").String())
+			if err != nil {
+				t.Fatalf("could not issue GET request to admin server: %s", err)
+			}
+			defer resp.Body.Close()
+			bodyBytes, _ := io.ReadAll(resp.Body)
+
+			if !tc.wantError {
+				require.Equal(t, 302, resp.StatusCode)
+			} else {
+				require.Contains(t, string(bodyBytes), "OIDC: auth server could not be initialized")
+				require.Equal(t, 500, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestOIDCProviderInitialization(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Initiate a test server to handle `./well-known/openid-configuration`.
+	testServer := httptest.NewUnstartedServer(nil)
+	testServerURL := "http://" + testServer.Listener.Addr().String()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"GET /.well-known/openid-configuration",
+		func(w http.ResponseWriter, r *http.Request) {
+			// Serve the response locally from testdata.
+			dataBytes, err := os.ReadFile("testdata/issuer_well_known_openid_configuration")
+			require.NoError(t, err)
+
+			// We need to match the 'issuer' key in the response to the test server URL.
+			// Hence, we read the test response and overwrite the 'issuer'.
+			type providerJSON struct {
+				Issuer      string   `json:"issuer"`
+				AuthURL     string   `json:"authorization_endpoint"`
+				TokenURL    string   `json:"token_endpoint"`
+				JWKSURI     string   `json:"jwks_uri"`
+				UserInfoURL string   `json:"userinfo_endpoint"`
+				Algorithms  []string `json:"id_token_signing_alg_values_supported"`
+			}
+
+			var p providerJSON
+			err = json.Unmarshal(dataBytes, &p)
+			require.NoError(t, err)
+
+			p.Issuer = testServerURL
+
+			updatedBytes, err := json.Marshal(p)
+			require.NoError(t, err)
+
+			_, err = w.Write(updatedBytes)
+			require.NoError(t, err)
+		},
+	)
+
+	testServer.Config = &http.Server{
+		Handler: mux,
+	}
+	testServer.Start()
+	defer testServer.Close()
+
+	// Initialize the OIDC manager.
+	clientTimeout := 10 * time.Second
+	oidcConf := oidcAuthenticationConf{
+		providerURL:   testServerURL,
+		clientTimeout: clientTimeout,
+	}
+	iOIDCMgr, err := NewOIDCManager(context.Background(), oidcConf, "redirectURL", []string{})
+	require.NoError(t, err)
+	require.NotNil(t, iOIDCMgr)
+
+	oidcMgr, _ := iOIDCMgr.(*oidcManager)
+	require.NotNil(t, oidcMgr.verifier)
+	require.NotNil(t, oidcMgr.oauth2Config)
+	require.NotNil(t, oidcMgr.httpClient)
+	require.Equal(t, clientTimeout, oidcMgr.httpClient.Timeout)
+}
+
+func TestOIDCProviderInitializationTimeout(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Initiate a test server to handle `./well-known/openid-configuration`.
+	testServer := httptest.NewUnstartedServer(nil)
+	testServerURL := "http://" + testServer.Listener.Addr().String()
+
+	waitChan := make(chan struct{}, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"GET /.well-known/openid-configuration",
+		func(w http.ResponseWriter, r *http.Request) {
+			// Hang the request handler so as to enforce HTTP client timeout.
+			<-waitChan
+		},
+	)
+
+	testServer.Config = &http.Server{
+		Handler: mux,
+	}
+	testServer.Start()
+	defer func() {
+		waitChan <- struct{}{}
+		close(waitChan)
+		testServer.Close()
+	}()
+
+	// Initialize the OIDC manager.
+	oidcConf := oidcAuthenticationConf{
+		providerURL: testServerURL,
+		// Set a small client timeout and assert that the initialization times out.
+		clientTimeout: time.Millisecond,
+	}
+	_, err := NewOIDCManager(context.Background(), oidcConf, "redirectURL", []string{})
+	var urlError *url.Error
+	require.ErrorAs(t, err, &urlError)
+	require.True(t, urlError.Timeout())
 }

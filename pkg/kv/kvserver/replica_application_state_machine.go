@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvadmission"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -25,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
-	"go.etcd.io/raft/v3"
 )
 
 // replica_application_*.go files provide concrete implementations of
@@ -134,9 +129,8 @@ func (sm *replicaStateMachine) NewEphemeralBatch() apply.EphemeralBatch {
 	r := sm.r
 	mb := &sm.ephemeralBatch
 	mb.r = r
-	r.mu.RLock()
-	mb.state = r.mu.state
-	r.mu.RUnlock()
+	r.raftMu.AssertHeld()
+	mb.state = r.shMu.state
 	return mb
 }
 
@@ -148,9 +142,10 @@ func (sm *replicaStateMachine) NewBatch() apply.Batch {
 	b.applyStats = &sm.applyStats
 	b.batch = r.store.TODOEngine().NewBatch()
 	r.mu.RLock()
-	b.state = r.mu.state
+	b.state = r.shMu.state
+	b.truncState = r.shMu.raftTruncState
 	b.state.Stats = &sm.stats
-	*b.state.Stats = *r.mu.state.Stats
+	*b.state.Stats = *r.shMu.state.Stats
 	b.closedTimestampSetter = r.mu.closedTimestampSetter
 	r.mu.RUnlock()
 	b.start = timeutil.Now()
@@ -287,7 +282,11 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 		log.Fatalf(ctx, "zero-value ReplicatedEvalResult passed to handleNonTrivialReplicatedEvalResult")
 	}
 
-	isRaftLogTruncationDeltaTrusted := true
+	truncState := rResult.RaftTruncatedState
+	if truncState != nil {
+		rResult.RaftTruncatedState = nil
+	}
+
 	if rResult.State != nil {
 		if newLease := rResult.State.Lease; newLease != nil {
 			sm.r.handleLeaseResult(ctx, newLease, rResult.PriorReadSummary)
@@ -295,17 +294,12 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 			rResult.PriorReadSummary = nil
 		}
 
-		// This strongly coupled truncation code will be removed in the release
-		// following LooselyCoupledRaftLogTruncation.
 		if newTruncState := rResult.State.TruncatedState; newTruncState != nil {
-			raftLogDelta, expectedFirstIndexWasAccurate := sm.r.handleTruncatedStateResult(
-				ctx, newTruncState, rResult.RaftExpectedFirstIndex)
-			if !expectedFirstIndexWasAccurate && rResult.RaftExpectedFirstIndex != 0 {
-				isRaftLogTruncationDeltaTrusted = false
+			if truncState != nil {
+				log.Fatalf(ctx, "double RaftTruncatedState in ReplicatedEvalResult")
 			}
-			rResult.RaftLogDelta += raftLogDelta
+			truncState = newTruncState
 			rResult.State.TruncatedState = nil
-			rResult.RaftExpectedFirstIndex = 0
 		}
 
 		if newVersion := rResult.State.Version; newVersion != nil {
@@ -323,12 +317,25 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 		}
 	}
 
-	if rResult.RaftLogDelta != 0 {
-		// This code path will be taken exactly when the preceding block has
-		// newTruncState != nil. It is needlessly confusing that these two are not
-		// in the same place.
-		sm.r.handleRaftLogDeltaResult(ctx, rResult.RaftLogDelta, isRaftLogTruncationDeltaTrusted)
+	// TODO(#93248): the strongly coupled truncation code will be removed once the
+	// loosely coupled truncations are the default.
+	if truncState != nil {
+		// NB: raftLogDelta reflects removals of any sideloaded entries.
+		raftLogDelta, expectedFirstIndexWasAccurate := sm.r.handleTruncatedStateResult(
+			ctx, truncState, rResult.RaftExpectedFirstIndex)
+		// NB: The RaftExpectedFirstIndex field is zero if this proposal is from
+		// before v22.1 that added it, when all truncations were strongly coupled.
+		// The delta in these historical proposals is thus accurate.
+		// TODO(pav-kv): remove the zero check after any below-raft migration.
+		isRaftLogTruncationDeltaTrusted := expectedFirstIndexWasAccurate ||
+			rResult.RaftExpectedFirstIndex == 0
+		// The proposer hasn't included the sideloaded entries into the delta. We
+		// counted these above, and combine the deltas.
+		raftLogDelta += rResult.RaftLogDelta
+		sm.r.handleRaftLogDeltaResult(ctx, raftLogDelta, isRaftLogTruncationDeltaTrusted)
+
 		rResult.RaftLogDelta = 0
+		rResult.RaftExpectedFirstIndex = 0
 	}
 
 	// The rest of the actions are "nontrivial" and may have large effects on the

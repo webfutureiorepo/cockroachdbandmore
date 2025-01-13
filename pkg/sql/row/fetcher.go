@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package row
 
@@ -203,6 +198,20 @@ type tableInfo struct {
 	tableOid     tree.Datum
 	oidOutputIdx int
 
+	// Fields for outputting the OriginID system column.
+	rowLastOriginID   int
+	originIDOutputIdx int
+
+	// Fields for outputting the OriginTimestamp system column.
+	rowLastOriginTimestamp hlc.Timestamp
+	// rowLastModifiedWithoutOriginTimestamp is the largest MVCC
+	// timestamp seen for any column family that _doesn't_ have an
+	// OriginTimestamp set. If this is greater than the
+	// rowLastOriginTimestamp field, we output NULL for origin
+	// timestamp.
+	rowLastModifiedWithoutOriginTimestamp hlc.Timestamp
+	originTimestampOutputIdx              int
+
 	// rowIsDeleted is true when the row has been deleted. This is only
 	// meaningful when kv deletion tombstones are returned by the KVBatchFetcher,
 	// which the one used by `StartScan` (the common case) doesnt. Notably,
@@ -239,6 +248,8 @@ type Fetcher struct {
 	// mvccDecodeStrategy controls whether or not MVCC timestamps should
 	// be decoded from KV's fetched.
 	mvccDecodeStrategy storage.MVCCDecodingStrategy
+
+	shouldRequestRawMVCCKeys bool
 
 	// -- Fields updated during a scan --
 
@@ -321,6 +332,9 @@ type FetcherInitArgs struct {
 	// wait while attempting to acquire a lock on a key or while blocking on an
 	// existing lock in order to perform a non-locking read on a key.
 	LockTimeout time.Duration
+	// DeadlockTimeout specifies the amount of time before pushing the lock holder
+	// for deadlock detection.
+	DeadlockTimeout time.Duration
 	// Alloc is used for buffered allocation of decoded datums.
 	Alloc      *tree.DatumAlloc
 	MemMonitor *mon.BytesMonitor
@@ -348,7 +362,9 @@ func (rf *Fetcher) Init(ctx context.Context, args FetcherInitArgs) error {
 	rf.args = args
 
 	if args.MemMonitor != nil {
-		rf.mon = mon.NewMonitorInheritWithLimit("fetcher-mem", 0 /* limit */, args.MemMonitor)
+		rf.mon = mon.NewMonitorInheritWithLimit(
+			"fetcher-mem", 0 /* limit */, args.MemMonitor, false, /* longLiving */
+		)
 		rf.mon.StartNoReserved(ctx, args.MemMonitor)
 		memAcc := rf.mon.MakeBoundAccount()
 		rf.kvFetcherMemAcc = &memAcc
@@ -362,11 +378,13 @@ func (rf *Fetcher) Init(ctx context.Context, args FetcherInitArgs) error {
 
 		// These slice fields might get re-allocated below, so reslice them from
 		// the old table here in case they've got enough capacity already.
-		indexColIdx:        rf.table.indexColIdx[:0],
-		keyVals:            rf.table.keyVals[:0],
-		extraVals:          rf.table.extraVals[:0],
-		timestampOutputIdx: noOutputColumn,
-		oidOutputIdx:       noOutputColumn,
+		indexColIdx:              rf.table.indexColIdx[:0],
+		keyVals:                  rf.table.keyVals[:0],
+		extraVals:                rf.table.extraVals[:0],
+		timestampOutputIdx:       noOutputColumn,
+		oidOutputIdx:             noOutputColumn,
+		originIDOutputIdx:        noOutputColumn,
+		originTimestampOutputIdx: noOutputColumn,
 	}
 
 	for idx := range args.Spec.FetchedColumns {
@@ -381,6 +399,16 @@ func (rf *Fetcher) Init(ctx context.Context, args FetcherInitArgs) error {
 			case catpb.SystemColumnKind_TABLEOID:
 				table.oidOutputIdx = idx
 				table.tableOid = tree.NewDOid(oid.Oid(args.Spec.TableID))
+
+			case catpb.SystemColumnKind_ORIGINID:
+				table.originIDOutputIdx = idx
+				rf.mvccDecodeStrategy = storage.MVCCDecodingRequired
+				rf.shouldRequestRawMVCCKeys = true
+
+			case catpb.SystemColumnKind_ORIGINTIMESTAMP:
+				table.originTimestampOutputIdx = idx
+				rf.mvccDecodeStrategy = storage.MVCCDecodingRequired
+				rf.shouldRequestRawMVCCKeys = true
 			}
 		}
 	}
@@ -463,17 +491,19 @@ func (rf *Fetcher) Init(ctx context.Context, args FetcherInitArgs) error {
 			lockWaitPolicy:             args.LockWaitPolicy,
 			lockDurability:             args.LockDurability,
 			lockTimeout:                args.LockTimeout,
+			deadlockTimeout:            args.DeadlockTimeout,
 			acc:                        rf.kvFetcherMemAcc,
+			rawMVCCValues:              rf.shouldRequestRawMVCCKeys,
 			forceProductionKVBatchSize: args.ForceProductionKVBatchSize,
 			kvPairsRead:                &kvPairsRead,
 			batchRequestsIssued:        &batchRequestsIssued,
 		}
 		if args.Txn != nil {
-			fetcherArgs.sendFn = makeTxnKVFetcherDefaultSendFunc(args.Txn, &batchRequestsIssued)
+			fetcherArgs.sendFn = makeSendFunc(args.Txn, args.Spec.External, &batchRequestsIssued)
 			fetcherArgs.admission.requestHeader = args.Txn.AdmissionHeader()
 			fetcherArgs.admission.responseQ = args.Txn.DB().SQLKVResponseAdmissionQ
 			fetcherArgs.admission.pacerFactory = args.Txn.DB().AdmissionPacerFactory
-			fetcherArgs.admission.settingsValues = args.Txn.DB().SettingsValues
+			fetcherArgs.admission.settingsValues = args.Txn.DB().SettingsValues()
 		}
 		rf.kvFetcher = newKVFetcher(newTxnKVFetcherInternal(fetcherArgs))
 	}
@@ -495,7 +525,7 @@ func (rf *Fetcher) Init(ctx context.Context, args FetcherInitArgs) error {
 // Consider using GetBatchRequestsIssued if that information is needed.
 func (rf *Fetcher) SetTxn(txn *kv.Txn) error {
 	var batchRequestsIssued int64
-	sendFn := makeTxnKVFetcherDefaultSendFunc(txn, &batchRequestsIssued)
+	sendFn := makeSendFunc(txn, rf.args.Spec.External, &batchRequestsIssued)
 	return rf.setTxnAndSendFn(txn, sendFn)
 }
 
@@ -646,6 +676,7 @@ func (rf *Fetcher) StartInconsistentScan(
 			}
 		}
 
+		log.VEventf(ctx, 2, "inconsistent scan: sending a batch with %d requests", len(ba.Requests))
 		res, err := txn.Send(ctx, ba)
 		if err != nil {
 			return nil, err.GoError()
@@ -869,15 +900,27 @@ func (rf *Fetcher) processKV(
 		// As kvs are iterated for this row, it keeps track of the greatest
 		// timestamp seen.
 		table.rowLastModified = hlc.Timestamp{}
+		table.rowLastOriginID = 0
+		table.rowLastOriginTimestamp = hlc.Timestamp{}
+		table.rowLastModifiedWithoutOriginTimestamp = hlc.Timestamp{}
 		// All row encodings (both before and after column families) have a
 		// sentinel kv (column family 0) that is always present when a row is
 		// present, even if that row is all NULLs. Thus, a row is deleted if and
 		// only if the first kv in it a tombstone (RawBytes is empty).
-		table.rowIsDeleted = len(kv.Value.RawBytes) == 0
+		table.rowIsDeleted = !kv.Value.IsPresent()
 	}
 
 	if table.rowLastModified.Less(kv.Value.Timestamp) {
 		table.rowLastModified = kv.Value.Timestamp
+	}
+	if vh, err := kv.Value.GetMVCCValueHeader(); err == nil {
+		if table.rowLastOriginTimestamp.LessEq(vh.OriginTimestamp) {
+			table.rowLastOriginID = int(vh.OriginID)
+			table.rowLastOriginTimestamp = vh.OriginTimestamp
+		}
+		if vh.OriginTimestamp.IsEmpty() && table.rowLastModifiedWithoutOriginTimestamp.Less(kv.Value.Timestamp) {
+			table.rowLastModifiedWithoutOriginTimestamp = kv.Value.Timestamp
+		}
 	}
 
 	if len(table.spec.FetchedColumns) == 0 {
@@ -1285,6 +1328,19 @@ func (rf *Fetcher) finalizeRow() error {
 	}
 	if table.oidOutputIdx != noOutputColumn {
 		table.row[table.oidOutputIdx] = rowenc.EncDatum{Datum: table.tableOid}
+	}
+
+	if table.originIDOutputIdx != noOutputColumn {
+		table.row[table.originIDOutputIdx] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(rf.table.rowLastOriginID))}
+	}
+
+	if table.originTimestampOutputIdx != noOutputColumn {
+		if rf.table.rowLastOriginTimestamp.IsSet() && rf.table.rowLastModifiedWithoutOriginTimestamp.Less(rf.table.rowLastOriginTimestamp) {
+			dec := rf.args.Alloc.NewDDecimal(tree.DDecimal{Decimal: eval.TimestampToDecimal(rf.table.rowLastOriginTimestamp)})
+			table.row[table.originTimestampOutputIdx] = rowenc.EncDatum{Datum: dec}
+		} else {
+			table.row[table.originTimestampOutputIdx] = rowenc.NullEncDatum()
+		}
 	}
 
 	// Fill in any missing values with NULLs

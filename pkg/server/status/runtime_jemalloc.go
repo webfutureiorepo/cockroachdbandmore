@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build !stdmalloc
 // +build !stdmalloc
@@ -81,6 +76,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/redact"
 	"github.com/dustin/go-humanize"
 )
 
@@ -106,7 +102,7 @@ func getJemallocStats(ctx context.Context) (uint, uint, error) {
 		for i := 0; i < v.NumField(); i++ {
 			stats[i] = t.Field(i).Name + ": " + humanize.IBytes(uint64(v.Field(i).Interface().(C.size_t)))
 		}
-		log.Infof(ctx, "jemalloc stats: %s", strings.Join(stats, " "))
+		log.Infof(ctx, "jemalloc stats: %s", redact.Safe(strings.Join(stats, " ")))
 	}
 
 	// NB: the `!V(MaxInt32)` condition is a workaround to not spew this to the

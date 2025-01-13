@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecutils
 
@@ -127,7 +122,7 @@ func TestSpillingQueue(t *testing.T) {
 						DiskQueueCfg:       queueCfg,
 						FDSemaphore:        colexecop.NewTestingSemaphore(2),
 						DiskAcc:            testDiskAcc,
-						ConverterMemAcc:    testMemAcc,
+						DiskQueueMemAcc:    testMemAcc,
 					},
 				)
 			} else {
@@ -139,7 +134,7 @@ func TestSpillingQueue(t *testing.T) {
 						DiskQueueCfg:       queueCfg,
 						FDSemaphore:        colexecop.NewTestingSemaphore(2),
 						DiskAcc:            testDiskAcc,
-						ConverterMemAcc:    testMemAcc,
+						DiskQueueMemAcc:    testMemAcc,
 					},
 				)
 			}
@@ -296,7 +291,7 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 			DiskQueueCfg:       queueCfg,
 			FDSemaphore:        colexecop.NewTestingSemaphore(2),
 			DiskAcc:            testDiskAcc,
-			ConverterMemAcc:    testMemAcc,
+			DiskQueueMemAcc:    testMemAcc,
 		},
 	)
 
@@ -363,7 +358,7 @@ func TestSpillingQueueMemoryAccounting(t *testing.T) {
 				DiskQueueCfg:       queueCfg,
 				FDSemaphore:        colexecop.NewTestingSemaphore(2),
 				DiskAcc:            testDiskAcc,
-				ConverterMemAcc:    testMemAcc,
+				DiskQueueMemAcc:    testMemAcc,
 			}
 			var q *SpillingQueue
 			if rewindable {
@@ -468,7 +463,7 @@ func TestSpillingQueueMovingTailWhenSpilling(t *testing.T) {
 			DiskQueueCfg:       queueCfg,
 			FDSemaphore:        colexecop.NewTestingSemaphore(2),
 			DiskAcc:            testDiskAcc,
-			ConverterMemAcc:    testMemAcc,
+			DiskQueueMemAcc:    testMemAcc,
 		}
 		q := NewSpillingQueue(newQueueArgs)
 

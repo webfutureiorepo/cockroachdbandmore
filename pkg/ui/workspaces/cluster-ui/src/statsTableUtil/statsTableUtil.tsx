@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-import React from "react";
-import { Anchor } from "src/anchor";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { Tooltip } from "@cockroachlabs/ui-components";
+import React from "react";
+
+import { Anchor } from "src/anchor";
+import { Timezone } from "src/timestamp";
 import {
   contentionTime,
   planningExecutionTime,
@@ -22,7 +18,6 @@ import {
   statementsSql,
   writtenToDisk,
 } from "src/util";
-import { Timezone } from "src/timestamp";
 
 // Single place for column names. Used in table columns and in columns selector.
 export const statisticsColumnLabels = {

@@ -1,21 +1,18 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { PayloadAction } from "@reduxjs/toolkit";
 import { all, call, put, takeEvery } from "redux-saga/effects";
 
 import { terminateQuery, terminateSession } from "src/api/terminateQueryApi";
 import { actions as sessionsActions } from "src/store/sessions";
-import { actions as terminateQueryActions } from "./terminateQuery.reducer";
 
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { maybeError } from "../../util";
+
+import { actions as terminateQueryActions } from "./terminateQuery.reducer";
 
 const CancelSessionRequest = cockroach.server.serverpb.CancelSessionRequest;
 const CancelQueryRequest = cockroach.server.serverpb.CancelQueryRequest;
@@ -33,7 +30,7 @@ export function* terminateSessionSaga(
     yield put(sessionsActions.invalidated());
     yield put(sessionsActions.refresh());
   } catch (e) {
-    yield put(terminateQueryActions.terminateSessionFailed(e));
+    yield put(terminateQueryActions.terminateSessionFailed(maybeError(e)));
   }
 }
 
@@ -47,7 +44,7 @@ export function* terminateQuerySaga(
     yield put(sessionsActions.invalidated());
     yield put(sessionsActions.refresh());
   } catch (e) {
-    yield put(terminateQueryActions.terminateQueryFailed(e));
+    yield put(terminateQueryActions.terminateQueryFailed(maybeError(e)));
   }
 }
 

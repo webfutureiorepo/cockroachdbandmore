@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm
 
@@ -31,5 +26,9 @@ func (s listSorter) less(i, j int) bool {
 func (s listSorter) compare(i, j int) int {
 	leftD := memo.ExtractConstDatum(s.list[i])
 	rightD := memo.ExtractConstDatum(s.list[j])
-	return leftD.Compare(s.cf.f.evalCtx, rightD)
+	cmp, err := leftD.Compare(s.cf.f.ctx, s.cf.f.evalCtx, rightD)
+	if err != nil {
+		panic(err)
+	}
+	return cmp
 }

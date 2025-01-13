@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -115,7 +110,7 @@ type sort_TYPE_DIR_HANDLES_NULLSOp struct {
 }
 
 func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
+	ctx context.Context, allocator *colmem.Allocator, col *coldata.Vec, order []int,
 ) {
 	s.sortCol = col.TemplateType()
 	// {{if .CanAbbreviate}}

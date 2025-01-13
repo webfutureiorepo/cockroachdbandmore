@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -52,8 +47,8 @@ func (s *MaskedSetting) String(sv *Values) string {
 }
 
 // DefaultString returns the default value for the setting as a string.
-func (s *MaskedSetting) DefaultString() (string, error) {
-	return s.setting.DecodeToString(s.setting.EncodedDefault())
+func (s *MaskedSetting) DefaultString() string {
+	return s.setting.DefaultString()
 }
 
 // Visibility returns the visibility setting for the underlying setting.

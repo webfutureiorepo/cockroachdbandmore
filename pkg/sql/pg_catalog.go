@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -21,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -64,9 +60,10 @@ import (
 )
 
 var (
-	oidZero   = tree.NewDOid(0)
-	zeroVal   = tree.DZero
-	negOneVal = tree.NewDInt(-1)
+	oidZero        = tree.NewDOid(0)
+	regProcOidZero = tree.NewDOidWithTypeAndName(0, types.RegProc, "-")
+	zeroVal        = tree.DZero
+	negOneVal      = tree.NewDInt(-1)
 
 	passwdStarString = tree.NewDString("********")
 )
@@ -380,7 +377,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-attrdef.html`,
 				expr = column.GetComputeExpr()
 			}
 			displayExpr, err := schemaexpr.FormatExprForDisplay(
-				ctx, table, expr, &p.semaCtx, p.SessionData(), tree.FmtPGCatalog,
+				ctx, table, expr, p.EvalContext(), &p.semaCtx, p.SessionData(), tree.FmtPGCatalog,
 			)
 			if err != nil {
 				return err
@@ -478,6 +475,7 @@ https://www.postgresql.org/docs/12/catalog-pg-attribute.html`,
 				tree.DNull, // atthasmissing
 				// These columns were automatically created by pg_catalog_test's missing column generator.
 				tree.DNull, // attmissingval
+				tree.MakeDBool(tree.DBool(column.IsHidden())), // attishidden
 			)
 		}
 
@@ -504,7 +502,7 @@ https://www.postgresql.org/docs/12/catalog-pg-attribute.html`,
 				if populatedColumns.Contains(colOrdinal) {
 					continue
 				}
-				colName := strings.Replace(fmt.Sprintf("........pg.dropped.%-8d", colOrdinal), " ", ".", -1)
+				colName := fmt.Sprintf("........pg.dropped.%d........", colOrdinal)
 				if err := addRow(
 					tableID,                             // attrelid
 					tree.NewDName(colName),              // attname
@@ -533,6 +531,7 @@ https://www.postgresql.org/docs/12/catalog-pg-attribute.html`,
 					tree.DNull, // atthasmissing
 					// These columns were automatically created by pg_catalog_test's missing column generator.
 					tree.DNull, // attmissingval
+					tree.DNull, // attishidden
 				); err != nil {
 					return err
 				}
@@ -615,7 +614,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-authid.html`,
 	schema: vtable.PGCatalogAuthID,
 	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachRole(ctx, p, func(userName username.SQLUsername, isRole bool, options roleOptions, _ tree.Datum) error {
+		return forEachRoleAtCacheReadTS(ctx, p, func(ctx context.Context, userName username.SQLUsername, isRole bool, options roleOptions, _ tree.Datum) error {
 			isRoot := tree.DBool(userName.IsRootUser() || userName.IsAdminRole())
 			// Currently, all users and roles inherit the privileges of roles they are
 			// members of. See https://github.com/cockroachdb/cockroach/issues/69583.
@@ -667,15 +666,16 @@ https://www.postgresql.org/docs/9.5/catalog-pg-auth-members.html`,
 	schema: vtable.PGCatalogAuthMembers,
 	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachRoleMembership(ctx, p.InternalSQLTxn(),
-			func(roleName, memberName username.SQLUsername, isAdmin bool) error {
+		return forEachRoleMembershipAtCacheReadTS(ctx, p,
+			func(ctx context.Context, roleName, memberName username.SQLUsername, isAdmin bool) error {
 				return addRow(
 					h.UserOid(roleName),                 // roleid
 					h.UserOid(memberName),               // member
 					tree.DNull,                          // grantor
 					tree.MakeDBool(tree.DBool(isAdmin)), // admin_option
 				)
-			})
+			},
+		)
 	},
 }
 
@@ -873,7 +873,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-collation.html`,
 	schema: vtable.PGCatalogCollation,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachDatabaseDesc(ctx, p, dbContext, false /* requiresPrivileges */, func(db catalog.DatabaseDescriptor) error {
+		return forEachDatabaseDesc(ctx, p, dbContext, false /* requiresPrivileges */, func(ctx context.Context, db catalog.DatabaseDescriptor) error {
 			namespaceOid := tree.NewDOid(catconstants.PgCatalogID)
 			add := func(collName string) error {
 				return addRow(
@@ -952,6 +952,13 @@ func populateTableConstraints(
 	namespaceOid := schemaOid(sc.GetID())
 	tblOid := tableOid(table.GetID())
 	for _, c := range table.AllConstraints() {
+		// Ignore constraints that are being dropped. When a column is dropped alongside
+		// a constraint, the DSC may insert a placeholder name into the constraint,
+		// which can interfere with column name lookups in this function.
+		if c.GetConstraintValidity() == descpb.ConstraintValidity_Dropping {
+			continue
+		}
+
 		conoid := tree.DNull
 		contype := tree.DNull
 		conindid := oidZero
@@ -995,13 +1002,13 @@ func populateTableConstraints(
 				contype = conTypeUnique
 				f.WriteString("UNIQUE (")
 				if err := catformat.FormatIndexElements(
-					ctx, table, uwi.IndexDesc(), f, p.SemaCtx(), p.SessionData(),
+					ctx, table, uwi.IndexDesc(), f, p.EvalContext(), p.SemaCtx(), p.SessionData(),
 				); err != nil {
 					return err
 				}
 				f.WriteByte(')')
 				if uwi.IsPartial() {
-					pred, err := schemaexpr.FormatExprForDisplay(ctx, table, uwi.GetPredicate(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog)
+					pred, err := schemaexpr.FormatExprForDisplay(ctx, table, uwi.GetPredicate(), p.EvalContext(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog)
 					if err != nil {
 						return err
 					}
@@ -1068,7 +1075,7 @@ func populateTableConstraints(
 				f.WriteString(" NOT VALID")
 			}
 			if uwoi.GetPredicate() != "" {
-				pred, err := schemaexpr.FormatExprForDisplay(ctx, table, uwoi.GetPredicate(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog)
+				pred, err := schemaexpr.FormatExprForDisplay(ctx, table, uwoi.GetPredicate(), p.EvalContext(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog)
 				if err != nil {
 					return err
 				}
@@ -1081,7 +1088,7 @@ func populateTableConstraints(
 			if conkey, err = colIDArrayToDatum(ck.CheckDesc().ColumnIDs); err != nil {
 				return err
 			}
-			displayExpr, err := schemaexpr.FormatExprForDisplay(ctx, table, ck.GetExpr(), &p.semaCtx, p.SessionData(), tree.FmtPGCatalog)
+			displayExpr, err := schemaexpr.FormatExprForDisplay(ctx, table, ck.GetExpr(), p.EvalContext(), &p.semaCtx, p.SessionData(), tree.FmtPGCatalog)
 			if err != nil {
 				return err
 			}
@@ -1150,7 +1157,7 @@ func (r oneAtATimeSchemaResolver) getTableByID(id descpb.ID) (catalog.TableDescr
 }
 
 func (r oneAtATimeSchemaResolver) getSchemaByID(id descpb.ID) (catalog.SchemaDescriptor, error) {
-	return r.p.Descriptors().ByID(r.p.txn).Get().Schema(r.ctx, id)
+	return r.p.Descriptors().ByIDWithoutLeased(r.p.txn).Get().Schema(r.ctx, id)
 }
 
 // makeAllRelationsVirtualTableWithDescriptorIDIndex creates a virtual table that searches through
@@ -1175,12 +1182,11 @@ func makeAllRelationsVirtualTableWithDescriptorIDIndex(
 	includesCompositeTypes := populateFromType != nil
 	populateAll := func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		if err := forEachTableDescWithTableLookup(
-			ctx,
-			p,
-			dbContext,
-			virtualOpts,
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor, lookup tableLookupFn) error {
+
+		opts := forEachTableDescOptions{virtualOpts: virtualOpts} /* no constraints in virtual tables */
+		if err := forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				db, sc, table, lookup := descCtx.database, descCtx.schema, descCtx.table, descCtx.tableLookup
 				return populateFromTable(ctx, p, h, db, sc, table, lookup, addRow)
 			},
 		); err != nil {
@@ -1193,7 +1199,7 @@ func makeAllRelationsVirtualTableWithDescriptorIDIndex(
 				ctx,
 				p,
 				dbContext,
-				func(_ catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, typeDesc catalog.TypeDescriptor) error {
+				func(ctx context.Context, _ catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, typeDesc catalog.TypeDescriptor) error {
 					nspOid := schemaOid(sc.GetID())
 					tn := tree.NewQualifiedTypeName(dbContext.GetName(), sc.GetName(), typeDesc.GetName())
 					typ, err := typedesc.HydratedTFromDesc(ctx, tn, typeDesc, p)
@@ -1339,7 +1345,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-database.html`,
 	schema: vtable.PGCatalogDatabase,
 	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		return forEachDatabaseDesc(ctx, p, nil /*all databases*/, false, /* requiresPrivileges */
-			func(db catalog.DatabaseDescriptor) error {
+			func(ctx context.Context, db catalog.DatabaseDescriptor) error {
 				ownerOid, err := getOwnerOID(ctx, p, db)
 				if err != nil {
 					return err
@@ -1372,104 +1378,130 @@ https://www.postgresql.org/docs/13/catalog-pg-default-acl.html`,
 	schema: vtable.PGCatalogDefaultACL,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		f := func(defaultPrivilegesForRole catpb.DefaultPrivilegesForRole) error {
-			objectTypes := privilege.GetTargetObjectTypes()
-			for _, objectType := range objectTypes {
-				privs, ok := defaultPrivilegesForRole.DefaultPrivilegesPerObject[objectType]
-				if !ok || len(privs.Users) == 0 {
-					// If the default privileges default state has been altered,
-					// we use an empty entry to signify that the user has no privileges.
-					// We only omit the row entirely if the default privileges are
-					// in its default state. This is PG's behavior.
-					// Note that if ForAllRoles is true, we can skip adding an entry
-					// since ForAllRoles cannot be a grantee - therefore we can ignore
-					// the RoleHasAllPrivilegesOnX flag and skip. We still have to take
-					// into consideration the PublicHasUsageOnTypes flag.
-					if objectType == privilege.Types {
-						// if the objectType is Types, we only omit the entry
-						// if both the role has ALL privileges AND public has USAGE.
-						// This is the "default" state for default privileges on types
-						// in Postgres.
-						if (!defaultPrivilegesForRole.IsExplicitRole() ||
-							catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Types)) &&
-							catprivilege.GetPublicHasUsageOnTypes(&defaultPrivilegesForRole) {
+
+		populatePrivilegeRow := func(schemaID descpb.ID) func(defaultPrivilegesForRole catpb.DefaultPrivilegesForRole) error {
+
+			return func(defaultPrivilegesForRole catpb.DefaultPrivilegesForRole) error {
+				objectTypes := privilege.GetTargetObjectTypes()
+				for _, objectType := range objectTypes {
+					privs, ok := defaultPrivilegesForRole.DefaultPrivilegesPerObject[objectType]
+					if !ok || len(privs.Users) == 0 {
+						// If the default privileges default state has been altered,
+						// we use an empty entry to signify that the user has no privileges.
+						// We only omit the row entirely if the default privileges are
+						// in its default state. This is PG's behavior.
+						// Note that if ForAllRoles is true, we can skip adding an entry
+						// since ForAllRoles cannot be a grantee - therefore we can ignore
+						// the RoleHasAllPrivilegesOnX flag and skip. We still have to take
+						// into consideration the PublicHasUsageOnTypes flag.
+						if objectType == privilege.Types {
+							// if the objectType is Types, we only omit the entry
+							// if both the role has ALL privileges AND public has USAGE.
+							// This is the "default" state for default privileges on types
+							// in Postgres.
+							if (!defaultPrivilegesForRole.IsExplicitRole() ||
+								catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Types)) &&
+								catprivilege.GetPublicHasUsageOnTypes(&defaultPrivilegesForRole) {
+								continue
+							}
+						} else if objectType == privilege.Routines {
+							// if the objectType is Routines, we only omit the entry
+							// if both the role has ALL privileges AND public has EXECUTE.
+							// This is the "default" state for default privileges on routines
+							// in Postgres.
+							if (!defaultPrivilegesForRole.IsExplicitRole() ||
+								catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Routines)) &&
+								catprivilege.GetPublicHasExecuteOnFunctions(&defaultPrivilegesForRole) {
+								continue
+							}
+						} else if !defaultPrivilegesForRole.IsExplicitRole() ||
+							catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, objectType) {
 							continue
 						}
-					} else if objectType == privilege.Routines {
-						// if the objectType is Routines, we only omit the entry
-						// if both the role has ALL privileges AND public has EXECUTE.
-						// This is the "default" state for default privileges on routines
-						// in Postgres.
-						if (!defaultPrivilegesForRole.IsExplicitRole() ||
-							catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Routines)) &&
-							catprivilege.GetPublicHasExecuteOnFunctions(&defaultPrivilegesForRole) {
-							continue
+					}
+
+					// Type of object this entry is for:
+					// r = relation (table, view), S = sequence, f = function, T = type, n = schema.
+					var c string
+					switch objectType {
+					case privilege.Tables:
+						c = "r"
+					case privilege.Sequences:
+						c = "S"
+					case privilege.Types:
+						c = "T"
+					case privilege.Schemas:
+						c = "n"
+					case privilege.Routines:
+						c = "f"
+					}
+					privilegeObjectType := targetObjectToPrivilegeObject[objectType]
+					arr := tree.NewDArray(types.String)
+					for _, userPrivs := range privs.Users {
+						var user string
+						if userPrivs.UserProto.Decode().IsPublicRole() {
+							// Postgres represents Public in defacl as an empty string.
+							user = ""
+						} else {
+							user = userPrivs.UserProto.Decode().Normalized()
 						}
-					} else if !defaultPrivilegesForRole.IsExplicitRole() ||
-						catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, objectType) {
-						continue
-					}
-				}
 
-				// Type of object this entry is for:
-				// r = relation (table, view), S = sequence, f = function, T = type, n = schema.
-				var c string
-				switch objectType {
-				case privilege.Tables:
-					c = "r"
-				case privilege.Sequences:
-					c = "S"
-				case privilege.Types:
-					c = "T"
-				case privilege.Schemas:
-					c = "n"
-				case privilege.Routines:
-					c = "f"
-				}
-				privilegeObjectType := targetObjectToPrivilegeObject[objectType]
-				arr := tree.NewDArray(types.String)
-				for _, userPrivs := range privs.Users {
-					var user string
-					if userPrivs.UserProto.Decode().IsPublicRole() {
-						// Postgres represents Public in defacl as an empty string.
-						user = ""
-					} else {
-						user = userPrivs.UserProto.Decode().Normalized()
+						privileges, err := privilege.ListFromBitField(
+							userPrivs.Privileges, privilegeObjectType,
+						)
+						if err != nil {
+							return err
+						}
+						grantOptions, err := privilege.ListFromBitField(
+							userPrivs.WithGrantOption, privilegeObjectType,
+						)
+						if err != nil {
+							return err
+						}
+						defaclItem, err := createDefACLItem(user, privileges, grantOptions, privilegeObjectType)
+						if err != nil {
+							return err
+						}
+						if err := arr.Append(
+							tree.NewDString(defaclItem)); err != nil {
+							return err
+						}
 					}
 
-					privileges, err := privilege.ListFromBitField(
-						userPrivs.Privileges, privilegeObjectType,
-					)
-					if err != nil {
-						return err
-					}
-					grantOptions, err := privilege.ListFromBitField(
-						userPrivs.WithGrantOption, privilegeObjectType,
-					)
-					if err != nil {
-						return err
-					}
-					defaclItem, err := createDefACLItem(user, privileges, grantOptions, privilegeObjectType)
-					if err != nil {
-						return err
-					}
-					if err := arr.Append(
-						tree.NewDString(defaclItem)); err != nil {
-						return err
-					}
-				}
+					// Special cases to handle for types and functions.
+					// If one of RoleHasAllPrivilegesOnTypes or PublicHasUsageOnTypes is false
+					// and the other is true, we do not omit the entry since the default
+					// state has changed. We have to produce an entry by expanding the
+					// privileges. Similarly, we need to check EXECUTE for functions.
+					if defaultPrivilegesForRole.IsExplicitRole() {
+						publicHasUsage := false
+						roleHasAllPrivileges := false
+						privilegeKind := privilege.USAGE
 
-				// Special cases to handle for types and functions.
-				// If one of RoleHasAllPrivilegesOnTypes or PublicHasUsageOnTypes is false
-				// and the other is true, we do not omit the entry since the default
-				// state has changed. We have to produce an entry by expanding the
-				// privileges. Similarly, we need to check EXECUTE for functions.
-				if defaultPrivilegesForRole.IsExplicitRole() {
-					if objectType == privilege.Types {
-						if !catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Types) &&
-							catprivilege.GetPublicHasUsageOnTypes(&defaultPrivilegesForRole) {
+						switch objectType {
+						case privilege.Types:
+							publicHasUsage = !catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Types) &&
+								catprivilege.GetPublicHasUsageOnTypes(&defaultPrivilegesForRole)
+							privilegeKind = privilege.USAGE
+							roleHasAllPrivileges = !catprivilege.GetPublicHasUsageOnTypes(&defaultPrivilegesForRole) &&
+								defaultPrivilegesForRole.GetExplicitRole().RoleHasAllPrivilegesOnTypes
+						case privilege.Routines:
+							publicHasUsage = !catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Routines) &&
+								catprivilege.GetPublicHasExecuteOnFunctions(&defaultPrivilegesForRole)
+							privilegeKind = privilege.EXECUTE
+							roleHasAllPrivileges = !catprivilege.GetPublicHasExecuteOnFunctions(&defaultPrivilegesForRole) &&
+								defaultPrivilegesForRole.GetExplicitRole().RoleHasAllPrivilegesOnFunctions
+						default:
+							if len(privs.Users) == 0 && schemaID != descpb.InvalidID {
+								continue
+							}
+						}
+
+						// publicHasUsage and roleHasAllPrivileges will always be false
+						// when objectType is not privilege.Types or privilege.Routines
+						if publicHasUsage {
 							defaclItem, err := createDefACLItem(
-								"" /* public role */, privilege.List{privilege.USAGE}, privilege.List{}, privilegeObjectType,
+								"" /* public role */, privilege.List{privilegeKind}, privilege.List{}, privilegeObjectType,
 							)
 							if err != nil {
 								return err
@@ -1477,9 +1509,7 @@ https://www.postgresql.org/docs/13/catalog-pg-default-acl.html`,
 							if err := arr.Append(tree.NewDString(defaclItem)); err != nil {
 								return err
 							}
-						}
-						if !catprivilege.GetPublicHasUsageOnTypes(&defaultPrivilegesForRole) &&
-							defaultPrivilegesForRole.GetExplicitRole().RoleHasAllPrivilegesOnTypes {
+						} else if roleHasAllPrivileges {
 							defaclItem, err := createDefACLItem(
 								defaultPrivilegesForRole.GetExplicitRole().UserProto.Decode().Normalized(),
 								privilege.List{privilege.ALL}, privilege.List{}, privilegeObjectType,
@@ -1490,67 +1520,58 @@ https://www.postgresql.org/docs/13/catalog-pg-default-acl.html`,
 							if err := arr.Append(tree.NewDString(defaclItem)); err != nil {
 								return err
 							}
+						} else if len(privs.Users) == 0 && schemaID != descpb.InvalidID {
+							continue
 						}
 					}
-					if objectType == privilege.Routines {
-						if !catprivilege.GetRoleHasAllPrivilegesOnTargetObject(&defaultPrivilegesForRole, privilege.Routines) &&
-							catprivilege.GetPublicHasExecuteOnFunctions(&defaultPrivilegesForRole) {
-							defaclItem, err := createDefACLItem(
-								"" /* public role */, privilege.List{privilege.EXECUTE}, privilege.List{}, privilegeObjectType,
-							)
-							if err != nil {
-								return err
-							}
-							if err := arr.Append(tree.NewDString(defaclItem)); err != nil {
-								return err
-							}
-						}
-						if !catprivilege.GetPublicHasExecuteOnFunctions(&defaultPrivilegesForRole) &&
-							defaultPrivilegesForRole.GetExplicitRole().RoleHasAllPrivilegesOnFunctions {
-							defaclItem, err := createDefACLItem(
-								defaultPrivilegesForRole.GetExplicitRole().UserProto.Decode().Normalized(),
-								privilege.List{privilege.ALL}, privilege.List{}, privilegeObjectType,
-							)
-							if err != nil {
-								return err
-							}
-							if err := arr.Append(tree.NewDString(defaclItem)); err != nil {
-								return err
-							}
-						}
-					}
-				}
 
-				// TODO(richardjcai): Update this logic once default privileges on
-				//    schemas are supported.
-				//    See: https://github.com/cockroachdb/cockroach/issues/67376.
-				schemaID := descpb.ID(0)
-				// If ForAllRoles is specified, we use an empty string as the normalized
-				// role name to create the row hash.
-				normalizedName := ""
-				roleOid := oidZero
-				if defaultPrivilegesForRole.IsExplicitRole() {
-					roleOid = h.UserOid(defaultPrivilegesForRole.GetExplicitRole().UserProto.Decode())
-					normalizedName = defaultPrivilegesForRole.GetExplicitRole().UserProto.Decode().Normalized()
+					// If ForAllRoles is specified, we use an empty string as the normalized
+					// role name to create the row hash.
+					normalizedName := ""
+					roleOid := oidZero
+
+					if defaultPrivilegesForRole.IsExplicitRole() {
+						roleOid = h.UserOid(defaultPrivilegesForRole.GetExplicitRole().UserProto.Decode())
+						normalizedName = defaultPrivilegesForRole.GetExplicitRole().UserProto.Decode().Normalized()
+					}
+					rowOid := h.DBSchemaRoleOid(
+						dbContext.GetID(),
+						schemaID,
+						normalizedName,
+					)
+					if err := addRow(
+						rowOid,              // row identifier oid
+						roleOid,             // defaclrole oid
+						schemaOid(schemaID), // defaclnamespace oid
+						tree.NewDString(c),  // defaclobjtype char
+						arr,                 // defaclacl aclitem[]
+					); err != nil {
+						return err
+					}
 				}
-				rowOid := h.DBSchemaRoleOid(
-					dbContext.GetID(),
-					schemaID,
-					normalizedName,
-				)
-				if err := addRow(
-					rowOid,             // row identifier oid
-					roleOid,            // defaclrole oid
-					oidZero,            // defaclnamespace oid
-					tree.NewDString(c), // defaclobjtype char
-					arr,                // defaclacl aclitem[]
-				); err != nil {
-					return err
-				}
+				return nil
 			}
-			return nil
 		}
-		return dbContext.GetDefaultPrivilegeDescriptor().ForEachDefaultPrivilegeForRole(f)
+		err := dbContext.ForEachSchema(func(id descpb.ID, name string) error {
+			schemaDescriptor, err := p.Descriptors().ByIDWithoutLeased(p.txn).Get().Schema(ctx, id)
+			if err != nil {
+				return err
+			}
+
+			err = schemaDescriptor.GetDefaultPrivilegeDescriptor().ForEachDefaultPrivilegeForRole(populatePrivilegeRow(id))
+
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			return err
+		}
+
+		return dbContext.GetDefaultPrivilegeDescriptor().ForEachDefaultPrivilegeForRole(populatePrivilegeRow(descpb.InvalidID /* schemaID */))
 	},
 }
 
@@ -1596,6 +1617,7 @@ var (
 	pgClassTableName       = tree.MakeTableNameWithSchema("", tree.Name(pgCatalogName), tree.Name("pg_class"))
 	pgDatabaseTableName    = tree.MakeTableNameWithSchema("", tree.Name(pgCatalogName), tree.Name("pg_database"))
 	pgRewriteTableName     = tree.MakeTableNameWithSchema("", tree.Name(pgCatalogName), tree.Name("pg_rewrite"))
+	pgProcTableName        = tree.MakeTableNameWithSchema("", tree.Name(pgCatalogName), tree.Name("pg_proc"))
 )
 
 // pg_depend is a fairly complex table that details many different kinds of
@@ -1624,13 +1646,15 @@ https://www.postgresql.org/docs/9.5/catalog-pg-depend.html`,
 		if err != nil {
 			return errors.New("could not find pg_catalog.pg_rewrite")
 		}
+		pgProcDesc, err := vt.getVirtualTableDesc(&pgProcTableName, p)
+		if err != nil {
+			return errors.New("could not find pg_catalog.pg_rewrite")
+		}
 		h := makeOidHasher()
-		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual /*virtual tables have no constraints*/, func(
-			db catalog.DatabaseDescriptor,
-			sc catalog.SchemaDescriptor,
-			table catalog.TableDescriptor,
-			tableLookup tableLookupFn,
-		) error {
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /*virtual tables have no constraints*/
+		err = forEachTableDesc(ctx, p, dbContext, opts, func(
+			ctx context.Context, descCtx tableDescContext) error {
+			db, sc, table, tableLookup := descCtx.database, descCtx.schema, descCtx.table, descCtx.tableLookup
 			pgConstraintTableOid := tableOid(pgConstraintsDesc.GetID())
 			pgClassTableOid := tableOid(pgClassDesc.GetID())
 			pgRewriteTableOid := tableOid(pgRewriteDesc.GetID())
@@ -1709,6 +1733,35 @@ https://www.postgresql.org/docs/9.5/catalog-pg-depend.html`,
 			}
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+		return forEachSchema(ctx, p, dbContext, true, func(ctx context.Context, sc catalog.SchemaDescriptor) error {
+			pgProcTableOid := tableOid(pgProcDesc.GetID())
+			return sc.ForEachFunctionSignature(func(sig descpb.SchemaDescriptor_FunctionSignature) error {
+				funcDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).Get().Function(ctx, sig.ID)
+				if err != nil {
+					return err
+				}
+				sourceID := catid.FuncIDToOID(funcDesc.GetID())
+				for _, otherFunction := range funcDesc.GetDependsOnFunctions() {
+					destID := catid.FuncIDToOID(otherFunction)
+					if err := addRow(
+						pgProcTableOid,         // classid
+						tree.NewDOid(sourceID), // objid
+						zeroVal,                // objsubid
+						pgProcTableOid,         // refclassid
+						tree.NewDOid(destID),   // refobjid
+						zeroVal,                // refobjsubid
+						depTypeNormal,          // deptype
+					); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		})
+
 	},
 }
 
@@ -1795,7 +1848,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-enum.html`,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
 
-		return forEachTypeDesc(ctx, p, dbContext, func(_ catalog.DatabaseDescriptor, _ catalog.SchemaDescriptor, typDesc catalog.TypeDescriptor) error {
+		return forEachTypeDesc(ctx, p, dbContext, func(ctx context.Context, _ catalog.DatabaseDescriptor, _ catalog.SchemaDescriptor, typDesc catalog.TypeDescriptor) error {
 			e := typDesc.AsEnumTypeDescriptor()
 			if e == nil {
 				// We only want to iterate over ENUM types and multi-region enums.
@@ -1891,8 +1944,10 @@ https://www.postgresql.org/docs/9.5/catalog-pg-index.html`,
 	schema: vtable.PGCatalogIndex,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /* virtual tables do not have indexes */
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor) error {
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /* virtual tables do not have indexes */
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				table := descCtx.table
 				tableOid := tableOid(table.GetID())
 
 				return catalog.ForEachIndex(table, catalog.IndexOpts{}, func(index catalog.Index) error {
@@ -1909,18 +1964,13 @@ https://www.postgresql.org/docs/9.5/catalog-pg-index.html`,
 
 					colAttNums := make([]descpb.ColumnID, 0, index.NumKeyColumns())
 					exprs := make([]string, 0, index.NumKeyColumns())
-					for i := index.IndexDesc().ExplicitColumnStartIdx(); i < index.NumKeyColumns(); i++ {
-						columnID := index.GetKeyColumnID(i)
-						col, err := catalog.MustFindColumnByID(table, columnID)
-						if err != nil {
-							return err
-						}
+					for i, col := range table.IndexKeyColumns(index) {
 						// The indkey for an expression element in an index
 						// should be 0.
 						if col.IsExpressionIndexColumn() {
 							colAttNums = append(colAttNums, 0)
 							formattedExpr, err := schemaexpr.FormatExprForDisplay(
-								ctx, table, col.GetComputeExpr(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog,
+								ctx, table, col.GetComputeExpr(), p.EvalContext(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog,
 							)
 							if err != nil {
 								return err
@@ -1970,7 +2020,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-index.html`,
 					indpred := tree.DNull
 					if index.IsPartial() {
 						formattedPred, err := schemaexpr.FormatExprForDisplay(
-							ctx, table, index.GetPredicate(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog,
+							ctx, table, index.GetPredicate(), p.EvalContext(), p.SemaCtx(), p.SessionData(), tree.FmtPGCatalog,
 						)
 						if err != nil {
 							return err
@@ -2024,8 +2074,10 @@ https://www.postgresql.org/docs/9.5/view-pg-indexes.html`,
 	schema: vtable.PGCatalogIndexes,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual, /* virtual tables do not have indexes */
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor, _ tableLookupFn) error {
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /* virtual tables do not have indexes */
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				db, sc, table := descCtx.database, descCtx.schema, descCtx.table
 				scNameName := tree.NewDName(sc.GetName())
 				tblName := tree.NewDName(table.GetName())
 				return catalog.ForEachIndex(table, catalog.IndexOpts{}, func(index catalog.Index) error {
@@ -2066,6 +2118,7 @@ func indexDefFromDescriptor(
 		index,
 		partitionStr,
 		tree.FmtPGCatalog,
+		p.EvalContext(),
 		p.SemaCtx(),
 		p.SessionData(),
 		catformat.IndexDisplayShowCreate,
@@ -2088,9 +2141,9 @@ https://www.postgresql.org/docs/9.5/catalog-pg-inherits.html`,
 }
 
 // Match the OIDs that Postgres uses for languages.
-var languageInternalOid = tree.NewDOidWithName(oid.Oid(12), types.Oid, "internal")
-var languageSqlOid = tree.NewDOidWithName(oid.Oid(14), types.Oid, "sql")
-var languagePlpgsqlOid = tree.NewDOidWithName(oid.Oid(14024), types.Oid, "plpgsql")
+var languageInternalOid = tree.NewDOidWithTypeAndName(oid.Oid(12), types.Oid, "internal")
+var languageSqlOid = tree.NewDOidWithTypeAndName(oid.Oid(14), types.Oid, "sql")
+var languagePlpgsqlOid = tree.NewDOidWithTypeAndName(oid.Oid(14024), types.Oid, "plpgsql")
 
 var pgCatalogLanguageTable = virtualSchemaTable{
 	comment: `available languages
@@ -2114,9 +2167,9 @@ https://www.postgresql.org/docs/9.5/catalog-pg-language.html`,
 				h.UserOid(username.AdminRoleName()), // lanowner
 				isPl,                                // lanispl
 				isTrusted,                           // lanpltrusted
-				tree.WrapAsZeroOid(types.Oid),       // lanplcallfoid
-				tree.WrapAsZeroOid(types.Oid),       // laninline
-				tree.WrapAsZeroOid(types.Oid),       // lanvalidator
+				tree.NewDOid(tree.UnknownOidValue),  // lanplcallfoid
+				tree.NewDOid(tree.UnknownOidValue),  // laninline
+				tree.NewDOid(tree.UnknownOidValue),  // lanvalidator
 				tree.DNull,                          // lanacl
 			); err != nil {
 				return err
@@ -2141,8 +2194,10 @@ var pgCatalogMatViewsTable = virtualSchemaTable{
 https://www.postgresql.org/docs/9.6/view-pg-matviews.html`,
 	schema: vtable.PGCatalogMatViews,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		return forEachTableDesc(ctx, p, dbContext, hideVirtual,
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, desc catalog.TableDescriptor) error {
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual}
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				sc, desc := descCtx.schema, descCtx.table
 				if !desc.MaterializedView() {
 					return nil
 				}
@@ -2180,8 +2235,8 @@ https://www.postgresql.org/docs/9.5/catalog-pg-namespace.html`,
 	schema: vtable.PGCatalogNamespace,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		return forEachDatabaseDesc(ctx, p, dbContext, true, /* requiresPrivileges */
-			func(db catalog.DatabaseDescriptor) error {
-				return forEachSchema(ctx, p, db, true /* requiresPrivileges */, func(sc catalog.SchemaDescriptor) error {
+			func(ctx context.Context, db catalog.DatabaseDescriptor) error {
+				return forEachSchema(ctx, p, db, true /* requiresPrivileges */, func(ctx context.Context, sc catalog.SchemaDescriptor) error {
 					ownerOID := tree.DNull
 					if sc.SchemaKind() == catalog.SchemaUserDefined {
 						var err error
@@ -2226,7 +2281,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-namespace.html`,
 					}
 					// Fallback to looking for temporary schemas.
 					var tempSchema catalog.SchemaDescriptor
-					if err := forEachSchema(ctx, p, db, false /* requiresPrivileges */, func(schema catalog.SchemaDescriptor) error {
+					if err := forEachSchema(ctx, p, db, false /* requiresPrivileges */, func(ctx context.Context, schema catalog.SchemaDescriptor) error {
 						if schema.GetID() != descpb.ID(ooid) {
 							return nil
 						}
@@ -2372,32 +2427,47 @@ https://www.postgresql.org/docs/9.5/catalog-pg-operator.html`,
 	},
 }
 
-func newSingletonStringArray(s string) tree.Datum {
-	return &tree.DArray{ParamTyp: types.String, Array: tree.Datums{tree.NewDString(s)}}
-}
-
-var (
-	proArgModeInOut    = newSingletonStringArray("b")
-	proArgModeIn       = newSingletonStringArray("i")
-	proArgModeOut      = newSingletonStringArray("o")
-	proArgModeTable    = newSingletonStringArray("t")
-	proArgModeVariadic = newSingletonStringArray("v")
-
-	// Avoid unused warning for constants.
-	_ = proArgModeInOut
-	_ = proArgModeIn
-	_ = proArgModeOut
-	_ = proArgModeTable
-)
-
 var pgCatalogPreparedXactsTable = virtualSchemaTable{
-	comment: `prepared transactions (empty - feature does not exist)
+	comment: `prepared transactions
 https://www.postgresql.org/docs/9.6/view-pg-prepared-xacts.html`,
 	schema: vtable.PGCatalogPreparedXacts,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
+		if !p.IsActive(ctx, clusterversion.V25_1_PreparedTransactionsTable) {
+			// TODO(nvanbenschoten): Remove this logic when mixed-version support
+			// with v24.3 is no longer necessary.
+			return nil
+		}
+		rows, err := p.InternalSQLTxn().QueryBufferedEx(
+			ctx,
+			"select-prepared-transactions",
+			p.Txn(),
+			sessiondata.NodeUserSessionDataOverride,
+			`SELECT global_id, prepared, owner, database FROM system.prepared_transactions`,
+		)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			// NOTE: we can't map a 128-bit CockroachDB transaction ID to a 32-bit
+			// Postgres xid, so we just return zero for each transaction's xid. This
+			// is acceptable, as the gid is the important part of pg_prepared_xacts.
+			transaction := zeroVal
+			globalID := row[0]
+			prepared := row[1]
+			owner := tree.NewDName(string(tree.MustBeDString(row[2])))
+			database := tree.NewDName(string(tree.MustBeDString(row[3])))
+			if err := addRow(
+				transaction, // transaction
+				globalID,    // gid
+				prepared,    // prepared
+				owner,       // owner
+				database,    // database
+			); err != nil {
+				return err
+			}
+		}
 		return nil
 	},
-	unimplemented: true,
 }
 
 // pgCatalogPreparedStatementsTable implements the pg_prepared_statements table.
@@ -2417,7 +2487,7 @@ https://www.postgresql.org/docs/9.6/view-pg-prepared-statements.html`,
 			paramNames := make([]string, len(placeholderTypes))
 
 			for i, placeholderType := range placeholderTypes {
-				paramTypes.Array[i] = tree.NewDOidWithName(
+				paramTypes.Array[i] = tree.NewDOidWithTypeAndName(
 					placeholderType.Oid(),
 					placeholderType,
 					placeholderType.SQLStandardName(),
@@ -2454,6 +2524,13 @@ https://www.postgresql.org/docs/9.6/view-pg-prepared-statements.html`,
 	},
 }
 
+var (
+	proKindFunction  = tree.NewDString("f")
+	proKindAggregate = tree.NewDString("a")
+	proKindWindow    = tree.NewDString("w")
+	proKindProcedure = tree.NewDString("p")
+)
+
 func addPgProcBuiltinRow(name string, addRow func(...tree.Datum) error) error {
 	_, overloads := builtinsregistry.GetBuiltinProperties(name)
 	nspOid := tree.NewDOid(catconstants.PgCatalogID)
@@ -2471,24 +2548,21 @@ func addPgProcBuiltinRow(name string, addRow func(...tree.Datum) error) error {
 		dName := tree.NewDName(name)
 		dSrc := tree.NewDString(name)
 
-		isAggregate := builtin.Class == tree.AggregateClass
-		isWindow := builtin.Class == tree.WindowClass
 		var kind tree.Datum
 		switch {
-		case isAggregate:
-			kind = tree.NewDString("a")
-		case isWindow:
-			kind = tree.NewDString("w")
+		case builtin.Class == tree.AggregateClass:
+			kind = proKindAggregate
+		case builtin.Class == tree.WindowClass:
+			kind = proKindWindow
 		default:
-			kind = tree.NewDString("f")
+			kind = proKindFunction
 		}
 
 		var retType tree.Datum
-		isRetSet := false
+		isRetSet := builtin.IsGenerator()
 		if fixedRetType := builtin.FixedReturnType(); fixedRetType != nil {
 			var retOid oid.Oid
 			if fixedRetType.Family() == types.TupleFamily && builtin.IsGenerator() {
-				isRetSet = true
 				// Functions returning tables with zero, or more than one
 				// columns are marked to return "anyelement"
 				// (e.g. `unnest`)
@@ -2513,30 +2587,32 @@ func addPgProcBuiltinRow(name string, addRow func(...tree.Datum) error) error {
 			}
 		}
 
+		getVariadicStringArray := func() tree.Datum {
+			return &tree.DArray{ParamTyp: types.String, Array: tree.Datums{proArgModeVariadic}}
+		}
+
 		var argmodes tree.Datum
 		var variadicType tree.Datum
 		switch v := argTypes.(type) {
 		case tree.VariadicType:
 			if len(v.FixedTypes) == 0 {
-				argmodes = proArgModeVariadic
+				argmodes = getVariadicStringArray()
 			} else {
 				ary := tree.NewDArray(types.String)
 				for range v.FixedTypes {
-					if err := ary.Append(tree.NewDString("i")); err != nil {
+					if err := ary.Append(proArgModeIn); err != nil {
 						return err
 					}
 				}
-				if err := ary.Append(tree.NewDString("v")); err != nil {
+				if err := ary.Append(proArgModeVariadic); err != nil {
 					return err
 				}
 				argmodes = ary
 			}
 			variadicType = tree.NewDOid(v.VarType.Oid())
 		case tree.HomogeneousType:
-			argmodes = proArgModeVariadic
-			argType := types.Any
-			oid := argType.Oid()
-			variadicType = tree.NewDOid(oid)
+			argmodes = getVariadicStringArray()
+			variadicType = tree.NewDOid(types.Any.Oid())
 		default:
 			argmodes = tree.DNull
 			variadicType = oidZero
@@ -2553,9 +2629,8 @@ func addPgProcBuiltinRow(name string, addRow func(...tree.Datum) error) error {
 			tree.DNull,                               // procost
 			tree.DNull,                               // prorows
 			variadicType,                             // provariadic
-			tree.DNull,                               // protransform
-			tree.MakeDBool(tree.DBool(isAggregate)),  // proisagg
-			tree.MakeDBool(tree.DBool(isWindow)),     // proiswindow
+			tree.DNull,                               // prosupport
+			kind,                                     // prokind
 			tree.DBoolFalse,                          // prosecdef
 			tree.MakeDBool(tree.DBool(proleakproof)), // proleakproof
 			tree.MakeDBool(tree.DBool(proisstrict)),  // proisstrict
@@ -2573,11 +2648,9 @@ func addPgProcBuiltinRow(name string, addRow func(...tree.Datum) error) error {
 			tree.DNull,                                      // protrftypes
 			dSrc,                                            // prosrc
 			tree.DNull,                                      // probin
+			tree.DNull,                                      // prosqlbody
 			tree.DNull,                                      // proconfig
 			tree.DNull,                                      // proacl
-			kind,                                            // prokind
-			// These columns were automatically created by pg_catalog_test's missing column generator.
-			tree.DNull, // prosupport
 		)
 		if err != nil {
 			return err
@@ -2586,41 +2659,22 @@ func addPgProcBuiltinRow(name string, addRow func(...tree.Datum) error) error {
 	return nil
 }
 
+var (
+	proArgModeIn       = tree.NewDString("i")
+	proArgModeOut      = tree.NewDString("o")
+	proArgModeInOut    = tree.NewDString("b")
+	proArgModeVariadic = tree.NewDString("v")
+)
+
 func addPgProcUDFRow(
 	h oidHasher,
 	scDesc catalog.SchemaDescriptor,
 	fnDesc catalog.FunctionDescriptor,
 	addRow func(...tree.Datum) error,
 ) error {
-	isStrict := fnDesc.GetNullInputBehavior() != catpb.Function_CALLED_ON_NULL_INPUT
-	argTypes := tree.NewDArray(types.Oid)
-	argModes := tree.NewDArray(types.String)
-	var argNames tree.Datum
-	argNamesArray := tree.NewDArray(types.String)
-	foundAnyArgNames := false
-	for _, param := range fnDesc.GetParams() {
-		if err := argTypes.Append(tree.NewDOid(param.Type.Oid())); err != nil {
-			return err
-		}
-		// We only support IN arguments at the moment.
-		if err := argModes.Append(tree.NewDString("i")); err != nil {
-			return err
-		}
-		if len(param.Name) > 0 {
-			foundAnyArgNames = true
-		}
-		if err := argNamesArray.Append(tree.NewDString(param.Name)); err != nil {
-			return err
-		}
-	}
-	argNames = tree.DNull
-	if foundAnyArgNames {
-		argNames = argNamesArray
-	}
-
-	kind := tree.NewDString("f")
+	kind := proKindFunction
 	if fnDesc.IsProcedure() {
-		kind = tree.NewDString("p")
+		kind = proKindProcedure
 	}
 
 	lang := languageInternalOid
@@ -2628,6 +2682,78 @@ func addPgProcUDFRow(
 		lang = languagePlpgsqlOid
 	} else if fnDesc.GetLanguage() == catpb.Function_SQL {
 		lang = languageSqlOid
+	}
+
+	argTypes, allArgTypesArray := tree.NewDArray(types.Oid), tree.NewDArray(types.Oid)
+	argModesArray, argNamesArray := tree.NewDArray(types.String), tree.NewDArray(types.String)
+	onlyINArgs := true
+	var foundAnyArgNames bool
+	var nArgs, nArgDefaults int
+	var argDefaultsBuilder strings.Builder
+	for _, param := range fnDesc.GetParams() {
+		class := funcdesc.ToTreeRoutineParamClass(param.Class)
+		if tree.IsInParamClass(class) {
+			// nArgs tracks only the number of input arguments.
+			nArgs++
+			// argTypes only includes input arguments.
+			if err := argTypes.Append(tree.NewDOid(param.Type.Oid())); err != nil {
+				return err
+			}
+		}
+		if param.DefaultExpr != nil {
+			nArgDefaults++
+			if nArgDefaults > 1 {
+				argDefaultsBuilder.WriteString(", ")
+			}
+			// Postgres has a special type pg_node_tree for proargdefaults
+			// column where the values are of the form:
+			//  ({CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location 55 :constvalue 4 [ 2 0 0 0 0 0 0 0 ]})
+			// We make our string roughly resemble that format.
+			argDefaultsBuilder.WriteString("{")
+			argDefaultsBuilder.WriteString(*param.DefaultExpr)
+			argDefaultsBuilder.WriteString("}")
+		}
+		// allArgTypesArray includes all arguments.
+		if err := allArgTypesArray.Append(tree.NewDOid(param.Type.Oid())); err != nil {
+			return err
+		}
+		onlyINArgs = onlyINArgs && (class == tree.RoutineParamDefault || class == tree.RoutineParamIn)
+		var argMode tree.Datum
+		switch class {
+		case tree.RoutineParamDefault, tree.RoutineParamIn:
+			argMode = proArgModeIn
+		case tree.RoutineParamOut:
+			argMode = proArgModeOut
+		case tree.RoutineParamInOut:
+			argMode = proArgModeInOut
+		case tree.RoutineParamVariadic:
+			argMode = proArgModeVariadic
+		default:
+			return errors.AssertionFailedf("unknown parameter class %d", class)
+		}
+		if err := argModesArray.Append(argMode); err != nil {
+			return err
+		}
+		foundAnyArgNames = foundAnyArgNames || len(param.Name) > 0
+		if err := argNamesArray.Append(tree.NewDString(param.Name)); err != nil {
+			return err
+		}
+	}
+	allArgTypes, argModes := tree.DNull, tree.DNull
+	if !onlyINArgs {
+		// When all arguments are IN arguments, then proallargtypes and
+		// proargmodes are NULL.
+		allArgTypes = allArgTypesArray
+		argModes = argModesArray
+	}
+	argNames := tree.DNull
+	if foundAnyArgNames {
+		// If none of the arguments have a name, then proargnames is NULL.
+		argNames = argNamesArray
+	}
+	argDefaults := tree.DNull
+	if nArgDefaults > 0 {
+		argDefaults = tree.NewDString("(" + argDefaultsBuilder.String() + ")")
 	}
 	return addRow(
 		tree.NewDOid(catid.FuncIDToOID(fnDesc.GetID())), // oid
@@ -2637,38 +2763,35 @@ func addPgProcUDFRow(
 		lang,            // prolang
 		tree.DNull,      // procost
 		tree.DNull,      // prorows
-		oidZero,         // provariadic
-		tree.DNull,      // protransform
-		tree.DBoolFalse, // proisagg
-		tree.DBoolFalse, // proiswindow
+		oidZero,         // provariadic // TODO(88947): this might need an adjustment.
+		tree.DNull,      // prosupport
+		kind,            // prokind
 		tree.DBoolFalse, // prosecdef
-		tree.MakeDBool(tree.DBool(fnDesc.GetLeakProof())),            // proleakproof
-		tree.MakeDBool(tree.DBool(isStrict)),                         // proisstrict
-		tree.MakeDBool(tree.DBool(fnDesc.GetReturnType().ReturnSet)), // proretset
-		tree.NewDString(funcVolatility(fnDesc.GetVolatility())),      // provolatile
-		tree.DNull, // proparallel
-		tree.NewDInt(tree.DInt(len(fnDesc.GetParams()))), // pronargs
-		tree.NewDInt(tree.DInt(0)),                       // pronargdefaults
-		tree.NewDOid(fnDesc.GetReturnType().Type.Oid()),  // prorettype
-		tree.NewDOidVectorFromDArray(argTypes),           // proargtypes
-		tree.DNull,                                       // proallargtypes
-		argModes,                                         // proargmodes
-		argNames,                                         // proargnames
-		tree.DNull,                                       // proargdefaults
-		tree.DNull,                                       // protrftypes
-		tree.NewDString(fnDesc.GetFunctionBody()),        // prosrc
-		tree.DNull,                                       // probin
-		tree.DNull,                                       // proconfig
-		tree.DNull,                                       // proacl
-		kind,                                             // prokind
-		// These columns were automatically created by pg_catalog_test's missing column generator.
-		tree.DNull, // prosupport
+		tree.MakeDBool(tree.DBool(fnDesc.GetLeakProof())),                                    // proleakproof
+		tree.MakeDBool(fnDesc.GetNullInputBehavior() != catpb.Function_CALLED_ON_NULL_INPUT), // proisstrict
+		tree.MakeDBool(tree.DBool(fnDesc.GetReturnType().ReturnSet)),                         // proretset
+		tree.NewDString(funcVolatility(fnDesc.GetVolatility())),                              // provolatile
+		tree.DNull,                                      // proparallel
+		tree.NewDInt(tree.DInt(nArgs)),                  // pronargs
+		tree.NewDInt(tree.DInt(nArgDefaults)),           // pronargdefaults
+		tree.NewDOid(fnDesc.GetReturnType().Type.Oid()), // prorettype
+		tree.NewDOidVectorFromDArray(argTypes),          // proargtypes
+		allArgTypes,                                     // proallargtypes
+		argModes,                                        // proargmodes
+		argNames,                                        // proargnames
+		argDefaults,                                     // proargdefaults
+		tree.DNull,                                      // protrftypes
+		tree.NewDString(fnDesc.GetFunctionBody()),       // prosrc
+		tree.DNull,                                      // probin
+		tree.DNull,                                      // prosqlbody
+		tree.DNull,                                      // proconfig
+		tree.DNull,                                      // proacl
 	)
 }
 
 var pgCatalogProcTable = virtualSchemaTable{
 	comment: `built-in functions (incomplete)
-https://www.postgresql.org/docs/9.5/catalog-pg-proc.html`,
+https://www.postgresql.org/docs/16/catalog-pg-proc.html`,
 	schema: vtable.PGCatalogProc,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
@@ -2679,7 +2802,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-proc.html`,
 		// builtin function since they don't really belong to any database.
 
 		err := forEachDatabaseDesc(ctx, p, dbContext, false, /* requiresPrivileges */
-			func(db catalog.DatabaseDescriptor) error {
+			func(ctx context.Context, db catalog.DatabaseDescriptor) error {
 				for _, name := range builtins.AllBuiltinNames() {
 					// parser.Builtins contains duplicate uppercase and lowercase keys.
 					// Only return the lowercase ones for compatibility with postgres.
@@ -2702,10 +2825,10 @@ https://www.postgresql.org/docs/9.5/catalog-pg-proc.html`,
 			return err
 		}
 		return forEachDatabaseDesc(ctx, p, dbContext, false, /* requiresPrivileges */
-			func(dbDesc catalog.DatabaseDescriptor) error {
-				return forEachSchema(ctx, p, dbDesc, true /* requiresPrivileges */, func(scDesc catalog.SchemaDescriptor) error {
+			func(ctx context.Context, dbDesc catalog.DatabaseDescriptor) error {
+				return forEachSchema(ctx, p, dbDesc, true /* requiresPrivileges */, func(ctx context.Context, scDesc catalog.SchemaDescriptor) error {
 					return scDesc.ForEachFunctionSignature(func(sig descpb.SchemaDescriptor_FunctionSignature) error {
-						fnDesc, err := p.Descriptors().ByID(p.Txn()).WithoutNonPublic().Get().Function(ctx, sig.ID)
+						fnDesc, err := p.Descriptors().ByIDWithoutLeased(p.Txn()).WithoutNonPublic().Get().Function(ctx, sig.ID)
 						if err != nil {
 							return err
 						}
@@ -2725,7 +2848,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-proc.html`,
 				ooid := coid.Oid
 
 				if funcdesc.IsOIDUserDefinedFunc(ooid) {
-					fnDesc, err := p.Descriptors().ByID(p.Txn()).WithoutNonPublic().Get().Function(ctx, funcdesc.UserDefinedFunctionOIDToID(ooid))
+					fnDesc, err := p.Descriptors().ByIDWithoutLeased(p.Txn()).WithoutNonPublic().Get().Function(ctx, funcdesc.UserDefinedFunctionOIDToID(ooid))
 					if err != nil {
 						if errors.Is(err, tree.ErrRoutineUndefined) {
 							return false, nil //nolint:returnerrcheck
@@ -2788,12 +2911,10 @@ https://www.postgresql.org/docs/9.5/catalog-pg-rewrite.html`,
 		h := makeOidHasher()
 		ruleName := tree.NewDString("_RETURN")
 		evType := tree.NewDString(string(evTypeSelect))
-		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual /*virtual tables have no constraints*/, func(
-			db catalog.DatabaseDescriptor,
-			sc catalog.SchemaDescriptor,
-			table catalog.TableDescriptor,
-			tableLookup tableLookupFn,
-		) error {
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /*virtual tables have no constraints*/
+		return forEachTableDesc(ctx, p, dbContext, opts, func(
+			ctx context.Context, descCtx tableDescContext) error {
+			table := descCtx.table
 			if !table.IsTable() && !table.IsView() {
 				return nil
 			}
@@ -2826,8 +2947,8 @@ https://www.postgresql.org/docs/9.5/view-pg-roles.html`,
 		// need to do the same. This shouldn't be an issue, because pg_roles doesn't
 		// include sensitive information such as password hashes.
 		h := makeOidHasher()
-		return forEachRole(ctx, p,
-			func(userName username.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
+		return forEachRoleAtCacheReadTS(ctx, p,
+			func(ctx context.Context, userName username.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
 				isRoot := tree.DBool(userName.IsRootUser() || userName.IsAdminRole())
 				// Currently, all users and roles inherit the privileges of roles they are
 				// members of. See https://github.com/cockroachdb/cockroach/issues/69583.
@@ -2889,8 +3010,10 @@ var pgCatalogSequenceTable = virtualSchemaTable{
 https://www.postgresql.org/docs/9.5/catalog-pg-sequence.html`,
 	schema: vtable.PGCatalogSequence,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /* virtual schemas do not have indexes */
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor) error {
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /* virtual schemas do not have indexes */
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				table := descCtx.table
 				if !table.IsSequence() {
 					return nil
 				}
@@ -2931,7 +3054,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-settings.html`,
 			valueDatum := tree.NewDString(value)
 			var bootDatum tree.Datum = tree.DNull
 			var resetDatum tree.Datum = tree.DNull
-			if gen.Set == nil && gen.RuntimeSet == nil {
+			if gen.Set == nil && gen.RuntimeSet == nil && gen.SetWithPlanner == nil {
 				// RESET/SET will leave the variable unchanged. Announce the
 				// current value as boot/reset value.
 				bootDatum = valueDatum
@@ -3037,8 +3160,10 @@ https://www.postgresql.org/docs/9.6/catalog-pg-shdepend.html`,
 		}
 
 		// Populating table descriptor dependencies with roles
-		if err = forEachTableDesc(ctx, p, dbContext, virtualMany,
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor) error {
+		opts := forEachTableDescOptions{virtualOpts: virtualMany}
+		if err = forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				db, table := descCtx.database, descCtx.table
 				privDesc, err := p.getPrivilegeDescriptor(ctx, table)
 				if err != nil {
 					return err
@@ -3068,7 +3193,7 @@ https://www.postgresql.org/docs/9.6/catalog-pg-shdepend.html`,
 
 		// Databases dependencies with roles
 		if err = forEachDatabaseDesc(ctx, p, nil /*all databases*/, false, /* requiresPrivileges */
-			func(db catalog.DatabaseDescriptor) error {
+			func(ctx context.Context, db catalog.DatabaseDescriptor) error {
 				owner := db.GetPrivileges().Owner()
 				showPrivs, err := db.GetPrivileges().Show(privilege.Database, true /* showImplicitOwnerPrivs */)
 				if err != nil {
@@ -3119,8 +3244,10 @@ https://www.postgresql.org/docs/9.5/view-pg-tables.html`,
 		// Note: pg_catalog.pg_tables is not well-defined if the dbContext is
 		// empty -- listing tables across databases can yield duplicate
 		// schema/table names.
-		return forEachTableDesc(ctx, p, dbContext, virtualMany,
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor) error {
+		opts := forEachTableDescOptions{virtualOpts: virtualMany}
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				sc, table := descCtx.schema, descCtx.table
 				if !table.IsTable() {
 					return nil
 				}
@@ -3310,6 +3437,8 @@ func addPGTypeRow(
 		}
 	case types.VoidFamily:
 		// void does not have an array type.
+	case types.TriggerFamily:
+		// trigger does not have an array type.
 	default:
 		typArray = tree.NewDOid(types.CalcArrayOid(typ))
 	}
@@ -3457,7 +3586,8 @@ func addPGAttributeRowForCompositeType(
 			// These columns were automatically created by pg_catalog_test's missing column generator.
 			tree.DNull, // atthasmissing
 			// These columns were automatically created by pg_catalog_test's missing column generator.
-			tree.DNull, // attmissingval
+			tree.DNull,      // attmissingval
+			tree.DBoolFalse, // attishidden
 		); err != nil {
 			return err
 		}
@@ -3491,7 +3621,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-type.html`,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
 		return forEachDatabaseDesc(ctx, p, dbContext, false, /* requiresPrivileges */
-			func(db catalog.DatabaseDescriptor) error {
+			func(ctx context.Context, db catalog.DatabaseDescriptor) error {
 				nspOid := tree.NewDOid(catconstants.PgCatalogID)
 
 				// Generate rows for all predefined types.
@@ -3502,14 +3632,12 @@ https://www.postgresql.org/docs/9.5/catalog-pg-type.html`,
 				}
 
 				// Each table has a corresponding pg_type row.
-				if err := forEachTableDescWithTableLookup(
-					ctx,
-					p,
-					dbContext,
-					virtualCurrentDB,
-					func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor, lookup tableLookupFn) error {
-						return addPGTypeRowForTable(ctx, p, h, db, sc, table, addRow)
-					},
+
+				opts := forEachTableDescOptions{virtualOpts: virtualCurrentDB}
+				if err := forEachTableDesc(ctx, p, dbContext, opts, func(
+					ctx context.Context, descCtx tableDescContext) error {
+					return addPGTypeRowForTable(ctx, p, h, descCtx.database, descCtx.schema, descCtx.table, addRow)
+				},
 				); err != nil {
 					return err
 				}
@@ -3519,7 +3647,7 @@ https://www.postgresql.org/docs/9.5/catalog-pg-type.html`,
 					ctx,
 					p,
 					db,
-					func(_ catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, typDesc catalog.TypeDescriptor) error {
+					func(ctx context.Context, _ catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, typDesc catalog.TypeDescriptor) error {
 						nspOid := schemaOid(sc.GetID())
 						tn := tree.NewQualifiedTypeName(db.GetName(), sc.GetName(), typDesc.GetName())
 						typ, err := typedesc.HydratedTFromDesc(ctx, tn, typDesc, p)
@@ -3639,8 +3767,8 @@ https://www.postgresql.org/docs/9.5/view-pg-user.html`,
 	schema: vtable.PGCatalogUser,
 	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachRole(ctx, p,
-			func(userName username.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
+		return forEachRoleAtCacheReadTS(ctx, p,
+			func(ctx context.Context, userName username.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
 				if isRole {
 					return nil
 				}
@@ -3724,7 +3852,7 @@ https://www.postgresql.org/docs/13/catalog-pg-db-role-setting.html`,
 			ctx,
 			"select-db-role-settings",
 			p.Txn(),
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			`SELECT database_id, role_name, settings FROM system.public.database_role_settings`,
 		)
 		if err != nil {
@@ -3757,7 +3885,7 @@ https://www.postgresql.org/docs/13/view-pg-shadow.html`,
 	schema: vtable.PgCatalogShadow,
 	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
-		return forEachRole(ctx, p, func(userName username.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
+		return forEachRoleAtCacheReadTS(ctx, p, func(ctx context.Context, userName username.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
 			noLogin, err := options.noLogin()
 			if err != nil {
 				return err
@@ -3836,7 +3964,9 @@ https://www.postgresql.org/docs/13/catalog-pg-statistic-ext.html`,
 				}
 				return err
 			}
-			canSeeDescriptor, err := userCanSeeDescriptor(ctx, p, tbl, db, false /* allowAdding */)
+			canSeeDescriptor, err := userCanSeeDescriptor(
+				ctx, p, tbl, db, false /* allowAdding */, false /* includeDropped */)
+
 			if err != nil {
 				return err
 			}
@@ -3876,8 +4006,11 @@ https://www.postgresql.org/docs/13/view-pg-sequences.html
 `,
 	schema: vtable.PgCatalogSequences,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /* virtual schemas do not have indexes */
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, table catalog.TableDescriptor) error {
+
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /* virtual schemas do not have indexes */
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				sc, table := descCtx.schema, descCtx.table
 				if !table.IsSequence() {
 					return nil
 				}
@@ -4193,12 +4326,12 @@ https://www.postgresql.org/docs/14/view-pg-cursors.html`,
 				return err
 			}
 			if err := addRow(
-				tree.NewDString(string(name)), /* name */
-				tree.NewDString(c.statement),  /* statement */
-				tree.DBoolFalse,               /* is_holdable */
-				tree.DBoolFalse,               /* is_binary */
-				tree.DBoolFalse,               /* is_scrollable */
-				tz,                            /* creation_date */
+				tree.NewDString(string(name)),          /* name */
+				tree.NewDString(c.statement),           /* statement */
+				tree.MakeDBool(tree.DBool(c.withHold)), /* is_holdable */
+				tree.DBoolFalse,                        /* is_binary */
+				tree.DBoolFalse,                        /* is_scrollable */
+				tz,                                     /* creation_date */
 			); err != nil {
 				return err
 			}
@@ -4639,6 +4772,9 @@ func typLen(typ *types.T) *tree.DInt {
 }
 
 func typByVal(typ *types.T) tree.Datum {
+	if typ.Identical(types.Trigger) {
+		return tree.DBoolTrue
+	}
 	_, variable := tree.DatumTypeSize(typ)
 	return tree.MakeDBool(tree.DBool(!variable))
 }
@@ -4689,11 +4825,13 @@ var datumToTypeCategory = map[types.Family]*tree.DString{
 	types.TupleFamily:       typCategoryPseudo,
 	types.OidFamily:         typCategoryNumeric,
 	types.PGLSNFamily:       typCategoryUserDefined,
+	types.PGVectorFamily:    typCategoryUserDefined,
 	types.RefCursorFamily:   typCategoryUserDefined,
 	types.UuidFamily:        typCategoryUserDefined,
 	types.INetFamily:        typCategoryNetworkAddr,
 	types.UnknownFamily:     typCategoryUnknown,
 	types.VoidFamily:        typCategoryPseudo,
+	types.TriggerFamily:     typCategoryPseudo,
 }
 
 func typCategory(typ *types.T) tree.Datum {
@@ -4714,8 +4852,11 @@ https://www.postgresql.org/docs/9.5/view-pg-views.html`,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		// Note: pg_views is not well defined if the dbContext is empty,
 		// because it does not distinguish views in separate databases.
-		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /*virtual schemas do not have views*/
-			func(db catalog.DatabaseDescriptor, sc catalog.SchemaDescriptor, desc catalog.TableDescriptor) error {
+
+		opts := forEachTableDescOptions{virtualOpts: hideVirtual} /*virtual schemas do not have views*/
+		return forEachTableDesc(ctx, p, dbContext, opts,
+			func(ctx context.Context, descCtx tableDescContext) error {
+				sc, desc := descCtx.schema, descCtx.table
 				if !desc.IsView() || desc.MaterializedView() {
 					return nil
 				}
@@ -4748,7 +4889,7 @@ https://www.postgresql.org/docs/9.6/catalog-pg-aggregate.html`,
 	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
 		return forEachDatabaseDesc(ctx, p, dbContext, false, /* requiresPrivileges */
-			func(db catalog.DatabaseDescriptor) error {
+			func(ctx context.Context, db catalog.DatabaseDescriptor) error {
 				for _, name := range builtins.AllAggregateBuiltinNames() {
 					if name == builtins.AnyNotNull {
 						// any_not_null is treated as a special case.
@@ -4783,28 +4924,27 @@ https://www.postgresql.org/docs/9.6/catalog-pg-aggregate.html`,
 								}
 							}
 						}
-						regprocForZeroOid := tree.NewDOidWithName(0, types.RegProc, "-")
 						err := addRow(
 							tree.NewDOid(overload.Oid).AsRegProc(name), // aggfnoid
-							aggregateKind,     // aggkind
-							aggNumDirectArgs,  // aggnumdirectargs
-							regprocForZeroOid, // aggtransfn
-							regprocForZeroOid, // aggfinalfn
-							regprocForZeroOid, // aggcombinefn
-							regprocForZeroOid, // aggserialfn
-							regprocForZeroOid, // aggdeserialfn
-							regprocForZeroOid, // aggmtransfn
-							regprocForZeroOid, // aggminvtransfn
-							regprocForZeroOid, // aggmfinalfn
-							tree.DBoolFalse,   // aggfinalextra
-							tree.DBoolFalse,   // aggmfinalextra
-							sortOperatorOid,   // aggsortop
-							tree.DNull,        // aggtranstype
-							tree.DNull,        // aggtransspace
-							tree.DNull,        // aggmtranstype
-							tree.DNull,        // aggmtransspace
-							tree.DNull,        // agginitval
-							tree.DNull,        // aggminitval
+							aggregateKind,    // aggkind
+							aggNumDirectArgs, // aggnumdirectargs
+							regProcOidZero,   // aggtransfn
+							regProcOidZero,   // aggfinalfn
+							regProcOidZero,   // aggcombinefn
+							regProcOidZero,   // aggserialfn
+							regProcOidZero,   // aggdeserialfn
+							regProcOidZero,   // aggmtransfn
+							regProcOidZero,   // aggminvtransfn
+							regProcOidZero,   // aggmfinalfn
+							tree.DBoolFalse,  // aggfinalextra
+							tree.DBoolFalse,  // aggmfinalextra
+							sortOperatorOid,  // aggsortop
+							tree.DNull,       // aggtranstype
+							tree.DNull,       // aggtransspace
+							tree.DNull,       // aggmtranstype
+							tree.DNull,       // aggmtransspace
+							tree.DNull,       // agginitval
+							tree.DNull,       // aggminitval
 							// These columns were automatically created by pg_catalog_test's missing column generator.
 							tree.DNull, // aggfinalmodify
 							tree.DNull, // aggmfinalmodify
@@ -5029,7 +5169,7 @@ func (h oidHasher) UniqueConstraintOid(
 func (h oidHasher) RegProc(name string) tree.Datum {
 	_, overloads := builtinsregistry.GetBuiltinProperties(name)
 	if len(overloads) == 0 {
-		return tree.DNull
+		return regProcOidZero
 	}
 	return tree.NewDOid(overloads[0].Oid).AsRegProc(name)
 }
@@ -5123,7 +5263,7 @@ func funcVolatility(v catpb.Function_Volatility) string {
 func populateVirtualIndexForTable(
 	ctx context.Context,
 	p *planner,
-	db catalog.DatabaseDescriptor,
+	dbContext catalog.DatabaseDescriptor,
 	tableDesc catalog.TableDescriptor,
 	addRow func(...tree.Datum) error,
 	populateFromTable func(ctx context.Context, p *planner, h oidHasher, db catalog.DatabaseDescriptor,
@@ -5134,7 +5274,8 @@ func populateVirtualIndexForTable(
 
 	// Don't include tables that aren't in the current database unless
 	// they're virtual, dropped tables, or ones that the user can't see.
-	canSeeDescriptor, err := userCanSeeDescriptor(ctx, p, tableDesc, db, true /*allowAdding*/)
+	canSeeDescriptor, err := userCanSeeDescriptor(
+		ctx, p, tableDesc, dbContext, true /*allowAdding*/, false /* includeDropped */)
 	if err != nil {
 		return false, err
 	}
@@ -5142,8 +5283,9 @@ func populateVirtualIndexForTable(
 	// or are dropped. From a virtual index viewpoint, we will consider
 	// this result set as populated, since the underlying full table will
 	// also skip the same descriptors.
-	if (!tableDesc.IsVirtualTable() && tableDesc.GetParentID() != db.GetID()) ||
-		tableDesc.Dropped() || !canSeeDescriptor {
+	if (!tableDesc.IsVirtualTable() && dbContext != nil && tableDesc.GetParentID() != dbContext.GetID()) ||
+		tableDesc.Dropped() ||
+		!canSeeDescriptor {
 		return true, nil
 	}
 	h := makeOidHasher()
@@ -5154,7 +5296,7 @@ func populateVirtualIndexForTable(
 		// Ideally, the catalog API would be able to return the temporary
 		// schemas from other sessions, but it cannot right now. See
 		// https://github.com/cockroachdb/cockroach/issues/97822.
-		if err := forEachSchema(ctx, p, db, false /* requiresPrivileges*/, func(schema catalog.SchemaDescriptor) error {
+		if err := forEachSchema(ctx, p, dbContext, false /* requiresPrivileges*/, func(ctx context.Context, schema catalog.SchemaDescriptor) error {
 			if schema.GetID() == tableDesc.GetParentSchemaID() {
 				sc = schema
 			}
@@ -5165,6 +5307,13 @@ func populateVirtualIndexForTable(
 	}
 	if sc == nil {
 		sc, err = p.Descriptors().ByIDWithLeased(p.txn).WithoutNonPublic().Get().Schema(ctx, tableDesc.GetParentSchemaID())
+		if err != nil {
+			return false, err
+		}
+	}
+	db := dbContext
+	if db == nil {
+		db, err = p.Descriptors().ByIDWithLeased(p.txn).WithoutNonPublic().Get().Database(ctx, tableDesc.GetParentID())
 		if err != nil {
 			return false, err
 		}

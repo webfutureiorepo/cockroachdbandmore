@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build !windows
 // +build !windows
@@ -28,12 +23,16 @@ const (
 	netType  = "unixgram"
 )
 
-func ready() error {
-	return notifyEnv(readyMsg)
+func ready(preNotify func()) error {
+	return notifyEnv(preNotify, readyMsg)
 }
 
-func notifyEnv(msg string) error {
+func notifyEnv(preNotify func(), msg string) error {
 	if path, ok := os.LookupEnv(envName); ok {
+		// Only run preNotify if we need to notify.
+		if preNotify != nil {
+			preNotify()
+		}
 		return notify(path, msg)
 	}
 	return nil

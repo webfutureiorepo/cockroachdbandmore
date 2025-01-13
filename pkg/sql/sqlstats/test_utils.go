@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstats
 
@@ -42,6 +37,17 @@ type TestingKnobs struct {
 	// SkipZoneConfigBootstrap used for backup tests where we want to skip
 	// the Zone Config TTL setup.
 	SkipZoneConfigBootstrap bool
+
+	// ConsumeStmtStatsInterceptor intercepts consumed stmt stats.
+	ConsumeStmtStatsInterceptor StatementVisitor
+
+	// ConsumeTxnStatsInterceptor intercepts consumed transaction stats.
+	ConsumeTxnStatsInterceptor TransactionVisitor
+
+	// OnAfterClear is invoked right after in-memory SQLStats stats cleared.
+	// It can be useful to invoke assertions right after in-memory stats flushed
+	// and cleared, and before new stats added to cache.
+	OnAfterClear func()
 }
 
 // ModuleTestingKnobs implements base.ModuleTestingKnobs interface.

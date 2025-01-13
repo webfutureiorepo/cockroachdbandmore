@@ -1,15 +1,11 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { format as d3Format } from "d3-format";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
+import { format as d3Format } from "d3-format";
+
 import { TransactionInfo } from "../transactionsTable";
 
 type StatementStatistics =
@@ -21,10 +17,9 @@ export const clamp = (i: number) => (i < 0 ? 0 : i);
 
 export const formatTwoPlaces = d3Format(".2f");
 
-export function bar(
-  name: string,
-  value: (d: StatementStatistics | Transaction | TransactionInfo) => number,
-) {
+export function bar<
+  T extends StatementStatistics | Transaction | TransactionInfo,
+>(name: string, value: (d: T) => number) {
   return { name, value };
 }
 

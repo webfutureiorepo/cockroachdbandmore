@@ -1,26 +1,20 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import { Col, Row } from "antd";
-import { ContentionDetails } from "../types";
-import { SummaryCard, SummaryCardItem } from "../../summaryCard";
 import { Heading } from "@cockroachlabs/ui-components";
+import { Col, Row } from "antd";
 import classNames from "classnames/bind";
+import "antd/lib/col/style";
+import React from "react";
 
 // TODO (xinhaoz) we should organize these common page details styles into its own file.
 import styles from "../../statementDetails/statementDetails.module.scss";
-
-import "antd/lib/row/style";
-import "antd/lib/col/style";
+import { SummaryCard, SummaryCardItem } from "../../summaryCard";
+import { ContentionDetails } from "../types";
 import { TransactionDetailsLink } from "../workloadInsights/util";
+import "antd/lib/row/style";
 
 const cx = classNames.bind(styles);
 

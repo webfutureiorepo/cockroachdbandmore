@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package hlc
 
@@ -192,6 +187,8 @@ func (t Timestamp) AsOfSystemTime() string {
 // IsEmpty returns true if t is an empty Timestamp.
 // gcassert:inline
 func (t Timestamp) IsEmpty() bool {
+	// TODO(radu): consider making timestamps with zero wall time and non-zero
+	// logical time illegal. Then we can check just the wall time.
 	return t == Timestamp{}
 }
 
@@ -202,10 +199,10 @@ func (t Timestamp) IsSet() bool {
 }
 
 // AddDuration adds a given duration to this Timestamp. Normally if you want to
-// bump your clock to  the higher of two timestamps, use Forward, however this
+// bump your clock to the higher of two timestamps, use Forward, however this
 // method is here to create a hlc.Timestamp in the future (or past).
 func (t Timestamp) AddDuration(duration time.Duration) Timestamp {
-	return t.Add(duration.Nanoseconds(), t.Logical)
+	return t.Add(duration.Nanoseconds(), 0)
 }
 
 // Add returns a timestamp with the WallTime and Logical components increased.
@@ -317,11 +314,6 @@ func (t Timestamp) ToLegacyTimestamp() LegacyTimestamp { return LegacyTimestamp(
 
 // ToTimestamp converts a LegacyTimestamp to a Timestamp.
 func (t LegacyTimestamp) ToTimestamp() Timestamp { return Timestamp(t) }
-
-// EqOrdering returns whether the receiver sorts equally to the parameter.
-func (t LegacyTimestamp) EqOrdering(s LegacyTimestamp) bool {
-	return t.ToTimestamp().EqOrdering(s.ToTimestamp())
-}
 
 // Less returns whether the receiver is less than the parameter.
 func (t LegacyTimestamp) Less(s LegacyTimestamp) bool {

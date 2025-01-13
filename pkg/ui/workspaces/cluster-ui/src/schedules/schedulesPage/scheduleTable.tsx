@@ -1,17 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+import { Nodes, MagnifyingGlass } from "@cockroachlabs/icons";
 import { Tooltip } from "@cockroachlabs/ui-components";
-import { isEqual, map } from "lodash";
+import classNames from "classnames/bind";
+import isEqual from "lodash/isEqual";
+import map from "lodash/map";
 import React from "react";
 import { Link } from "react-router-dom";
-import { Nodes, MagnifyingGlass } from "@cockroachlabs/icons";
+
 import { Anchor } from "src/anchor";
 import { Schedule, Schedules } from "src/api/schedulesApi";
 import { EmptyTable } from "src/empty";
@@ -20,9 +18,8 @@ import { ColumnDescriptor, SortSetting, SortedTable } from "src/sortedtable";
 import { dropSchedules, pauseSchedules, resumeSchedules } from "src/util/docs";
 import { DATE_FORMAT } from "src/util/format";
 
-import styles from "../schedules.module.scss";
-import classNames from "classnames/bind";
 import { Timestamp, Timezone } from "../../timestamp";
+import styles from "../schedules.module.scss";
 const cx = classNames.bind(styles);
 
 class SchedulesSortedTable extends SortedTable<Schedule> {}
@@ -294,7 +291,7 @@ export class ScheduleTable extends React.Component<
         }),
       )
     ) {
-      this.setState((prevState: Readonly<any>) => {
+      this.setState((prevState: Readonly<ScheduleTableState>) => {
         return {
           pagination: {
             ...prevState.pagination,

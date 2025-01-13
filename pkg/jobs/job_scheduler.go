@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -33,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 )
 
 // CreatedByScheduledJobs identifies the job that was created
@@ -84,7 +80,7 @@ func (s scheduledJobStorageTxn) loadCandidateScheduleForExecution(
 	row, cols, err := s.txn.QueryRowExWithCols(
 		ctx, "find-scheduled-jobs-exec",
 		s.txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		lookupStmt)
 	if err != nil {
 		return nil, err
@@ -114,7 +110,7 @@ func lookupNumRunningJobs(
 	row, err := txn.QueryRowEx(
 		ctx, "lookup-num-running",
 		txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		lookupStmt)
 	if err != nil {
 		return 0, err
@@ -135,14 +131,14 @@ func (s *jobScheduler) processSchedule(
 			// In particular, it'd be nice to add more time when repeatedly rescheduling
 			// a job.  It would also be nice not to log each event.
 			schedule.SetNextRun(s.env.Now().Add(recheckRunningAfter))
-			schedule.SetScheduleStatus("delayed due to %d already running", numRunning)
+			schedule.SetScheduleStatusf("delayed due to %d already running", numRunning)
 			s.metrics.RescheduleWait.Inc(1)
 			return scheduleStorage.Update(ctx, schedule)
 		case jobspb.ScheduleDetails_SKIP:
 			if err := schedule.ScheduleNextRun(); err != nil {
 				return err
 			}
-			schedule.SetScheduleStatus("rescheduled due to %d already running", numRunning)
+			schedule.SetScheduleStatusf("rescheduled due to %d already running", numRunning)
 			s.metrics.RescheduleSkip.Inc(1)
 			return scheduleStorage.Update(ctx, schedule)
 		}
@@ -264,7 +260,7 @@ func (s *jobScheduler) executeCandidateSchedule(
 	if processErr := withSavePoint(ctx, txn.KV(), func() error {
 		if timeout > 0 {
 			return timeutil.RunWithTimeout(
-				ctx, fmt.Sprintf("process-schedule-%d", schedule.ScheduleID()), timeout,
+				ctx, redact.Sprintf("process-schedule-%d", schedule.ScheduleID()), timeout,
 				func(ctx context.Context) error {
 					return s.processSchedule(ctx, schedule, numRunning, txn)
 				})
@@ -326,7 +322,7 @@ func (s *jobScheduler) executeSchedules(ctx context.Context, maxSchedules int64)
 	it, err := s.DB.Executor().QueryIteratorEx(
 		ctx, "find-scheduled-jobs",
 		/*txn=*/ nil,
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		findSchedulesStmt)
 
 	if err != nil {
@@ -431,7 +427,7 @@ func (s *jobScheduler) runDaemon(ctx context.Context, stopper *stop.Stopper) {
 				if err := whenDisabled.withCancelOnDisabled(ctx, &s.Settings.SV, func(ctx context.Context) error {
 					return s.executeSchedules(ctx, maxSchedules)
 				}); err != nil {
-					log.Errorf(ctx, "error executing schedules: %+v", err)
+					log.Errorf(ctx, "error executing schedules: %v", err)
 				}
 			}
 		}

@@ -10,7 +10,7 @@ INSERT INTO db.public.tbl VALUES(-3);
 ALTER TABLE db.public.tbl ADD COLUMN j INT NOT NULL DEFAULT 42;
 EXPLAIN (DDL) rollback at post-commit stage 7 of 7;
 ----
-Schema change plan for rolling back ALTER TABLE ‹db›.public.‹tbl› ADD COLUMN ‹j› INT8 NOT NULL DEFAULT ‹42›;
+Schema change plan for rolling back ALTER TABLE db.public.tbl ADD COLUMN j INT8 NOT NULL DEFAULT ‹42›;
  └── PostCommitNonRevertiblePhase
       ├── Stage 1 of 2 in PostCommitNonRevertiblePhase
       │    ├── 11 elements transitioning toward ABSENT
@@ -26,6 +26,7 @@ Schema change plan for rolling back ALTER TABLE ‹db›.public.‹tbl› ADD CO
       │    │    ├── PUBLIC                → ABSENT      IndexColumn:{DescID: 106 (tbl), ColumnID: 3 (j-), IndexID: 3}
       │    │    └── WRITE_ONLY            → ABSENT      ColumnNotNull:{DescID: 106 (tbl), ColumnID: 3 (j-), IndexID: 2 (tbl_pkey-)}
       │    └── 13 Mutation operations
+      │         ├── MakeWriteOnlyColumnDeleteOnly {"ColumnID":3,"TableID":106}
       │         ├── SetColumnName {"ColumnID":3,"Name":"crdb_internal_co...","TableID":106}
       │         ├── MakeWriteOnlyIndexDeleteOnly {"IndexID":2,"TableID":106}
       │         ├── RemoveColumnFromIndex {"ColumnID":1,"IndexID":2,"TableID":106}
@@ -36,14 +37,13 @@ Schema change plan for rolling back ALTER TABLE ‹db›.public.‹tbl› ADD CO
       │         ├── RemoveColumnFromIndex {"ColumnID":3,"IndexID":3,"Kind":2,"Ordinal":1,"TableID":106}
       │         ├── MakeIndexAbsent {"IndexID":3,"TableID":106}
       │         ├── RemoveColumnNotNull {"ColumnID":3,"TableID":106}
-      │         ├── MakeWriteOnlyColumnDeleteOnly {"ColumnID":3,"TableID":106}
       │         ├── SetJobStateOnDescriptor {"DescriptorID":106}
       │         └── UpdateSchemaChangerJob {"IsNonCancelable":true,"RunningStatus":"PostCommitNonRev..."}
       └── Stage 2 of 2 in PostCommitNonRevertiblePhase
            ├── 6 elements transitioning toward ABSENT
            │    ├── DELETE_ONLY → ABSENT Column:{DescID: 106 (tbl), ColumnID: 3 (j-)}
-           │    ├── PUBLIC      → ABSENT ColumnType:{DescID: 106 (tbl), ColumnFamilyID: 0 (primary), ColumnID: 3 (j-)}
-           │    ├── PUBLIC      → ABSENT ColumnDefaultExpression:{DescID: 106 (tbl), ColumnID: 3 (j-)}
+           │    ├── PUBLIC      → ABSENT ColumnType:{DescID: 106 (tbl), ColumnFamilyID: 0 (primary), ColumnID: 3 (j-), TypeName: "INT8"}
+           │    ├── PUBLIC      → ABSENT ColumnDefaultExpression:{DescID: 106 (tbl), ColumnID: 3 (j-), Expr: 42:::INT8}
            │    ├── DELETE_ONLY → ABSENT PrimaryIndex:{DescID: 106 (tbl), IndexID: 2 (tbl_pkey-), ConstraintID: 2, TemporaryIndexID: 3, SourceIndexID: 1 (tbl_pkey+)}
            │    ├── PUBLIC      → ABSENT IndexData:{DescID: 106 (tbl), IndexID: 2 (tbl_pkey-)}
            │    └── PUBLIC      → ABSENT IndexData:{DescID: 106 (tbl), IndexID: 3}

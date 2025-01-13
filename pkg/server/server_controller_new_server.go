@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -18,7 +13,6 @@ import (
 	"path/filepath"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/mtinfopb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/clientsecopts"
@@ -189,21 +183,6 @@ func makeSharedProcessTenantServerConfig(
 	stopper *stop.Stopper,
 	nodeMetricsRecorder *status.MetricsRecorder,
 ) (baseCfg BaseConfig, sqlCfg SQLConfig, err error) {
-	// We need a value in the version setting prior to the update
-	// coming from the system.settings table. This value must be valid
-	// and compatible with the state of the tenant's keyspace.
-	//
-	// Since we don't know at which binary version the tenant
-	// keyspace was initialized, we must be conservative and
-	// assume it was created a long time ago; and that we may
-	// have to run all known migrations since then. So initialize
-	// the version setting to the minimum supported version.
-	if err := clusterversion.Initialize(
-		ctx, st.Version.MinSupportedVersion(), &st.SV,
-	); err != nil {
-		return BaseConfig{}, SQLConfig{}, err
-	}
-
 	tr := tracing.NewTracerWithOpt(ctx, tracing.WithClusterSettings(&st.SV))
 
 	// Define a tenant store. This will be used to write the
@@ -256,6 +235,7 @@ func makeSharedProcessTenantServerConfig(
 	baseCfg.EnableDemoLoginEndpoint = kvServerCfg.BaseConfig.EnableDemoLoginEndpoint
 	baseCfg.DefaultZoneConfig = kvServerCfg.BaseConfig.DefaultZoneConfig
 	baseCfg.HeapProfileDirName = kvServerCfg.BaseConfig.HeapProfileDirName
+	baseCfg.CPUProfileDirName = kvServerCfg.BaseConfig.CPUProfileDirName
 	baseCfg.GoroutineDumpDirName = kvServerCfg.BaseConfig.GoroutineDumpDirName
 
 	// The ListenerFactory allows us to dynamically choose a
@@ -367,6 +347,7 @@ func makeSharedProcessTenantServerConfig(
 	sqlCfg.LocalKVServerInfo = &kvServerInfo
 
 	sqlCfg.NodeMetricsRecorder = nodeMetricsRecorder
+	sqlCfg.LicenseEnforcer = kvServerCfg.SQLConfig.LicenseEnforcer
 
 	return baseCfg, sqlCfg, nil
 }

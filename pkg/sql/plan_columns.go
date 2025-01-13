@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -100,6 +95,8 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 		return n.columns
 	case *showFingerprintsNode:
 		return n.columns
+	case *callNode:
+		return n.getResultColumns()
 
 	// Nodes with a fixed schema.
 	case *scrubNode:
@@ -139,31 +136,31 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 	// Nodes that have the same schema as their source or their
 	// valueNode helper.
 	case *bufferNode:
-		return getPlanColumns(n.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *distinctNode:
-		return getPlanColumns(n.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *fetchNode:
 		return n.cursor.Types()
 	case *filterNode:
-		return getPlanColumns(n.source.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *max1RowNode:
-		return getPlanColumns(n.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *limitNode:
-		return getPlanColumns(n.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *spoolNode:
-		return getPlanColumns(n.source, mut)
+		return getPlanColumns(n.input, mut)
 	case *serializeNode:
 		return getPlanColumns(n.source, mut)
 	case *saveTableNode:
-		return getPlanColumns(n.source, mut)
+		return getPlanColumns(n.input, mut)
 	case *scanBufferNode:
 		return getPlanColumns(n.buffer, mut)
 	case *sortNode:
-		return getPlanColumns(n.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *topKNode:
-		return getPlanColumns(n.plan, mut)
+		return getPlanColumns(n.input, mut)
 	case *recursiveCTENode:
-		return getPlanColumns(n.initial, mut)
+		return getPlanColumns(n.input, mut)
 
 	case *showVarNode:
 		return colinfo.ResultColumns{

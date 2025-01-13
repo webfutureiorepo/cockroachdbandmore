@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package concurrency provides a concurrency manager structure that
 // encapsulates the details of concurrency control and contention handling for
@@ -206,7 +201,7 @@ type RequestSequencer interface {
 	// the request had against conflicting requests and allowing conflicting
 	// requests that are blocked on this one to proceed. The guard should not
 	// be used after being released.
-	FinishReq(*Guard)
+	FinishReq(context.Context, *Guard)
 }
 
 // ContentionHandler is concerned with handling contention-related errors. This
@@ -437,6 +432,10 @@ type Request struct {
 	// The SafeFormatter capable of formatting the request. This is used to enrich
 	// logging with request level information when latches conflict.
 	BaFmt redact.SafeFormatter
+
+	// DeadlockTimeout is the amount of time that the request will wait on a lock
+	// before pushing the lock holder's transaction for deadlock detection.
+	DeadlockTimeout time.Duration
 }
 
 // Guard is returned from Manager.SequenceReq. The guard is passed back in to
@@ -521,7 +520,7 @@ type latchManager interface {
 	Poison(latchGuard)
 
 	// Release a guard's latches, relinquish its protection from conflicting requests.
-	Release(latchGuard)
+	Release(ctx context.Context, lg latchGuard)
 
 	// Metrics returns information about the state of the latchManager.
 	Metrics() LatchMetrics

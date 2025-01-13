@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
@@ -21,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
-	"github.com/cockroachdb/cockroach/pkg/util/future"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -62,13 +56,15 @@ var (
 	)
 )
 
+func newRetryErrBufferCapacityExceeded() error {
+	return kvpb.NewRangeFeedRetryError(kvpb.RangeFeedRetryError_REASON_SLOW_CONSUMER)
+}
+
 // newErrBufferCapacityExceeded creates an error that is returned to subscribers
 // if the rangefeed processor is not able to keep up with the flow of incoming
 // events and is forced to drop events in order to not block.
 func newErrBufferCapacityExceeded() *kvpb.Error {
-	return kvpb.NewError(
-		kvpb.NewRangeFeedRetryError(kvpb.RangeFeedRetryError_REASON_SLOW_CONSUMER),
-	)
+	return kvpb.NewError(newRetryErrBufferCapacityExceeded())
 }
 
 // Config encompasses the configuration required to create a Processor.
@@ -99,7 +95,8 @@ type Config struct {
 	// Optional Processor memory budget.
 	MemBudget *FeedBudget
 
-	// Rangefeed scheduler to use for the processor. Must be provided.
+	// Rangefeed scheduler to use for processor. If set, SchedulerProcessor would
+	// be instantiated.
 	Scheduler *Scheduler
 
 	// Priority marks this rangefeed as a priority rangefeed, which will run in a
@@ -107,11 +104,18 @@ type Config struct {
 	// for low-volume system ranges, since the worker pool is small (default 2).
 	// Only has an effect when Scheduler is used.
 	Priority bool
+
+	// UnregisterFromReplica is a callback provided from the
+	// replica that this processor can call when shutting down to
+	// remove itself from the replica.
+	UnregisterFromReplica func(Processor)
 }
 
 // SetDefaults initializes unset fields in Config to values
 // suitable for use by a Processor.
 func (sc *Config) SetDefaults() {
+	// Some tests don't set the TxnPusher, so we avoid setting a default push txn
+	// interval in such cases #121429.
 	if sc.TxnPusher == nil {
 		if sc.PushTxnsAge != 0 {
 			panic("nil TxnPusher with non-zero PushTxnsAge")
@@ -184,15 +188,16 @@ type Processor interface {
 	//
 	// NB: startTS is exclusive; the first possible event will be at startTS.Next().
 	Register(
+		streamCtx context.Context,
 		span roachpb.RSpan,
 		startTS hlc.Timestamp, // exclusive
 		catchUpIter *CatchUpIterator,
 		withDiff bool,
 		withFiltering bool,
+		withOmitRemote bool,
 		stream Stream,
-		disconnectFn func(),
-		done *future.ErrorFuture,
-	) (bool, *Filter)
+	) (bool, Disconnector, *Filter)
+
 	// DisconnectSpanWithErr disconnects all rangefeed registrations that overlap
 	// the given span with the given error.
 	DisconnectSpanWithErr(span roachpb.Span, pErr *kvpb.Error)
@@ -293,23 +298,13 @@ type syncEvent struct {
 	testRegCatchupSpan *roachpb.Span
 }
 
+// logicalOpMetadata is metadata associated with a logical Op.
+type logicalOpMetadata struct {
+	omitInRangefeeds bool
+	originID         uint32
+}
+
 // IntentScannerConstructor is used to construct an IntentScanner. It
 // should be called from underneath a stopper task to ensure that the
 // engine has not been closed.
 type IntentScannerConstructor func() IntentScanner
-
-// calculateDateEventSize returns estimated size of the event that contain actual
-// data. We only account for logical ops and sst's. Those events come from raft
-// and are budgeted. Other events come from processor jobs and update timestamps
-// we don't take them into account as they are supposed to be small and to avoid
-// complexity of having multiple producers getting from budget.
-func calculateDateEventSize(e event) int64 {
-	var size int64
-	for _, op := range e.ops {
-		size += int64(op.Size())
-	}
-	if e.sst != nil {
-		size += int64(len(e.sst.data))
-	}
-	return size
-}

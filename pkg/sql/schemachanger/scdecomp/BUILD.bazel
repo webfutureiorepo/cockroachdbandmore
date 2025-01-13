@@ -29,6 +29,7 @@ go_library(
         "//pkg/util/iterutil",
         "//pkg/util/protoutil",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_cockroachdb_redact//:redact",
         "@com_github_lib_pq//oid",
     ],
 )
@@ -40,10 +41,6 @@ go_test(
         "main_test.go",
     ],
     data = glob(["testdata/**"]),
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/security/securityassets",
         "//pkg/security/securitytest",

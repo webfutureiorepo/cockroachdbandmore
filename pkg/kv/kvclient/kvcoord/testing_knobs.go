@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -49,6 +44,15 @@ type ClientTestingKnobs struct {
 	// only applies to requests sent with the LEASEHOLDER routing policy.
 	DontReorderReplicas bool
 
+	// RouteToLeaseholderFirst, if set, the DistSender will move the leaseholder
+	// to the first replica in the transport list when the policy is
+	// RoutingPolicy_LEASEHOLDER. The leaseholder may still be the first replica
+	// it sends the request to if it is also the closest replica. Requests that
+	// are targeted for the leaseholder will instead be proxied to it. This
+	// parameter is typically not set for tests and instead is controlled by
+	// metamorphicRouteToLeaseholderFirst.
+	RouteToLeaseholderFirst bool
+
 	// CommitWaitFilter allows tests to instrument the beginning of a transaction
 	// commit wait sleep.
 	CommitWaitFilter func()
@@ -62,6 +66,11 @@ type ClientTestingKnobs struct {
 	// TransactionRetryFilter allows transaction retry loops to inject retriable
 	// errors.
 	TransactionRetryFilter func(roachpb.Transaction) bool
+
+	// DisableTxnAnchorKeyRandomization, if set, disables randomization when
+	// picking a transaction's anchor key; instead, the transaction is anchored at
+	// the first key it locks.
+	DisableTxnAnchorKeyRandomization bool
 }
 
 var _ base.ModuleTestingKnobs = &ClientTestingKnobs{}

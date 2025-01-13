@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemadesc_test
 
@@ -241,5 +236,63 @@ func TestValidateCrossSchemaReferences(t *testing.T) {
 		} else if expectedErr != err.Error() {
 			t.Errorf("%d: expected \"%s\", but found \"%s\"", i, expectedErr, err.Error())
 		}
+	}
+}
+
+func TestStripNonExistentRoles(t *testing.T) {
+	badOwnerPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.MakeSQLUsernameFromPreNormalizedString("dropped_user"))
+	goodOwnerPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.AdminRoleName())
+	badPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.RootUserName())
+	goodPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.RootUserName())
+	badPrivilege.Users = append(badPrivilege.Users, catpb.UserPrivileges{
+		UserProto: username.TestUserName().EncodeProto(),
+	})
+	tests := []struct {
+		name    string
+		desc    descpb.SchemaDescriptor
+		expDesc descpb.SchemaDescriptor
+	}{
+		{
+			name: "grants reference missing user",
+			desc: descpb.SchemaDescriptor{
+				ID:         52,
+				ParentID:   51,
+				Name:       "schema1",
+				Privileges: badPrivilege,
+			},
+			expDesc: descpb.SchemaDescriptor{
+				ID:         52,
+				ParentID:   51,
+				Name:       "schema1",
+				Privileges: goodPrivilege,
+			},
+		},
+		{
+			name: "missing owner",
+			desc: descpb.SchemaDescriptor{
+				ID:         52,
+				ParentID:   51,
+				Name:       "schema1",
+				Privileges: badOwnerPrivilege,
+			},
+			expDesc: descpb.SchemaDescriptor{
+				ID:         52,
+				ParentID:   51,
+				Name:       "schema1",
+				Privileges: goodOwnerPrivilege,
+			},
+		},
+	}
+	for _, test := range tests {
+		b := schemadesc.NewBuilder(&test.desc)
+		require.NoError(t, b.RunPostDeserializationChanges())
+		out := schemadesc.NewBuilder(&test.expDesc)
+		require.NoError(t, out.RunPostDeserializationChanges())
+		require.NoError(t, b.StripNonExistentRoles(func(role username.SQLUsername) bool {
+			return role.IsAdminRole() || role.IsPublicRole() || role.IsRootUser()
+		}))
+		desc := b.BuildCreatedMutableSchema()
+		require.True(t, desc.GetPostDeserializationChanges().Contains(catalog.StrippedNonExistentRoles))
+		require.Equal(t, out.BuildCreatedMutableSchema().SchemaDesc(), desc.SchemaDesc())
 	}
 }

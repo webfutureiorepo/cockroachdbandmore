@@ -4,13 +4,8 @@
 
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlsmith
 
@@ -69,13 +64,8 @@ func (w *statementSampler) Next() statement {
 
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // tableExprWeight is the generic weight type.
 type tableExprWeight struct {
@@ -126,13 +116,8 @@ func (w *tableExprSampler) Next() tableExpr {
 
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // selectStatementWeight is the generic weight type.
 type selectStatementWeight struct {
@@ -185,13 +170,8 @@ func (w *selectStatementSampler) Next() selectStatement {
 
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // scalarExprWeight is the generic weight type.
 type scalarExprWeight struct {
@@ -237,5 +217,48 @@ func (w *scalarExprSampler) Next() scalarExpr {
 	w.mu.Lock()
 	v := w.samples[w.rnd.Intn(len(w.samples))]
 	w.mu.Unlock()
+	return v
+}
+
+// newWeightedPLpgSQLStmtSampler creates a plpgsqlStmtSampler that produces
+// plpgsqlStatements. They are returned at the relative frequency of the values
+// of weights. All weights must be >= 1.
+func newWeightedPLpgSQLStmtSampler(
+	weights []plpgsqlStatementWeight, seed int64,
+) *plpgsqlStmtSampler {
+	sum := 0
+	for _, w := range weights {
+		if w.weight < 1 {
+			panic("expected weight >= 1")
+		}
+		sum += w.weight
+	}
+	if sum == 0 {
+		panic("expected weights")
+	}
+	samples := make([]plpgsqlStatement, sum)
+	pos := 0
+	for _, w := range weights {
+		for count := 0; count < w.weight; count++ {
+			samples[pos] = w.elem
+			pos++
+		}
+	}
+	return &plpgsqlStmtSampler{
+		rnd:     rand.New(rand.NewSource(seed)),
+		samples: samples,
+	}
+}
+
+type plpgsqlStmtSampler struct {
+	mu      syncutil.Mutex
+	rnd     *rand.Rand
+	samples []plpgsqlStatement
+}
+
+func (s *plpgsqlStmtSampler) Next() plpgsqlStatement {
+	s.mu.Lock()
+	v := s.samples[s.rnd.Intn(len(s.samples))]
+	s.mu.Unlock()
 	return v
 }

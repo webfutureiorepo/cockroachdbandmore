@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecovery
 
@@ -311,6 +306,19 @@ func applyReplicaUpdate(
 	// Refresh stats
 	if err := sl.SetMVCCStats(ctx, readWriter, &ms); err != nil {
 		return PrepareReplicaReport{}, errors.Wrap(err, "updating MVCCStats")
+	}
+
+	// Update the HardState to clear the LeadEpoch, as otherwise we may risk
+	// seeing an epoch regression in raft. See #136908 for more details.
+	hs, err := sl.LoadHardState(ctx, readWriter)
+	if err != nil {
+		return PrepareReplicaReport{}, errors.Wrap(err, "loading HardState")
+	}
+
+	hs.LeadEpoch = 0
+
+	if err := sl.SetHardState(ctx, readWriter, hs); err != nil {
+		return PrepareReplicaReport{}, errors.Wrap(err, "setting HardState")
 	}
 
 	return report, nil

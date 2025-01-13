@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -35,19 +30,14 @@ func registerDrop(r registry.Registry) {
 	// rows). Next, it issues a `DROP` for the whole database, and sets the GC TTL
 	// to one second.
 	runDrop := func(ctx context.Context, t test.Test, c cluster.Cluster, warehouses, nodes int) {
-		c.Put(ctx, t.DeprecatedWorkload(), "./workload", c.Range(1, nodes))
 		settings := install.MakeClusterSettings()
 		settings.Env = append(settings.Env, "COCKROACH_MEMPROF_INTERVAL=15s")
-		c.Start(ctx, t.L(), option.DefaultStartOpts(), settings, c.Range(1, nodes))
+		c.Start(ctx, t.L(), option.DefaultStartOpts(), settings)
 
-		m := c.NewMonitor(ctx, c.Range(1, nodes))
+		m := c.NewMonitor(ctx, c.All())
 		m.Go(func(ctx context.Context) error {
 			t.WorkerStatus("importing TPCC fixture")
-			pgurl, err := roachtestutil.DefaultPGUrl(ctx, c, t.L(), c.Nodes(1))
-			if err != nil {
-				t.Fatal(err)
-			}
-			c.Run(ctx, option.WithNodes(c.Node(1)), tpccImportCmd(warehouses, pgurl))
+			c.Run(ctx, option.WithNodes(c.Node(1)), tpccImportCmd("", warehouses, "{pgurl:1}"))
 
 			// Don't open the DB connection until after the data has been imported.
 			// Otherwise the ALTER TABLE query below might fail to find the
@@ -153,7 +143,7 @@ func registerDrop(r registry.Registry) {
 			if !allNodesSpaceCleared {
 				sizeReport += fmt.Sprintf("disk space usage has not dropped below %s on all nodes.",
 					humanizeutil.IBytes(int64(maxSizeBytes)))
-				t.Fatalf(sizeReport)
+				t.Fatal(sizeReport)
 			}
 
 			return nil

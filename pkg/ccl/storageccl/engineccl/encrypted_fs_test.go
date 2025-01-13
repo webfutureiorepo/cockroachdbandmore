@@ -1,10 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package engineccl
 
@@ -27,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/storageutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -34,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
-	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/cockroachdb/pebble/vfs/errorfs"
 	"github.com/stretchr/testify/require"
@@ -46,7 +43,7 @@ func TestEncryptedFS(t *testing.T) {
 	memFS := vfs.NewMem()
 
 	require.NoError(t, memFS.MkdirAll("/bar", os.ModePerm))
-	fileRegistry := &storage.PebbleFileRegistry{FS: memFS, DBDir: "/bar"}
+	fileRegistry := &fs.FileRegistry{FS: memFS, DBDir: "/bar"}
 	require.NoError(t, fileRegistry.Load(context.Background()))
 
 	// Using a StoreKeyManager for the test since it is easy to create. Write a key for the
@@ -55,7 +52,7 @@ func TestEncryptedFS(t *testing.T) {
 	for i := 0; i < keyIDLength+16; i++ {
 		b = append(b, 'a')
 	}
-	f, err := memFS.Create("keyfile")
+	f, err := memFS.Create("keyfile", fs.UnspecifiedWriteCategory)
 	require.NoError(t, err)
 	bReader := bytes.NewReader(b)
 	_, err = io.Copy(f, bReader)
@@ -66,7 +63,7 @@ func TestEncryptedFS(t *testing.T) {
 
 	streamCreator := &FileCipherStreamCreator{keyManager: keyManager, envType: enginepb.EnvType_Store}
 
-	fs := &encryptedFS{FS: memFS, fileRegistry: fileRegistry, streamCreator: streamCreator}
+	encryptedFS := &encryptedFS{FS: memFS, fileRegistry: fileRegistry, streamCreator: streamCreator}
 
 	// Style (and most code) is from Pebble's mem_fs_test.go. We are mainly testing the integration of
 	// encryptedFS with FileRegistry and FileCipherStreamCreator. This uses real encryption but the
@@ -128,19 +125,19 @@ func TestEncryptedFS(t *testing.T) {
 		)
 		switch s[0] {
 		case "create":
-			g, err = fs.Create(s[1])
+			g, err = encryptedFS.Create(s[1], fs.UnspecifiedWriteCategory)
 		case "link":
-			err = fs.Link(s[1], s[2])
+			err = encryptedFS.Link(s[1], s[2])
 		case "open":
-			g, err = fs.Open(s[1])
+			g, err = encryptedFS.Open(s[1])
 		case "mkdirall":
-			err = fs.MkdirAll(s[1], 0755)
+			err = encryptedFS.MkdirAll(s[1], 0755)
 		case "remove":
-			err = fs.Remove(s[1])
+			err = encryptedFS.Remove(s[1])
 		case "rename":
-			err = fs.Rename(s[1], s[2])
+			err = encryptedFS.Rename(s[1], s[2])
 		case "reuseForWrite":
-			g, err = fs.ReuseForWrite(s[1], s[2])
+			g, err = encryptedFS.ReuseForWrite(s[1], s[2], fs.UnspecifiedWriteCategory)
 		case "f.write":
 			_, err = f.Write([]byte(s[1]))
 		case "f.read":
@@ -202,7 +199,7 @@ func TestEncryptedFSUnencryptedFiles(t *testing.T) {
 	memFS := vfs.NewMem()
 	require.NoError(t, memFS.MkdirAll("/foo", os.ModeDir))
 
-	fileRegistry := &storage.PebbleFileRegistry{FS: memFS, DBDir: "/foo"}
+	fileRegistry := &fs.FileRegistry{FS: memFS, DBDir: "/foo"}
 	require.NoError(t, fileRegistry.Load(context.Background()))
 
 	keyManager := &StoreKeyManager{fs: memFS, activeKeyFilename: "plain", oldKeyFilename: "plain"}
@@ -210,12 +207,12 @@ func TestEncryptedFSUnencryptedFiles(t *testing.T) {
 
 	streamCreator := &FileCipherStreamCreator{keyManager: keyManager, envType: enginepb.EnvType_Store}
 
-	fs := &encryptedFS{FS: memFS, fileRegistry: fileRegistry, streamCreator: streamCreator}
+	encryptedFS := &encryptedFS{FS: memFS, fileRegistry: fileRegistry, streamCreator: streamCreator}
 
 	var filesCreated []string
 	for i := 0; i < 5; i++ {
 		filename := fmt.Sprintf("file%d", i)
-		f, err := fs.Create(filename)
+		f, err := encryptedFS.Create(filename, fs.UnspecifiedWriteCategory)
 		require.NoError(t, err)
 		filesCreated = append(filesCreated, filename)
 		require.NoError(t, f.Close())
@@ -227,105 +224,116 @@ func TestEncryptedFSUnencryptedFiles(t *testing.T) {
 	}
 }
 
-// Minimal test that creates an encrypted Pebble that exercises creation and reading of encrypted
-// files, rereading data after reopening the engine, and stats code.
+// Minimal test that creates an encrypted Pebble that exercises creation and
+// reading of encrypted files, rereading data after reopening the engine, and
+// stats code.
 func TestPebbleEncryption(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	opts := storage.DefaultPebbleOptions()
-	opts.Cache = pebble.NewCache(1 << 20)
-	defer opts.Cache.Unref()
+	const stickyVFSID = `foo`
 
-	memFS := vfs.NewMem()
-	opts.FS = memFS
+	ctx := context.Background()
+	stickyRegistry := fs.NewStickyRegistry()
 	keyFile128 := "111111111111111111111111111111111234567890123456"
-	writeToFile(t, opts.FS, "16.key", []byte(keyFile128))
-	var encOptions baseccl.EncryptionOptions
-	encOptions.KeySource = baseccl.EncryptionKeySource_KeyFiles
-	encOptions.KeyFiles = &baseccl.EncryptionKeyFiles{
-		CurrentKey: "16.key",
-		OldKey:     "plain",
-	}
-	encOptions.DataKeyRotationPeriod = 1000 // arbitrary seconds
-	encOptionsBytes, err := protoutil.Marshal(&encOptions)
+	writeToFile(t, stickyRegistry.Get(stickyVFSID), "16.key", []byte(keyFile128))
+
+	encOptionsBytes, err := protoutil.Marshal(&baseccl.EncryptionOptions{
+		KeySource: baseccl.EncryptionKeySource_KeyFiles,
+		KeyFiles: &baseccl.EncryptionKeyFiles{
+			CurrentKey: "16.key",
+			OldKey:     "plain",
+		},
+		DataKeyRotationPeriod: 1000, // arbitrary seconds
+	})
 	require.NoError(t, err)
-	db, err := storage.NewPebble(
-		context.Background(),
-		storage.PebbleConfig{
-			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				Settings:          cluster.MakeTestingClusterSettings(),
-				UseFileRegistry:   true,
+
+	func() {
+		// Initialize the filesystem env.
+		env, err := fs.InitEnvFromStoreSpec(
+			ctx,
+			base.StoreSpec{
+				InMemory:          true,
+				Attributes:        roachpb.Attributes{},
+				Size:              base.SizeSpec{InBytes: 512 << 20},
 				EncryptionOptions: encOptionsBytes,
+				StickyVFSID:       stickyVFSID,
 			},
-			Opts: opts,
-		})
-	require.NoError(t, err)
-	// TODO(sbhola): Ensure that we are not returning the secret data keys by mistake.
-	r, err := db.GetEncryptionRegistries()
-	require.NoError(t, err)
+			fs.ReadWrite,
+			stickyRegistry, /* sticky registry */
+			nil,            /* statsCollector */
+		)
+		require.NoError(t, err)
+		db, err := storage.Open(ctx, env, cluster.MakeTestingClusterSettings())
+		require.NoError(t, err)
+		defer db.Close()
 
-	var fileRegistry enginepb.FileRegistry
-	require.NoError(t, protoutil.Unmarshal(r.FileRegistry, &fileRegistry))
-	var keyRegistry enginepbccl.DataKeysRegistry
-	require.NoError(t, protoutil.Unmarshal(r.KeyRegistry, &keyRegistry))
+		// TODO(sbhola): Ensure that we are not returning the secret data keys by mistake.
+		r, err := db.GetEncryptionRegistries()
+		require.NoError(t, err)
 
-	stats, err := db.GetEnvStats()
-	require.NoError(t, err)
-	// Opening the DB should've created OPTIONS, MANIFEST, and the WAL.
-	require.GreaterOrEqual(t, stats.TotalFiles, uint64(3))
-	// We also created markers for the format version and the manifest.
-	require.Equal(t, uint64(5), stats.ActiveKeyFiles)
-	var s enginepbccl.EncryptionStatus
-	require.NoError(t, protoutil.Unmarshal(stats.EncryptionStatus, &s))
-	require.Equal(t, "16.key", s.ActiveStoreKey.Source)
-	require.Equal(t, int32(enginepbccl.EncryptionType_AES128_CTR), stats.EncryptionType)
-	t.Logf("EnvStats:\n%+v\n\n", *stats)
+		var fileRegistry enginepb.FileRegistry
+		require.NoError(t, protoutil.Unmarshal(r.FileRegistry, &fileRegistry))
+		var keyRegistry enginepbccl.DataKeysRegistry
+		require.NoError(t, protoutil.Unmarshal(r.KeyRegistry, &keyRegistry))
 
-	batch := db.NewWriteBatch()
-	defer batch.Close()
-	require.NoError(t, batch.PutUnversioned(roachpb.Key("a"), []byte("a")))
-	require.NoError(t, batch.Commit(true))
-	require.NoError(t, db.Flush())
-	require.Equal(t, []byte("a"), storageutils.MVCCGetRaw(t, db, storageutils.PointKey("a", 0)))
-	db.Close()
+		stats, err := db.GetEnvStats()
+		require.NoError(t, err)
+		// Opening the DB should've created OPTIONS, MANIFEST, and the WAL.
+		require.GreaterOrEqual(t, stats.TotalFiles, uint64(3))
+		// We also created markers for the format version and the manifest.
+		require.Equal(t, uint64(5), stats.ActiveKeyFiles)
+		var s enginepbccl.EncryptionStatus
+		require.NoError(t, protoutil.Unmarshal(stats.EncryptionStatus, &s))
+		require.Equal(t, "16.key", s.ActiveStoreKey.Source)
+		require.Equal(t, int32(enginepbccl.EncryptionType_AES128_CTR), stats.EncryptionType)
+		t.Logf("EnvStats:\n%+v\n\n", *stats)
 
-	opts2 := storage.DefaultPebbleOptions()
-	opts2.Cache = pebble.NewCache(1 << 20)
-	defer opts2.Cache.Unref()
+		batch := db.NewWriteBatch()
+		defer batch.Close()
+		require.NoError(t, batch.PutUnversioned(roachpb.Key("a"), []byte("a")))
+		require.NoError(t, batch.Commit(true))
+		require.NoError(t, db.Flush())
+		require.Equal(t, []byte("a"), storageutils.MVCCGetRaw(t, db, storageutils.PointKey("a", 0)))
+	}()
 
-	opts2.FS = memFS
-	db, err = storage.NewPebble(
-		context.Background(),
-		storage.PebbleConfig{
-			StorageConfig: base.StorageConfig{
-				Settings:          cluster.MakeTestingClusterSettings(),
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				UseFileRegistry:   true,
+	func() {
+		// Initialize the filesystem env again, replaying the file registries.
+		env, err := fs.InitEnvFromStoreSpec(
+			ctx,
+			base.StoreSpec{
+				InMemory:          true,
+				Attributes:        roachpb.Attributes{},
+				Size:              base.SizeSpec{InBytes: 512 << 20},
 				EncryptionOptions: encOptionsBytes,
+				StickyVFSID:       stickyVFSID,
 			},
-			Opts: opts2,
-		})
-	require.NoError(t, err)
-	require.Equal(t, []byte("a"), storageutils.MVCCGetRaw(t, db, storageutils.PointKey("a", 0)))
+			fs.ReadWrite,
+			stickyRegistry, /* sticky registry */
+			nil,            /* statsCollector */
+		)
+		require.NoError(t, err)
+		db, err := storage.Open(ctx, env, cluster.MakeTestingClusterSettings())
+		require.NoError(t, err)
+		defer db.Close()
+		require.Equal(t, []byte("a"), storageutils.MVCCGetRaw(t, db, storageutils.PointKey("a", 0)))
 
-	// Flushing should've created a new sstable under the active key.
-	stats, err = db.GetEnvStats()
-	require.NoError(t, err)
-	t.Logf("EnvStats:\n%+v\n\n", *stats)
-	require.GreaterOrEqual(t, stats.TotalFiles, uint64(5))
-	require.LessOrEqual(t, uint64(5), stats.ActiveKeyFiles)
-	require.Equal(t, stats.TotalBytes, stats.ActiveKeyBytes)
-
-	db.Close()
+		// Flushing should've created a new sstable under the active key.
+		stats, err := db.GetEnvStats()
+		require.NoError(t, err)
+		t.Logf("EnvStats:\n%+v\n\n", *stats)
+		require.GreaterOrEqual(t, stats.TotalFiles, uint64(5))
+		require.LessOrEqual(t, uint64(5), stats.ActiveKeyFiles)
+		require.Equal(t, stats.TotalBytes, stats.ActiveKeyBytes)
+	}()
 }
 
 func TestPebbleEncryption2(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	memFS := vfs.NewMem()
+	const stickyVFSID = `foo`
+	stickyRegistry := fs.NewStickyRegistry()
+
+	memFS := stickyRegistry.Get(stickyVFSID)
 	firstKeyFile128 := "111111111111111111111111111111111234567890123456"
 	secondKeyFile128 := "111111111111111111111111111111198765432198765432"
 	writeToFile(t, memFS, "16v1.key", []byte(firstKeyFile128))
@@ -367,35 +375,36 @@ func TestPebbleEncryption2(t *testing.T) {
 	addKeyAndValidate := func(
 		key string, val string, encKeyFile string, oldEncFileKey string,
 	) {
-		encOptions := baseccl.EncryptionOptions{
+		encOptionsBytes, err := protoutil.Marshal(&baseccl.EncryptionOptions{
 			KeySource: baseccl.EncryptionKeySource_KeyFiles,
 			KeyFiles: &baseccl.EncryptionKeyFiles{
 				CurrentKey: encKeyFile,
 				OldKey:     oldEncFileKey,
 			},
 			DataKeyRotationPeriod: 1000,
-		}
-		encOptionsBytes, err := protoutil.Marshal(&encOptions)
+		})
 		require.NoError(t, err)
 
-		opts := storage.DefaultPebbleOptions()
-		opts.FS = memFS
-		opts.Cache = pebble.NewCache(1 << 20)
-		defer opts.Cache.Unref()
-
-		db, err := storage.NewPebble(
-			context.Background(),
-			storage.PebbleConfig{
-				StorageConfig: base.StorageConfig{
-					Settings:          cluster.MakeTestingClusterSettings(),
-					Attrs:             roachpb.Attributes{},
-					MaxSize:           512 << 20,
-					UseFileRegistry:   true,
-					EncryptionOptions: encOptionsBytes,
-				},
-				Opts: opts,
-			})
+		// Initialize the filesystem env.
+		ctx := context.Background()
+		env, err := fs.InitEnvFromStoreSpec(
+			ctx,
+			base.StoreSpec{
+				InMemory:          true,
+				Attributes:        roachpb.Attributes{},
+				Size:              base.SizeSpec{InBytes: 512 << 20},
+				EncryptionOptions: encOptionsBytes,
+				StickyVFSID:       stickyVFSID,
+			},
+			fs.ReadWrite,
+			stickyRegistry, /* sticky registry */
+			nil,            /* statsCollector */
+		)
 		require.NoError(t, err)
+		db, err := storage.Open(ctx, env, cluster.MakeTestingClusterSettings())
+		require.NoError(t, err)
+		defer db.Close()
+
 		require.True(t, validateKeys(db))
 
 		keys[key] = true
@@ -504,7 +513,7 @@ type encryptedTestFS struct {
 	errorProb       float64
 	errorRand       *rand.Rand
 
-	encEnv *storage.EncryptionEnv
+	encEnv *fs.EncryptionEnv
 }
 
 func (etfs *encryptedTestFS) fs() vfs.FS {
@@ -524,12 +533,12 @@ func (etfs *encryptedTestFS) restart() error {
 		etfs.encEnv.Closer.Close()
 		etfs.encEnv = nil
 	}
-	etfs.mem.ResetToSyncedState()
+	etfs.mem = etfs.mem.CrashClone(vfs.CrashCloneCfg{})
 	ei := &errorInjector{prob: etfs.errorProb, rand: etfs.errorRand}
 	fsMeta := errorfs.Wrap(etfs.mem, ei)
 	// TODO(sumeer): Do deterministic rollover of file registry after small
 	// number of operations.
-	fileRegistry := &storage.PebbleFileRegistry{
+	fileRegistry := &fs.FileRegistry{
 		FS: fsMeta, DBDir: "", ReadOnly: false, NumOldRegistryFiles: 2}
 	if err := fileRegistry.Load(context.Background()); err != nil {
 		return err
@@ -547,7 +556,7 @@ func (etfs *encryptedTestFS) restart() error {
 }
 
 func makeEncryptedTestFS(t *testing.T, errorProb float64, errorRand *rand.Rand) *encryptedTestFS {
-	mem := vfs.NewStrictMem()
+	mem := vfs.NewCrashableMem()
 	keyFile128 := "111111111111111111111111111111111234567890123456"
 	writeToFile(t, mem, "16.key", []byte(keyFile128))
 	dir, err := mem.OpenDir("/")
@@ -612,7 +621,7 @@ func (op *createOp) run(t *fsTest) {
 	// Create is idempotent, so we simply retry on injected errors.
 	withRetry(t, func() error {
 		var f vfs.File
-		f, err := t.fs.fs().Create(op.name)
+		f, err := t.fs.fs().Create(op.name, fs.UnspecifiedWriteCategory)
 		if err != nil {
 			return err
 		}

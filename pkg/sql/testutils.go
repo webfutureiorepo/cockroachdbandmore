@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -50,7 +45,7 @@ func CreateTestTableDescriptor(
 	if err != nil {
 		return nil, err
 	}
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	evalCtx := eval.MakeTestingEvalContext(st)
 	sessionData := &sessiondata.SessionData{
 		LocalOnlySessionData: sessiondatapb.LocalOnlySessionData{
@@ -77,6 +72,7 @@ func CreateTestTableDescriptor(
 			&evalCtx,
 			sessionData,
 			tree.PersistencePermanent,
+			nil, /* colToSequenceRefs */
 		)
 		return desc, err
 	case *tree.CreateSequence:
@@ -131,7 +127,8 @@ func (dsp *DistSQLPlanner) Exec(
 	distribute bool,
 ) error {
 	p := localPlanner.(*planner)
-	p.stmt = makeStatement(stmt, clusterunique.ID{} /* queryID */)
+	p.stmt = makeStatement(stmt, clusterunique.ID{}, /* queryID */
+		tree.FmtFlags(queryFormattingForFingerprintsMask.Get(&p.execCfg.Settings.SV)))
 	if err := p.makeOptimizerPlan(ctx); err != nil {
 		return err
 	}
@@ -151,9 +148,9 @@ func (dsp *DistSQLPlanner) Exec(
 	)
 	defer recv.Release()
 
-	distributionType := DistributionType(DistributionTypeNone)
+	distributionType := DistributionType(LocalDistribution)
 	if distribute {
-		distributionType = DistributionTypeSystemTenantOnly
+		distributionType = FullDistribution
 	}
 	evalCtx := p.ExtendedEvalContext()
 	planCtx := execCfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, p, p.txn,
@@ -162,37 +159,4 @@ func (dsp *DistSQLPlanner) Exec(
 
 	dsp.PlanAndRun(ctx, evalCtx, planCtx, p.txn, p.curPlan.main, recv, nil /* finishedSetupFn */)
 	return rw.Err()
-}
-
-// ExecLocalAll is basically a conn_executor free version of execWithDistSQLEngine
-// hard coded for non-distributed statements (currently used by copy testing).
-func (dsp *DistSQLPlanner) ExecLocalAll(
-	ctx context.Context, execCfg ExecutorConfig, p *planner, res RestrictedCommandResult,
-) error {
-	defer p.curPlan.close(ctx)
-	recv := MakeDistSQLReceiver(
-		ctx,
-		res,
-		p.stmt.AST.StatementReturnType(),
-		execCfg.RangeDescriptorCache,
-		p.txn,
-		execCfg.Clock,
-		p.ExtendedEvalContext().Tracing,
-	)
-	defer recv.Release()
-
-	distributionType := DistributionType(DistributionTypeNone)
-	evalCtx := p.ExtendedEvalContext()
-	planCtx := execCfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, p, p.txn,
-		distributionType)
-	planCtx.stmtType = recv.stmtType
-
-	var factoryEvalCtx = extendedEvalContext{Tracing: &SessionTracing{}}
-	evalCtxFactory := func(bool) *extendedEvalContext {
-		factoryEvalCtx.Context = evalCtx.Context
-		factoryEvalCtx.Placeholders = &p.semaCtx.Placeholders
-		factoryEvalCtx.Annotations = &p.semaCtx.Annotations
-		return &factoryEvalCtx
-	}
-	return dsp.PlanAndRunAll(ctx, evalCtx, planCtx, p, recv, evalCtxFactory)
 }

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -126,7 +121,7 @@ func (o *Optimizer) TryPlaceholderFastPath() (_ opt.Expr, ok bool, err error) {
 	var foundIndex cat.Index
 	for ord, n := 0, tabMeta.Table.IndexCount(); ord < n; ord++ {
 		index := tabMeta.Table.Index(ord)
-		if index.IsInverted() {
+		if index.IsInverted() || index.IsVector() {
 			continue
 		}
 
@@ -216,7 +211,7 @@ func (o *Optimizer) TryPlaceholderFastPath() (_ opt.Expr, ok bool, err error) {
 		ScanPrivate: newPrivate,
 	}
 	placeholderScan = o.mem.AddPlaceholderScanToGroup(placeholderScan, root)
-	o.mem.SetBestProps(placeholderScan, rootPhysicalProps, &physical.Provided{}, 1.0 /* cost */)
+	o.mem.SetBestProps(placeholderScan, rootPhysicalProps, &physical.Provided{}, memo.Cost{C: 1.0})
 	o.mem.SetRoot(placeholderScan, rootPhysicalProps)
 
 	if buildutil.CrdbTestBuild && !o.mem.IsOptimized() {

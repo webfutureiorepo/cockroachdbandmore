@@ -27,7 +27,6 @@ go_library(
         "//pkg/kv/kvnemesis/kvnemesisutil",
         "//pkg/kv/kvpb",
         "//pkg/kv/kvserver",
-        "//pkg/kv/kvserver/concurrency",
         "//pkg/kv/kvserver/concurrency/isolation",
         "//pkg/kv/kvserver/concurrency/lock",
         "//pkg/kv/kvserver/liveness",
@@ -54,7 +53,6 @@ go_library(
         "@com_github_cockroachdb_pebble//:pebble",
         "@com_github_cockroachdb_pebble//vfs",
         "@org_golang_google_protobuf//proto",
-        "@org_golang_x_exp//slices",
     ],
 )
 
@@ -72,10 +70,7 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":kvnemesis"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
+    exec_properties = {"test.Pool": "heavy"},
     deps = [
         "//pkg/base",
         "//pkg/config/zonepb",

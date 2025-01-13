@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gossip
 
@@ -75,13 +70,13 @@ func startGossipAtAddr(
 }
 
 type fakeGossipServer struct {
-	nodeAddr   util.UnresolvedAddr
-	nodeIDChan chan roachpb.NodeID
+	nodeAddr     util.UnresolvedAddr
+	receivedArgs chan Request
 }
 
 func newFakeGossipServer(grpcServer *grpc.Server, stopper *stop.Stopper) *fakeGossipServer {
 	s := &fakeGossipServer{
-		nodeIDChan: make(chan roachpb.NodeID, 1),
+		receivedArgs: make(chan Request, 1),
 	}
 	RegisterGossipServer(grpcServer, s)
 	return s
@@ -95,7 +90,7 @@ func (s *fakeGossipServer) Gossip(stream Gossip_GossipServer) error {
 		}
 
 		select {
-		case s.nodeIDChan <- args.NodeID:
+		case s.receivedArgs <- *args:
 		default:
 		}
 
@@ -110,10 +105,11 @@ func (s *fakeGossipServer) Gossip(stream Gossip_GossipServer) error {
 
 // startFakeServerGossips creates local gossip instances and remote
 // faked gossip instance. The remote gossip instance launches its
-// faked gossip service just for check the client message.
+// faked gossip service just for check the client message. Also, it returns the
+// rpc context for both local and remote servers.
 func startFakeServerGossips(
 	t *testing.T, clusterID uuid.UUID, localNodeID roachpb.NodeID, stopper *stop.Stopper,
-) (*Gossip, *fakeGossipServer) {
+) (*Gossip, *fakeGossipServer, *rpc.Context, *rpc.Context) {
 	ctx := context.Background()
 	clock := hlc.NewClockForTesting(nil)
 	lRPCContext := rpc.NewInsecureTestingContextWithClusterID(ctx, clock, stopper, clusterID)
@@ -135,7 +131,7 @@ func startFakeServerGossips(
 	addr := rln.Addr()
 	remote.nodeAddr = util.MakeUnresolvedAddr(addr.Network(), addr.String())
 
-	return local, remote
+	return local, remote, lRPCContext, rRPCContext
 }
 
 func gossipSucceedsSoon(
@@ -184,7 +180,7 @@ func TestClientGossip(t *testing.T) {
 	local, _ := startGossip(clusterID, 1, stopper, t, metric.NewRegistry())
 	remote, _ := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
 	disconnected := make(chan *client, 1)
-	c := newClient(log.MakeTestingAmbientCtxWithNewTracer(), remote.GetNodeAddr(), makeMetrics())
+	c := newClient(log.MakeTestingAmbientCtxWithNewTracer(), remote.GetNodeAddr(), roachpb.Locality{}, makeMetrics())
 
 	defer func() {
 		stopper.Stop(ctx)
@@ -236,7 +232,7 @@ func TestClientGossipMetrics(t *testing.T) {
 	gossipSucceedsSoon(
 		t, stopper, clusterID, make(chan *client, 2),
 		map[*client]*Gossip{
-			newClient(log.MakeTestingAmbientCtxWithNewTracer(), local.GetNodeAddr(), remote.nodeMetrics): remote,
+			newClient(log.MakeTestingAmbientCtxWithNewTracer(), local.GetNodeAddr(), roachpb.Locality{}, remote.nodeMetrics): remote,
 		},
 		func() error {
 			// Infos/Bytes Sent/Received should not be zero.
@@ -288,13 +284,13 @@ func TestClientNodeID(t *testing.T) {
 	clusterID := uuid.MakeV4()
 
 	localNodeID := roachpb.NodeID(1)
-	local, remote := startFakeServerGossips(t, clusterID, localNodeID, stopper)
+	local, remote, _, _ := startFakeServerGossips(t, clusterID, localNodeID, stopper)
 
 	clock := hlc.NewClockForTesting(nil)
 	// Use an insecure context. We're talking to tcp socket which are not in the certs.
 	rpcContext := rpc.NewInsecureTestingContextWithClusterID(ctx, clock, stopper, clusterID)
 
-	c := newClient(log.MakeTestingAmbientCtxWithNewTracer(), &remote.nodeAddr, makeMetrics())
+	c := newClient(log.MakeTestingAmbientCtxWithNewTracer(), &remote.nodeAddr, roachpb.Locality{}, makeMetrics())
 	disconnected <- c
 
 	defer func() {
@@ -310,9 +306,9 @@ func TestClientNodeID(t *testing.T) {
 	for {
 		// Wait for c.gossip to start.
 		select {
-		case receivedNodeID := <-remote.nodeIDChan:
-			if receivedNodeID != localNodeID {
-				t.Fatalf("client should send NodeID with %v, got %v", localNodeID, receivedNodeID)
+		case args := <-remote.receivedArgs:
+			if args.NodeID != localNodeID {
+				t.Fatalf("client should send NodeID with %v, got %v", localNodeID, args.NodeID)
 			}
 			return
 		case <-disconnected:
@@ -341,7 +337,7 @@ func TestClientDisconnectLoopback(t *testing.T) {
 	local, localCtx := startGossip(uuid.Nil, 1, stopper, t, metric.NewRegistry())
 	local.mu.Lock()
 	lAddr := local.mu.is.NodeAddr
-	local.startClientLocked(lAddr, localCtx)
+	local.startClientLocked(lAddr, roachpb.Locality{}, localCtx)
 	local.mu.Unlock()
 	local.manage(localCtx)
 	testutils.SucceedsSoon(t, func() error {
@@ -387,7 +383,7 @@ func TestClientDisconnectRedundant(t *testing.T) {
 			// Restart the client connection in the loop. It might have failed due to
 			// a heartbeat time.
 			local.mu.Lock()
-			local.startClientLocked(rAddr, localCtx)
+			local.startClientLocked(rAddr, roachpb.Locality{}, localCtx)
 			local.mu.Unlock()
 			return fmt.Errorf("unable to find local to remote client")
 		}
@@ -398,7 +394,7 @@ func TestClientDisconnectRedundant(t *testing.T) {
 	// Start a remote to local client. This client will get removed as being
 	// redundant as there is already a connection between the two nodes.
 	remote.mu.Lock()
-	remote.startClientLocked(lAddr, remoteCtx)
+	remote.startClientLocked(lAddr, roachpb.Locality{}, remoteCtx)
 	remote.mu.Unlock()
 
 	testutils.SucceedsSoon(t, func() error {
@@ -433,8 +429,8 @@ func TestClientDisallowMultipleConns(t *testing.T) {
 	// Start two clients from local to remote. RPC client cache is
 	// disabled via the context, so we'll start two different outgoing
 	// connections.
-	local.startClientLocked(rAddr, localCtx)
-	local.startClientLocked(rAddr, localCtx)
+	local.startClientLocked(rAddr, roachpb.Locality{}, localCtx)
+	local.startClientLocked(rAddr, roachpb.Locality{}, localCtx)
 	local.mu.Unlock()
 	remote.mu.Unlock()
 	local.manage(localCtx)
@@ -516,7 +512,7 @@ func TestClientForwardUnresolved(t *testing.T) {
 	local, _ := startGossip(uuid.Nil, nodeID, stopper, t, metric.NewRegistry())
 	addr := local.GetNodeAddr()
 
-	client := newClient(log.MakeTestingAmbientCtxWithNewTracer(), addr, makeMetrics()) // never started
+	client := newClient(log.MakeTestingAmbientCtxWithNewTracer(), addr, roachpb.Locality{}, makeMetrics()) // never started
 
 	newAddr := util.UnresolvedAddr{
 		NetworkField: "tcp",
@@ -539,4 +535,87 @@ func TestClientForwardUnresolved(t *testing.T) {
 	if !client.forwardAddr.Equal(&newAddr) {
 		t.Fatalf("unexpected forward address %v, expected %v", client.forwardAddr, &newAddr)
 	}
+}
+
+// TestClientHighStampsDiff verifies that a client sends a diff of the high
+// water stamps rather than sending the whole map.
+func TestClientSendsHighStampsDiff(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	ctx := context.Background()
+	stopper := stop.NewStopper()
+	disconnected := make(chan *client, 1)
+
+	// Shared cluster ID by all gossipers (this ensures that the gossipers
+	// don't talk to servers from unrelated tests by accident).
+	clusterID := uuid.MakeV4()
+
+	localNodeID := roachpb.NodeID(1)
+	local, remote, _, rCtx := startFakeServerGossips(t, clusterID, localNodeID, stopper)
+
+	clock := hlc.NewClockForTesting(nil)
+	// Use an insecure context. We're talking to tcp socket which are not in the
+	// certs.
+	rpc.NewInsecureTestingContextWithClusterID(ctx, clock, stopper, clusterID)
+
+	// Create a client and let it connect to the remote address.
+	c := newClient(log.MakeTestingAmbientCtxWithNewTracer(), &remote.nodeAddr, roachpb.Locality{}, makeMetrics())
+	disconnected <- c
+
+	ctxNew, cancel := context.WithCancel(c.AnnotateCtx(context.Background()))
+	defer func() {
+		cancel()
+	}()
+
+	conn, err := rCtx.GRPCUnvalidatedDial(c.addr.String(), roachpb.Locality{}).Connect(ctxNew)
+	require.NoError(t, err)
+
+	stream, err := NewGossipClient(conn).Gossip(ctx)
+	require.NoError(t, err)
+
+	// Add an info to generate some deltas and allow the request to be sent.
+	err = local.AddInfo("local-key", nil, time.Hour)
+	require.NoError(t, err)
+
+	// The first thing the client does is to request the gossips from the server.
+	// It attaches ALL the high water timestamps that it has.
+	err = c.requestGossip(local, stream)
+	require.NoError(t, err)
+
+	args := <-remote.receivedArgs
+	local.mu.Lock()
+	currentHighStamps := local.mu.is.getHighWaterStamps()
+	local.mu.Unlock()
+	require.Equal(t, args.HighWaterStamps, currentHighStamps)
+
+	// Expect that the requests will only contain high water stamps if they are
+	// different from what was previously sent. Since we didn't change any info,
+	// the client should send an empty map of high water stamps.
+	err = c.sendGossip(local, stream, true /* firstReq */)
+	require.NoError(t, err)
+
+	args = <-remote.receivedArgs
+	require.Empty(t, args.HighWaterStamps)
+
+	// Adding an info causes an update in the high water stamps.
+	err = local.AddInfo("local-key", nil, time.Hour)
+	require.NoError(t, err)
+
+	err = c.sendGossip(local, stream, false /* firstReq */)
+	require.NoError(t, err)
+
+	// Now that the timestamp is newer than what was previously sent, expect that
+	// the high water stamps will contain the new timestamp.
+	args = <-remote.receivedArgs
+	local.mu.Lock()
+	currentHighStamps = local.mu.is.getHighWaterStamps()
+	local.mu.Unlock()
+	require.Equal(t, args.HighWaterStamps, currentHighStamps)
+
+	defer func() {
+		stopper.Stop(ctx)
+		if c != <-disconnected {
+			t.Errorf("expected client disconnect after remote close")
+		}
+	}()
 }

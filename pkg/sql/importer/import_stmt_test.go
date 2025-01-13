@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -2024,6 +2019,8 @@ func TestFailedImportGC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	skip.UnderRace(t)
+
 	const nodes = 3
 
 	var forceFailure bool
@@ -2093,7 +2090,7 @@ func TestFailedImportGC(t *testing.T) {
 	tableID := descpb.ID(dbID + 2)
 	var td catalog.TableDescriptor
 	if err := sql.TestingDescsTxn(ctx, tc.Server(0), func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		td, err = col.ByID(txn.KV()).Get().Table(ctx, tableID)
+		td, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -2106,7 +2103,7 @@ func TestFailedImportGC(t *testing.T) {
 	close(blockGC)
 	// Ensure that a GC job was created, and wait for it to finish.
 	doneGCQuery := fmt.Sprintf(
-		"SELECT count(*) FROM [SHOW JOBS] WHERE job_type = '%s' AND running_status = '%s' AND created > %s",
+		"SELECT count(*) FROM crdb_internal.jobs WHERE job_type = '%s' AND running_status = '%s' AND created > %s",
 		"SCHEMA CHANGE GC", sql.RunningStatusWaitingForMVCCGC, beforeImport.String(),
 	)
 	sqlDB.CheckQueryResultsRetry(t, doneGCQuery, [][]string{{"1"}})
@@ -2764,6 +2761,9 @@ INSERT INTO foo VALUES (1);
 func TestImportObjectLevelRBAC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	skip.UnderRace(t)
+
 	const nodes = 3
 
 	ctx := context.Background()
@@ -3843,9 +3843,7 @@ func TestImportIntoCSV(t *testing.T) {
 
 func benchUserUpload(b *testing.B, uploadBaseURI string) {
 	defer log.Scope(b).Close(b)
-	const (
-		nodes = 3
-	)
+	const nodes = 3
 	ctx := context.Background()
 	baseDir, cleanup := testutils.TempDir(b)
 	defer cleanup()
@@ -4062,7 +4060,7 @@ func BenchmarkCSVConvertRecord(b *testing.B) {
 
 	create := stmt.AST.(*tree.CreateTable)
 	st := cluster.MakeTestingClusterSettings()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	evalCtx := eval.MakeTestingEvalContext(st)
 
 	tableDesc, err := MakeTestingSimpleTableDescriptor(ctx, &semaCtx, st, create, descpb.ID(100), keys.PublicSchemaIDForBackup, descpb.ID(100), NoFKs, 1)
@@ -4114,6 +4112,7 @@ func TestImportDefault(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	skip.UnderRace(t, "takes >1min under race")
+
 	const nodes = 3
 	numFiles := nodes + 2
 	rowsPerFile := 1000
@@ -4539,7 +4538,8 @@ func TestImportDefaultNextVal(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	defer setImportReaderParallelism(1)()
-	skip.UnderStressRace(t, "test hits a timeout before a successful run")
+
+	skip.UnderRace(t, "test hits a timeout before a successful run")
 
 	const nodes = 3
 	numFiles := 1
@@ -4811,6 +4811,8 @@ func TestImportComputed(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	skip.UnderRace(t)
+
 	const nodes = 3
 
 	ctx := context.Background()
@@ -5013,7 +5015,7 @@ func BenchmarkDelimitedConvertRecord(b *testing.B) {
 	}
 	create := stmt.AST.(*tree.CreateTable)
 	st := cluster.MakeTestingClusterSettings()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	evalCtx := eval.MakeTestingEvalContext(st)
 
 	tableDesc, err := MakeTestingSimpleTableDescriptor(ctx, &semaCtx, st, create, descpb.ID(100), keys.PublicSchemaIDForBackup, descpb.ID(100), NoFKs, 1)
@@ -5115,7 +5117,7 @@ func BenchmarkPgCopyConvertRecord(b *testing.B) {
 		b.Fatal(err)
 	}
 	create := stmt.AST.(*tree.CreateTable)
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := eval.MakeTestingEvalContext(st)
 
@@ -5224,7 +5226,7 @@ func TestImportControlJobRBAC(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 
-	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return fakeResumer{
 			OnResume: func(ctx context.Context) error {
 				<-done
@@ -5235,7 +5237,7 @@ func TestImportControlJobRBAC(t *testing.T) {
 				return nil
 			},
 		}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 
 	startLeasedJob := func(t *testing.T, record jobs.Record) *jobs.StartableJob {
 		job, err := jobs.TestingCreateAndStartJob(
@@ -5322,7 +5324,7 @@ func TestImportWorkerFailure(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	skip.UnderDeadlock(t, "test is flaky under deadlock")
-	skip.UnderStressRace(t, "test is flaky under stressrace")
+	skip.UnderRace(t, "test is flaky under race")
 
 	allowResponse := make(chan struct{})
 	params := base.TestClusterArgs{}
@@ -5365,7 +5367,8 @@ func TestImportWorkerFailure(t *testing.T) {
 		t.Fatalf("%s: query returned before expected: %s", err, query)
 	}
 	var jobID jobspb.JobID
-	sqlDB.QueryRow(t, `SELECT id FROM system.jobs ORDER BY created DESC LIMIT 1`).Scan(&jobID)
+	sqlDB.QueryRow(t, `SELECT id FROM system.jobs WHERE status = 'running'
+                             AND job_type = 'IMPORT' ORDER BY created DESC LIMIT 1`).Scan(&jobID)
 
 	// Shut down a node.
 	tc.StopServer(1)
@@ -5378,13 +5381,13 @@ func TestImportWorkerFailure(t *testing.T) {
 	// rolled back.
 	if err := <-errCh; err != nil {
 		t.Logf("%s failed, checking that imported data was completely removed: %q", query, err)
-		sqlDB.CheckQueryResults(t, `SELECT * FROM t ORDER BY i`, [][]string{})
+		sqlDB.CheckQueryResultsRetry(t, `SELECT * FROM t ORDER BY i`, [][]string{})
 		return
 	}
 
 	// But the job should be restarted and succeed eventually.
 	jobutils.WaitForJobToSucceed(t, sqlDB, jobID)
-	sqlDB.CheckQueryResults(t,
+	sqlDB.CheckQueryResultsRetry(t,
 		`SELECT * FROM t ORDER BY i`,
 		sqlDB.QueryStr(t, `SELECT * FROM generate_series(0, $1)`, count-1),
 	)
@@ -5420,11 +5423,9 @@ func TestImportMysql(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderStressRace(t)
+	skip.UnderRace(t)
 
-	const (
-		nodes = 3
-	)
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t)
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -5552,9 +5553,9 @@ func TestImportIntoMysql(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t)
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -5579,9 +5580,9 @@ func TestImportDelimited(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t, "mysqlout")
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -5669,9 +5670,9 @@ func TestImportPgCopy(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t, "pgcopy")
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -5755,9 +5756,9 @@ func TestImportPgDump(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t)
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -5957,8 +5958,6 @@ func TestImportPgDumpIgnoredStmts(t *testing.T) {
 
 	data := `
 				-- Statements that CRDB cannot parse.
-				CREATE TRIGGER conditions_set_updated_at BEFORE UPDATE ON conditions FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
-
 				REVOKE ALL ON SEQUENCE knex_migrations_id_seq FROM PUBLIC;
 				REVOKE ALL ON SEQUENCE knex_migrations_id_seq FROM database;
 
@@ -5982,14 +5981,6 @@ func TestImportPgDumpIgnoredStmts(t *testing.T) {
 				$_$;
 				ALTER FUNCTION public.isnumeric(text) OWNER TO roland;
 
-        ALTER TABLE "database"."table" ALTER COLUMN "Id" ADD GENERATED BY DEFAULT AS IDENTITY (
-            SEQUENCE NAME "database"."sequencename"
-            START WITH 1
-            INCREMENT BY 1
-            NO MINVALUE
-            NO MAXVALUE
-            CACHE 1
-        );
         COPY db.table (col1, col2, col3, col4) FROM '$$PATH$$/3057.dat';
         GRANT USAGE ON SCHEMA "schemaname" TO davidt WITH GRANT OPTION;
 
@@ -6003,6 +5994,7 @@ func TestImportPgDumpIgnoredStmts(t *testing.T) {
 				COMMENT ON TABLE t IS 'This should be skipped';
 				COMMENT ON DATABASE t IS 'This should be skipped';
 				COMMENT ON COLUMN t IS 'This should be skipped';
+				CREATE TRIGGER conditions_set_updated_at BEFORE UPDATE ON conditions FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
 
 
 				-- Statements that CRDB can parse, but IMPORT does not support.
@@ -6027,7 +6019,7 @@ func TestImportPgDumpIgnoredStmts(t *testing.T) {
 
 	t.Run("dont-ignore-unsupported", func(t *testing.T) {
 		sqlDB.Exec(t, "CREATE DATABASE foo1; USE foo1;")
-		sqlDB.ExpectErr(t, "syntax error", "IMPORT PGDUMP ($1)", srv.URL)
+		sqlDB.ExpectErr(t, "unsupported", "IMPORT PGDUMP ($1)", srv.URL)
 	})
 
 	t.Run("require-both-unsupported-options", func(t *testing.T) {
@@ -6084,8 +6076,7 @@ func TestImportPgDumpIgnoredStmts(t *testing.T) {
 			}
 		}
 
-		schemaFileContents := []string{
-			`create trigger: could not be parsed
+		schemaFileContents := []string{`
 revoke privileges on sequence: could not be parsed
 revoke privileges on sequence: could not be parsed
 grant privileges on sequence: could not be parsed
@@ -6095,6 +6086,7 @@ comment on function: could not be parsed
 create extension if not exists with: could not be parsed
 alter aggregate: could not be parsed
 alter domain: could not be parsed
+create trigger: unsupported by IMPORT
 `,
 			`create function: could not be parsed
 alter function: could not be parsed
@@ -6456,16 +6448,16 @@ func TestImportPgDumpSchemas(t *testing.T) {
 
 		// Ensure that a GC job was created, and wait for it to finish.
 		doneGCQuery := fmt.Sprintf(
-			"SELECT count(*) FROM [SHOW JOBS] WHERE job_type = '%s' AND running_status = '%s' AND created > %s",
+			"SELECT count(*) FROM crdb_internal.jobs WHERE job_type = '%s' AND running_status = '%s' AND created > %s",
 			"SCHEMA CHANGE GC", sql.RunningStatusWaitingForMVCCGC, beforeImport.String(),
 		)
 
 		doneSchemaDropQuery := fmt.Sprintf(
-			"SELECT count(*) FROM [SHOW JOBS] WHERE job_type = '%s' AND status = '%s' AND description"+
+			"SELECT count(*) FROM crdb_internal.jobs WHERE job_type = '%s' AND status = '%s' AND description"+
 				" LIKE '%s'", "SCHEMA CHANGE", jobs.StatusSucceeded, "dropping schemas%")
 
 		doneDatabaseUpdateQuery := fmt.Sprintf(
-			"SELECT count(*) FROM [SHOW JOBS] WHERE job_type = '%s' AND status = '%s' AND description"+
+			"SELECT count(*) FROM crdb_internal.jobs WHERE job_type = '%s' AND status = '%s' AND description"+
 				" LIKE '%s'", "SCHEMA CHANGE", jobs.StatusSucceeded, "updating parent database%")
 
 		sqlDB.CheckQueryResultsRetry(t, doneGCQuery, [][]string{{"1"}})
@@ -6475,7 +6467,7 @@ func TestImportPgDumpSchemas(t *testing.T) {
 		for _, schemaID := range schemaIDs {
 			// Expect that the schema descriptor is deleted.
 			if err := sql.TestingDescsTxn(ctx, tc.Server(0), func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
-				_, err := col.ByID(txn.KV()).Get().Schema(ctx, schemaID)
+				_, err := col.ByIDWithoutLeased(txn.KV()).Get().Schema(ctx, schemaID)
 				if pgerror.GetPGCode(err) == pgcode.InvalidSchemaName {
 					return nil
 				}
@@ -6491,7 +6483,7 @@ func TestImportPgDumpSchemas(t *testing.T) {
 		for _, tableID := range tableIDs {
 			// Expect that the table descriptor is deleted.
 			if err := sql.TestingDescsTxn(ctx, tc.Server(0), func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
-				_, err := col.ByID(txn.KV()).Get().Table(ctx, tableID)
+				_, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 				if !testutils.IsError(err, "descriptor not found") {
 					return err
 				}
@@ -6514,9 +6506,9 @@ func TestImportCockroachDump(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t)
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -6613,9 +6605,9 @@ func TestImportAvro(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t, "avro")
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -6940,9 +6932,9 @@ func TestDetachedImport(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t, "avro")
 	args := base.TestServerArgs{ExternalIODir: baseDir}
@@ -7040,12 +7032,11 @@ func TestImportRowErrorLargeRows(t *testing.T) {
 func TestImportJobEventLogging(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.ScopeWithoutShowLogs(t).Close(t)
-
 	defer jobs.TestingSetProgressThresholds()()
 
-	const (
-		nodes = 3
-	)
+	skip.UnderRace(t)
+
+	const nodes = 3
 	ctx := context.Background()
 	baseDir := datapathutils.TestDataPath(t, "avro")
 	args := base.TestServerArgs{ExternalIODir: baseDir}

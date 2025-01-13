@@ -1,20 +1,16 @@
 # Invalid filters.
 
-filter cloud=badcloud
-----
-error: invalid cloud "badcloud"; valid clouds are local,gce,aws,azure
-
 filter owner=badowner
 ----
 error: invalid owner "badowner"
 
 filter suite=badsuite
 ----
-error: invalid suite "badsuite"; valid suites are nightly,weekly,release_qualification,orm,driver,tool,smoketest,quick,fixtures,pebble,pebble_nightly_write,pebble_nightly_ycsb,pebble_nightly_ycsb_race,roachtest
+error: invalid suite "badsuite"; valid suites are nightly,weekly,release_qualification,orm,driver,tool,quick,fixtures,pebble,pebble_nightly_write,pebble_nightly_ycsb,pebble_nightly_ycsb_race,roachtest,acceptance,perturbation,mixedversion
 
-filter cloud=badcloud owner=badowner suite=badsuite
+filter owner=badowner suite=badsuite
 ----
-error: invalid cloud "badcloud"; valid clouds are local,gce,aws,azure
+error: invalid suite "badsuite"; valid suites are nightly,weekly,release_qualification,orm,driver,tool,quick,fixtures,pebble,pebble_nightly_write,pebble_nightly_ycsb,pebble_nightly_ycsb_race,roachtest,acceptance,perturbation,mixedversion
 
 # Filters with one field leading to no matches.
 
@@ -26,10 +22,6 @@ error: no benchmarks match regexp "component_blargle"
 filter suite=orm
 ----
 error: no tests in suite "orm"
-
-filter owner=replication
-----
-error: no tests with owner "replication"
 
 filter benchmarks
 component_blargle

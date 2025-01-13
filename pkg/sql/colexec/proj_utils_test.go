@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -76,7 +71,7 @@ func assertProjOpAgainstRowByRow(
 	// column of the projection operator.
 	op := colexecbase.NewSimpleProjectOp(projOp, len(inputTypes)+1, []uint32{uint32(len(inputTypes))})
 	materializer := NewMaterializer(
-		nil, /* allocator */
+		nil, /* streamingMemAcc */
 		flowCtx,
 		1, /* processorID */
 		colexecargs.OpWithMetaInfo{Root: op},
@@ -89,7 +84,7 @@ func assertProjOpAgainstRowByRow(
 		actualRow, meta := materializer.Next()
 		require.Nil(t, meta)
 		require.Equal(t, 1, len(actualRow))
-		cmp, err := expectedDatum.Compare(outputType, &da, evalCtx, &actualRow[0])
+		cmp, err := expectedDatum.Compare(ctx, outputType, &da, evalCtx, &actualRow[0])
 		require.NoError(t, err)
 		require.Equal(t, 0, cmp)
 	}

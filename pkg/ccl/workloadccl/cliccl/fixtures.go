@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cliccl
 
@@ -15,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/workloadccl"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
@@ -271,14 +267,17 @@ func (l restoreDataLoader) InitialDataLoad(
 ) (int64, error) {
 	log.Infof(ctx, "starting restore of %d tables", len(gen.Tables()))
 	start := timeutil.Now()
-	bytes, err := workloadccl.RestoreFixture(ctx, db, l.fixture, l.database, true /* injectStats */)
+	err := workloadccl.RestoreFixture(ctx, db, l.fixture, l.database, true /* injectStats */)
 	if err != nil {
 		return 0, errors.Wrap(err, `restoring fixture`)
 	}
 	elapsed := timeutil.Since(start)
-	log.Infof(ctx, "restored %s bytes in %d tables (took %s, %s)",
-		humanizeutil.IBytes(bytes), len(gen.Tables()), elapsed, humanizeutil.DataRate(bytes, elapsed))
-	return bytes, nil
+	log.Infof(ctx, "restored %d tables (took %s)",
+		len(gen.Tables()), elapsed)
+	// As of #134516, RESTORE no longer returns the number of bytes restored.
+	// We still return 0 here to implement the interface, although as of right
+	// now the value is never used.
+	return 0, nil
 }
 
 func fixturesLoad(gen workload.Generator, urls []string, dbName string) error {

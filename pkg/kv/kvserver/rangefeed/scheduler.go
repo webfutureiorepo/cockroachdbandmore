@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
@@ -16,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -127,11 +121,6 @@ type SchedulerConfig struct {
 	HistogramFrequency int64
 }
 
-// priorityIDsValue is a placeholder value for Scheduler.priorityIDs. IntMap
-// requires an unsafe.Pointer value, but we don't care about the value (only the
-// key), so we can reuse the same allocation.
-var priorityIDsValue = unsafe.Pointer(new(bool))
-
 // shardIndex returns the shard index of the given processor ID based on the
 // shard count and processor priority. Priority processors are assigned to the
 // reserved shard 0, other ranges are modulo ID (ignoring shard 0). numShards
@@ -160,7 +149,7 @@ type Scheduler struct {
 	// separate shards to reduce mutex contention. Allocation is modulo
 	// processors, with shard 0 reserved for priority processors.
 	shards      []*schedulerShard // 1 + id%(len(shards)-1)
-	priorityIDs syncutil.IntMap
+	priorityIDs syncutil.Set[int64]
 	wg          sync.WaitGroup
 }
 
@@ -248,11 +237,8 @@ func newSchedulerShard(
 func (s *Scheduler) Start(ctx context.Context, stopper *stop.Stopper) error {
 	// Start each shard.
 	for shardID, shard := range s.shards {
-		shardID, shard := shardID, shard // pin loop variables
-
 		// Start the shard's workers.
 		for workerID := 0; workerID < shard.numWorkers; workerID++ {
-			workerID := workerID // pin loop variable
 			s.wg.Add(1)
 
 			if err := stopper.RunAsyncTask(ctx,
@@ -291,10 +277,10 @@ func (s *Scheduler) register(id int64, f Callback, priority bool) error {
 	// Make sure we register the priority ID before registering the callback,
 	// since we can otherwise race with enqueues, using the wrong shard.
 	if priority {
-		s.priorityIDs.Store(id, priorityIDsValue)
+		s.priorityIDs.Add(id)
 	}
 	if err := s.shards[shardIndex(id, len(s.shards), priority)].register(id, f); err != nil {
-		s.priorityIDs.Delete(id)
+		s.priorityIDs.Remove(id)
 		return err
 	}
 	return nil
@@ -309,9 +295,9 @@ func (s *Scheduler) register(id int64, f Callback, priority bool) error {
 // Any attempts to enqueue events for processor after this call will return an
 // error.
 func (s *Scheduler) unregister(id int64) {
-	_, priority := s.priorityIDs.Load(id)
+	priority := s.priorityIDs.Contains(id)
 	s.shards[shardIndex(id, len(s.shards), priority)].unregister(id)
-	s.priorityIDs.Delete(id)
+	s.priorityIDs.Remove(id)
 }
 
 func (s *Scheduler) Stop() {
@@ -337,7 +323,7 @@ func (s *Scheduler) stopProcessor(id int64) {
 // Enqueue event for existing callback. The event is ignored if the processor
 // does not exist.
 func (s *Scheduler) enqueue(id int64, evt processorEventType) {
-	_, priority := s.priorityIDs.Load(id)
+	priority := s.priorityIDs.Contains(id)
 	s.shards[shardIndex(id, len(s.shards), priority)].enqueue(id, evt)
 }
 
@@ -592,7 +578,7 @@ type SchedulerBatch struct {
 	priorityIDs map[int64]bool
 }
 
-func newSchedulerBatch(numShards int, priorityIDs *syncutil.IntMap) *SchedulerBatch {
+func newSchedulerBatch(numShards int, priorityIDs *syncutil.Set[int64]) *SchedulerBatch {
 	b := schedulerBatchPool.Get().(*SchedulerBatch)
 	if cap(b.ids) >= numShards {
 		b.ids = b.ids[:numShards]
@@ -604,7 +590,7 @@ func newSchedulerBatch(numShards int, priorityIDs *syncutil.IntMap) *SchedulerBa
 	}
 	// Cache the priority range IDs in an owned map, since we expect this to be
 	// very small or empty and we do a lookup for every Add() call.
-	priorityIDs.Range(func(id int64, _ unsafe.Pointer) bool {
+	priorityIDs.Range(func(id int64) bool {
 		b.priorityIDs[id] = true
 		return true
 	})

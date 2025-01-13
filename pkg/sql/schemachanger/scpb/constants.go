@@ -1,16 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scpb
 
-import "github.com/cockroachdb/errors"
+import (
+	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
+)
 
 const (
 	// PlaceHolderRoleName placeholder string for non-fetched role names.
@@ -20,6 +18,15 @@ const (
 // TargetStatus is the subset of Status values which serve as valid target
 // statuses.
 type TargetStatus Status
+
+var _ redact.SafeValue = Status(0)
+var _ redact.SafeValue = TargetStatus(0)
+
+// SafeValue implements the redact.SafeValue interface.
+func (t TargetStatus) SafeValue() {}
+
+// SafeValue implements the redact.SafeValue interface.
+func (s Status) SafeValue() {}
 
 const (
 	// InvalidTarget indicates that the element doesn't have a target status
@@ -42,6 +49,11 @@ const (
 	// and target statuses are both ABSENT won't experience any state transitions.
 	Transient TargetStatus = TargetStatus(Status_TRANSIENT_ABSENT)
 )
+
+// Status returns the TargetStatus as a Status.
+func (t TargetStatus) String() string {
+	return Status(t).String()
+}
 
 // Status returns the TargetStatus as a Status.
 func (t TargetStatus) Status() Status {

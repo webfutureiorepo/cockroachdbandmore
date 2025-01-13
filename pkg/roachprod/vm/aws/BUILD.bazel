@@ -15,6 +15,7 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/roachprod/vm/aws",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/roachprod/config",
         "//pkg/roachprod/logger",
         "//pkg/roachprod/vm",
         "//pkg/roachprod/vm/flagstub",
@@ -22,8 +23,8 @@ go_library(
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_cockroachdb_errors//oserror",
         "@com_github_spf13_pflag//:pflag",
+        "@org_golang_x_exp//maps",
         "@org_golang_x_sync//errgroup",
         "@org_golang_x_time//rate",
     ],
@@ -35,7 +36,7 @@ genrule(
     cmd = """
       $(location //pkg/roachprod/vm/aws/terraformgen) -o $@
     """,
-    exec_tools = ["//pkg/roachprod/vm/aws/terraformgen"],
+    tools = ["//pkg/roachprod/vm/aws/terraformgen"],
     visibility = [
         ":__pkg__",
         "//pkg/gen:__pkg__",

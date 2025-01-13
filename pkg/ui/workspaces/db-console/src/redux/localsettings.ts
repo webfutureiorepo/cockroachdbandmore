@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * The local settings reducer is designed to store local-only UI settings in
@@ -19,10 +14,12 @@
  * it should be given the full redux treatment with unique modification actions.
  */
 
-import _ from "lodash";
-import { createSelector, Selector } from "reselect";
+import { util } from "@cockroachlabs/cluster-ui";
+import clone from "lodash/clone";
+import isNil from "lodash/isNil";
 import { Action } from "redux";
 import { call, takeEvery } from "redux-saga/effects";
+import { createSelector, Selector } from "reselect";
 
 import { PayloadAction } from "src/interfaces/action";
 
@@ -53,7 +50,8 @@ function saveToSessionStorage(data: LocalSettingData) {
   try {
     sessionStorage.setItem(`${STORAGE_PREFIX}/${data.key}`, value);
   } catch (e) {
-    console.warn(e.message);
+    // eslint-disable-next-line no-console
+    console.warn(util.maybeError(e).message);
   }
 }
 
@@ -73,14 +71,14 @@ export function localSettingsReducer(
   state: LocalSettingsState = {},
   action: Action,
 ): LocalSettingsState {
-  if (_.isNil(action)) {
+  if (isNil(action)) {
     return state;
   }
 
   switch (action.type) {
     case SET_UI_VALUE: {
       const { payload } = action as PayloadAction<LocalSettingData>;
-      state = _.clone(state);
+      state = clone(state);
       state[payload.key] = payload.value;
       return state;
     }

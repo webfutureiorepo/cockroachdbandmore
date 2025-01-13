@@ -1,18 +1,14 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package validate
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -94,8 +90,8 @@ func validateSchemaChangerState(d catalog.Descriptor, vea catalog.ValidationErro
 	}
 
 	// Validate that the statements are sorted.
-	if !sort.SliceIsSorted(scs.RelevantStatements, func(i, j int) bool {
-		return scs.RelevantStatements[i].StatementRank < scs.RelevantStatements[j].StatementRank
+	if !slices.IsSortedFunc(scs.RelevantStatements, func(a, b scpb.DescriptorState_Statement) int {
+		return cmp.Compare(a.StatementRank, b.StatementRank)
 	}) {
 		report(errors.New("RelevantStatements are not sorted"))
 	}
@@ -117,7 +113,7 @@ func validateSchemaChangerState(d catalog.Descriptor, vea catalog.ValidationErro
 		statementRanks.Add(int(s.StatementRank))
 		if _, ok := statementsExpected[s.StatementRank]; !ok {
 			report(errors.Errorf("unexpected statement %d (%s)",
-				s.StatementRank, s.Statement.Statement))
+				s.StatementRank, s.Statement.RedactedStatement))
 		}
 	}
 

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -383,20 +378,8 @@ func TestCrossJoiner(t *testing.T) {
 	defer cleanup()
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
-
-	// When we have non-empty ON expression, we will plan additional operators
-	// on top of the cross joiner (selection and projection ops). Those
-	// operators currently don't implement the colexecop.Closer interface, so
-	// the closers aren't automatically closed by the RunTests harness (i.e.
-	// closeIfCloser stops early), so we need to close all closers explicitly.
-	// (The alternative would be to make all these selection and projection
-	// operators implement the interface, but it doesn't seem worth it.)
-	var onExprToClose colexecop.Closers
-	defer func() {
-		for _, c := range onExprToClose {
-			require.NoError(t, c.Close(ctx))
-		}
-	}()
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 
 	for _, spillForced := range []bool{false, true} {
 		flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
@@ -406,21 +389,15 @@ func TestCrossJoiner(t *testing.T) {
 				runHashJoinTestCase(t, tc, nil /* rng */, func(sources []colexecop.Operator) (colexecop.Operator, error) {
 					spec := createSpecForHashJoiner(tc)
 					args := &colexecargs.NewColOperatorArgs{
-						Spec:                spec,
-						Inputs:              colexectestutils.MakeInputs(sources),
-						StreamingMemAccount: testMemAcc,
-						DiskQueueCfg:        queueCfg,
-						FDSemaphore:         colexecop.NewTestingSemaphore(colexecop.ExternalHJMinPartitions),
-						MonitorRegistry:     &monitorRegistry,
+						Spec:            spec,
+						Inputs:          colexectestutils.MakeInputs(sources),
+						DiskQueueCfg:    queueCfg,
+						FDSemaphore:     colexecop.NewTestingSemaphore(colexecop.ExternalHJMinPartitions),
+						MonitorRegistry: &monitorRegistry,
+						CloserRegistry:  &closerRegistry,
 					}
 					result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
-					if err != nil {
-						return nil, err
-					}
-					if !tc.onExpr.Empty() {
-						onExprToClose = append(onExprToClose, result.ToClose...)
-					}
-					return result.Root, nil
+					return result.Root, err
 				})
 			}
 		}
@@ -451,6 +428,8 @@ func BenchmarkCrossJoiner(b *testing.B) {
 	defer cleanup()
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 
 	for _, spillForced := range []bool{false, true} {
 		flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
@@ -473,11 +452,11 @@ func BenchmarkCrossJoiner(b *testing.B) {
 				args := &colexecargs.NewColOperatorArgs{
 					Spec: spec,
 					// Inputs will be set below.
-					Inputs:              []colexecargs.OpWithMetaInfo{{}, {}},
-					StreamingMemAccount: testMemAcc,
-					DiskQueueCfg:        queueCfg,
-					FDSemaphore:         colexecop.NewTestingSemaphore(VecMaxOpenFDsLimit),
-					MonitorRegistry:     &monitorRegistry,
+					Inputs:          []colexecargs.OpWithMetaInfo{{}, {}},
+					DiskQueueCfg:    queueCfg,
+					FDSemaphore:     colexecop.NewTestingSemaphore(VecMaxOpenFDsLimit),
+					MonitorRegistry: &monitorRegistry,
+					CloserRegistry:  &closerRegistry,
 				}
 				b.Run(fmt.Sprintf("spillForced=%t/type=%s/rows=%d", spillForced, joinType, nRows), func(b *testing.B) {
 					var nOutputRows int

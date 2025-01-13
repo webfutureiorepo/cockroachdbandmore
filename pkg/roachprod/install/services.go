@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package install
 
@@ -21,6 +16,7 @@ import (
 
 	"github.com/alessio/shellescape"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
+	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -80,6 +76,9 @@ type ServiceDescriptors []ServiceDesc
 
 // ServicePredicate is a predicate function definition for filtering services.
 type ServicePredicate func(ServiceDesc) bool
+
+// FindOpenPortsFunc is a function signature for finding open ports on a node.
+type FindOpenPortsFunc func(ctx context.Context, l *logger.Logger, node Node, startPort, count int) ([]int, error)
 
 // localClusterPortCache is a workaround for local clusters to prevent multiple
 // nodes from using the same port when searching for open ports.
@@ -215,9 +214,21 @@ func (c *SyncedCluster) DiscoverService(
 	}
 
 	// Finally, fall back to the default ports if no services are found. This is
-	// useful for backwards compatibility with clusters that were created before
-	// the introduction of service discovery, or without a DNS provider.
-	// TODO(Herko): Remove this once DNS support is fully functional.
+	// required for scenarios where the services were not registered with a DNS
+	// provider (Google DNS). Currently, services will not be registered in the
+	// following scenarios:
+	//
+	// 1. A system interface started with default ports. This is an optimisation
+	// to avoid the overhead of registering services when starting a storage
+	// cluster with default ports.
+	// 2. Clusters not on GCP
+	// 3. Clusters that specify a custom project.
+	//
+	// The fall back is also useful for
+	// backwards compatibility with clusters that were created before the
+	// introduction of service discovery, or without a DNS provider.
+	// TODO(Herko): Remove this once DNS support is fully
+	// functional.
 	if len(services) == 0 {
 		var port int
 		switch serviceType {
@@ -238,6 +249,24 @@ func (c *SyncedCluster) DiscoverService(
 		}, nil
 	}
 	return services[0], err
+}
+
+// ListLoadBalancers returns a list of load balancers from all providers, for
+// the cluster.
+func (c *SyncedCluster) ListLoadBalancers(l *logger.Logger) ([]vm.ServiceAddress, error) {
+	lock := syncutil.Mutex{}
+	allAddresses := make([]vm.ServiceAddress, 0)
+	err := vm.FanOut(c.VMs, func(provider vm.Provider, vms vm.List) error {
+		addresses, listErr := provider.ListLoadBalancers(l, vms)
+		if listErr != nil {
+			return listErr
+		}
+		lock.Lock()
+		defer lock.Unlock()
+		allAddresses = append(allAddresses, addresses...)
+		return nil
+	})
+	return allAddresses, err
 }
 
 // MapServices discovers all service types for a given virtual cluster
@@ -394,16 +423,20 @@ func (c *SyncedCluster) FindOpenPorts(
 		return nil, err
 	}
 
+	transientFailure := func(err error) error {
+		return rperrors.TransientFailure(err, "open_ports")
+	}
+
 	res, err := c.runCmdOnSingleNode(ctx, l, node, buf.String(), defaultCmdOpts("find-ports"))
-	if err != nil {
-		return nil, err
+	if findPortsErr := errors.CombineErrors(err, res.Err); findPortsErr != nil {
+		return nil, transientFailure(errors.Wrapf(findPortsErr, "output:\n%s", res.CombinedOut))
 	}
 	ports, err = stringToIntegers(strings.TrimSpace(res.CombinedOut))
 	if err != nil {
 		return nil, err
 	}
 	if len(ports) != count {
-		return nil, errors.Errorf("expected %d ports, got %d", count, len(ports))
+		return nil, transientFailure(errors.Errorf("expected %d ports, got %d", count, len(ports)))
 	}
 	return ports, nil
 }
@@ -476,4 +509,20 @@ func (c *SyncedCluster) TargetDNSName(node Node) string {
 	}
 	// Targets always end with a period as per SRV record convention.
 	return fmt.Sprintf("%s.%s", cVM.PublicDNS, postfix)
+}
+
+// FindLoadBalancer returns the first load balancer address that matches the
+// given port. If no load balancer is found, an error is returned.
+func (c *SyncedCluster) FindLoadBalancer(l *logger.Logger, port int) (*vm.ServiceAddress, error) {
+	addresses, err := c.ListLoadBalancers(l)
+	if err != nil {
+		return nil, err
+	}
+	// Find the load balancer with the matching port.
+	for _, a := range addresses {
+		if a.Port == port {
+			return &a, nil
+		}
+	}
+	return nil, errors.Newf("no load balancer found for port %d", port)
 }

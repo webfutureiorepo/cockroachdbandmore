@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowcontainer
 
@@ -42,10 +37,11 @@ type kvStreamerResultDiskBuffer struct {
 	iter         RowIterator
 	iterResultID int
 
-	engine     diskmap.Factory
-	monitor    *mon.BytesMonitor
-	rowScratch rowenc.EncDatumRow
-	alloc      tree.DatumAlloc
+	engine      diskmap.Factory
+	memAcc      mon.BoundAccount
+	diskMonitor *mon.BytesMonitor
+	rowScratch  rowenc.EncDatumRow
+	alloc       tree.DatumAlloc
 }
 
 var _ kvstreamer.ResultDiskBuffer = &kvStreamerResultDiskBuffer{}
@@ -53,11 +49,12 @@ var _ kvstreamer.ResultDiskBuffer = &kvStreamerResultDiskBuffer{}
 // NewKVStreamerResultDiskBuffer return a new kvstreamer.ResultDiskBuffer that
 // is backed by a disk row container.
 func NewKVStreamerResultDiskBuffer(
-	engine diskmap.Factory, monitor *mon.BytesMonitor,
+	engine diskmap.Factory, memAcc mon.BoundAccount, diskMonitor *mon.BytesMonitor,
 ) kvstreamer.ResultDiskBuffer {
 	return &kvStreamerResultDiskBuffer{
-		engine:  engine,
-		monitor: monitor,
+		engine:      engine,
+		memAcc:      memAcc,
+		diskMonitor: diskMonitor,
 	}
 }
 
@@ -66,12 +63,18 @@ func (b *kvStreamerResultDiskBuffer) Serialize(
 	ctx context.Context, r *kvstreamer.Result,
 ) (resultID int, _ error) {
 	if !b.initialized {
-		b.container = MakeDiskRowContainer(
-			b.monitor,
+		var err error
+		b.container, err = MakeDiskRowContainer(
+			ctx,
+			b.memAcc,
+			b.diskMonitor,
 			inOrderResultsBufferSpillTypeSchema,
 			colinfo.ColumnOrdering{},
 			b.engine,
 		)
+		if err != nil {
+			return 0, err
+		}
 		b.initialized = true
 		b.rowScratch = make(rowenc.EncDatumRow, len(inOrderResultsBufferSpillTypeSchema))
 	}

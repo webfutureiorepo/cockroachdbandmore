@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -49,7 +44,7 @@ type SendOptions struct {
 //
 // The caller is responsible for ordering the replicas in the slice according to
 // the order in which the should be tried.
-type TransportFactory func(SendOptions, ReplicaSlice) (Transport, error)
+type TransportFactory func(SendOptions, ReplicaSlice) Transport
 
 // Transport objects can send RPCs to one or more replicas of a range.
 // All calls to Transport methods are made from a single thread, so
@@ -85,6 +80,11 @@ type Transport interface {
 	// transport.
 	MoveToFront(roachpb.ReplicaDescriptor) bool
 
+	// Reset moves back to the first replica in the transport, according to the
+	// current ordering. This may not be the same replica as MoveToFront if it was
+	// called prior, which places the replica at the next rather than first index.
+	Reset()
+
 	// Release releases any resources held by this Transport.
 	Release()
 }
@@ -102,7 +102,7 @@ const (
 // requests in a tight loop, exposing data races; see transport_race.go.
 func grpcTransportFactoryImpl(
 	opts SendOptions, nodeDialer *nodedialer.Dialer, rs ReplicaSlice,
-) (Transport, error) {
+) Transport {
 	transport := grpcTransportPool.Get().(*grpcTransport)
 	// Grab the saved slice memory from grpcTransport.
 	replicas := transport.replicas
@@ -140,7 +140,7 @@ func grpcTransportFactoryImpl(
 		transport.splitHealthy()
 	}
 
-	return transport, nil
+	return transport
 }
 
 type grpcTransport struct {
@@ -235,6 +235,9 @@ func (gt *grpcTransport) sendBatch(
 				"trying to ingest remote spans but there is no recording span set up")
 		}
 		span.ImportRemoteRecording(reply.CollectedSpans)
+		// The field is cleared by the sender because if the spans are re-imported
+		// by accident, duplicate spans may occur.
+		reply.CollectedSpans = nil
 	}
 	if err != nil {
 		return nil, errors.Wrapf(err, "ba: %s RPC error", ba.String())
@@ -283,6 +286,10 @@ func (gt *grpcTransport) MoveToFront(replica roachpb.ReplicaDescriptor) bool {
 	return false
 }
 
+func (gt *grpcTransport) Reset() {
+	gt.nextReplicaIdx = 0
+}
+
 // splitHealthy splits the grpcTransport's replica slice into healthy replica
 // and unhealthy replica, based on their connection state. Healthy replicas will
 // be rearranged first in the replicas slice, and unhealthy replicas will be
@@ -317,10 +324,10 @@ func (h *byHealth) Less(i, j int) bool {
 // Transport. This is useful for tests that want to use DistSender
 // without a full RPC stack.
 func SenderTransportFactory(tracer *tracing.Tracer, sender kv.Sender) TransportFactory {
-	return func(_ SendOptions, replicas ReplicaSlice) (Transport, error) {
+	return func(_ SendOptions, replicas ReplicaSlice) Transport {
 		// Always send to the first replica.
 		replica := replicas[0].ReplicaDescriptor
-		return &senderTransport{tracer, sender, replica, false}, nil
+		return &senderTransport{tracer, sender, replica, false}
 	}
 }
 
@@ -367,6 +374,9 @@ func (s *senderTransport) SendNext(
 			panic("trying to ingest remote spans but there is no recording span set up")
 		}
 		span.ImportRemoteRecording(br.CollectedSpans)
+		// The field is cleared by the sender because if the spans are re-imported
+		// by accident, duplicate spans may occur.
+		br.CollectedSpans = nil
 	}
 
 	return br, nil
@@ -393,5 +403,7 @@ func (s *senderTransport) SkipReplica() {
 func (s *senderTransport) MoveToFront(replica roachpb.ReplicaDescriptor) bool {
 	return true
 }
+
+func (s *senderTransport) Reset() {}
 
 func (s *senderTransport) Release() {}

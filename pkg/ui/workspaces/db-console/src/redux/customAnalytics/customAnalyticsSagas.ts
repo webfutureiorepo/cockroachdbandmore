@@ -1,19 +1,14 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { call, put, takeEvery } from "redux-saga/effects";
 import Analytics from "analytics-node";
+import { call, put, takeEvery } from "redux-saga/effects";
 
 import { PayloadAction } from "src/interfaces/action";
-import { COCKROACHLABS_ADDR } from "src/util/cockroachlabsAPI";
 import { emailSubscriptionAlertLocalSetting } from "src/redux/alerts";
+import { COCKROACHLABS_ADDR } from "src/util/cockroachlabsAPI";
 
 import {
   EMAIL_SUBSCRIPTION_SIGN_UP,

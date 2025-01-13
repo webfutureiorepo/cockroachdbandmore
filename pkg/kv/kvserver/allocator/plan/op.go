@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package plan
 
@@ -58,7 +53,7 @@ func (o AllocationTransferLeaseOp) ApplyImpact(storepool storepool.AllocatorStor
 // replicas txn.
 type AllocationChangeReplicasOp struct {
 	Usage             allocator.RangeUsageInfo
-	lhStore           roachpb.StoreID
+	LeaseholderStore  roachpb.StoreID
 	Chgs              kvpb.ReplicationChanges
 	AllocatorPriority float64
 	Reason            kvserverpb.RangeLogEventReason
@@ -71,7 +66,7 @@ var _ AllocationOp = &AllocationChangeReplicasOp{}
 // operation includes the leaseholder store.
 func (o AllocationChangeReplicasOp) LHBeingRemoved() bool {
 	for _, chg := range o.Chgs.VoterRemovals() {
-		if chg.StoreID == o.lhStore {
+		if chg.StoreID == o.LeaseholderStore {
 			return true
 		}
 	}

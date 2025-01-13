@@ -12,7 +12,6 @@ go_library(
         "//pkg/base",
         "//pkg/kv/kvserver/kvflowcontrol",
         "//pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb",
-        "//pkg/settings",
         "//pkg/settings/cluster",
         "//pkg/util/admission/admissionpb",
         "//pkg/util/buildutil",
@@ -31,10 +30,6 @@ go_test(
     srcs = ["kvflowcontroller_test.go"],
     data = glob(["testdata/**"]),
     embed = [":kvflowcontroller"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/kv/kvserver/kvflowcontrol",
         "//pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb",

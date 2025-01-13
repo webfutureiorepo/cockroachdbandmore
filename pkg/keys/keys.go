@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package keys
 
@@ -100,6 +95,49 @@ func DecodeNodeTombstoneKey(key roachpb.Key) (roachpb.NodeID, error) {
 		return 0, errors.Errorf("invalid key has trailing garbage: %q", detail)
 	}
 	return roachpb.NodeID(nodeID), err
+}
+
+// StoreLivenessRequesterMetaKey returns the key for the local store's Store
+// Liveness requester metadata.
+func StoreLivenessRequesterMetaKey() roachpb.Key {
+	return MakeStoreKey(localStoreLivenessRequesterMeta, nil)
+}
+
+// StoreLivenessSupporterMetaKey returns the key for the local store's Store
+// Liveness supporter metadata.
+func StoreLivenessSupporterMetaKey() roachpb.Key {
+	return MakeStoreKey(localStoreLivenessSupporterMeta, nil)
+}
+
+// StoreLivenessSupportForKey returns the key for the Store Liveness support
+// by the local store for a given store identified by nodeID and storeID.
+func StoreLivenessSupportForKey(nodeID roachpb.NodeID, storeID roachpb.StoreID) roachpb.Key {
+	nodeIDAndStoreID := uint64(nodeID)<<32 | uint64(storeID)
+	return MakeStoreKey(
+		localStoreLivenessSupportFor, encoding.EncodeUint64Ascending(nil, nodeIDAndStoreID),
+	)
+}
+
+// DecodeStoreLivenessSupportForKey returns the node ID and store ID of a given
+// localStoreLivenessSupportFor key.
+func DecodeStoreLivenessSupportForKey(key roachpb.Key) (roachpb.NodeID, roachpb.StoreID, error) {
+	suffix, detail, err := DecodeStoreKey(key)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !suffix.Equal(localStoreLivenessSupportFor) {
+		return 0, 0, errors.Errorf("key with suffix %q != %q", suffix, localStoreLivenessSupportFor)
+	}
+	detail, nodeIDAndStoreID, err := encoding.DecodeUint64Ascending(detail)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(detail) != 0 {
+		return 0, 0, errors.Errorf("invalid key has trailing garbage: %q", detail)
+	}
+	nodeID := roachpb.NodeID(nodeIDAndStoreID >> 32)
+	storeID := roachpb.StoreID(nodeIDAndStoreID & math.MaxUint32)
+	return nodeID, storeID, nil
 }
 
 // StoreCachedSettingsKey returns a store-local key for store's cached settings.
@@ -287,6 +325,11 @@ func DecodeAbortSpanKey(key roachpb.Key, dest []byte) (uuid.UUID, error) {
 // RangeAppliedStateKey returns a system-local key for the range applied state key.
 func RangeAppliedStateKey(rangeID roachpb.RangeID) roachpb.Key {
 	return MakeRangeIDPrefixBuf(rangeID).RangeAppliedStateKey()
+}
+
+// RangeForceFlushKey returns a system-local key for the range force flush key.
+func RangeForceFlushKey(rangeID roachpb.RangeID) roachpb.Key {
+	return MakeRangeIDPrefixBuf(rangeID).RangeForceFlushKey()
 }
 
 // RangeLeaseKey returns a system-local key for a range lease.
@@ -963,7 +1006,7 @@ func GetRowPrefixLength(key roachpb.Key) (int, error) {
 	colFamIDLenByte := sqlKey[sqlN-1:]
 	if encoding.PeekType(colFamIDLenByte) != encoding.Int {
 		// The last byte is not a valid column family ID suffix.
-		return 0, errors.Errorf("%s: not a valid table key", key)
+		return 0, errors.Errorf("%s: not a valid column family ID suffix", key)
 	}
 
 	// Strip off the column family ID suffix from the buf. The last byte of the
@@ -972,7 +1015,7 @@ func GetRowPrefixLength(key roachpb.Key) (int, error) {
 	// 0 (see the optimization in MakeFamilyKey).
 	_, colFamIDLen, err := encoding.DecodeUvarintAscending(colFamIDLenByte)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrapf(err, "could not decode column family ID length")
 	}
 	// Note how this next comparison (and by extension the code after it) is
 	// overflow-safe. There are more intuitive ways of writing this that aren't
@@ -1089,6 +1132,12 @@ func (b RangeIDPrefixBuf) ReplicatedSharedLocksTransactionLatchingKey(txnID uuid
 // See comment on RangeAppliedStateKey function.
 func (b RangeIDPrefixBuf) RangeAppliedStateKey() roachpb.Key {
 	return append(b.replicatedPrefix(), LocalRangeAppliedStateSuffix...)
+}
+
+// RangeForceFlushKey returns a system-local key for the range force flush
+// key.
+func (b RangeIDPrefixBuf) RangeForceFlushKey() roachpb.Key {
+	return append(b.replicatedPrefix(), LocalRangeForceFlushSuffix...)
 }
 
 // RangeLeaseKey returns a system-local key for a range lease.

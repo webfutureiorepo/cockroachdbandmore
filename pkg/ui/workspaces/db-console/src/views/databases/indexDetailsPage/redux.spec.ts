@@ -1,23 +1,19 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { createMemoryHistory } from "history";
-import Long from "long";
-import { RouteComponentProps } from "react-router-dom";
-import { bindActionCreators, Store } from "redux";
 import {
   IndexDetailPageActions,
   IndexDetailsPageData,
   util,
   TimeScale,
 } from "@cockroachlabs/cluster-ui";
+import { createMemoryHistory } from "history";
+import Long from "long";
+import moment from "moment-timezone";
+import { RouteComponentProps } from "react-router-dom";
+import { bindActionCreators, Store } from "redux";
 
 import { AdminUIState, createAdminUIStore } from "src/redux/state";
 import {
@@ -26,8 +22,8 @@ import {
   tableNameAttr,
 } from "src/util/constants";
 import * as fakeApi from "src/util/fakeApi";
+
 import { mapStateToProps, mapDispatchToProps } from "./redux";
-import moment from "moment-timezone";
 
 function fakeRouteComponentProps(
   k1: string,
@@ -94,10 +90,7 @@ class TestDriver {
       );
   }
 
-  assertProperties(
-    expected: IndexDetailsPageData,
-    compareTimestamps: boolean = true,
-  ) {
+  assertProperties(expected: IndexDetailsPageData, compareTimestamps = true) {
     // Assert moments are equal if not in pre-loading state.
     if (compareTimestamps) {
       expect(
@@ -160,8 +153,8 @@ describe("Index Details Page", function () {
           indexID: undefined,
           lastRead: util.minDate,
           lastReset: util.minDate,
+          databaseID: undefined,
         },
-        breadcrumbItems: null,
       },
       false,
     );
@@ -192,6 +185,7 @@ describe("Index Details Page", function () {
         },
       ],
       last_reset: util.stringToTimestamp("2021-11-12T20:18:22.167627Z"),
+      database_id: 10,
     });
 
     await driver.refreshIndexStats();
@@ -220,8 +214,8 @@ describe("Index Details Page", function () {
           util.stringToTimestamp("2021-11-12T20:18:22.167627Z"),
         ),
         indexRecommendations: [],
+        databaseID: 10,
       },
-      breadcrumbItems: null,
     });
   });
 });

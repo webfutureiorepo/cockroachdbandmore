@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package allccl
 
@@ -116,6 +113,7 @@ func TestAllRegisteredImportFixture(t *testing.T) {
 
 func TestAllRegisteredSetup(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.UnderDeadlock(t)
 
 	for _, meta := range workload.Registered() {
 		if bigInitialData(meta) {
@@ -242,6 +240,13 @@ func hashTableInitialData(
 				for i := 0; i < b.Length(); i++ {
 					_, _ = h.Write(colBytes.Get(i))
 				}
+			case types.TimestampFamily, types.TimestampTZFamily:
+				colTime := col.Timestamp()
+
+				for i := 0; i < b.Length(); i++ {
+					binary.LittleEndian.PutUint64(scratch[:8], uint64(colTime[i].UnixNano()))
+					_, _ = h.Write(scratch[:8])
+				}
 			default:
 				return errors.Errorf(`unhandled type %s`, col.Type())
 			}
@@ -277,9 +282,9 @@ func TestDeterministicInitialData(t *testing.T) {
 		`roachmart`:  0xda5e73423dbdb2d9,
 		`sqlsmith`:   0xcbf29ce484222325,
 		`startrek`:   0xa0249fbdf612734c,
-		`tpcc`:       0xab32e4f5e899eb2f,
+		`tpcc`:       0xf25e71062ca28dca,
 		`tpch`:       0xe4fd28db230b9149,
-		`ycsb`:       0x1244ea1c29ef67f6,
+		`ycsb`:       0xcfd3f148a01a2c47,
 	}
 
 	var a bufalloc.ByteAllocator

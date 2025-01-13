@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
@@ -14,6 +9,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/server/dumpstore"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -38,6 +34,13 @@ const jemallocFileNamePrefix = "jeprof"
 // jemallocFileNameSuffix is the file name extension of jemalloc profile dumps.
 const jemallocFileNameSuffix = ".jeprof"
 
+var jemallCombinedFileSize = settings.RegisterByteSizeSetting(
+	settings.ApplicationLevel,
+	"server.jemalloc.total_dump_size_limit",
+	"maximum combined disk size of preserved jemalloc profiles",
+	32<<20, // 32MiB
+)
+
 // NewNonGoAllocProfiler creates a NonGoAllocProfiler. dir is the
 // directory in which profiles are to be stored.
 func NewNonGoAllocProfiler(
@@ -47,7 +50,7 @@ func NewNonGoAllocProfiler(
 		return nil, errors.AssertionFailedf("need to specify dir for NewHeapProfiler")
 	}
 
-	dumpStore := dumpstore.NewStore(dir, maxCombinedFileSize, st)
+	dumpStore := dumpstore.NewStore(dir, jemallCombinedFileSize, st)
 
 	hp := &NonGoAllocProfiler{
 		profiler: makeProfiler(

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package funcdesc
 
@@ -17,9 +12,9 @@ import (
 )
 
 var schemaExprContextAllowingUDF = map[tree.SchemaExprContext]clusterversion.Key{
-	tree.CheckConstraintExpr:           clusterversion.V23_1,
-	tree.ColumnDefaultExprInNewTable:   clusterversion.V23_1,
-	tree.ColumnDefaultExprInSetDefault: clusterversion.V23_1,
+	tree.CheckConstraintExpr:           clusterversion.MinSupported,
+	tree.ColumnDefaultExprInNewTable:   clusterversion.MinSupported,
+	tree.ColumnDefaultExprInSetDefault: clusterversion.MinSupported,
 }
 
 // MaybeFailOnUDFUsage returns an error if the given expression or any

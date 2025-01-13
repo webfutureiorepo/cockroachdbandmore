@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package keys
 
@@ -704,7 +699,7 @@ func TestEnsureSafeSplitKey(t *testing.T) {
 	}
 }
 
-func testDecodeTenantPrefixShared(t *testing.T) {
+func TestDecodeTenantPrefix(t *testing.T) {
 	tIDs := []roachpb.TenantID{
 		roachpb.SystemTenantID,
 		roachpb.MustMakeTenantID(2),
@@ -737,16 +732,8 @@ func testDecodeTenantPrefixShared(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
-}
 
-func TestDecodeTenantPrefix(t *testing.T) {
-	testDecodeTenantPrefixShared(t)
-}
-
-func TestDecodeTenantPrefixE(t *testing.T) {
-	testDecodeTenantPrefixShared(t)
-
-	_, _, err := DecodeTenantPrefixE([]byte("\xfe\x88\x28\xa0\x9b"))
+	_, _, err := DecodeTenantPrefix([]byte("\xfe\x88\x28\xa0\x9b"))
 	require.Error(t, err, roachpb.ErrInvalidTenantID)
 }
 

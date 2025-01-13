@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package flowinfra
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	"math"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,10 +210,7 @@ func TestStreamConnectionTimeout(t *testing.T) {
 	// to connect a stream, but it'll be too late.
 	id1 := execinfrapb.FlowID{UUID: uuid.MakeV4()}
 	f1 := &FlowBase{}
-	var canceled atomic.Bool
-	f1.mu.ctxCancel = func() {
-		canceled.Store(true)
-	}
+	f1.mu.ctxCancel = func() {}
 	streamID1 := execinfrapb.StreamID(1)
 	consumer := &distsqlutils.RowBuffer{}
 	wg := &sync.WaitGroup{}
@@ -242,9 +233,6 @@ func TestStreamConnectionTimeout(t *testing.T) {
 		defer si.mu.Unlock()
 		if !si.mu.canceled {
 			return errors.Errorf("not timed out yet")
-		}
-		if !canceled.Load() {
-			return errors.New("expected ctxCancel to have been called")
 		}
 		return nil
 	})
@@ -682,7 +670,7 @@ func TestFlowCancelPartiallyBlocked(t *testing.T) {
 	// RegisterFlow with an immediate timeout.
 	flow := &FlowBase{
 		FlowCtx: execinfra.FlowCtx{
-			ID: execinfrapb.FlowID{UUID: uuid.FastMakeV4()},
+			ID: execinfrapb.FlowID{UUID: uuid.MakeV4()},
 		},
 		inboundStreams: inboundStreams,
 		flowRegistry:   fr,
@@ -746,10 +734,10 @@ func (s *delayedErrorServerStream) Send(*execinfrapb.ConsumerSignal) error {
 //     inbound stream timeout is reached
 //   - that timeout "cancels" the single pending flow; this cancellation results
 //     in the flow being marked as "canceled" and the wait group being
-//     decremented (as well as calling Timeout() on the receiver). It also
-//     results in the flow cancellation.
+//     decremented (as well as calling Timeout() on the receiver)
 //   - after the flow cancellation is performed, the "handshake" RPC results in
-//     an error too, which doesn't actually matter at this point.
+//     an error which results in flow being properly canceled (by calling
+//     FlowBase.ctxCancel).
 //
 // Before #94113 was fixed, the flow would be incorrectly marked as "connected"
 // before the "handshake" RPC was issued, so the inbound stream timeout would
@@ -821,9 +809,7 @@ func TestErrorOnSlowHandshake(t *testing.T) {
 	// Make sure that the wait group is properly decremented (this must have
 	// been done by flowEntry.streamTimer too).
 	wg.Wait()
-	// We expect that Flow.Cancel is called twice - once when the inbound stream
-	// timed out, and again when the RPC results in an error.
-	<-cancelCh
+	// Since the RPC resulted in an error, we expect that the flow is canceled.
 	<-cancelCh
 	err := <-errCh
 	if err == nil {

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecjoin
 
@@ -39,7 +34,7 @@ func NewCrossJoiner(
 	leftTypes []*types.T,
 	rightTypes []*types.T,
 	diskAcc *mon.BoundAccount,
-	converterMemAcc *mon.BoundAccount,
+	diskQueueMemAcc *mon.BoundAccount,
 ) colexecop.ClosableOperator {
 	c := &crossJoiner{
 		crossJoinerBase: newCrossJoinerBase(
@@ -51,7 +46,7 @@ func NewCrossJoiner(
 			diskQueueCfg,
 			fdSemaphore,
 			diskAcc,
-			converterMemAcc,
+			diskQueueMemAcc,
 		),
 		TwoInputInitHelper: colexecop.MakeTwoInputInitHelper(left, right),
 		outputTypes:        joinType.MakeOutputTypes(leftTypes, rightTypes),
@@ -304,7 +299,7 @@ func (c *crossJoiner) willEmit() int {
 
 // setAllNulls sets all tuples in vecs with indices in [0, length) range to
 // null.
-func setAllNulls(vecs []coldata.Vec, length int) {
+func setAllNulls(vecs []*coldata.Vec, length int) {
 	for i := range vecs {
 		vecs[i].Nulls().SetNullRange(0 /* startIdx */, length)
 	}
@@ -327,7 +322,7 @@ func newCrossJoinerBase(
 	cfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
 	diskAcc *mon.BoundAccount,
-	converterMemAcc *mon.BoundAccount,
+	diskQueueMemAcc *mon.BoundAccount,
 ) *crossJoinerBase {
 	base := &crossJoinerBase{
 		joinType: joinType,
@@ -349,7 +344,7 @@ func newCrossJoinerBase(
 				DiskQueueCfg:       cfg,
 				FDSemaphore:        fdSemaphore,
 				DiskAcc:            diskAcc,
-				ConverterMemAcc:    converterMemAcc,
+				DiskQueueMemAcc:    diskQueueMemAcc,
 			},
 		),
 	}

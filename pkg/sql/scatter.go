@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -27,6 +22,7 @@ import (
 )
 
 type scatterNode struct {
+	zeroInputPlanNode
 	optColumnsSlot
 
 	run scatterRun
@@ -77,7 +73,7 @@ func (p *planner) Scatter(ctx context.Context, n *tree.Scatter) (planNode, error
 		fromVals := make([]tree.Datum, len(n.From))
 		for i, expr := range n.From {
 			typedExpr, err := p.analyzeExpr(
-				ctx, expr, nil, tree.IndexedVarHelper{}, desiredTypes[i], true, "SCATTER",
+				ctx, expr, tree.IndexedVarHelper{}, desiredTypes[i], true, "SCATTER",
 			)
 			if err != nil {
 				return nil, err
@@ -90,7 +86,7 @@ func (p *planner) Scatter(ctx context.Context, n *tree.Scatter) (planNode, error
 		toVals := make([]tree.Datum, len(n.From))
 		for i, expr := range n.To {
 			typedExpr, err := p.analyzeExpr(
-				ctx, expr, nil, tree.IndexedVarHelper{}, desiredTypes[i], true, "SCATTER",
+				ctx, expr, tree.IndexedVarHelper{}, desiredTypes[i], true, "SCATTER",
 			)
 			if err != nil {
 				return nil, err

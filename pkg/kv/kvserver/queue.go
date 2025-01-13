@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -348,6 +343,14 @@ type queueConfig struct {
 	// disabledConfig is a reference to the cluster setting that controls enabling
 	// and disabling queues.
 	disabledConfig *settings.BoolSetting
+	// skipIfReplicaHasExternalFilesConfig is a reference to the
+	// clsuter setting that controls whether replicas should be
+	// processed in this queue if they have external files. May
+	// be nil.
+	//
+	// skipIfReplicaHasExternalFilesConfig is only consulted after
+	// shouldQueue returns true for the given replica.
+	skipIfReplicaHasExternalFilesConfig *settings.BoolSetting
 }
 
 // baseQueue is the base implementation of the replicaQueue interface. Queue
@@ -679,6 +682,19 @@ func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.
 	if !should {
 		return
 	}
+
+	extConf := bq.skipIfReplicaHasExternalFilesConfig
+	if extConf != nil && extConf.Get(&bq.store.cfg.Settings.SV) {
+		hasExternal, err := realRepl.HasExternalBytes()
+		if err != nil {
+			log.Warningf(ctx, "could not determine if %s has external bytes: %s", realRepl, err)
+			return
+		}
+		if hasExternal {
+			log.VInfof(ctx, 1, "skipping %s for %s because it has external bytes", bq.name, realRepl)
+			return
+		}
+	}
 	_, err = bq.addInternal(ctx, repl.Desc(), repl.ReplicaID(), priority)
 	if !isExpectedQueueError(err) {
 		log.Errorf(ctx, "unable to add: %+v", err)
@@ -894,7 +910,6 @@ func (bq *baseQueue) processOneAsyncAndReleaseSem(
 	// it is no longer processable, return immediately.
 	if _, err := bq.replicaCanBeProcessed(ctx, repl, false /*acquireLeaseIfNeeded */); err != nil {
 		bq.finishProcessingReplica(ctx, stopper, repl, err)
-		log.Infof(ctx, "%s: skipping %d since replica can't be processed %v", taskName, repl.ReplicaID(), err)
 		<-bq.processSem
 		return
 	}
@@ -953,7 +968,7 @@ func (bq *baseQueue) processReplica(ctx context.Context, repl replicaInQueue) er
 		return err
 	}
 
-	return timeutil.RunWithTimeout(ctx, fmt.Sprintf("%s queue process replica %d", bq.name, repl.GetRangeID()),
+	return timeutil.RunWithTimeout(ctx, redact.Sprintf("%s queue process replica %d", bq.name, repl.GetRangeID()),
 		bq.processTimeoutFunc(bq.store.ClusterSettings(), repl), func(ctx context.Context) error {
 			log.VEventf(ctx, 3, "processing...")
 			// NB: in production code, this type assertion is always true. In tests,
@@ -1037,7 +1052,7 @@ func (bq *baseQueue) replicaCanBeProcessed(
 	// and renew or acquire if necessary.
 	if bq.needsLease {
 		if acquireLeaseIfNeeded {
-			leaseStatus, pErr := repl.redirectOnOrAcquireLease(ctx)
+			_, pErr := repl.redirectOnOrAcquireLease(ctx)
 			if pErr != nil {
 				switch v := pErr.GetDetail().(type) {
 				case *kvpb.NotLeaseHolderError, *kvpb.RangeNotFoundError:
@@ -1050,7 +1065,7 @@ func (bq *baseQueue) replicaCanBeProcessed(
 
 			// TODO(baptist): Should this be added to replicaInQueue?
 			realRepl, _ := repl.(*Replica)
-			pErr = realRepl.maybeSwitchLeaseType(ctx, leaseStatus)
+			pErr = realRepl.maybeSwitchLeaseType(ctx)
 			if pErr != nil {
 				return nil, pErr.GoError()
 			}
@@ -1059,7 +1074,9 @@ func (bq *baseQueue) replicaCanBeProcessed(
 			st := repl.CurrentLeaseStatus(ctx)
 			if st.IsValid() && !st.OwnedBy(repl.StoreID()) {
 				log.VEventf(ctx, 1, "needs lease; not adding: %v", st.Lease)
-				return nil, errors.Newf("needs lease, not adding: %v", st.Lease)
+				// NB: this is an expected error, so make sure it doesn't get
+				// logged loudly.
+				return nil, benignerror.New(errors.Newf("needs lease, not adding: %v", st.Lease))
 			}
 		}
 	}

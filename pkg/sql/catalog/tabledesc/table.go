@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tabledesc
 
@@ -146,10 +141,14 @@ func MakeColumnDefDescs(
 			return nil, errors.AssertionFailedf(
 				"column %s is of invalid generated as identity type (neither ALWAYS nor BY DEFAULT)", string(d.Name))
 		}
+		// GeneratedAsIdentitySequenceOption is used to populate the sequence options for the column information schema.
+		// An empty string will populate default values and null will generate null values.
+		s := ""
 		if genSeqOpt := d.GeneratedIdentity.SeqOptions; genSeqOpt != nil {
-			s := tree.Serialize(&d.GeneratedIdentity.SeqOptions)
-			col.GeneratedAsIdentitySequenceOption = &s
+			// Override GeneratedAsIdentitySequenceOption default values with specified SeqOptions.
+			s = tree.Serialize(&d.GeneratedIdentity.SeqOptions)
 		}
+		col.GeneratedAsIdentitySequenceOption = &s
 	}
 
 	// Validate and assign column type.
@@ -157,7 +156,7 @@ func MakeColumnDefDescs(
 	if err != nil {
 		return nil, err
 	}
-	if err = colinfo.ValidateColumnDefType(ctx, evalCtx.Settings.Version, resType); err != nil {
+	if err = colinfo.ValidateColumnDefType(ctx, evalCtx.Settings, resType); err != nil {
 		return nil, err
 	}
 	col.Type = resType
@@ -280,6 +279,10 @@ func EvalShardBucketCount(
 	} else {
 		if paramVal != nil {
 			shardBuckets = paramVal
+		}
+		// Check if shardBuckets is NULL
+		if shardBuckets == tree.DNull {
+			return 0, pgerror.Newf(pgcode.InvalidParameterValue, invalidBucketCountMsg, "NULL")
 		}
 		typedExpr, err := schemaexpr.SanitizeVarFreeExpr(
 			ctx, shardBuckets, types.Int, "BUCKET_COUNT", semaCtx, volatility.Volatile, false, /*allowAssignmentCast*/

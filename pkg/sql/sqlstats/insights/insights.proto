@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.sql.insights;
@@ -135,6 +130,9 @@ message Statement {
   string error_code = 24;
   // The most recent error experienced by this statement.
   string error_msg = 25 [(gogoproto.nullable) = false, (gogoproto.customtype) = "github.com/cockroachdb/redact.RedactableString"];
+  // KVNodeIDs is the ordered list of KV node ids which were used to evaluate KV
+  // read requests.
+  repeated int32 kv_node_ids = 26 [(gogoproto.customname) = "KVNodeIDs"];
 }
 
 

@@ -1,12 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { createMemoryHistory } from "history";
+import merge from "lodash/merge";
+
+import { AdminUIState, createAdminUIStore } from "src/redux/state";
 
 import {
   selectLocalityTree,
@@ -14,7 +14,7 @@ import {
   selectNodeLocalities,
 } from "./localities";
 
-function makeStateWithLocalities(localities: LocalityTier[][]) {
+function makeStateWithLocalities(localities: LocalityTier[][]): AdminUIState {
   const nodes = localities.map((locality, i) => {
     return {
       desc: {
@@ -23,8 +23,8 @@ function makeStateWithLocalities(localities: LocalityTier[][]) {
       },
     };
   });
-
-  return {
+  const store = createAdminUIStore(createMemoryHistory());
+  return merge<AdminUIState, RecursivePartial<AdminUIState>>(store.getState(), {
     cachedData: {
       nodes: {
         data: nodes,
@@ -34,7 +34,7 @@ function makeStateWithLocalities(localities: LocalityTier[][]) {
       },
       liveness: {},
     },
-  };
+  });
 }
 
 describe("selectLocalityTree", function () {

@@ -1,18 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opt_test
 
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -110,6 +106,11 @@ func TestAggregateIgnoresDuplicates(t *testing.T) {
 		// st_extent
 		{op: opt.STExtentOp, typ: types.Geometry},
 	}
+	// Re-order test cases so that all cases that use the same type are
+	// contiguous (to avoid recreating the table).
+	sort.Slice(testCases, func(i, j int) bool {
+		return testCases[i].typ.SQLString() < testCases[j].typ.SQLString()
+	})
 
 	// Ensure that a test case exists for each operator that
 	// AggregateIgnoresDuplicates returns true for.
@@ -143,16 +144,22 @@ func TestAggregateIgnoresDuplicates(t *testing.T) {
 		numIters = 10
 	)
 	rng, _ := randutil.NewTestRand()
+	var prevTyp *types.T
 	for _, tc := range testCases {
 		sqlOp, ok := opt.AggregateOpReverseMap[tc.op]
 		if !ok {
 			t.Fatalf("%s is not an aggregate function", tc.op.String())
 		}
 
-		for i := 0; i < numDatums; i++ {
-			// Create the results table.
+		// Create the results table if the previous one used a different type.
+		if prevTyp == nil || !prevTyp.Identical(tc.typ) {
 			tDB.Exec(t, "DROP TABLE IF EXISTS results")
 			tDB.Exec(t, fmt.Sprintf("CREATE TABLE results (r %s)", tc.typ.SQLString()))
+			prevTyp = tc.typ
+		}
+		for i := 0; i < numDatums; i++ {
+			// Clear the table.
+			tDB.Exec(t, "DELETE FROM results WHERE true")
 
 			// Generate a random datum.
 			datum := randgen.RandDatum(rng, tc.typ, false /* nullOk */)

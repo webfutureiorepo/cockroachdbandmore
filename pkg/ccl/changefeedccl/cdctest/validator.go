@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdctest
 
@@ -18,6 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -142,8 +140,11 @@ func (v *orderValidator) NoteRow(partition string, key, value string, updated hl
 	})
 	seen := timestampsIdx < len(timestampValueTuples) &&
 		timestampValueTuples[timestampsIdx].ts == updated
+	if seen {
+		return nil
+	}
 
-	if !seen && len(timestampValueTuples) > 0 &&
+	if len(timestampValueTuples) > 0 &&
 		updated.Less(timestampValueTuples[len(timestampValueTuples)-1].ts) {
 		v.failures = append(v.failures, fmt.Sprintf(
 			`topic %s partition %s: saw new row timestamp %s after %s was seen`,
@@ -152,21 +153,20 @@ func (v *orderValidator) NoteRow(partition string, key, value string, updated hl
 			timestampValueTuples[len(timestampValueTuples)-1].ts.AsOfSystemTime(),
 		))
 	}
-	if !seen && updated.Less(v.resolved[partition]) {
+	latestResolved := v.resolved[partition]
+	if updated.Less(latestResolved) {
 		v.failures = append(v.failures, fmt.Sprintf(
 			`topic %s partition %s: saw new row timestamp %s after %s was resolved`,
-			v.topic, partition, updated.AsOfSystemTime(), v.resolved[partition].AsOfSystemTime(),
+			v.topic, partition, updated.AsOfSystemTime(), latestResolved.AsOfSystemTime(),
 		))
 	}
 
-	if !seen {
-		v.keyTimestampAndValues[key] = append(
-			append(timestampValueTuples[:timestampsIdx], timestampValue{
-				ts:    updated,
-				value: value,
-			}),
-			timestampValueTuples[timestampsIdx:]...)
-	}
+	v.keyTimestampAndValues[key] = append(
+		append(timestampValueTuples[:timestampsIdx], timestampValue{
+			ts:    updated,
+			value: value,
+		}),
+		timestampValueTuples[timestampsIdx:]...)
 	return nil
 }
 
@@ -214,31 +214,39 @@ func NewBeforeAfterValidator(sqlDB *gosql.DB, table string) (Validator, error) {
 func (v *beforeAfterValidator) NoteRow(
 	partition string, key, value string, updated hlc.Timestamp,
 ) error {
-	var primaryKeyDatums []interface{}
-	if err := gojson.Unmarshal([]byte(key), &primaryKeyDatums); err != nil {
+	keyJSON, err := json.ParseJSON(key)
+	if err != nil {
 		return err
 	}
-	if len(primaryKeyDatums) != len(v.primaryKeyCols) {
+	keyJSONAsArray, notArray := keyJSON.AsArray()
+	if !notArray || len(keyJSONAsArray) != len(v.primaryKeyCols) {
 		return errors.Errorf(
-			`expected primary key columns %s got datums %s`, v.primaryKeyCols, primaryKeyDatums)
+			`notArray: %t expected primary key columns %s got datums %s`,
+			notArray, v.primaryKeyCols, keyJSONAsArray)
 	}
 
-	type wrapper struct {
-		After  map[string]interface{} `json:"after"`
-		Before map[string]interface{} `json:"before"`
+	valueJSON, err := json.ParseJSON(value)
+	if err != nil {
+		return err
 	}
-	var rowJSON wrapper
-	if err := gojson.Unmarshal([]byte(value), &rowJSON); err != nil {
+
+	afterJSON, err := valueJSON.FetchValKey("after")
+	if err != nil {
+		return err
+	}
+
+	beforeJson, err := valueJSON.FetchValKey("before")
+	if err != nil {
 		return err
 	}
 
 	// Check that the "after" field agrees with the row in the table at the
 	// updated timestamp.
-	if err := v.checkRowAt("after", primaryKeyDatums, rowJSON.After, updated); err != nil {
+	if err := v.checkRowAt("after", keyJSONAsArray, afterJSON, updated); err != nil {
 		return err
 	}
 
-	if v.resolved[partition].IsEmpty() && rowJSON.Before == nil {
+	if v.resolved[partition].IsEmpty() && (beforeJson == nil || beforeJson.Type() == json.NullJSONType) {
 		// If the initial scan hasn't completed for this partition,
 		// we don't require the rows to contain a "before" field.
 		return nil
@@ -246,15 +254,15 @@ func (v *beforeAfterValidator) NoteRow(
 
 	// Check that the "before" field agrees with the row in the table immediately
 	// before the updated timestamp.
-	return v.checkRowAt("before", primaryKeyDatums, rowJSON.Before, updated.Prev())
+	return v.checkRowAt("before", keyJSONAsArray, beforeJson, updated.Prev())
 }
 
 func (v *beforeAfterValidator) checkRowAt(
-	field string, primaryKeyDatums []interface{}, rowDatums map[string]interface{}, ts hlc.Timestamp,
+	field string, primaryKeyDatums []json.JSON, rowDatums json.JSON, ts hlc.Timestamp,
 ) error {
 	var stmtBuf bytes.Buffer
 	var args []interface{}
-	if rowDatums == nil {
+	if rowDatums == nil || rowDatums.Type() == json.NullJSONType {
 		// We expect the row to be missing ...
 		stmtBuf.WriteString(`SELECT count(*) = 0 `)
 	} else {
@@ -262,28 +270,46 @@ func (v *beforeAfterValidator) checkRowAt(
 		stmtBuf.WriteString(`SELECT count(*) = 1 `)
 	}
 	fmt.Fprintf(&stmtBuf, `FROM %s AS OF SYSTEM TIME '%s' WHERE `, v.table, ts.AsOfSystemTime())
-	if rowDatums == nil {
+	if rowDatums == nil || rowDatums.Type() == json.NullJSONType {
 		// ... with the primary key.
 		for i, datum := range primaryKeyDatums {
 			if len(args) != 0 {
 				stmtBuf.WriteString(` AND `)
 			}
-			fmt.Fprintf(&stmtBuf, `%s = $%d`, v.primaryKeyCols[i], i+1)
-			args = append(args, datum)
+			if datum == nil || datum.Type() == json.NullJSONType {
+				fmt.Fprintf(&stmtBuf, `%s IS NULL`, v.primaryKeyCols[i])
+			} else {
+				fmt.Fprintf(&stmtBuf, `to_json(%s)::TEXT = $%d`, v.primaryKeyCols[i], i+1)
+				args = append(args, datum.String())
+			}
 		}
 	} else {
 		// ... and match the specified datums.
-		colNames := make([]string, 0, len(rowDatums))
-		for col := range rowDatums {
-			colNames = append(colNames, col)
+		iter, err := rowDatums.ObjectIter()
+		if err != nil {
+			return err
+		}
+
+		colNames := make([]string, 0)
+		for iter.Next() {
+			colNames = append(colNames, iter.Key())
 		}
 		sort.Strings(colNames)
 		for i, col := range colNames {
 			if len(args) != 0 {
 				stmtBuf.WriteString(` AND `)
 			}
-			fmt.Fprintf(&stmtBuf, `%s = $%d`, col, i+1)
-			args = append(args, rowDatums[col])
+			jsonCol, err := rowDatums.FetchValKey(col)
+
+			if jsonCol == nil || jsonCol.Type() == json.NullJSONType {
+				fmt.Fprintf(&stmtBuf, `%s IS NULL`, col)
+			} else {
+				fmt.Fprintf(&stmtBuf, `to_json(%s)::TEXT = $%d`, col, i+1)
+				if err != nil {
+					return err
+				}
+				args = append(args, jsonCol.String())
+			}
 		}
 	}
 
@@ -675,8 +701,8 @@ type CountValidator struct {
 	rowsSinceResolved                    int
 }
 
-// MakeCountValidator returns a CountValidator wrapping the given Validator.
-func MakeCountValidator(v Validator) *CountValidator {
+// NewCountValidator returns a CountValidator wrapping the given Validator.
+func NewCountValidator(v Validator) *CountValidator {
 	return &CountValidator{v: v}
 }
 

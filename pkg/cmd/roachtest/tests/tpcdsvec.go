@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -19,8 +14,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload/tpcds"
@@ -71,7 +68,7 @@ func registerTPCDSVec(r registry.Registry) {
 		t.Status("restoring TPCDS dataset for Scale Factor 1")
 		if _, err := clusterConn.Exec(
 			`
-RESTORE DATABASE tpcds FROM 'gs://cockroach-fixtures-us-east1/workload/tpcds/scalefactor=1/backup?AUTH=implicit'
+RESTORE DATABASE tpcds FROM '/' IN 'gs://cockroach-fixtures-us-east1/workload/tpcds/scalefactor=1/backup?AUTH=implicit'
 WITH unsafe_restore_incompatible_version;
 `,
 		); err != nil {
@@ -83,7 +80,7 @@ WITH unsafe_restore_incompatible_version;
 		}
 		scatterTables(t, clusterConn, tpcdsTables)
 		t.Status("waiting for full replication")
-		err := WaitFor3XReplication(ctx, t, clusterConn)
+		err := roachtestutil.WaitFor3XReplication(ctx, t.L(), clusterConn)
 		require.NoError(t, err)
 
 		// TODO(yuzefovich): it seems like if cmpconn.CompareConns hits a
@@ -94,7 +91,7 @@ WITH unsafe_restore_incompatible_version;
 		// We additionally open fresh connections for each query.
 		setStmtTimeout := fmt.Sprintf("SET statement_timeout='%s';", timeout)
 		firstNode := c.Node(1)
-		urls, err := c.ExternalPGUrl(ctx, t.L(), firstNode, "" /* tenant */, 0 /* sqlInstance */)
+		urls, err := c.ExternalPGUrl(ctx, t.L(), firstNode, roachprod.PGURLOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,16 +182,15 @@ WITH unsafe_restore_incompatible_version;
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             "tpcdsvec",
-		Owner:            registry.OwnerSQLQueries,
-		Benchmark:        true,
-		Cluster:          r.MakeClusterSpec(3),
-		CompatibleClouds: registry.AllExceptAWS,
+		Name:      "tpcdsvec",
+		Owner:     registry.OwnerSQLQueries,
+		Benchmark: true,
+		Cluster:   r.MakeClusterSpec(3),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
 		Suites:           registry.Suites(registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if c.Cloud() != spec.GCE && !c.IsLocal() {
-				t.Skip("uses gs://cockroach-fixtures-us-east1; see https://github.com/cockroachdb/cockroach/issues/105968")
-			}
 			runTPCDSVec(ctx, t, c)
 		},
 	})

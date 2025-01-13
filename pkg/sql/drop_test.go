@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -131,7 +126,7 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 	tbDesc := desctestutils.TestingGetPublicTableDescriptor(kvDB, s.Codec(), "t", "kv")
 	var dbDesc catalog.DatabaseDescriptor
 	require.NoError(t, sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		dbDesc, err = col.ByID(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
+		dbDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
 		return err
 	}))
 
@@ -304,7 +299,7 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	tb2Desc := desctestutils.TestingGetPublicTableDescriptor(kvDB, s.Codec(), "t", "kv2")
 	var dbDesc catalog.DatabaseDescriptor
 	require.NoError(t, sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		dbDesc, err = col.ByID(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
+		dbDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Database(ctx, tbDesc.GetParentID())
 		return err
 	}))
 
@@ -497,6 +492,16 @@ func TestDropIndex(t *testing.T) {
 				tableDesc.GetID(),
 			},
 		}); err != nil {
+			// If the job is not running, check if it already succeeded.
+			if secondErr := jobutils.VerifySystemJob(t, sqlRun, 2, jobspb.TypeSchemaChangeGC, jobs.StatusSucceeded, jobs.Record{
+				Username:    username.NodeUserName(),
+				Description: `GC for CREATE INDEX foo ON t.public.kv (v)`,
+				DescriptorIDs: descpb.IDs{
+					tableDesc.GetID(),
+				},
+			}); secondErr == nil {
+				return nil
+			}
 			return err
 		}
 		return nil
@@ -693,8 +698,9 @@ func TestDropTableDeleteData(t *testing.T) {
 		},
 	}
 
+	ctx := context.Background()
 	srv, sqlDB, kvDB := serverutils.StartServer(t, params)
-	defer srv.Stopper().Stop(context.Background())
+	defer srv.Stopper().Stop(ctx)
 	s := srv.ApplicationLayer()
 	codec := s.Codec()
 	systemDB := srv.SystemLayer().SQLConn(t)
@@ -710,57 +716,59 @@ func TestDropTableDeleteData(t *testing.T) {
 	const numKeys = 3 * numRows
 	const numTables = 5
 	var descs []catalog.TableDescriptor
-	for i := 0; i < numTables; i++ {
-		tableName := fmt.Sprintf("test%d", i)
-		if err := tests.CreateKVTable(sqlDB, tableName, numRows); err != nil {
-			t.Fatal(err)
+
+	func() {
+		defer close(allowGC)
+		for i := 0; i < numTables; i++ {
+			tableName := fmt.Sprintf("test%d", i)
+			if err := tests.CreateKVTable(sqlDB, tableName, numRows); err != nil {
+				t.Fatal(err)
+			}
+
+			descs = append(descs, desctestutils.TestingGetPublicTableDescriptor(kvDB, codec, "t", tableName))
+
+			parentDatabaseID := descpb.ID(sqlutils.QueryDatabaseID(t, sqlDB, "t"))
+			parentSchemaID := descpb.ID(sqlutils.QuerySchemaID(t, sqlDB, "t", "public"))
+
+			nameKey := catalogkeys.EncodeNameKey(codec, &descpb.NameInfo{
+				ParentID:       parentDatabaseID,
+				ParentSchemaID: parentSchemaID,
+				Name:           tableName,
+			})
+			gr, err := kvDB.Get(ctx, nameKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gr.Exists() {
+				t.Fatalf("Name entry %q does not exist", nameKey)
+			}
+
+			tableSpan := descs[i].TableSpan(codec)
+			tests.CheckKeyCount(t, kvDB, tableSpan, numKeys)
+
+			if _, err := sqltestutils.AddImmediateGCZoneConfig(sqlDB, descs[i].GetID()); err != nil {
+				t.Fatal(err)
+			}
 		}
 
-		descs = append(descs, desctestutils.TestingGetPublicTableDescriptor(kvDB, codec, "t", tableName))
-
-		parentDatabaseID := descpb.ID(sqlutils.QueryDatabaseID(t, sqlDB, "t"))
-		parentSchemaID := descpb.ID(sqlutils.QuerySchemaID(t, sqlDB, "t", "public"))
-
-		nameKey := catalogkeys.EncodeNameKey(codec, &descpb.NameInfo{
-			ParentID:       parentDatabaseID,
-			ParentSchemaID: parentSchemaID,
-			Name:           tableName,
-		})
-		gr, err := kvDB.Get(ctx, nameKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !gr.Exists() {
-			t.Fatalf("Name entry %q does not exist", nameKey)
+		for i := 0; i < numTables; i++ {
+			if _, err := sqlDB.Exec(fmt.Sprintf(`DROP TABLE t.%s`, descs[i].GetName())); err != nil {
+				t.Fatal(err)
+			}
 		}
 
-		tableSpan := descs[i].TableSpan(codec)
-		tests.CheckKeyCount(t, kvDB, tableSpan, numKeys)
-
-		if _, err := sqltestutils.AddImmediateGCZoneConfig(sqlDB, descs[i].GetID()); err != nil {
-			t.Fatal(err)
+		// Data hasn't been GC-ed.
+		for i := 0; i < numTables; i++ {
+			if err := descExists(sqlDB, true, descs[i].GetID()); err != nil {
+				t.Fatalf("table (id=%d name=%s) was deleted. error: %v", descs[i].GetID(), descs[i].GetName(), err)
+			}
+			tableSpan := descs[i].TableSpan(codec)
+			tests.CheckKeyCountIncludingTombstoned(t, srv.StorageLayer(), tableSpan, numKeys)
 		}
-	}
-
-	for i := 0; i < numTables; i++ {
-		if _, err := sqlDB.Exec(fmt.Sprintf(`DROP TABLE t.%s`, descs[i].GetName())); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Data hasn't been GC-ed.
-	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
-	for i := 0; i < numTables; i++ {
-		if err := descExists(sqlDB, true, descs[i].GetID()); err != nil {
-			t.Fatalf("table (id=%d name=%s) was deleted. error: %v", descs[i].GetID(), descs[i].GetName(), err)
-		}
-		tableSpan := descs[i].TableSpan(codec)
-		tests.CheckKeyCountIncludingTombstoned(t, srv.StorageLayer(), tableSpan, numKeys)
-	}
-
-	close(allowGC)
+	}()
 
 	// Now verify that the GC job has run.
+	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	for i := 0; i < numTables; i++ {
 		if err := jobutils.VerifySystemJob(t, sqlRun, numTables+i,
 			jobspb.TypeNewSchemaChange, jobs.StatusSucceeded, jobs.Record{
@@ -884,7 +892,7 @@ func TestDropTableWhileUpgradingFormat(t *testing.T) {
 	// Simulate a migration upgrading the table descriptor's format version after
 	// the table has been dropped but before the truncation has occurred.
 	if err := sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-		tbl, err := col.ByID(txn.KV()).Get().Table(ctx, tableDesc.ID)
+		tbl, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableDesc.ID)
 		if err != nil {
 			return err
 		}
@@ -1229,7 +1237,7 @@ func TestDropIndexOnHashShardedIndexWithStoredShardColumn(t *testing.T) {
 	tdb.QueryRow(t, query).Scan(&tableID)
 	require.NoError(t, sql.TestingDescsTxn(ctx, s,
 		func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-			tableDesc, err = col.ByID(txn.KV()).Get().Table(ctx, tableID)
+			tableDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 			return err
 		}))
 	shardIdx, err := catalog.MustFindIndexByName(tableDesc, "idx")
@@ -1247,7 +1255,7 @@ func TestDropIndexOnHashShardedIndexWithStoredShardColumn(t *testing.T) {
 	// Assert that the index is dropped but the shard column remains after dropping the index.
 	require.NoError(t, sql.TestingDescsTxn(ctx, s,
 		func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
-			tableDesc, err = col.ByID(txn.KV()).Get().Table(ctx, tableID)
+			tableDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, tableID)
 			return err
 		}))
 	_, err = catalog.MustFindIndexByName(tableDesc, "idx")
@@ -1493,4 +1501,39 @@ func TestDropLargeDatabaseWithDeclarativeSchemaChanger(t *testing.T) {
 			GraphDepth:         2,
 		},
 		true)
+}
+
+func BenchmarkDropLargeDatabaseWithGenerateTestObjects(b *testing.B) {
+	defer leaktest.AfterTest(b)()
+	defer log.Scope(b).Close(b)
+
+	for _, declarative := range []bool{false, true} {
+		for _, tables := range []int{8, 32, 128, 1024} {
+			b.Run(fmt.Sprintf("declarative=%t/tables=%d", declarative, tables), func(b *testing.B) {
+				ctx := context.Background()
+				s, sqlDB, _ := serverutils.StartServer(b, base.TestServerArgs{})
+				sqlConn, err := sqlDB.Conn(ctx)
+				require.NoError(b, err)
+				defer s.Stopper().Stop(ctx)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					tdb := sqlutils.MakeSQLRunner(sqlConn)
+					tdb.Exec(b, "CREATE DATABASE db")
+					tdb.Exec(b, "USE db")
+					tdb.Exec(b, "SELECT crdb_internal.generate_test_objects('test', $1::int)", tables)
+					tdb.Exec(b, "USE system;")
+					if declarative {
+						tdb.Exec(b, "SET use_declarative_schema_changer=unsafe_always")
+					} else {
+						tdb.Exec(b, "SET use_declarative_schema_changer=off")
+					}
+					b.StartTimer()
+					tdb.Exec(b, "DROP DATABASE db CASCADE;")
+					b.StopTimer()
+					tdb.Exec(b, "SET use_declarative_schema_changer=off")
+				}
+			})
+		}
+	}
 }

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // Package sqlstats is a subsystem that is responsible for tracking the
 // statistics of statements and transactions.
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
@@ -76,22 +70,13 @@ type ApplicationStats interface {
 
 	// MergeApplicationStatementStats merges the other application's statement
 	// statistics into the current ApplicationStats. It returns how many number
-	// of statistics were being discarded due to memory constraint. If the
-	// transformer is non-nil, then it is applied to other's statement statistics
-	// before other's statement statistics are merged into the current
-	// ApplicationStats.
+	// of statistics were being discarded due to memory constraint. The
+	// TransactionFingerprintID of all other's statement statistics keys is
+	// updated to the provided one.
 	MergeApplicationStatementStats(
 		ctx context.Context,
 		other ApplicationStats,
-		transformer func(statistics *appstatspb.CollectedStatementStatistics),
-	) uint64
-
-	// MergeApplicationTransactionStats merges the other application's transaction
-	// statistics into the current ApplicationStats. It returns how many number
-	// of statistics were being discarded due to memory constraint.
-	MergeApplicationTransactionStats(
-		ctx context.Context,
-		other ApplicationStats,
+		transactionFingerprintID appstatspb.TransactionFingerprintID,
 	) uint64
 
 	// MaybeLogDiscardMessage is used to possibly log a message when statistics
@@ -105,6 +90,9 @@ type ApplicationStats interface {
 	// Free frees the current ApplicationStats and zeros out the memory counts
 	// and fingerprint counts.
 	Free(context.Context)
+
+	// Clear is like Free but also prepares the container for reuse.
+	Clear(context.Context)
 }
 
 // IteratorOptions provides the ability to the caller to change how it iterates
@@ -139,39 +127,6 @@ type TransactionVisitor func(context.Context, *appstatspb.CollectedTransactionSt
 // the visitor, the iteration is aborted.
 type AggregatedTransactionVisitor func(appName string, statistics *appstatspb.TxnStats) error
 
-// StatsCollector is an interface that collects statistics for transactions and
-// statements for the entire lifetime of a session.
-type StatsCollector interface {
-	Writer
-
-	// PhaseTimes returns the sessionphase.Times that this StatsCollector is
-	// currently tracking.
-	PhaseTimes() *sessionphase.Times
-
-	// PreviousPhaseTimes returns the sessionphase.Times that this StatsCollector
-	// was previously tracking before being Reset.
-	PreviousPhaseTimes() *sessionphase.Times
-
-	// Reset resets the StatsCollector with a new ApplicationStats and a new copy
-	// of the sessionphase.Times.
-	Reset(ApplicationStats, *sessionphase.Times)
-
-	// StartTransaction sets up the StatsCollector for a new transaction.
-	StartTransaction()
-
-	// EndTransaction informs the StatsCollector that the current txn has
-	// finished execution. (Either COMMITTED or ABORTED). This means the txn's
-	// fingerprint ID is now available. StatsCollector will now go back to update
-	// the transaction fingerprint ID field of all the statement statistics for that
-	// txn.
-	EndTransaction(ctx context.Context, transactionFingerprintID appstatspb.TransactionFingerprintID)
-
-	// UpgradeImplicitTxn informs the StatsCollector that the current txn has been
-	// upgraded to an explicit transaction, thus all previously recorded statements
-	// should be updated accordingly.
-	UpgradeImplicitTxn(ctx context.Context) error
-}
-
 // Storage provides clients with interface to perform read and write operations
 // to sql statistics.
 type Storage interface {
@@ -182,7 +137,7 @@ type Storage interface {
 
 	// GetApplicationStats returns an ApplicationStats instance for the given
 	// application name.
-	GetApplicationStats(appName string, internal bool) ApplicationStats
+	GetApplicationStats(appName string) ApplicationStats
 
 	// Reset resets all the statistics stored in-memory in the current Storage.
 	Reset(context.Context) error
@@ -201,6 +156,7 @@ type RecordedStmtStats struct {
 	StatementID          clusterunique.ID
 	TransactionID        uuid.UUID
 	AutoRetryCount       int
+	Failed               bool
 	AutoRetryReason      error
 	RowsAffected         int
 	IdleLatencySec       float64
@@ -213,6 +169,7 @@ type RecordedStmtStats struct {
 	RowsRead             int64
 	RowsWritten          int64
 	Nodes                []int64
+	KVNodeIDs            []int32
 	StatementType        tree.StatementType
 	Plan                 *appstatspb.ExplainTreePlanNode
 	PlanGist             string

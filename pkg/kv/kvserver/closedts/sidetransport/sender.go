@@ -1,22 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sidetransport contains definitions for the sidetransport layer of
 // the kvserver.
 package sidetransport
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -242,7 +238,7 @@ func (s *Sender) Run(ctx context.Context, nodeID roachpb.NodeID) {
 				s.buf.Close()
 			}()
 
-			timer := timeutil.NewTimer()
+			var timer timeutil.Timer
 			defer timer.Stop()
 			for {
 				interval := closedts.SideTransportCloseInterval.Get(&s.st.SV)
@@ -251,7 +247,6 @@ func (s *Sender) Run(ctx context.Context, nodeID roachpb.NodeID) {
 				} else {
 					// Disable the side-transport.
 					timer.Stop()
-					timer = timeutil.NewTimer()
 				}
 				select {
 				case <-timer.C:
@@ -906,8 +901,8 @@ func (s streamState) String() string {
 	}
 	for policy, ranges := range rangesByPolicy {
 		fmt.Fprintf(sb, "%s: ", policy)
-		sort.Slice(ranges, func(i, j int) bool {
-			return ranges[i].id < ranges[j].id
+		slices.SortFunc(ranges, func(a, b rangeInfo) int {
+			return cmp.Compare(a.id, b.id)
 		})
 		for i, rng := range ranges {
 			if i > 0 {

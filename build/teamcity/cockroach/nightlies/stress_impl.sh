@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2021 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname "${0}"))))"
@@ -11,8 +17,16 @@ else
     TAGS="bazel,gss,$TAGS"
 fi
 
-bazel build //pkg/cmd/bazci --config=ci
-BAZEL_BIN=$(bazel info bazel-bin --config=ci)
+GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$TC_BUILD_BRANCH" != "$GIT_BRANCH" ]; then
+    echo "Skipping test $TARGET, as the expected branch is $TC_BUILD_BRANCH, but actual branch is $GIT_BRANCH"
+    exit 0
+else
+    echo "Confirmed that git branch is $GIT_BRANCH matches build branch $TC_BUILD_BRANCH"
+fi
+
+bazel build //pkg/cmd/bazci
+BAZEL_BIN=$(bazel info bazel-bin)
 ARTIFACTS_DIR=/artifacts
 
 if [[ ! -z $(bazel query "attr(tags, \"integration\", $TARGET)") ]]

@@ -1,23 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import moment from "moment-timezone";
+import { call } from "redux-saga/effects";
 import { expectSaga } from "redux-saga-test-plan";
 import { throwError } from "redux-saga-test-plan/providers";
-import { call } from "redux-saga/effects";
-import {
-  createDiagnosticsReportSaga,
-  requestStatementsDiagnosticsSaga,
-  cancelDiagnosticsReportSaga,
-  StatementDiagnosticsState,
-} from "src/store/statementDiagnostics";
-import { actions, reducer } from "src/store/statementDiagnostics";
+
 import {
   createStatementDiagnosticsReport,
   cancelStatementDiagnosticsReport,
@@ -28,7 +18,14 @@ import {
   CancelStmtDiagnosticRequest,
   CancelStmtDiagnosticResponse,
 } from "src/api/statementDiagnosticsApi";
-import moment from "moment-timezone";
+import {
+  createDiagnosticsReportSaga,
+  requestStatementsDiagnosticsSaga,
+  cancelDiagnosticsReportSaga,
+  StatementDiagnosticsState,
+  actions,
+  reducer,
+} from "src/store/statementDiagnostics";
 
 describe("statementsDiagnostics sagas", () => {
   describe("createDiagnosticsReportSaga", () => {
@@ -42,6 +39,7 @@ describe("statementsDiagnostics sagas", () => {
       minExecutionLatencySeconds: minExecLatency,
       expiresAfterSeconds: expiresAfter,
       planGist: planGist,
+      redacted: false,
     };
 
     const insertResponse: InsertStmtDiagnosticResponse = {

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /*
 Package bulkingest defines a workload that is intended to stress some edge cases
@@ -118,6 +113,9 @@ func (*bulkingest) Meta() workload.Meta { return bulkingestMeta }
 // Flags implements the Flagser interface.
 func (w *bulkingest) Flags() workload.Flags { return w.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (w *bulkingest) ConnFlags() *workload.ConnFlags { return w.connFlags }
+
 // Hooks implements the Hookser interface.
 func (w *bulkingest) Hooks() workload.Hooks {
 	return workload.Hooks{}
@@ -180,10 +178,6 @@ func (w *bulkingest) Tables() []workload.Table {
 func (w *bulkingest) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -201,7 +195,7 @@ func (w *bulkingest) Ops(
 		return workload.QueryLoad{}, err
 	}
 
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	for i := 0; i < w.connFlags.Concurrency; i++ {
 		rng := rand.New(rand.NewSource(RandomSeed.Seed()))
 		hists := reg.GetHandle()

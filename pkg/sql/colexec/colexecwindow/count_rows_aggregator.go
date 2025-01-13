@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecwindow
 
@@ -36,7 +31,7 @@ func NewCountRowsOperator(
 	colsToStore := framer.getColsToStore(nil /* oldColsToStore */)
 	buffer := colexecutils.NewSpillingBuffer(
 		args.BufferAllocator, bufferMemLimit, args.QueueCfg, args.FdSemaphore,
-		args.InputTypes, args.DiskAcc, args.ConverterMemAcc, colsToStore...,
+		args.InputTypes, args.DiskAcc, args.DiskQueueMemAcc, colsToStore...,
 	)
 	windower := &countRowsWindowAggregator{
 		partitionSeekerBase: partitionSeekerBase{
@@ -92,7 +87,7 @@ func (a *countRowsWindowAggregator) processBatch(batch coldata.Batch, startIdx, 
 		return
 	}
 	outVec := batch.ColVec(a.outputColIdx)
-	a.allocator.PerformOperation([]coldata.Vec{outVec}, func() {
+	a.allocator.PerformOperation([]*coldata.Vec{outVec}, func() {
 		outCol := outVec.Int64()
 		_, _ = outCol[startIdx], outCol[endIdx-1]
 		for i := startIdx; i < endIdx; i++ {

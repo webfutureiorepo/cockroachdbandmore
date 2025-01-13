@@ -1,21 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import { Loading } from "@cockroachlabs/cluster-ui";
+import isEmpty from "lodash/isEmpty";
+import map from "lodash/map";
 import React from "react";
 
 import * as protos from "src/js/protos";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { REMOTE_DEBUGGING_ERROR_TEXT } from "src/util/constants";
 import Print from "src/views/reports/containers/range/print";
-import { Loading } from "@cockroachlabs/cluster-ui";
 
 interface AllocatorOutputProps {
   allocator: CachedDataReducerState<protos.cockroach.server.serverpb.AllocatorRangeResponse>;
@@ -30,7 +26,7 @@ export default class AllocatorOutput extends React.Component<
 
     if (
       allocator &&
-      (_.isEmpty(allocator.data) || _.isEmpty(allocator.data.dry_run))
+      (isEmpty(allocator.data) || isEmpty(allocator.data.dry_run))
     ) {
       return <div>No simulated allocator output was returned.</div>;
     }
@@ -46,7 +42,7 @@ export default class AllocatorOutput extends React.Component<
               Message
             </th>
           </tr>
-          {_.map(allocator.data.dry_run.events, (event, key) => (
+          {map(allocator.data.dry_run.events, (event, key) => (
             <tr key={key} className="allocator-table__row">
               <td className="allocator-table__cell allocator-table__cell--date">
                 {Print.Timestamp(event.time)}
@@ -79,7 +75,7 @@ export default class AllocatorOutput extends React.Component<
     }
 
     let fromNodeID = "";
-    if (allocator && !_.isEmpty(allocator.data)) {
+    if (allocator && !isEmpty(allocator.data)) {
       fromNodeID = ` (from n${allocator.data.node_id.toString()})`;
     }
 

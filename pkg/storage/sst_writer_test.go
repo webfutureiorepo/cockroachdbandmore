@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/sstable/block"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,7 +56,7 @@ func makePebbleSST(t testing.TB, kvs []MVCCKeyValue, ingestion bool) []byte {
 	if ingestion {
 		w = MakeIngestionSSTWriter(ctx, st, f)
 	} else {
-		w = MakeBackupSSTWriter(ctx, st, &f.Buffer)
+		w = MakeTransportSSTWriter(ctx, st, &f.Buffer)
 	}
 	defer w.Close()
 
@@ -77,19 +73,66 @@ func makePebbleSST(t testing.TB, kvs []MVCCKeyValue, ingestion bool) []byte {
 func TestMakeIngestionWriterOptions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
+	type want struct {
+		format             sstable.TableFormat
+		disableValueBlocks bool
+	}
 	testCases := []struct {
 		name string
 		st   *cluster.Settings
-		want sstable.TableFormat
+		want want
 	}{
 		{
 			name: "with virtual sstables",
 			st: func() *cluster.Settings {
 				st := cluster.MakeTestingClusterSettings()
-				ValueBlocksEnabled.Override(context.Background(), &st.SV, true)
+				IngestionValueBlocksEnabled.Override(context.Background(), &st.SV, true)
+				ColumnarBlocksEnabled.Override(context.Background(), &st.SV, false)
 				return st
 			}(),
-			want: sstable.TableFormatPebblev4,
+			want: want{
+				format:             sstable.TableFormatPebblev4,
+				disableValueBlocks: false,
+			},
+		},
+		{
+			name: "disable value blocks",
+			st: func() *cluster.Settings {
+				st := cluster.MakeTestingClusterSettings()
+				IngestionValueBlocksEnabled.Override(context.Background(), &st.SV, false)
+				ColumnarBlocksEnabled.Override(context.Background(), &st.SV, false)
+				return st
+			}(),
+			want: want{
+				format:             sstable.TableFormatPebblev4,
+				disableValueBlocks: true,
+			},
+		},
+		{
+			name: "enable columnar blocks",
+			st: func() *cluster.Settings {
+				st := cluster.MakeTestingClusterSettings()
+				IngestionValueBlocksEnabled.Override(context.Background(), &st.SV, false)
+				ColumnarBlocksEnabled.Override(context.Background(), &st.SV, true)
+				return st
+			}(),
+			want: want{
+				format:             sstable.TableFormatPebblev5,
+				disableValueBlocks: true,
+			},
+		},
+		{
+			name: "enable columnar blocks with value blocks",
+			st: func() *cluster.Settings {
+				st := cluster.MakeTestingClusterSettings()
+				IngestionValueBlocksEnabled.Override(context.Background(), &st.SV, true)
+				ColumnarBlocksEnabled.Override(context.Background(), &st.SV, true)
+				return st
+			}(),
+			want: want{
+				format:             sstable.TableFormatPebblev5,
+				disableValueBlocks: false,
+			},
 		},
 	}
 
@@ -97,7 +140,8 @@ func TestMakeIngestionWriterOptions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			opts := MakeIngestionWriterOptions(ctx, tc.st)
-			require.Equal(t, tc.want, opts.TableFormat)
+			require.Equal(t, tc.want.format, opts.TableFormat)
+			require.Equal(t, tc.want.disableValueBlocks, opts.DisableValueBlocks)
 		})
 	}
 }
@@ -138,6 +182,58 @@ func TestSSTWriterRangeKeys(t *testing.T) {
 		pointKV("a", 1, "foo"),
 		rangeKV("f", "g", 2, tombstoneLocalTS(1)),
 	}, scanIter(t, iter))
+}
+
+func TestSSTWriterOption(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// makeCompressionWriterOpt returns a new SSTWriterOption that uses the
+	// cluster setting that has been set to the given algorithm as the basis for
+	// determining which compression algorithm is used when the SSTWriterOption
+	// runs over an sstable.WriterOptions.
+	makeCompressionWriterOpt := func(alg compressionAlgorithm) SSTWriterOption {
+		ctx := context.Background()
+		st := cluster.MakeTestingClusterSettings()
+		CompressionAlgorithmStorage.Override(ctx, &st.SV, alg)
+		return WithCompressionFromClusterSetting(ctx, st, CompressionAlgorithmStorage)
+	}
+
+	tcs := []struct {
+		name      string
+		writerOpt SSTWriterOption
+		wantFunc  func(*testing.T, *sstable.WriterOptions)
+	}{
+		{
+			"disable value blocks",
+			WithValueBlocksDisabled,
+			func(t *testing.T, opts *sstable.WriterOptions) {
+				require.True(t, opts.DisableValueBlocks)
+			},
+		},
+		{
+			"with snappy compression",
+			makeCompressionWriterOpt(compressionAlgorithmSnappy),
+			func(t *testing.T, opts *sstable.WriterOptions) {
+				require.Equal(t, block.SnappyCompression, opts.Compression)
+			},
+		},
+		{
+			"with zstd compression",
+			makeCompressionWriterOpt(compressionAlgorithmZstd),
+			func(t *testing.T, opts *sstable.WriterOptions) {
+				require.Equal(t, block.ZstdCompression, opts.Compression)
+			},
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &sstable.WriterOptions{}
+			tc.writerOpt(opts)
+			tc.wantFunc(t, opts)
+		})
+	}
 }
 
 func BenchmarkWriteSSTable(b *testing.B) {

@@ -1,19 +1,13 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package execinfra contains the common interfaces for colexec and rowexec.
 package execinfra
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -124,7 +118,7 @@ type RowSource interface {
 
 	// Start prepares the RowSource for future Next() calls and takes in the
 	// context in which these future calls should operate. Start needs to be
-	// called before Next/ConsumerDone/ConsumerClosed.
+	// called before Next and ConsumerDone.
 	//
 	// RowSources that consume other RowSources are expected to Start() their
 	// inputs.
@@ -170,7 +164,8 @@ type RowSource interface {
 
 	// ConsumerClosed informs the source that the consumer is done and will not
 	// make any more calls to Next(). Must be called at least once on a given
-	// RowSource.
+	// RowSource and can be called multiple times. Implementations must support
+	// the case when Start was never called.
 	//
 	// Like ConsumerDone(), if the consumer of the source stops consuming rows
 	// before Next indicates that there are no more rows, ConsumerDone() and/or
@@ -206,7 +201,7 @@ func Run(ctx context.Context, src RowSource, dst RowReceiver) {
 				// the other portal, i.e. we leave the current portal open.
 				return
 			case DrainRequested:
-				DrainAndForwardMetadata(ctx, src, dst)
+				drainAndForwardMetadata(ctx, src, dst)
 				dst.ProducerDone()
 				return
 			case ConsumerClosed:
@@ -221,16 +216,16 @@ func Run(ctx context.Context, src RowSource, dst RowReceiver) {
 	}
 }
 
-// DrainAndForwardMetadata calls src.ConsumerDone() (thus asking src for
+// drainAndForwardMetadata calls src.ConsumerDone() (thus asking src for
 // draining metadata) and then forwards all the metadata to dst.
 //
 // When this returns, src has been properly closed (regardless of the presence
 // or absence of an error). dst, however, has not been closed; someone else must
 // call dst.ProducerDone() when all producers have finished draining.
 //
-// It is OK to call DrainAndForwardMetadata() multiple times concurrently on the
+// It is OK to call drainAndForwardMetadata() multiple times concurrently on the
 // same dst (as RowReceiver.Push() is guaranteed to be thread safe).
-func DrainAndForwardMetadata(ctx context.Context, src RowSource, dst RowReceiver) {
+func drainAndForwardMetadata(ctx context.Context, src RowSource, dst RowReceiver) {
 	src.ConsumerDone()
 	for {
 		row, meta := src.Next()
@@ -314,47 +309,23 @@ func GetLeafTxnFinalState(ctx context.Context, txn *kv.Txn) *roachpb.LeafTxnFina
 	return txnMeta
 }
 
-// DrainAndClose is a version of DrainAndForwardMetadata that drains multiple
-// sources. These sources are assumed to be the only producers left for dst, so
-// dst is closed once they're all exhausted (this is different from
-// DrainAndForwardMetadata).
+// DrainAndClose drains and closes the source and then closes the dst too. It
+// also propagates the tracing metadata if there is any in the context. src is
+// assumed to be the only producer for dst.
 //
 // If cause is specified, it is forwarded to the consumer before all the drain
 // metadata. This is intended to have been the error, if any, that caused the
 // draining.
-//
-// pushTrailingMeta is called after draining the sources and before calling
-// dst.ProducerDone(). It gives the caller the opportunity to push some trailing
-// metadata (e.g. tracing information and txn updates, if applicable).
-//
-// srcs can be nil.
-//
-// All errors are forwarded to the producer.
 func DrainAndClose(
-	ctx context.Context,
-	dst RowReceiver,
-	cause error,
-	pushTrailingMeta func(context.Context, RowReceiver),
-	srcs ...RowSource,
+	ctx context.Context, flowCtx *FlowCtx, src RowSource, dst RowReceiver, cause error,
 ) {
 	if cause != nil {
 		// We ignore the returned ConsumerStatus and rely on the
-		// DrainAndForwardMetadata() calls below to close srcs in all cases.
+		// drainAndForwardMetadata() call below to close the source.
 		_ = dst.Push(nil /* row */, &execinfrapb.ProducerMetadata{Err: cause})
 	}
-	if len(srcs) > 0 {
-		var wg sync.WaitGroup
-		for _, input := range srcs[1:] {
-			wg.Add(1)
-			go func(input RowSource) {
-				DrainAndForwardMetadata(ctx, input, dst)
-				wg.Done()
-			}(input)
-		}
-		DrainAndForwardMetadata(ctx, srcs[0], dst)
-		wg.Wait()
-	}
-	pushTrailingMeta(ctx, dst)
+	drainAndForwardMetadata(ctx, src, dst)
+	SendTraceData(ctx, flowCtx, dst)
 	dst.ProducerDone()
 }
 

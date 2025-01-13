@@ -1,42 +1,39 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import {
   IndexDetailsPageData,
   util,
   RecommendationType as RecType,
 } from "@cockroachlabs/cluster-ui";
-import { AdminUIState } from "src/redux/state";
 import { RouteComponentProps } from "react-router";
-import { getMatchParamByName } from "src/util/query";
-import {
-  databaseNameAttr,
-  tableNameAttr,
-  indexNameAttr,
-} from "src/util/constants";
+
+import { cockroach } from "src/js/protos";
 import {
   refreshIndexStats,
   refreshNodes,
   refreshUserSQLRoles,
 } from "src/redux/apiReducers";
 import { resetIndexUsageStatsAction } from "src/redux/indexUsageStats";
-import { longToInt } from "src/util/fixLong";
-import { cockroach } from "src/js/protos";
-import TableIndexStatsRequest = cockroach.server.serverpb.TableIndexStatsRequest;
+import { nodeRegionsByIDSelector } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
+import { setGlobalTimeScaleAction } from "src/redux/statements";
+import { selectTimeScale } from "src/redux/timeScale";
 import {
   selectHasViewActivityRedactedRole,
   selectHasAdminRole,
 } from "src/redux/user";
-import { nodeRegionsByIDSelector } from "src/redux/nodes";
-import { setGlobalTimeScaleAction } from "src/redux/statements";
-import { selectTimeScale } from "src/redux/timeScale";
+import {
+  databaseNameAttr,
+  tableNameAttr,
+  indexNameAttr,
+} from "src/util/constants";
+import { longToInt } from "src/util/fixLong";
+import { getMatchParamByName } from "src/util/query";
+
+import TableIndexStatsRequest = cockroach.server.serverpb.TableIndexStatsRequest;
 const { RecommendationType } = cockroach.sql.IndexRecommendation;
 
 export const mapStateToProps = (
@@ -93,8 +90,8 @@ export const mapStateToProps = (
       ),
       lastReset: util.TimestampToMoment(stats?.data?.last_reset, util.minDate),
       indexRecommendations,
+      databaseID: stats?.data?.database_id,
     },
-    breadcrumbItems: null,
   };
 };
 

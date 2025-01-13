@@ -1,17 +1,13 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package appstatspb
 
 import (
 	"math"
+	"strconv"
 
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
@@ -19,12 +15,16 @@ import (
 // StmtFingerprintID is the type of a Statement's fingerprint ID.
 type StmtFingerprintID uint64
 
+func (s StmtFingerprintID) String() string {
+	return strconv.FormatUint(uint64(s), 10)
+}
+
 // ConstructStatementFingerprintID constructs an ID by hashing query with
-// constants redacted, its database and failure status, and if it was part of an
+// constants redacted, its database, and if it was part of an
 // implicit txn. At the time of writing, these are the axis' we use to bucket
 // queries for stats collection (see stmtKey).
-func ConstructStatementFingerprintID(
-	stmtNoConstants string, failed bool, implicitTxn bool, database string,
+var ConstructStatementFingerprintID = func(
+	stmtNoConstants string, implicitTxn bool, database string,
 ) StmtFingerprintID {
 	fnv := util.MakeFNV64()
 	for _, c := range stmtNoConstants {
@@ -32,11 +32,6 @@ func ConstructStatementFingerprintID(
 	}
 	for _, c := range database {
 		fnv.Add(uint64(c))
-	}
-	if failed {
-		fnv.Add('F')
-	} else {
-		fnv.Add('S')
 	}
 	if implicitTxn {
 		fnv.Add('I')
@@ -49,6 +44,10 @@ func ConstructStatementFingerprintID(
 // TransactionFingerprintID is the hashed string constructed using the
 // individual statement fingerprint IDs that comprise the transaction.
 type TransactionFingerprintID uint64
+
+func (t TransactionFingerprintID) String() string {
+	return strconv.FormatUint(uint64(t), 10)
+}
 
 // InvalidTransactionFingerprintID denotes an invalid transaction fingerprint ID.
 const InvalidTransactionFingerprintID = TransactionFingerprintID(0)
@@ -156,9 +155,6 @@ func (s *AggregatedStatementMetadata) Add(other *CollectedStatementStatistics) {
 	if other.Key.DistSQL {
 		s.DistSQLCount++
 	}
-	if other.Key.Failed {
-		s.FailedCount++
-	}
 	if other.Key.FullScan {
 		s.FullScanCount++
 	}
@@ -186,7 +182,9 @@ func (s *StatementStatistics) Add(other *StatementStatistics) {
 	s.RowsRead.Add(other.RowsRead, s.Count, other.Count)
 	s.RowsWritten.Add(other.RowsWritten, s.Count, other.Count)
 	s.Nodes = util.CombineUnique(s.Nodes, other.Nodes)
+	s.KVNodeIDs = util.CombineUnique(s.KVNodeIDs, other.KVNodeIDs)
 	s.Regions = util.CombineUnique(s.Regions, other.Regions)
+	s.UsedFollowerRead = s.UsedFollowerRead || other.UsedFollowerRead
 	s.PlanGists = util.CombineUnique(s.PlanGists, other.PlanGists)
 	s.Indexes = util.CombineUnique(s.Indexes, other.Indexes)
 	s.ExecStats.Add(other.ExecStats)
@@ -214,6 +212,7 @@ func (s *StatementStatistics) Add(other *StatementStatistics) {
 	}
 
 	s.Count += other.Count
+	s.FailureCount += other.FailureCount
 }
 
 // AlmostEqual compares two StatementStatistics and their contained NumericStats

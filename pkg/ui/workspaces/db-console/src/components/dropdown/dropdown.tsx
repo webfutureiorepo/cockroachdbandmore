@@ -1,21 +1,17 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { CaretDownOutlined } from "@ant-design/icons";
 import cn from "classnames";
+import React from "react";
+
+import { Button } from "src/components/button";
 
 import { OutsideEventHandler } from "../outsideEventHandler";
+
 import "./dropdown.styl";
-import { Icon } from "antd";
-import "antd/lib/icon/style";
-import { Button } from "src/components/button";
 
 export interface Item {
   value: string;
@@ -49,7 +45,7 @@ function DropdownButton(props: DropdownButtonProps) {
       type="flat"
       size="small"
       iconPosition="right"
-      icon={() => <Icon className="collapse-toggle__icon" type="caret-down" />}
+      icon={() => <CaretDownOutlined className="collapse-toggle__icon" />}
     >
       {children}
     </Button>

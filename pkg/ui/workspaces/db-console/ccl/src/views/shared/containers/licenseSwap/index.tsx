@@ -1,12 +1,9 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import omit from "lodash/omit";
 import React from "react";
 import { connect } from "react-redux";
 
@@ -46,9 +43,13 @@ function mapStateToProps(state: AdminUIState): OwnProps {
  * LicenseSwap is a higher-order component that swaps out two components based
  * on the current license status.
  */
-export default function swapByLicense<TProps>(
-  OSSComponent: React.ComponentClass<TProps>,
-  CCLComponent: React.ComponentClass<TProps>,
+export default function swapByLicense<
+  OSSProps,
+  CCLProps,
+  TProps = OSSProps | CCLProps,
+>(
+  OSSComponent: React.ComponentClass<OSSProps>,
+  CCLComponent: React.ComponentClass<CCLProps>,
 ) {
   const ossName = getComponentName(OSSComponent);
   const cclName = getComponentName(CCLComponent);
@@ -61,12 +62,12 @@ export default function swapByLicense<TProps>(
       )})`;
 
       render() {
-        const props = _.omit(this.props, ["enterpriseEnabled"]);
+        const props = omit(this.props, ["enterpriseEnabled"]);
 
         if (!this.props.enterpriseEnabled) {
-          return <OSSComponent {...(props as TProps)} />;
+          return <OSSComponent {...(props as OSSProps)} />;
         }
-        return <CCLComponent {...(props as TProps)} />;
+        return <CCLComponent {...(props as CCLProps)} />;
       }
     },
   );

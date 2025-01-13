@@ -1,13 +1,9 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { util } from "@cockroachlabs/cluster-ui";
 import moment from "moment-timezone";
 import { Action } from "redux";
 import { channel, Task, Channel } from "redux-saga";
@@ -130,7 +126,7 @@ export class ManagedQuerySagaState {
   // The number of components currently requesting that this query be
   // auto-refreshed. This is the result of incrementing on autoRefresh()
   // actions and decrementing on stopAutoRefresh() actions.
-  autoRefreshCount: number = 0;
+  autoRefreshCount = 0;
   // If true, the query saga needs to run the underlying query immediately. If
   // this is false, the saga will delay until it needs to be refreshed (or
   // will exit if autoRefreshCount is zero,)
@@ -178,9 +174,7 @@ export function* queryManagerSaga() {
     const state = queryManagerState.getQueryState(qmAction.query);
     if (!taskIsRunning(state.sagaTask)) {
       state.channel = channel<QueryManagementAction>();
-      state.sagaTask = (yield fork(managedQuerySaga, state)) as ReturnType<
-        typeof managedQuerySaga
-      >;
+      state.sagaTask = yield fork(managedQuerySaga, state);
     }
     yield put(state.channel, qmAction);
   }
@@ -324,7 +318,7 @@ export function* runQuery(state: ManagedQuerySagaState) {
     yield put(queryBegin(id));
     yield call(querySaga);
   } catch (e) {
-    err = e;
+    err = util.maybeError(e);
   }
 
   // Yielding to moment lets us easily mock time in tests.

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -28,24 +23,22 @@ import (
 // should be used by planNodes (or similar components) whenever they need to
 // buffer data. init or initWithDedup must be called before the first use.
 type rowContainerHelper struct {
-	memMonitor  *mon.BytesMonitor
-	diskMonitor *mon.BytesMonitor
-	rows        *rowcontainer.DiskBackedRowContainer
-	scratch     rowenc.EncDatumRow
+	memMonitor          *mon.BytesMonitor
+	unlimitedMemMonitor *mon.BytesMonitor
+	diskMonitor         *mon.BytesMonitor
+	rows                *rowcontainer.DiskBackedRowContainer
+	scratch             rowenc.EncDatumRow
 }
 
 func (c *rowContainerHelper) Init(
-	ctx context.Context,
-	typs []*types.T,
-	evalContext *extendedEvalContext,
-	opName redact.RedactableString,
+	ctx context.Context, typs []*types.T, evalContext *extendedEvalContext, opName redact.SafeString,
 ) {
 	c.initMonitors(ctx, evalContext, opName)
 	distSQLCfg := &evalContext.DistSQLPlanner.distSQLSrv.ServerConfig
 	c.rows = &rowcontainer.DiskBackedRowContainer{}
 	c.rows.Init(
-		colinfo.NoOrdering, typs, &evalContext.Context,
-		distSQLCfg.TempStorage, c.memMonitor, c.diskMonitor,
+		colinfo.NoOrdering, typs, &evalContext.Context, distSQLCfg.TempStorage,
+		c.memMonitor, c.unlimitedMemMonitor, c.diskMonitor,
 	)
 	c.scratch = make(rowenc.EncDatumRow, len(typs))
 }
@@ -53,10 +46,7 @@ func (c *rowContainerHelper) Init(
 // InitWithDedup is a variant of init that is used if row deduplication
 // functionality is needed (see addRowWithDedup).
 func (c *rowContainerHelper) InitWithDedup(
-	ctx context.Context,
-	typs []*types.T,
-	evalContext *extendedEvalContext,
-	opName redact.RedactableString,
+	ctx context.Context, typs []*types.T, evalContext *extendedEvalContext, opName redact.SafeString,
 ) {
 	c.initMonitors(ctx, evalContext, opName)
 	distSQLCfg := &evalContext.DistSQLPlanner.distSQLSrv.ServerConfig
@@ -70,25 +60,61 @@ func (c *rowContainerHelper) InitWithDedup(
 		ordering[i].Direction = encoding.Ascending
 	}
 	c.rows.Init(
-		ordering, typs, &evalContext.Context,
-		distSQLCfg.TempStorage, c.memMonitor, c.diskMonitor,
+		ordering, typs, &evalContext.Context, distSQLCfg.TempStorage,
+		c.memMonitor, c.unlimitedMemMonitor, c.diskMonitor,
 	)
 	c.rows.DoDeDuplicate()
 	c.scratch = make(rowenc.EncDatumRow, len(typs))
 }
 
-func (c *rowContainerHelper) initMonitors(
-	ctx context.Context, evalContext *extendedEvalContext, opName redact.RedactableString,
+// InitWithParentMon is a variant of Init that allows the parent memory monitor
+// to be specified. This is useful when the container should not be owned by the
+// current transaction (e.g. a SQL cursor that lives on the session).
+func (c *rowContainerHelper) InitWithParentMon(
+	ctx context.Context,
+	typs []*types.T,
+	parent *mon.BytesMonitor,
+	evalContext *extendedEvalContext,
+	opName redact.SafeString,
 ) {
 	distSQLCfg := &evalContext.DistSQLPlanner.distSQLSrv.ServerConfig
-	// TODO(yuzefovich): currently the memory usage of c.memMonitor doesn't
-	// count against sql.mem.distsql.current metric. Fix it.
+	// TODO(yuzefovich): currently the memory usage of c.memMonitor and
+	// c.unlimitedMemMonitor don't count against sql.mem.distsql.current metric.
+	// Fix it.
 	c.memMonitor = execinfra.NewLimitedMonitorNoFlowCtx(
-		ctx, evalContext.Planner.Mon(), distSQLCfg, evalContext.SessionData(),
-		redact.Sprintf("%s-limited", opName),
+		ctx, parent, distSQLCfg, evalContext.SessionData(),
+		opName+"-limited",
+	)
+	c.unlimitedMemMonitor = execinfra.NewMonitor(
+		ctx, parent, opName+"-unlimited",
 	)
 	c.diskMonitor = execinfra.NewMonitor(
-		ctx, distSQLCfg.ParentDiskMonitor, redact.Sprintf("%s-disk", opName),
+		ctx, distSQLCfg.ParentDiskMonitor, opName+"-disk",
+	)
+	c.rows = &rowcontainer.DiskBackedRowContainer{}
+	c.rows.Init(
+		colinfo.NoOrdering, typs, &evalContext.Context, distSQLCfg.TempStorage,
+		c.memMonitor, c.unlimitedMemMonitor, c.diskMonitor,
+	)
+	c.scratch = make(rowenc.EncDatumRow, len(typs))
+}
+
+func (c *rowContainerHelper) initMonitors(
+	ctx context.Context, evalContext *extendedEvalContext, opName redact.SafeString,
+) {
+	distSQLCfg := &evalContext.DistSQLPlanner.distSQLSrv.ServerConfig
+	// TODO(yuzefovich): currently the memory usage of c.memMonitor and
+	// c.unlimitedMemMonitor don't count against sql.mem.distsql.current metric.
+	// Fix it.
+	c.memMonitor = execinfra.NewLimitedMonitorNoFlowCtx(
+		ctx, evalContext.Planner.Mon(), distSQLCfg, evalContext.SessionData(),
+		opName+"-limited",
+	)
+	c.unlimitedMemMonitor = execinfra.NewMonitor(
+		ctx, evalContext.Planner.Mon(), opName+"-unlimited",
+	)
+	c.diskMonitor = execinfra.NewMonitor(
+		ctx, distSQLCfg.ParentDiskMonitor, opName+"-disk",
 	)
 }
 
@@ -133,6 +159,7 @@ func (c *rowContainerHelper) Close(ctx context.Context) {
 	if c.rows != nil {
 		c.rows.Close(ctx)
 		c.memMonitor.Stop(ctx)
+		c.unlimitedMemMonitor.Stop(ctx)
 		c.diskMonitor.Stop(ctx)
 		c.rows = nil
 	}
@@ -163,15 +190,7 @@ func (i *rowContainerIterator) Next() (tree.Datums, error) {
 		// All rows have been exhausted.
 		return nil, nil
 	}
-	origRow, err := i.iter.Row()
-	if err != nil {
-		return nil, err
-	}
-	// Shallow-copy the row to ensure that it is safe to hold on to after Next()
-	// and Close() calls - see the RowIterator interface.
-	row := make(tree.Datums, len(origRow))
-	copy(row, origRow)
-	return row, nil
+	return i.iter.Row()
 }
 
 func (i *rowContainerIterator) Close() {

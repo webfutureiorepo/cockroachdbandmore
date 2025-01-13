@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catalog
 
@@ -17,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -28,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -54,6 +49,22 @@ const (
 
 	// Function is for function descriptors.
 	Function DescriptorType = "function"
+)
+
+// DescExprType describes the type for a serialized expression or statement
+// within a descriptor. This determines how the serialized expression should be
+// interpreted.
+type DescExprType uint8
+
+const (
+	// SQLExpr is a serialized SQL expression, such as "1 * 2".
+	SQLExpr DescExprType = iota
+	// SQLStmt is a serialized SQL statement or series of statements. Ex:
+	//   INSERT INTO xy VALUES (1, 2)
+	SQLStmt
+	// PLpgSQLStmt is a serialized PLpgSQL statement or series of statements. Ex:
+	//   BEGIN RAISE NOTICE 'foo'; END;
+	PLpgSQLStmt
 )
 
 // MutationPublicationFilter is used by MakeFirstMutationPublic to filter the
@@ -108,6 +119,10 @@ type DescriptorBuilder interface {
 		nonTerminalJobIDMightExist func(id jobspb.JobID) bool,
 	) error
 
+	// StripNonExistentRoles removes any privileges granted to roles that
+	// don't exist.
+	StripNonExistentRoles(roleExists func(role username.SQLUsername) bool) error
+
 	// SetRawBytesInStorage sets `rawBytesInStorage` field by deep-copying `rawBytes`.
 	SetRawBytesInStorage(rawBytes []byte)
 
@@ -145,13 +160,24 @@ type NameKey interface {
 	GetParentSchemaID() descpb.ID
 }
 
+var _ NameKey = descpb.NameInfo{}
+
+func MakeNameInfo(nk NameKey) descpb.NameInfo {
+	if ni, ok := nk.(descpb.NameInfo); ok {
+		return ni
+	}
+	return descpb.NameInfo{
+		ParentID:       nk.GetParentID(),
+		ParentSchemaID: nk.GetParentSchemaID(),
+		Name:           nk.GetName(),
+	}
+}
+
 // NameEntry corresponds to an entry in the namespace table.
 type NameEntry interface {
 	NameKey
 	GetID() descpb.ID
 }
-
-var _ NameKey = descpb.NameInfo{}
 
 // LeasableDescriptor is an interface for objects which can be leased via the
 // descriptor leasing system.
@@ -261,6 +287,14 @@ type Descriptor interface {
 	// referenced by this descriptor which must be hydrated prior to using it.
 	// iterutil.StopIteration is supported.
 	ForEachUDTDependentForHydration(func(t *types.T) error) error
+
+	// MaybeRequiresTypeHydration returns false if the descriptor definitely does not
+	// depend on any types.T being hydrated.
+	MaybeRequiresTypeHydration() bool
+
+	// GetReplicatedPCRVersion return the version from the source
+	// tenant if this descriptor is replicated.
+	GetReplicatedPCRVersion() descpb.DescriptorVersion
 }
 
 // DatabaseDescriptor encapsulates the concept of a database.
@@ -332,6 +366,9 @@ type TableDescriptor interface {
 	IsPhysicalTable() bool
 	// MaterializedView returns whether this TableDescriptor is a MaterializedView.
 	MaterializedView() bool
+	// IsReadOnly returns if this table descriptor has external data, and cannot
+	// be written to.
+	IsReadOnly() bool
 	// IsAs returns true if the TableDescriptor describes a Table that was created
 	// with a CREATE TABLE AS command.
 	IsAs() bool
@@ -369,15 +406,23 @@ type TableDescriptor interface {
 	IsPartitionAllBy() bool
 
 	// PrimaryIndexSpan returns the Span that corresponds to the entire primary
-	// index; can be used for a full table scan.
+	// index; can be used for a full table scan. This will not be an external span
+	// even if the table uses external row data.
 	PrimaryIndexSpan(codec keys.SQLCodec) roachpb.Span
 	// IndexSpan returns the Span that corresponds to an entire index; can be used
-	// for a full index scan.
+	// for a full index scan. This will not be an external span even if the table
+	// uses external row data.
 	IndexSpan(codec keys.SQLCodec, id descpb.IndexID) roachpb.Span
-	// AllIndexSpans returns the Spans for each index in the table, including those
-	// being added in the mutations.
+	// IndexSpanAllowingExternalRowData returns the Span that corresponds to an
+	// entire index; can be used for a full index scan. If the table uses external
+	// row data, this will be an external span.
+	IndexSpanAllowingExternalRowData(codec keys.SQLCodec, id descpb.IndexID) roachpb.Span
+	// AllIndexSpans returns the Spans for each index in the table, including
+	// those being added in the mutations. These will not be external spans even
+	// if the table uses external row data.
 	AllIndexSpans(codec keys.SQLCodec) roachpb.Spans
-	// TableSpan returns the Span that corresponds to the entire table.
+	// TableSpan returns the Span that corresponds to the entire table. This will
+	// not be an external span even if the table uses external row data.
 	TableSpan(codec keys.SQLCodec) roachpb.Span
 	// GetIndexMutationCapabilities returns:
 	// 1. Whether the index is a mutation
@@ -590,6 +635,12 @@ type TableDescriptor interface {
 	// Note: This was only used in pre-20.2 truncate and 20.2 mixed version and
 	// is now deprecated.
 	GetReplacementOf() descpb.TableDescriptor_Replacement
+
+	// GetAllReferencedTableIDs returns all relation IDs that this table
+	// references. Table references can be from foreign keys, triggers, or via
+	// direct references if the descriptor is a view.
+	GetAllReferencedTableIDs() descpb.IDs
+
 	// GetAllReferencedTypeIDs returns all user defined type descriptor IDs that
 	// this table references. It takes in a function that returns the TypeDescriptor
 	// with the desired ID.
@@ -606,6 +657,11 @@ type TableDescriptor interface {
 	GetAllReferencedFunctionIDsInConstraint(
 		cstID descpb.ConstraintID,
 	) (DescriptorIDSet, error)
+
+	// GetAllReferencedFunctionIDsInTrigger returns descriptor IDs of all user
+	// defined functions referenced in this trigger. This includes the trigger
+	// function as well as any functions it references transitively.
+	GetAllReferencedFunctionIDsInTrigger(triggerID descpb.TriggerID) DescriptorIDSet
 
 	// GetAllReferencedFunctionIDsInColumnExprs returns descriptor IDs of all user
 	// defined functions referenced by expressions in this column.
@@ -724,6 +780,9 @@ type TableDescriptor interface {
 	// AutoStatsCollectionEnabled indicates if automatic statistics collection is
 	// explicitly enabled or disabled for this table.
 	AutoStatsCollectionEnabled() catpb.AutoStatsCollectionStatus
+	// AutoPartialStatsCollectionEnabled indicates if automatic partial statistics
+	// collection is explicitly enabled or disabled for this table.
+	AutoPartialStatsCollectionEnabled() catpb.AutoPartialStatsCollectionStatus
 	// AutoStatsMinStaleRows indicates the setting of
 	// sql_stats_automatic_collection_min_stale_rows for this table.
 	// If ok is true, then the minStaleRows value is valid, otherwise this has not
@@ -759,6 +818,18 @@ type TableDescriptor interface {
 	// IsSchemaLocked returns true if we don't allow performing schema changes
 	// on this table descriptor.
 	IsSchemaLocked() bool
+	// IsPrimaryKeySwapMutation returns true if the mutation is a primary key
+	// swap mutation or a secondary index used by the declarative schema changer
+	// for a primary index swap.
+	IsPrimaryKeySwapMutation(m *descpb.DescriptorMutation) bool
+	// ExternalRowData indicates where the row data for this object is stored if
+	// it is stored outside the span of the object.
+	ExternalRowData() *descpb.ExternalRowData
+	// GetTriggers returns a slice with all triggers defined on the table.
+	GetTriggers() []descpb.TriggerDescriptor
+	// GetNextTriggerID returns the next unused trigger ID for this table.
+	// Trigger IDs are unique per table, but not unique globally.
+	GetNextTriggerID() descpb.TriggerID
 }
 
 // MutableTableDescriptor is both a MutableDescriptor and a TableDescriptor.
@@ -784,7 +855,8 @@ type TypeDescriptor interface {
 	IsCompatibleWith(other TypeDescriptor) error
 	// AsTypesT returns a reference to a types.T corresponding to this type
 	// descriptor. No guarantees are provided as to whether this object is a
-	// singleton or not, or whether it's hydrated or not.
+	// singleton or not, or whether it's hydrated or not. The returned type can be
+	// hydrated by the caller.
 	AsTypesT() *types.T
 	// GetKind returns the kind of this type.
 	GetKind() descpb.TypeDescriptor_Kind
@@ -952,7 +1024,7 @@ type FunctionDescriptor interface {
 	// GetFunctionBody returns the function body string.
 	GetFunctionBody() string
 
-	// GetParams returns a list of argument definition from the function.
+	// GetParams returns a list of all parameters of the function.
 	GetParams() []descpb.FunctionDescriptor_Parameter
 
 	// GetDependsOn returns a list of IDs of the relation this function depends on.
@@ -960,6 +1032,10 @@ type FunctionDescriptor interface {
 
 	// GetDependsOnTypes returns a list of IDs of the types this function depends on.
 	GetDependsOnTypes() []descpb.ID
+
+	// GetDependsOnFunctions returns a list of IDs of functions this function depends
+	// on.
+	GetDependsOnFunctions() []descpb.ID
 
 	// GetDependedOnBy returns a list of back-references of this function.
 	GetDependedOnBy() []descpb.FunctionDescriptor_Reference
@@ -982,6 +1058,9 @@ type FunctionDescriptor interface {
 	// IsProcedure returns true if the descriptor represents a procedure. It
 	// returns false if the descriptor represents a user-defined function.
 	IsProcedure() bool
+
+	// GetSecurity returns the security specification of this function.
+	GetSecurity() catpb.Function_Security
 }
 
 // FilterDroppedDescriptor returns an error if the descriptor state is DROP.
@@ -1083,14 +1162,4 @@ func IsSystemDescriptor(desc Descriptor) bool {
 // for the legacy schema changer).
 func HasConcurrentDeclarativeSchemaChange(desc Descriptor) bool {
 	return desc.GetDeclarativeSchemaChangerState() != nil
-}
-
-// MaybeRequiresHydration returns false if the descriptor definitely does not
-// depend on any types.T being hydrated.
-func MaybeRequiresHydration(desc Descriptor) (ret bool) {
-	_ = desc.ForEachUDTDependentForHydration(func(t *types.T) error {
-		ret = true
-		return iterutil.StopIteration()
-	})
-	return ret
 }

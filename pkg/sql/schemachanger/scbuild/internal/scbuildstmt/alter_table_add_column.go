@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
@@ -15,23 +10,28 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/docs"
+	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/seqexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdecomp"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -42,39 +42,34 @@ import (
 )
 
 func alterTableAddColumn(
-	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t *tree.AlterTableAddColumn,
+	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, stmt tree.Statement, t *tree.AlterTableAddColumn,
 ) {
 	d := t.ColumnDef
-	// We don't support handling zone config related properties for tables, so
-	// throw an unsupported error.
-	fallBackIfSubZoneConfigExists(b, t, tbl.TableID)
+	if t.ColumnDef.Unique.IsUnique {
+		panicIfRegionChangeUnderwayOnRBRTable(b, "add a UNIQUE COLUMN", tbl.TableID)
+	}
 	fallBackIfRegionalByRowTable(b, t, tbl.TableID)
-	fallBackIfVirtualColumnWithNotNullConstraint(t)
-	// Version gates functionally that is implemented after the statement is
-	// publicly published.
-	fallbackIfAddColDropColAlterPKInOneAlterTableStmtBeforeV232(b, tbl.TableID, t)
 
 	// Check column non-existence.
-	{
-		elts := b.ResolveColumn(tbl.TableID, d.Name, ResolveParams{
-			IsExistenceOptional: true,
-			RequiredPrivilege:   privilege.CREATE,
-		})
-		_, _, col := scpb.FindColumn(elts)
-		if col != nil {
-			if t.IfNotExists {
-				return
-			}
-			if col.IsSystemColumn {
-				panic(pgerror.Newf(pgcode.DuplicateColumn,
-					"column name %q conflicts with a system column name",
-					d.Name))
-			}
-			panic(sqlerrors.NewColumnAlreadyExistsInRelationError(string(d.Name), tn.Object()))
+	elts := b.ResolveColumn(tbl.TableID, d.Name, ResolveParams{
+		IsExistenceOptional: true,
+		RequiredPrivilege:   privilege.CREATE,
+	})
+	_, colTargetStatus, col := scpb.FindColumn(elts)
+	columnAlreadyExists := col != nil && colTargetStatus != scpb.ToAbsent
+	// If the column exists and IF NOT EXISTS is specified, continue parsing
+	// to ensure there are no other errors before treating the operation as a no-op.
+	if columnAlreadyExists && !t.IfNotExists {
+		if col.IsSystemColumn {
+			panic(pgerror.Newf(pgcode.DuplicateColumn,
+				"column name %q conflicts with a system column name",
+				d.Name))
 		}
+		panic(sqlerrors.NewColumnAlreadyExistsInRelationError(string(d.Name), tn.Object()))
 	}
+	var colSerialDefaultExpression *scpb.Expression
 	if d.IsSerial {
-		panic(scerrors.NotImplementedErrorf(d, "contains serial data type"))
+		d, colSerialDefaultExpression = alterTableAddColumnSerial(b, d, tn)
 	}
 	if d.GeneratedIdentity.IsGeneratedAsIdentity {
 		panic(scerrors.NotImplementedErrorf(d, "contains generated identity type"))
@@ -119,6 +114,13 @@ func alterTableAddColumn(
 	if err != nil {
 		panic(err)
 	}
+
+	// Parsing of the ALTER statement is complete, and no further errors are possible.
+	// If the column already exists, exit here to make the operation a no-op.
+	if columnAlreadyExists {
+		return
+	}
+
 	desc := cdd.ColumnDescriptor
 	desc.ID = b.NextTableColumnID(tbl)
 	spec := addColumnSpec{
@@ -178,13 +180,53 @@ func alterTableAddColumn(
 		))
 	}
 	if desc.IsComputed() {
-		expr := b.ComputedColumnExpression(tbl, d)
-		spec.colType.ComputeExpr = b.WrapExpression(tbl.TableID, expr)
+		expr := b.WrapExpression(tbl.TableID, b.ComputedColumnExpression(tbl, d))
+		if spec.colType.ElementCreationMetadata.In_24_3OrLater {
+			spec.compute = &scpb.ColumnComputeExpression{
+				TableID:    tbl.TableID,
+				ColumnID:   spec.col.ColumnID,
+				Expression: *expr,
+			}
+		} else {
+			spec.colType.ComputeExpr = expr
+		}
 		if desc.Virtual {
 			b.IncrementSchemaChangeAddColumnQualificationCounter("virtual")
 		} else {
 			b.IncrementSchemaChangeAddColumnQualificationCounter("computed")
 		}
+
+		// To validate, we add a transient check constraint. It uses an assignment
+		// cast to verify that the computed column expression fits in to the column
+		// type. This constraint is temporary and doesn't need to persist beyond the
+		// ALTER operation. The CHECK expression returns true for every row, but
+		// since it uses `assignment_cast`, the expression will fail with an error
+		// if a row is invalid.
+		var typeRef tree.ResolvableTypeReference = spec.colType.Type
+		if types.IsOIDUserDefinedType(spec.colType.Type.Oid()) {
+			typeRef = &tree.OIDTypeReference{OID: spec.colType.Type.Oid()}
+		}
+		checkExpr, err := parser.ParseExpr(fmt.Sprintf(
+			"CASE WHEN (crdb_internal.assignment_cast(%s, NULL::%s)) IS NULL THEN TRUE ELSE TRUE END",
+			expr.Expr, typeRef.SQLString(),
+		))
+		if err != nil {
+			panic(err)
+		}
+
+		// The constraint requires a backing index to use, which we will use the
+		// primary index.
+		indexID := getLatestPrimaryIndex(b, tbl.TableID).IndexID
+		// Collect all the table columns IDs.
+		colIDs := getSortedColumnIDsInIndex(b, tbl.TableID, indexID)
+		chk := scpb.CheckConstraint{
+			TableID:              tbl.TableID,
+			Expression:           *b.WrapExpression(tbl.TableID, checkExpr),
+			ConstraintID:         b.NextTableConstraintID(tbl.TableID),
+			IndexIDForValidation: indexID,
+			ColumnIDs:            colIDs,
+		}
+		b.AddTransient(&chk) // Adding it as transient ensures it doesn't survive past the ALTER.
 	}
 	if d.HasColumnFamily() {
 		elts := b.QueryByID(tbl.TableID)
@@ -210,11 +252,23 @@ func alterTableAddColumn(
 		}
 	}
 	if desc.HasDefault() {
-		expression := b.WrapExpression(tbl.TableID, cdd.DefaultExpr)
+		if colSerialDefaultExpression == nil {
+			colSerialDefaultExpression = b.WrapExpression(tbl.TableID, cdd.DefaultExpr)
+		} else {
+			// Otherwise, a serial column is being created. The sequence was created
+			// above, but the owner could not be assigned, since the column does not
+			// exist. So manually create the element here, since the CREATE SEQUENCE
+			// code path cannot resolve the column.
+			b.Add(&scpb.SequenceOwner{
+				SequenceID: colSerialDefaultExpression.UsesSequenceIDs[0],
+				TableID:    tbl.TableID,
+				ColumnID:   cdd.ID,
+			})
+		}
 		spec.def = &scpb.ColumnDefaultExpression{
 			TableID:    tbl.TableID,
 			ColumnID:   spec.col.ColumnID,
-			Expression: *expression,
+			Expression: *colSerialDefaultExpression,
 		}
 		b.IncrementSchemaChangeAddColumnQualificationCounter("default_expr")
 	}
@@ -254,49 +308,97 @@ func alterTableAddColumn(
 	}
 }
 
-// We start to support mixing add column(s), drop column(s), alter PK in one
-// ALTER TABLE stmt from V23_2. Before that, we only support just add column(s),
-// or just drop column(s), or just alter PK in one ALTER TABLE stmt.
-func fallbackIfAddColDropColAlterPKInOneAlterTableStmtBeforeV232(
-	b BuildCtx, tableID catid.DescID, n tree.NodeFormatter,
-) {
-	addingAnyColumn := !b.QueryByID(tableID).
-		Filter(isColumnFilter).
-		Filter(publicTargetFilter).
-		Filter(notReachedTargetYetFilter).
-		IsEmpty()
-
-	droppingAnyColumn := !b.QueryByID(tableID).
-		Filter(isColumnFilter).
-		Filter(absentTargetFilter).
-		Filter(notReachedTargetYetFilter).
-		IsEmpty()
-
-	alteringAnyPK := false
-	currentPrimaryIndexID := mustRetrieveCurrentPrimaryIndexElement(b, tableID).IndexID
-	scpb.ForEachPrimaryIndex(
-		b.QueryByID(tableID).Filter(publicTargetFilter).Filter(notReachedTargetYetFilter), func(
-			current scpb.Status, target scpb.TargetStatus, e *scpb.PrimaryIndex,
-		) {
-			// If any adding primary index has different key columns than current
-			// primary index `old`, then we conclude an ALTER PK happened.
-			if !haveSameIndexColsByKind(b, tableID, currentPrimaryIndexID, e.IndexID, scpb.IndexColumn_KEY) {
-				alteringAnyPK = true
-			}
-		})
-
-	boolToInt := func(b bool) int {
-		if b {
-			return 1
-		}
-		return 0
+func alterTableAddColumnSerial(
+	b BuildCtx, d *tree.ColumnTableDef, tn *tree.TableName,
+) (newDef *tree.ColumnTableDef, colDefaultExpression *scpb.Expression) {
+	if err := catalog.AssertValidSerialColumnDef(d, tn); err != nil {
+		panic(err)
 	}
 
-	if boolToInt(addingAnyColumn)+boolToInt(droppingAnyColumn)+boolToInt(alteringAnyPK) > 1 {
-		if !b.EvalCtx().Settings.Version.IsActive(b, clusterversion.V23_2) {
-			panic(scerrors.NotImplementedErrorf(n, "mixing ADD COLUMN, DROP COLUMN, "+
-				"and ALTER PRIMARY KEY not supported before V23.2"))
+	defType, err := tree.ResolveType(b, d.Type, b.SemaCtx().GetTypeResolver())
+	if err != nil {
+		panic(err)
+	}
+
+	telemetry.Inc(sqltelemetry.SerialColumnNormalizationCounter(
+		defType.Name(), b.SessionData().SerialNormalizationMode.String()))
+
+	serialNormalizationMode := b.SessionData().SerialNormalizationMode
+	switch serialNormalizationMode {
+	// The type will be upgraded when the columns are setup or before a
+	// sequence is created.
+	case sessiondatapb.SerialUsesRowID, sessiondatapb.SerialUsesUnorderedRowID, sessiondatapb.SerialUsesVirtualSequences:
+		if defType.Width() < types.Int.Width() {
+			b.EvalCtx().ClientNoticeSender.BufferClientNotice(
+				b,
+				errors.WithHintf(
+					pgnotice.Newf(
+						"upgrading the column %s to %s to utilize the session serial_normalization setting",
+						d.Name.String(),
+						types.Int.SQLString(),
+					),
+					"change the serial_normalization to sql_sequence or sql_sequence_cached if you wish "+
+						"to use a smaller sized serial column at the cost of performance. See %s",
+					docs.URL("serial.html"),
+				),
+			)
 		}
+	}
+	// Serial is an alias for a real column definition. False indicates a remapped alias.
+	d.IsSerial = false
+
+	if serialNormalizationMode == sessiondatapb.SerialUsesRowID {
+		return catalog.UseRowID(*d), nil
+	} else if serialNormalizationMode == sessiondatapb.SerialUsesUnorderedRowID {
+		return catalog.UseUnorderedRowID(*d), nil
+	}
+
+	// Start with a fixed sequence number and find the first one
+	// that is free.
+	nameBase := tree.Name(tn.Table() + "_" + string(d.Name) + "_seq")
+	seqName := tree.NewTableNameWithSchema(
+		tn.CatalogName,
+		tn.SchemaName,
+		nameBase)
+
+	for idx := 0; ; idx++ {
+		ers := b.ResolveRelation(seqName.ToUnresolvedObjectName(),
+			ResolveParams{
+				IsExistenceOptional: true,
+				RequiredPrivilege:   privilege.USAGE,
+				WithOffline:         true, // We search sequence with provided name, including offline ones.
+				ResolveTypes:        true, // Check for collisions with type names.
+			})
+		if ers.IsEmpty() {
+			break
+		}
+		seqName.ObjectName = tree.Name(fmt.Sprintf("%s%d", nameBase, idx))
+	}
+
+	seqOptions, err := catalog.SequenceOptionsFromNormalizationMode(serialNormalizationMode, b.ClusterSettings(), d, defType)
+	if err != nil {
+		panic(err)
+	}
+
+	// Create the sequence and fetch the element after. The full descriptor
+	// will be created after the build phase, so we cannot fully resolve it.
+	sequenceElem := doCreateSequence(b, &tree.CreateSequence{
+		Name:    *seqName,
+		Options: seqOptions,
+	})
+	// Set up the expression and manually add the reference, since WrapExpression
+	// cannot resolve this sequence yet.
+	newDef = catalog.UseSequence(*d, seqName)
+	// Rewrite the sequence name.
+	expr, err := seqexpr.ReplaceSequenceNamesWithIDs(newDef.DefaultExpr.Expr, map[string]descpb.ID{
+		seqName.String(): sequenceElem.SequenceID,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return newDef, &scpb.Expression{
+		Expr:            catpb.Expression(tree.Serialize(expr)),
+		UsesSequenceIDs: []catid.DescID{sequenceElem.SequenceID},
 	}
 }
 
@@ -312,16 +414,18 @@ func columnNamesToIDs(b BuildCtx, tbl *scpb.Table) map[string]descpb.ColumnID {
 }
 
 type addColumnSpec struct {
-	tbl      *scpb.Table
-	col      *scpb.Column
-	fam      *scpb.ColumnFamily
-	name     *scpb.ColumnName
-	colType  *scpb.ColumnType
-	def      *scpb.ColumnDefaultExpression
-	onUpdate *scpb.ColumnOnUpdateExpression
-	comment  *scpb.ColumnComment
-	unique   bool
-	notNull  bool
+	tbl              *scpb.Table
+	col              *scpb.Column
+	fam              *scpb.ColumnFamily
+	name             *scpb.ColumnName
+	colType          *scpb.ColumnType
+	def              *scpb.ColumnDefaultExpression
+	onUpdate         *scpb.ColumnOnUpdateExpression
+	compute          *scpb.ColumnComputeExpression
+	transientCompute *scpb.ColumnComputeExpression
+	comment          *scpb.ColumnComment
+	unique           bool
+	notNull          bool
 }
 
 // addColumn adds a column as specified in the `spec`. It delegates most of the work
@@ -335,12 +439,6 @@ func addColumn(b BuildCtx, spec addColumnSpec, n tree.NodeFormatter) (backing *s
 	addColumnIgnoringNotNull := func(
 		b BuildCtx, spec addColumnSpec, n tree.NodeFormatter,
 	) (backing *scpb.PrimaryIndex) {
-		if spec.def == nil && spec.colType.ComputeExpr == nil && spec.notNull && spec.unique {
-			panic(scerrors.NotImplementedErrorf(n,
-				"`ADD COLUMN NOT NULL UNIQUE` is problematic with "+
-					"concurrent insert. See issue #90174"))
-		}
-
 		b.Add(spec.col)
 		if spec.fam != nil {
 			b.Add(spec.fam)
@@ -353,21 +451,22 @@ func addColumn(b BuildCtx, spec addColumnSpec, n tree.NodeFormatter) (backing *s
 		if spec.onUpdate != nil {
 			b.Add(spec.onUpdate)
 		}
+		if spec.compute != nil {
+			b.Add(spec.compute)
+		}
+		if spec.transientCompute != nil {
+			b.AddTransient(spec.transientCompute)
+		}
 		if spec.comment != nil {
 			b.Add(spec.comment)
 		}
 		// Don't need to modify primary indexes for virtual columns.
 		if spec.colType.IsVirtual {
-			chain := getPrimaryIndexChain(b, spec.tbl.TableID)
-			if chain.finalSpec.primary != nil {
-				return chain.finalSpec.primary
-			} else {
-				return chain.oldSpec.primary
-			}
+			return getLatestPrimaryIndex(b, spec.tbl.TableID)
 		}
 
 		inflatedChain := getInflatedPrimaryIndexChain(b, spec.tbl.TableID)
-		if spec.def == nil && spec.colType.ComputeExpr == nil {
+		if spec.def == nil && spec.colType.ComputeExpr == nil && spec.compute == nil && spec.transientCompute == nil {
 			// Optimization opportunity: if we were to add a new column without default
 			// value nor computed expression, then we can just add the column to existing
 			// non-nil primary indexes without actually backfilling any data. This is
@@ -730,14 +829,23 @@ func addSecondaryIndexTargetsForAddColumn(
 	}
 }
 
-func mustRetrieveTemporaryIndexElem(
+func retrieveTemporaryIndexElem(
 	b BuildCtx, tableID catid.DescID, indexID catid.IndexID,
 ) (temporaryIndexElem *scpb.TemporaryIndex) {
-	scpb.ForEachTemporaryIndex(b.QueryByID(tableID), func(current scpb.Status, target scpb.TargetStatus, e *scpb.TemporaryIndex) {
+	b.QueryByID(tableID).FilterTemporaryIndex().ForEach(func(
+		_ scpb.Status, _ scpb.TargetStatus, e *scpb.TemporaryIndex,
+	) {
 		if e.IndexID == indexID {
 			temporaryIndexElem = e
 		}
 	})
+	return temporaryIndexElem
+}
+
+func mustRetrieveTemporaryIndexElem(
+	b BuildCtx, tableID catid.DescID, indexID catid.IndexID,
+) (temporaryIndexElem *scpb.TemporaryIndex) {
+	temporaryIndexElem = retrieveTemporaryIndexElem(b, tableID, indexID)
 	if temporaryIndexElem == nil {
 		panic(errors.AssertionFailedf("programming error: cannot find a TemporaryIndex element"+
 			" of ID %v", indexID))

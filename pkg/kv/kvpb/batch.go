@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvpb
 
@@ -410,25 +405,25 @@ func (ba *BatchRequest) IsCompleteTransaction() bool {
 	panic(fmt.Sprintf("unreachable. Batch requests: %s", TruncatedRequestsString(ba.Requests, 1024)))
 }
 
-// hasFlag returns true iff one of the requests within the batch contains the
-// specified flag.
-func (ba *BatchRequest) hasFlag(flag flag) bool {
+// hasFlag returns true iff at least one of the requests within the batch
+// contains at least one of the specified flags.
+func (ba *BatchRequest) hasFlag(flags flag) bool {
 	for _, union := range ba.Requests {
-		if (union.GetInner().flags() & flag) != 0 {
+		if (union.GetInner().flags() & flags) != 0 {
 			return true
 		}
 	}
 	return false
 }
 
-// hasFlagForAll returns true iff all of the requests within the batch contains
-// the specified flag.
-func (ba *BatchRequest) hasFlagForAll(flag flag) bool {
+// hasFlagForAll returns true iff all of the requests within the batch contain
+// all of the specified flags.
+func (ba *BatchRequest) hasFlagForAll(flags flag) bool {
 	if len(ba.Requests) == 0 {
 		return false
 	}
 	for _, union := range ba.Requests {
-		if (union.GetInner().flags() & flag) == 0 {
+		if (union.GetInner().flags() & flags) != flags {
 			return false
 		}
 	}
@@ -474,25 +469,47 @@ func (br *BatchResponse) String() string {
 	return strings.Join(str, ", ")
 }
 
-// LockSpanIterate calls the passed method with the key ranges of the
-// transactional locks contained in the batch. Usually the key spans
-// contained in the requests are used, but when a response contains a
-// ResumeSpan the ResumeSpan is subtracted from the request span to
-// provide a more minimal span of keys affected by the request.
-func (ba *BatchRequest) LockSpanIterate(br *BatchResponse, fn func(roachpb.Span, lock.Durability)) {
+// LockSpanIterate calls LockSpanIterate for each request in the batch.
+func (ba *BatchRequest) LockSpanIterate(
+	br *BatchResponse, fn func(roachpb.Span, lock.Durability),
+) error {
 	for i, arg := range ba.Requests {
 		req := arg.GetInner()
-		if !IsLocking(req) {
-			continue
-		}
 		var resp Response
 		if br != nil {
 			resp = br.Responses[i].GetInner()
 		}
-		if span, ok := ActualSpan(req, resp); ok {
-			fn(span, LockingDurability(req))
+		if err := LockSpanIterate(req, resp, fn); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// LockSpanIterate calls the passed function with the keys or key spans of the
+// transactional locks acquired by the request. Usually the full key span that
+// is addressed by the request is used. However, a more minimal span of keys can
+// be provided in the following cases:
+//   - the request operates over a range of keys but the response includes the
+//     specific set of keys that were locked. In these cases, the provided
+//     function is called with each individual locked key.
+//   - the request operates over a range of keys but the response contains a
+//     ResumeSpan signifying the key spans not reached by the request. In these
+//     cases, the ResumeSpan is subtracted from the request span.
+func LockSpanIterate(req Request, resp Response, fn func(roachpb.Span, lock.Durability)) error {
+	if !IsLocking(req) {
+		return nil
+	}
+	dur := LockingDurability(req)
+	if canIterateResponseKeys(req, resp) {
+		return ResponseKeyIterate(req, resp, func(key roachpb.Key) {
+			fn(roachpb.Span{Key: key}, dur)
+		})
+	}
+	if span, ok := actualSpan(req, resp); ok {
+		fn(span, dur)
+	}
+	return nil
 }
 
 // RefreshSpanIterate calls the passed function with the key spans of
@@ -513,7 +530,7 @@ func (ba *BatchRequest) RefreshSpanIterate(br *BatchResponse, fn func(roachpb.Sp
 		if br != nil {
 			resp = br.Responses[i].GetInner()
 		}
-		if ba.WaitPolicy == lock.WaitPolicy_SkipLocked && CanSkipLocked(req) {
+		if ba.WaitPolicy == lock.WaitPolicy_SkipLocked && CanSkipLocked(req) && resp != nil {
 			if ba.IndexFetchSpec != nil {
 				return errors.AssertionFailedf("unexpectedly IndexFetchSpec is set with SKIP LOCKED wait policy")
 			}
@@ -536,7 +553,7 @@ func (ba *BatchRequest) RefreshSpanIterate(br *BatchResponse, fn func(roachpb.Sp
 			}
 		} else {
 			// Otherwise, call the function with the span which was operated on.
-			if span, ok := ActualSpan(req, resp); ok {
+			if span, ok := actualSpan(req, resp); ok {
 				fn(span)
 			}
 		}
@@ -544,10 +561,10 @@ func (ba *BatchRequest) RefreshSpanIterate(br *BatchResponse, fn func(roachpb.Sp
 	return nil
 }
 
-// ActualSpan returns the actual request span which was operated on,
+// actualSpan returns the actual request span which was operated on,
 // according to the existence of a resume span in the response. If
 // nothing was operated on, returns false.
-func ActualSpan(req Request, resp Response) (roachpb.Span, bool) {
+func actualSpan(req Request, resp Response) (roachpb.Span, bool) {
 	h := req.Header()
 	if resp != nil {
 		resumeSpan := resp.Header().ResumeSpan
@@ -567,6 +584,25 @@ func ActualSpan(req Request, resp Response) (roachpb.Span, bool) {
 	return h.Span(), true
 }
 
+// canIterateResponseKeys returns whether the response to the given request
+// contains keys that can be iterated over using ResponseKeyIterate.
+func canIterateResponseKeys(req Request, resp Response) bool {
+	if resp == nil {
+		return false
+	}
+	switch v := req.(type) {
+	case *GetRequest:
+		return true
+	case *ScanRequest:
+		return v.ScanFormat != COL_BATCH_RESPONSE
+	case *ReverseScanRequest:
+		return v.ScanFormat != COL_BATCH_RESPONSE
+	case *DeleteRangeRequest:
+		return v.ReturnKeys
+	}
+	return false
+}
+
 // ResponseKeyIterate calls the passed function with the keys returned
 // in the provided request's response. If no keys are being returned,
 // the function will not be called.
@@ -574,7 +610,7 @@ func ActualSpan(req Request, resp Response) (roachpb.Span, bool) {
 // COL_BATCH_RESPONSE scan format.
 func ResponseKeyIterate(req Request, resp Response, fn func(roachpb.Key)) error {
 	if resp == nil {
-		return nil
+		return errors.Errorf("cannot iterate over response keys of %s request with nil response", req.Method())
 	}
 	switch v := resp.(type) {
 	case *GetResponse:
@@ -641,6 +677,14 @@ func ResponseKeyIterate(req Request, resp Response, fn func(roachpb.Key)) error 
 			if len(v.ColBatches.ColBatches) > 0 {
 				return errors.AssertionFailedf("unexpectedly non-empty ColBatches")
 			}
+		}
+	case *DeleteRangeResponse:
+		if !req.(*DeleteRangeRequest).ReturnKeys {
+			return errors.AssertionFailedf("cannot iterate over response keys of DeleteRange " +
+				"request when ReturnKeys=false")
+		}
+		for _, k := range v.Keys {
+			fn(k)
 		}
 	default:
 		return errors.Errorf("cannot iterate over response keys of %s request", req.Method())
@@ -845,6 +889,9 @@ func (ba *BatchRequest) SafeFormat(s redact.SafePrinter, verb rune) {
 	}
 	if ba.LockTimeout != 0 {
 		s.Printf(", [lock-timeout: %s]", ba.LockTimeout)
+	}
+	if ba.DeadlockTimeout != 0 {
+		s.Printf(", [deadlock-timeout: %s]", ba.DeadlockTimeout)
 	}
 	if ba.AmbiguousReplayProtection {
 		s.Printf(", [protect-ambiguous-replay]")

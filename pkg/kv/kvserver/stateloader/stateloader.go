@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stateloader
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -73,6 +69,10 @@ func (rsl StateLoader) Load(
 		return kvserverpb.ReplicaState{}, err
 	}
 
+	if s.ForceFlushIndex, err = rsl.LoadRangeForceFlushIndex(ctx, reader); err != nil {
+		return kvserverpb.ReplicaState{}, err
+	}
+
 	as, err := rsl.LoadRangeAppliedState(ctx, reader)
 	if err != nil {
 		return kvserverpb.ReplicaState{}, err
@@ -84,13 +84,9 @@ func (rsl StateLoader) Load(
 	s.Stats = &ms
 	s.RaftClosedTimestamp = as.RaftClosedTimestamp
 
-	// The truncated state should not be optional (i.e. the pointer is
-	// pointless), but it is and the migration is not worth it.
-	truncState, err := rsl.LoadRaftTruncatedState(ctx, reader)
-	if err != nil {
-		return kvserverpb.ReplicaState{}, err
-	}
-	s.TruncatedState = &truncState
+	// Invariant: TruncatedState == nil. The field is being phased out. The
+	// RaftTruncatedState must be loaded separately.
+	s.TruncatedState = nil
 
 	version, err := rsl.LoadVersion(ctx, reader)
 	if err != nil {
@@ -125,11 +121,6 @@ func (rsl StateLoader) Save(
 		return enginepb.MVCCStats{}, err
 	}
 	if err := rsl.SetGCHint(ctx, readWriter, ms, state.GCHint); err != nil {
-		return enginepb.MVCCStats{}, err
-	}
-	// TODO(sep-raft-log): SetRaftTruncatedState will be in a separate batch when
-	// the Raft log engine is separated. Figure out the ordering required here.
-	if err := rsl.SetRaftTruncatedState(ctx, readWriter, state.TruncatedState); err != nil {
 		return enginepb.MVCCStats{}, err
 	}
 	if state.Version != nil {
@@ -254,7 +245,7 @@ func (rsl StateLoader) SetRangeAppliedState(
 	// in ComputeStats.
 	ms := (*enginepb.MVCCStats)(nil)
 	return storage.MVCCPutProto(ctx, readWriter, rsl.RangeAppliedStateKey(),
-		hlc.Timestamp{}, as, storage.MVCCWriteOptions{Stats: ms, Category: storage.ReplicationReadCategory})
+		hlc.Timestamp{}, as, storage.MVCCWriteOptions{Stats: ms, Category: fs.ReplicationReadCategory})
 }
 
 // SetMVCCStats overwrites the MVCC stats. This needs to perform a read on the
@@ -293,7 +284,7 @@ func (rsl StateLoader) LoadGCThreshold(
 ) (*hlc.Timestamp, error) {
 	var t hlc.Timestamp
 	_, err := storage.MVCCGetProto(ctx, reader, rsl.RangeGCThresholdKey(),
-		hlc.Timestamp{}, &t, storage.MVCCGetOptions{ReadCategory: storage.MVCCGCReadCategory})
+		hlc.Timestamp{}, &t, storage.MVCCGetOptions{ReadCategory: fs.MVCCGCReadCategory})
 	return &t, err
 }
 
@@ -317,7 +308,7 @@ func (rsl StateLoader) LoadGCHint(
 ) (*roachpb.GCHint, error) {
 	var h roachpb.GCHint
 	_, err := storage.MVCCGetProto(ctx, reader, rsl.RangeGCHintKey(),
-		hlc.Timestamp{}, &h, storage.MVCCGetOptions{ReadCategory: storage.MVCCGCReadCategory})
+		hlc.Timestamp{}, &h, storage.MVCCGetOptions{ReadCategory: fs.MVCCGCReadCategory})
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +347,28 @@ func (rsl StateLoader) SetVersion(
 		hlc.Timestamp{}, version, storage.MVCCWriteOptions{Stats: ms})
 }
 
+// LoadRangeForceFlushIndex loads the force-flush index.
+func (rsl StateLoader) LoadRangeForceFlushIndex(
+	ctx context.Context, reader storage.Reader,
+) (roachpb.ForceFlushIndex, error) {
+	var ffIndex roachpb.ForceFlushIndex
+	// If not found, ffIndex.Index will stay 0.
+	_, err := storage.MVCCGetProto(ctx, reader, rsl.RangeForceFlushKey(),
+		hlc.Timestamp{}, &ffIndex, storage.MVCCGetOptions{})
+	return ffIndex, err
+}
+
+// SetForceFlushIndex sets the force-flush index.
+func (rsl StateLoader) SetForceFlushIndex(
+	ctx context.Context,
+	readWriter storage.ReadWriter,
+	ms *enginepb.MVCCStats,
+	ffIndex *roachpb.ForceFlushIndex,
+) error {
+	return storage.MVCCPutProto(ctx, readWriter, rsl.RangeForceFlushKey(),
+		hlc.Timestamp{}, ffIndex, storage.MVCCWriteOptions{Stats: ms})
+}
+
 // UninitializedReplicaState returns the ReplicaState of an uninitialized
 // Replica with the given range ID. It is equivalent to StateLoader.Load from an
 // empty storage.
@@ -363,7 +376,7 @@ func UninitializedReplicaState(rangeID roachpb.RangeID) kvserverpb.ReplicaState 
 	return kvserverpb.ReplicaState{
 		Desc:           &roachpb.RangeDescriptor{RangeID: rangeID},
 		Lease:          &roachpb.Lease{},
-		TruncatedState: &kvserverpb.RaftTruncatedState{},
+		TruncatedState: nil, // Invariant: always nil.
 		GCThreshold:    &hlc.Timestamp{},
 		Stats:          &enginepb.MVCCStats{},
 		GCHint:         &roachpb.GCHint{},

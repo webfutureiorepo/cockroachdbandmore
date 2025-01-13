@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo
 
@@ -30,6 +25,7 @@ import (
 // Test getting statistics from constraints that cannot yet be inferred
 // by the optimizer.
 func TestGetStatsFromConstraint(t *testing.T) {
+	ctx := context.Background()
 	evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	evalCtx.SessionData().OptimizerUseMultiColStats = true
 
@@ -114,7 +110,7 @@ func TestGetStatsFromConstraint(t *testing.T) {
 		sel := mem.MemoizeSelect(scan, TrueFilter)
 
 		relProps := &props.Relational{Cardinality: props.AnyCardinality}
-		relProps.NotNullCols = cs.ExtractNotNullCols(&evalCtx)
+		relProps.NotNullCols = cs.ExtractNotNullCols(ctx, &evalCtx)
 		s := relProps.Statistics()
 		s.Init(relProps)
 
@@ -123,7 +119,7 @@ func TestGetStatsFromConstraint(t *testing.T) {
 
 		// Calculate row count and selectivity.
 		s.RowCount = scan.Relational().Statistics().RowCount
-		selectivity, _ := sb.selectivityFromMultiColDistinctCounts(cols, sel, s)
+		selectivity, _, _ := sb.selectivityFromMultiColDistinctCounts(cols, sel, s)
 		s.ApplySelectivity(selectivity)
 
 		// Update null counts.
@@ -152,7 +148,7 @@ func TestGetStatsFromConstraint(t *testing.T) {
 
 	var columns45 constraint.Columns
 	columns45.Init([]opt.OrderingColumn{4, 5})
-	keyCtx45 := constraint.MakeKeyContext(&columns45, &evalCtx)
+	keyCtx45 := constraint.MakeKeyContext(ctx, &columns45, &evalCtx)
 
 	cs1 := constraint.SingleConstraint(&c1)
 	statsFunc(
@@ -214,13 +210,13 @@ func TestGetStatsFromConstraint(t *testing.T) {
 		"[rows=160000, distinct(1)=2, null(1)=0, distinct(3)=2, null(3)=0, distinct(1,3)=4, null(1,3)=0]",
 	)
 
-	cs := cs3.Intersect(&evalCtx, cs123)
+	cs := cs3.Intersect(ctx, &evalCtx, cs123)
 	statsFunc(
 		cs,
 		"[rows=909098.9, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0, distinct(3)=1, null(3)=0, distinct(1-3)=1, null(1-3)=0]",
 	)
 
-	cs = cs32.Intersect(&evalCtx, cs123)
+	cs = cs32.Intersect(ctx, &evalCtx, cs123)
 	statsFunc(
 		cs,
 		"[rows=909098.9, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0, distinct(3)=1, null(3)=0, distinct(1-3)=1, null(1-3)=0]",

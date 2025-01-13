@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -109,7 +103,8 @@ type backupFixtureSpecs struct {
 	initWorkloadViaRestore *restoreSpecs
 
 	timeout time.Duration
-	suites  registry.SuiteSet
+	// A no-op, used only to set larger timeouts due roachtests limiting timeouts based on the suite
+	suites registry.SuiteSet
 
 	testName string
 
@@ -118,7 +113,7 @@ type backupFixtureSpecs struct {
 }
 
 func (bf *backupFixtureSpecs) initTestName() {
-	bf.testName = "backupFixture/" + bf.scheduledBackupSpecs.workload.String() + "/" + bf.scheduledBackupSpecs.cloud
+	bf.testName = fmt.Sprintf("backupFixture/%s/revision-history=%t/%s", bf.scheduledBackupSpecs.workload.String(), !bf.scheduledBackupSpecs.nonRevisionHistory, bf.scheduledBackupSpecs.cloud)
 }
 
 func makeBackupDriver(t test.Test, c cluster.Cluster, sp backupFixtureSpecs) backupDriver {
@@ -137,10 +132,8 @@ type backupDriver struct {
 }
 
 func (bd *backupDriver) prepareCluster(ctx context.Context) {
-
-	if bd.c.Cloud() != bd.sp.scheduledBackupSpecs.cloud {
-		// For now, only run the test on the cloud provider that also stores the backup.
-		bd.t.Skip(fmt.Sprintf("test configured to run on %s", bd.sp.scheduledBackupSpecs.cloud))
+	if err := bd.sp.scheduledBackupSpecs.CloudIsCompatible(bd.c.Cloud()); err != nil {
+		bd.t.Skip(err.Error())
 	}
 	version := clusterupgrade.CurrentVersion()
 	if bd.sp.scheduledBackupSpecs.version != fixtureFromMasterVersion {
@@ -154,14 +147,14 @@ func (bd *backupDriver) prepareCluster(ctx context.Context) {
 
 	require.NoError(bd.t, clusterupgrade.StartWithSettings(ctx, bd.t.L(), bd.c,
 		bd.sp.hardware.getCRDBNodes(),
-		option.DefaultStartOptsNoBackups(),
+		option.NewStartOpts(option.NoBackupSchedule, option.DisableWALFailover),
 		install.BinaryOption(binaryPath)))
 
 	bd.assertCorrectCockroachBinary(ctx)
 	if !bd.sp.scheduledBackupSpecs.ignoreExistingBackups {
 		// This check allows the roachtest to fail fast, instead of when the
 		// scheduled backup cmd is issued.
-		require.False(bd.t, bd.checkForExistingBackupCollection(ctx))
+		require.False(bd.t, bd.checkForExistingBackupCollection(ctx), fmt.Sprintf("existing backup in collection %s", bd.sp.scheduledBackupSpecs.backupCollection()))
 	}
 }
 
@@ -248,7 +241,6 @@ func (bd *backupDriver) monitorBackups(ctx context.Context) {
 }
 
 func registerBackupFixtures(r registry.Registry) {
-	rng, _ := randutil.NewPseudoRand()
 	for _, bf := range []backupFixtureSpecs{
 		{
 			// 400GB backup fixture with 48 incremental layers. This is used by
@@ -270,27 +262,50 @@ func registerBackupFixtures(r registry.Registry) {
 			suites: registry.Suites(registry.Nightly),
 		},
 		{
-			// 15 GB backup fixture with 48 incremental layers. This is used by
-			// restore/tpce/15GB/aws/nodes=4/cpus=8. Runs weekly to catch any
-			// regressions in the fixture generation code.
-			hardware: makeHardwareSpecs(hardwareSpecs{workloadNode: true, cpus: 4}),
-			scheduledBackupSpecs: makeBackupFixtureSpecs(
-				scheduledBackupSpecs{
-					incrementalBackupCrontab: "*/2 * * * *",
-					ignoreExistingBackups:    true,
-					backupSpecs: backupSpecs{
-						nonRevisionHistory: rng.Intn(2) == 1,
-						workload:           tpceRestore{customers: 1000},
-						version:            fixtureFromMasterVersion,
-						numBackupsInChain:  4,
-					},
-				}),
+			// 400GB backup fixture, no revision history, with 48 incremental layers.
+			// This will used by the online restore roachtests. During 24.2
+			// development, we can use it to enable OR of incremental backups.
+			hardware: makeHardwareSpecs(hardwareSpecs{workloadNode: true}),
+			scheduledBackupSpecs: makeBackupFixtureSpecs(scheduledBackupSpecs{
+				backupSpecs: backupSpecs{
+					version:            fixtureFromMasterVersion,
+					nonRevisionHistory: true,
+				},
+			}),
+			timeout: 5 * time.Hour,
 			initWorkloadViaRestore: &restoreSpecs{
-				backup:                 backupSpecs{version: "v22.2.1", numBackupsInChain: 48},
-				restoreUptoIncremental: 48,
+				backup: backupSpecs{
+					version:           fixtureFromMasterVersion,
+					numBackupsInChain: 48,
+				},
+				restoreUptoIncremental: 12,
 			},
-			timeout: 2 * time.Hour,
-			suites:  registry.Suites(registry.Weekly),
+			skip:   "only for fixture generation",
+			suites: registry.Suites(registry.Nightly),
+		},
+		{
+			// 8TB backup fixture, no revision history, with 48 incremental layers.
+			// This will used by the online restore roachtests. During 24.2
+			// development, we can use it to enable OR of incremental backups.
+			hardware: makeHardwareSpecs(hardwareSpecs{nodes: 10, volumeSize: 1500, workloadNode: true}),
+			scheduledBackupSpecs: makeBackupFixtureSpecs(scheduledBackupSpecs{
+				backupSpecs: backupSpecs{
+					version:            fixtureFromMasterVersion,
+					nonRevisionHistory: true,
+					workload:           tpceRestore{customers: 500000},
+				},
+			}),
+			timeout: 23 * time.Hour,
+			initWorkloadViaRestore: &restoreSpecs{
+				backup: backupSpecs{
+					version:            "v23.1.11",
+					numBackupsInChain:  48,
+					nonRevisionHistory: true,
+				},
+				restoreUptoIncremental: 12,
+			},
+			skip:   "only for fixture generation",
+			suites: registry.Suites(registry.Weekly),
 		},
 		{
 			// 8TB Backup Fixture.
@@ -332,6 +347,22 @@ func registerBackupFixtures(r registry.Registry) {
 			timeout: 48 * time.Hour,
 			skip:    "only for fixture generation",
 		},
+		{
+			hardware: makeHardwareSpecs(hardwareSpecs{workloadNode: true}),
+			scheduledBackupSpecs: makeBackupFixtureSpecs(scheduledBackupSpecs{
+				backupSpecs: backupSpecs{
+					workload:           tpccRestore{opts: tpccRestoreOptions{warehouses: 5000}},
+					nonRevisionHistory: true,
+				},
+			}),
+			initWorkloadViaRestore: &restoreSpecs{
+				backup:                 backupSpecs{version: "v23.1.1", numBackupsInChain: 48},
+				restoreUptoIncremental: 48,
+			},
+			timeout: 1 * time.Hour,
+			suites:  registry.Suites(registry.Nightly),
+			skip:    "only for fixture generation",
+		},
 	} {
 		bf := bf
 		bf.initTestName()
@@ -341,7 +372,7 @@ func registerBackupFixtures(r registry.Registry) {
 			Cluster:           bf.hardware.makeClusterSpecs(r, bf.scheduledBackupSpecs.cloud),
 			Timeout:           bf.timeout,
 			EncryptionSupport: registry.EncryptionMetamorphic,
-			CompatibleClouds:  registry.Clouds(bf.scheduledBackupSpecs.cloud),
+			CompatibleClouds:  bf.scheduledBackupSpecs.CompatibleClouds(),
 			Suites:            bf.suites,
 			Skip:              bf.skip,
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {

@@ -1,19 +1,16 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemachange
 
 import (
+	"cmp"
 	"fmt"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -21,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/errors"
-	"golang.org/x/exp/slices"
 )
 
 // ErrCaseNotPossible is a sentinel indicating that an elected case could not
@@ -181,13 +177,20 @@ func Generate[T tree.Statement](
 		compiledCases[i], compiledCases[j] = compiledCases[j], compiledCases[i]
 	})
 
-	// Prioritize cases that will succeed but pushing them to the front of our
+	// Prioritize cases that will succeed by pushing them to the front of our
 	// slice. If no successful case is possible, we'll fallback to error cases.
-	slices.SortStableFunc(compiledCases, func(a, b compiledCase) bool {
+	slices.SortStableFunc(compiledCases, func(a, b compiledCase) int {
 		aIsSuccess := a.Code == pgcode.SuccessfulCompletion
 		bIsSuccess := b.Code == pgcode.SuccessfulCompletion
 
-		return aIsSuccess && !bIsSuccess
+		if aIsSuccess && bIsSuccess {
+			// If both are valid, choose randomly.
+			return cmp.Compare(rng.Float64(), 0.5)
+		}
+		if aIsSuccess {
+			return -1
+		}
+		return +1
 	})
 
 	for _, c := range compiledCases {
@@ -204,7 +207,7 @@ func Generate[T tree.Statement](
 		// NB: Parsing the template result as SQL ensures that we catch any
 		// template errors and distinguish them from workload errors. It also
 		// allows us to normalize the outputs so users don't have to worry about
-		// whitespace and/or captialization.
+		// whitespace and/or capitalization.
 		stmt, err := parser.ParseOne(raw.String())
 		if err != nil {
 			return zero, pgcode.Code{}, errors.AssertionFailedf(

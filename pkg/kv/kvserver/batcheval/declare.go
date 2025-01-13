@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -176,7 +171,10 @@ func DeclareKeysForRefresh(
 func DeclareKeysForBatch(
 	rs ImmutableRangeState, header *kvpb.Header, latchSpans *spanset.SpanSet,
 ) error {
-	if header.Txn != nil {
+	// If the batch is transactional and has acquired locks, we will check if the
+	// transaction has been aborted during evaluation (see checkIfTxnAborted), so
+	// declare a read latch on the AbortSpan key.
+	if header.Txn != nil && header.Txn.IsLocking() {
 		header.Txn.AssertInitialized(context.TODO())
 		latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{
 			Key: keys.AbortSpanKey(rs.GetRangeID(), header.Txn.ID),

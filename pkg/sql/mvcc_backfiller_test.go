@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -62,8 +57,7 @@ func TestIndexBackfillMergeRetry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderStressRace(t, "TODO(ssd) test times outs under race")
-	skip.UnderRace(t, "TODO(ssd) test times outs under race")
+	skip.UnderDuress(t, "this test fails under duress")
 
 	params, _ := createTestServerParams()
 
@@ -671,10 +665,11 @@ func splitIndex(
 			return err
 		}
 
-		holder, err := tc.FindRangeLeaseHolder(rangeDesc, nil)
+		li, _, err := tc.FindRangeLeaseEx(ctx, rangeDesc, nil)
 		if err != nil {
 			return err
 		}
+		holder := li.CurrentOrProspective().Replica
 
 		_, rightRange, err := tc.Server(int(holder.NodeID) - 1).SplitRange(pik)
 		if err != nil {

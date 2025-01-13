@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package connectionlatency
 
@@ -53,6 +48,9 @@ func (connectionLatency) Meta() workload.Meta { return connectionLatencyMeta }
 // Flags implements the Flagser interface.
 func (c *connectionLatency) Flags() workload.Flags { return c.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (c *connectionLatency) ConnFlags() *workload.ConnFlags { return c.connFlags }
+
 // Tables implements the Generator interface.
 func (connectionLatency) Tables() []workload.Table {
 	return nil
@@ -63,11 +61,6 @@ func (c *connectionLatency) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
 	ql := workload.QueryLoad{}
-	_, err := workload.SanitizeUrls(c, c.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
-
 	for _, url := range urls {
 		op := &connectionOp{
 			url:   url,

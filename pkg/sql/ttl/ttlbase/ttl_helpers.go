@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttlbase
 
@@ -60,7 +55,7 @@ var (
 		settings.ApplicationLevel,
 		"sql.ttl.default_delete_rate_limit",
 		"default delete rate limit (rows per second) per node for each TTL job. Use 0 to signify no rate limit.",
-		0,
+		100,
 		settings.NonNegativeInt,
 		settings.WithPublic,
 	)
@@ -74,7 +69,9 @@ var (
 	changefeedReplicationDisabled = settings.RegisterBoolSetting(
 		settings.ApplicationLevel,
 		"sql.ttl.changefeed_replication.disabled",
-		"if true, deletes issued by TTL will not be replicated via changefeeds",
+		"if true, deletes issued by TTL will not be replicated via changefeeds "+
+			"(this setting will be ignored by changefeeds that have the ignore_disable_changefeed_replication option set; "+
+			"such changefeeds will continue to replicate all TTL deletes)",
 		false,
 		settings.WithPublic,
 	)
@@ -153,7 +150,12 @@ func CheckJobEnabled(settingsValues *settings.Values) error {
 
 // GetChangefeedReplicationDisabled returns whether changefeed replication
 // should be disabled for this job based on the relevant cluster setting.
-func GetChangefeedReplicationDisabled(settingsValues *settings.Values) bool {
+func GetChangefeedReplicationDisabled(
+	settingsValues *settings.Values, ttl *catpb.RowLevelTTL,
+) bool {
+	if ttl.DisableChangefeedReplication {
+		return true
+	}
 	return changefeedReplicationDisabled.Get(settingsValues)
 }
 

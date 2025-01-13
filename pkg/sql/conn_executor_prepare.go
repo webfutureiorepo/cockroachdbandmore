@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -56,7 +51,12 @@ func (ex *connExecutor) execPrepare(
 		}
 	}
 
-	ctx, sp := tracing.EnsureChildSpan(ctx, ex.server.cfg.AmbientCtx.Tracer, "prepare stmt")
+	// Check if we need to auto-commit the transaction due to DDL.
+	if ev, payload := ex.maybeAutoCommitBeforeDDL(ctx, parseCmd.AST); ev != nil {
+		return ev, payload
+	}
+
+	ctx, sp := tracing.ChildSpan(ctx, "prepare stmt")
 	defer sp.Finish()
 
 	// The anonymous statement can be overwritten.
@@ -73,7 +73,8 @@ func (ex *connExecutor) execPrepare(
 		ex.deletePreparedStmt(ctx, "")
 	}
 
-	stmt := makeStatement(parseCmd.Statement, ex.server.cfg.GenerateID())
+	stmt := makeStatement(parseCmd.Statement, ex.server.cfg.GenerateID(),
+		tree.FmtFlags(queryFormattingForFingerprintsMask.Get(ex.server.cfg.SV())))
 	_, err := ex.addPreparedStmt(
 		ctx,
 		parseCmd.Name,
@@ -315,9 +316,7 @@ func (ex *connExecutor) populatePrepared(
 	}
 	stmt := &p.stmt
 
-	if err := p.semaCtx.Placeholders.Init(stmt.NumPlaceholders, placeholderHints); err != nil {
-		return 0, err
-	}
+	p.semaCtx.Placeholders.Init(stmt.NumPlaceholders, placeholderHints)
 	p.extendedEvalCtx.PrepareOnly = true
 	// If the statement is being prepared by a session migration, then we should
 	// not evaluate the AS OF SYSTEM TIME timestamp. During session migration,
@@ -497,6 +496,7 @@ func (ex *connExecutor) execBind(
 						typ,
 						qArgFormatCodes[i],
 						arg,
+						p.datumAlloc,
 					)
 					if err != nil {
 						return pgerror.Wrapf(err, pgcode.ProtocolViolation, "error in argument for %s", k)
@@ -711,7 +711,8 @@ func (ex *connExecutor) execDescribe(
 // prepared and executed inside of an aborted transaction.
 func (ex *connExecutor) isAllowedInAbortedTxn(ast tree.Statement) bool {
 	switch s := ast.(type) {
-	case *tree.CommitTransaction, *tree.RollbackTransaction, *tree.RollbackToSavepoint:
+	case *tree.CommitTransaction, *tree.PrepareTransaction,
+		*tree.RollbackTransaction, *tree.RollbackToSavepoint:
 		return true
 	case *tree.Savepoint:
 		if ex.isCommitOnReleaseSavepoint(s.Name) {

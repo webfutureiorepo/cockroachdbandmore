@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -225,7 +220,9 @@ func indexEntryForDatums(
 		colIDtoRowIndex.Set(c.GetID(), i)
 	}
 	indexEntries, err := rowenc.EncodeSecondaryIndex(
-		keys.SystemSQLCodec, tableDesc, index, colIDtoRowIndex, row, true /* includeEmpty */)
+		context.Background(), keys.SystemSQLCodec, tableDesc, index,
+		colIDtoRowIndex, row, true, /* includeEmpty */
+	)
 	if err != nil {
 		return rowenc.IndexEntry{}, err
 	}
@@ -490,7 +487,7 @@ INSERT INTO t.test VALUES (10, 2);
 	values = []tree.Datum{tree.NewDInt(10), tree.NewDInt(0)}
 	// Encode the column value.
 	valueBuf, err := valueside.Encode(
-		[]byte(nil), valueside.MakeColumnIDDelta(0, tableDesc.PublicColumns()[1].GetID()), values[1], []byte(nil))
+		[]byte(nil), valueside.MakeColumnIDDelta(0, tableDesc.PublicColumns()[1].GetID()), values[1])
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package protoreflect
 
@@ -19,6 +14,10 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/gogo/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 var shorthands map[string]protoutil.Message = map[string]protoutil.Message{}
@@ -76,6 +75,42 @@ func NewMessage(name string) (protoutil.Message, error) {
 			name, rv.Interface())
 	}
 	return msg, nil
+}
+
+// NewJSONMessageFromFileDescriptor decodes a protobuf message from binary to JSON
+// based on the provided protoreflect.FileDescriptor
+func NewJSONMessageFromFileDescriptor(
+	name string, fd protoreflect.FileDescriptor, data []byte, resolver protodesc.Resolver,
+) (jsonb.JSON, error) {
+	//convert FileDescriptor to FileDescriptorProto
+	fdp := protodesc.ToFileDescriptorProto(fd)
+
+	//create new proto File from FileDescriptorProto
+	f, err := protodesc.NewFile(fdp, resolver)
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating protodesc.NewFile: %w")
+	}
+
+	//get MessageDescriptor from File based on provided name
+	md := f.Messages().ByName(protoreflect.Name(name))
+	if md == nil {
+		return nil, errors.Newf("message descriptor was nil for name %s", name)
+	}
+
+	//Get message to unmarshall protobuf binary from the MessageDescriptor
+	mt := dynamicpb.NewMessageType(md)
+	msg := mt.New().Interface()
+
+	//Unmarshal
+	err = protoutil.TODOUnmarshal(data, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	//Format Protobuf message to JSON string
+	json := protojson.Format(msg)
+
+	return jsonb.ParseJSON(json)
 }
 
 // DecodeMessage decodes protocol message specified as its fully

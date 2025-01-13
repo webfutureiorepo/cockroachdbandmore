@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -22,8 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/multitenant"
-	"github.com/cockroachdb/cockroach/pkg/multitenant/mtinfopb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/settingswatcher"
@@ -60,6 +53,7 @@ import (
 
 // setClusterSettingNode represents a SET CLUSTER SETTING statement.
 type setClusterSettingNode struct {
+	zeroInputPlanNode
 	name    settings.SettingName
 	st      *cluster.Settings
 	setting settings.NonMaskedSetting
@@ -193,7 +187,7 @@ func (p *planner) SetClusterSetting(
 	}
 
 	if nameStatus != settings.NameActive {
-		p.BufferClientNotice(ctx, settingNameDeprecationNotice(name, setting.Name()))
+		p.BufferClientNotice(ctx, settingAlternateNameNotice(name, setting.Name()))
 		name = setting.Name()
 	}
 
@@ -269,7 +263,8 @@ func (p *planner) getAndValidateTypedClusterSetting(
 				requiredType = types.Int
 			case *settings.FloatSetting:
 				requiredType = types.Float
-			case *settings.EnumSetting:
+			case settings.AnyEnumSetting:
+				// EnumSettings can be set with either strings or integers.
 				requiredType = types.Any
 			case *settings.DurationSetting:
 				requiredType = types.Interval
@@ -277,7 +272,7 @@ func (p *planner) getAndValidateTypedClusterSetting(
 				requiredType = types.Interval
 				// Ensure that the expression contains a unit (i.e can't be a float)
 				_, err := p.analyzeExpr(
-					ctx, expr, nil, dummyHelper, types.Float, false, "SET CLUSTER SETTING "+string(name),
+					ctx, expr, dummyHelper, types.Float, false, "SET CLUSTER SETTING "+string(name),
 				)
 				// An interval with a unit (valid) will return an
 				// "InvalidTextRepresentation" error when trying to parse it as a float.
@@ -293,7 +288,7 @@ func (p *planner) getAndValidateTypedClusterSetting(
 			}
 
 			typed, err := p.analyzeExpr(
-				ctx, expr, nil, dummyHelper, requiredType, true, "SET CLUSTER SETTING "+string(name))
+				ctx, expr, dummyHelper, requiredType, true, "SET CLUSTER SETTING "+string(name))
 			if err != nil {
 				hasHint, hint := setting.ErrorHint()
 				if hasHint {
@@ -358,17 +353,6 @@ func (n *setClusterSettingNode) startExec(params runParams) error {
 	// Report tracked cluster settings via telemetry.
 	// TODO(justin): implement a more general mechanism for tracking these.
 	switch n.name {
-	case multitenant.DefaultClusterSelectSettingName:
-		if multitenant.VerifyTenantService.Get(&n.st.SV) && expectedEncodedValue != "" {
-			tr, err := GetTenantRecordByName(params.ctx, n.st, params.p.InternalSQLTxn(), roachpb.TenantName(expectedEncodedValue))
-			if err != nil {
-				return errors.Wrapf(err, "failed to lookup tenant %q", expectedEncodedValue)
-			}
-			if tr.ServiceMode != mtinfopb.ServiceModeShared {
-				return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-					"shared service not enabled for tenant %q", expectedEncodedValue)
-			}
-		}
 	case catpb.AutoStatsEnabledSettingName:
 		switch expectedEncodedValue {
 		case "true":
@@ -484,7 +468,7 @@ func writeDefaultSettingValue(
 	expectedEncodedValue = setting.EncodedDefault()
 	_, err = db.Executor().ExecEx(
 		ctx, "reset-setting", nil,
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"DELETE FROM system.settings WHERE name = $1", setting.InternalKey(),
 	)
 	return reportedValue, expectedEncodedValue, err
@@ -530,7 +514,7 @@ func writeNonDefaultSettingValue(
 
 		if _, err = db.Executor().ExecEx(
 			ctx, "update-setting", nil,
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			`UPSERT INTO system.settings (name, value, "lastUpdated", "valueType") VALUES ($1, $2, now(), $3)`,
 			setting.InternalKey(), encoded, setting.Typ(),
 		); err != nil {
@@ -559,7 +543,7 @@ func setVersionSetting(
 	// value change is valid.
 	datums, err := db.Executor().QueryRowEx(
 		ctx, "retrieve-prev-setting", nil,
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT value FROM system.settings WHERE name = $1", setting.InternalKey(),
 	)
 	if err != nil {
@@ -794,6 +778,9 @@ func toSettingString(
 		return "", errors.Errorf("cannot use %s %T value for string setting", d.ResolvedType(), d)
 	case *settings.BoolSetting:
 		if b, ok := d.(*tree.DBool); ok {
+			if err := setting.Validate(&st.SV, bool(*b)); err != nil {
+				return "", err
+			}
 			return settings.EncodeBool(bool(*b)), nil
 		}
 		return "", errors.Errorf("cannot use %s %T value for bool setting", d.ResolvedType(), d)
@@ -813,20 +800,20 @@ func toSettingString(
 			return settings.EncodeFloat(float64(*f)), nil
 		}
 		return "", errors.Errorf("cannot use %s %T value for float setting", d.ResolvedType(), d)
-	case *settings.EnumSetting:
+	case settings.AnyEnumSetting:
 		if i, intOK := d.(*tree.DInt); intOK {
 			v, ok := setting.ParseEnum(settings.EncodeInt(int64(*i)))
 			if ok {
 				return settings.EncodeInt(v), nil
 			}
-			return "", errors.WithHintf(errors.Errorf("invalid integer value '%d' for enum setting", *i), setting.GetAvailableValuesAsHint())
+			return "", errors.WithHint(errors.Errorf("invalid integer value '%d' for enum setting", *i), setting.GetAvailableValuesAsHint())
 		} else if s, ok := d.(*tree.DString); ok {
 			str := string(*s)
 			v, ok := setting.ParseEnum(str)
 			if ok {
 				return settings.EncodeInt(v), nil
 			}
-			return "", errors.WithHintf(errors.Errorf("invalid string value '%s' for enum setting", str), setting.GetAvailableValuesAsHint())
+			return "", errors.WithHint(errors.Errorf("invalid string value '%s' for enum setting", str), setting.GetAvailableValuesAsHint())
 		}
 		return "", errors.Errorf("cannot use %s %T value for enum setting, must be int or string", d.ResolvedType(), d)
 	case *settings.ByteSizeSetting:

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rditer
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/pebble"
@@ -35,7 +31,7 @@ type ReplicaDataIteratorOptions struct {
 	// ExcludeUserKeySpan removes UserKeySpace span portion.
 	ExcludeUserKeySpan bool
 	// ReadCategory is used for stats etc.
-	ReadCategory storage.ReadCategory
+	ReadCategory fs.ReadCategory
 }
 
 // ReplicaMVCCDataIterator provides a complete iteration over MVCC or unversioned
@@ -135,6 +131,25 @@ func MakeReplicatedKeySpanSet(d *roachpb.RangeDescriptor) *spanset.SpanSet {
 		panic(err)
 	}
 	return ss
+}
+
+// MakeReplicatedKeySpansUserOnly returns all key spans corresponding to user
+// keys.
+func MakeReplicatedKeySpansUserOnly(d *roachpb.RangeDescriptor) []roachpb.Span {
+	return Select(d.RangeID, SelectOpts{
+		ReplicatedBySpan:      d.RSpan(),
+		ReplicatedSpansFilter: ReplicatedSpansUserOnly,
+	})
+}
+
+// MakeReplicatedKeySpansExcludingUser returns all key spans corresponding to
+// non-user keys.
+func MakeReplicatedKeySpansExcludingUser(d *roachpb.RangeDescriptor) []roachpb.Span {
+	return Select(d.RangeID, SelectOpts{
+		ReplicatedBySpan:      d.RSpan(),
+		ReplicatedByRangeID:   true,
+		ReplicatedSpansFilter: ReplicatedSpansExcludeUser,
+	})
 }
 
 // makeReplicatedKeySpansExceptLockTable returns all key spans that are fully Raft
@@ -384,7 +399,7 @@ func IterateReplicaKeySpans(
 	reader storage.Reader,
 	replicatedOnly bool,
 	replicatedSpansFilter ReplicatedSpansFilter,
-	visitor func(storage.EngineIterator, roachpb.Span, storage.IterKeyType) error,
+	visitor func(storage.EngineIterator, roachpb.Span) error,
 ) error {
 	if !reader.ConsistentIterators() {
 		panic("reader must provide consistent iterators")
@@ -406,28 +421,25 @@ func IterateReplicaKeySpans(
 			UnreplicatedByRangeID: true,
 		})
 	}
-	keyTypes := []storage.IterKeyType{storage.IterKeyTypePointsOnly, storage.IterKeyTypeRangesOnly}
 	for _, span := range spans {
-		for _, keyType := range keyTypes {
-			err := func() error {
-				iter, err := reader.NewEngineIterator(ctx, storage.IterOptions{
-					KeyTypes:   keyType,
-					LowerBound: span.Key,
-					UpperBound: span.EndKey,
-				})
-				if err != nil {
-					return err
-				}
-				defer iter.Close()
-				ok, err := iter.SeekEngineKeyGE(storage.EngineKey{Key: span.Key})
-				if err == nil && ok {
-					err = visitor(iter, span, keyType)
-				}
-				return err
-			}()
+		err := func() error {
+			iter, err := reader.NewEngineIterator(ctx, storage.IterOptions{
+				KeyTypes:   storage.IterKeyTypePointsAndRanges,
+				LowerBound: span.Key,
+				UpperBound: span.EndKey,
+			})
 			if err != nil {
-				return iterutil.Map(err)
+				return err
 			}
+			defer iter.Close()
+			ok, err := iter.SeekEngineKeyGE(storage.EngineKey{Key: span.Key})
+			if err == nil && ok {
+				err = visitor(iter, span)
+			}
+			return err
+		}()
+		if err != nil {
+			return iterutil.Map(err)
 		}
 	}
 	return nil
@@ -443,9 +455,10 @@ var IterateReplicaKeySpansShared func(
 	clusterID uuid.UUID,
 	reader storage.Reader,
 	visitPoint func(key *pebble.InternalKey, val pebble.LazyValue, info pebble.IteratorLevel) error,
-	visitRangeDel func(start, end []byte, seqNum uint64) error,
+	visitRangeDel func(start, end []byte, seqNum pebble.SeqNum) error,
 	visitRangeKey func(start, end []byte, keys []rangekey.Key) error,
 	visitSharedFile func(sst *pebble.SharedSSTMeta) error,
+	visitExternalFile func(sst *pebble.ExternalFile) error,
 ) error
 
 // IterateOptions instructs how points and ranges should be presented to visitor
@@ -456,7 +469,7 @@ type IterateOptions struct {
 	CombineRangesAndPoints bool
 	Reverse                bool
 	ExcludeUserKeySpan     bool
-	ReadCategory           storage.ReadCategory
+	ReadCategory           fs.ReadCategory
 }
 
 // IterateMVCCReplicaKeySpans iterates over replica's key spans in the similar

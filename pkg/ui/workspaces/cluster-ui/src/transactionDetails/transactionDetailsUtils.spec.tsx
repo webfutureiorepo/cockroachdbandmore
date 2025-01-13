@@ -1,22 +1,19 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import shuffle from "lodash/shuffle";
+import Long from "long";
+
+import { mockTxnStats, Txn, Stmt, mockStmtStats } from "../api/testUtils";
+import { unset } from "../util";
 
 import {
   getStatementsForTransaction,
   getTxnFromSqlStatsTxns,
   getTxnQueryString,
 } from "./transactionDetailsUtils";
-import { mockTxnStats, Txn, Stmt, mockStmtStats } from "../api/testUtils";
-import { shuffle } from "lodash";
-import Long from "long";
-import { unset } from "../util";
 
 describe("getTxnFromSqlStatsTxns", () => {
   // Each transaction will be mocked with an exec count of 1.
@@ -180,7 +177,7 @@ describe("getTxnQueryString", () => {
       stmtIDs: [3, 5, 7, 9],
       queries: ["a", "b", "c", "d"],
     },
-  ].map(tc => {
+  ].map((tc): [Txn, Stmt[], string] => {
     const txnID = Long.fromInt(tc.txnID);
 
     const txn = mockTxnStats({
@@ -284,7 +281,7 @@ describe("getStatementsForTransaction", () => {
       stmtIDs: [4, 5, 6],
       useArrayProp: true,
     },
-  ].map(tc => {
+  ].map((tc): [Txn, string[], Stmt[]] => {
     const txnID = Long.fromInt(tc.txnID);
 
     const txn = mockTxnStats({

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgwire
 
@@ -16,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -30,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
@@ -111,11 +106,11 @@ type PreServeConnHandler struct {
 	// than a boolean, i.e. to accept the provided address only from
 	// certain peer IPs, or with certain certificates. (could it be a
 	// special hba.conf directive?)
-	trustClientProvidedRemoteAddr syncutil.AtomicBool
+	trustClientProvidedRemoteAddr atomic.Bool
 
 	// acceptSystemIdentityOption determines whether the system_identity
 	// option will be read from the client. This is used in tests.
-	acceptSystemIdentityOption syncutil.AtomicBool
+	acceptSystemIdentityOption atomic.Bool
 
 	// acceptTenantName determines whether this pre-serve handler will
 	// interpret a tenant name specification in the connection
@@ -143,16 +138,19 @@ func NewPreServeConnHandler(
 		tenantIndependentMetrics: metrics,
 		getTLSConfig:             getTLSConfig,
 
-		tenantIndependentConnMonitor: mon.NewMonitor("pre-conn",
-			mon.MemoryResource,
-			metrics.PreServeCurBytes,
-			metrics.PreServeMaxBytes,
-			int64(connReservationBatchSize)*baseSQLMemoryBudget, noteworthyConnMemoryUsageBytes, st),
+		tenantIndependentConnMonitor: mon.NewMonitor(mon.Options{
+			Name:       mon.MakeMonitorName("pre-conn"),
+			CurCount:   metrics.PreServeCurBytes,
+			MaxHist:    metrics.PreServeMaxBytes,
+			Increment:  int64(connReservationBatchSize) * baseSQLMemoryBudget,
+			Settings:   st,
+			LongLiving: true,
+		}),
 	}
 	s.tenantIndependentConnMonitor.StartNoReserved(ctx, parentMemoryMonitor)
 
 	// TODO(knz,ben): Use a cluster setting for this.
-	s.trustClientProvidedRemoteAddr.Set(trustClientProvidedRemoteAddrOverride)
+	s.trustClientProvidedRemoteAddr.Store(trustClientProvidedRemoteAddrOverride)
 
 	return &s
 }
@@ -167,7 +165,7 @@ func (s *PreServeConnHandler) AnnotateCtxForIncomingConn(
 	ctx context.Context, conn net.Conn,
 ) context.Context {
 	tag := "client"
-	if s.trustClientProvidedRemoteAddr.Get() {
+	if s.trustClientProvidedRemoteAddr.Load() {
 		tag = "peer"
 	}
 	return logtags.AddTag(ctx, tag, conn.RemoteAddr().String())
@@ -227,7 +225,7 @@ func (s *PreServeConnHandler) sendErr(
 ) error {
 	w := errWriter{
 		sv:         &st.SV,
-		msgBuilder: newWriteBuffer(s.tenantIndependentMetrics.PreServeBytesOutCount),
+		msgBuilder: newWriteBuffer(s.tenantIndependentMetrics.PreServeBytesOutCount.Inc),
 	}
 	// We could, but do not, report server-side network errors while
 	// trying to send the client error. This is because clients that
@@ -280,7 +278,7 @@ type PreServeStatus struct {
 
 	// Reserved is a memory account of the memory overhead for the
 	// connection. Defined only if State == PreServeReady.
-	Reserved mon.BoundAccount
+	Reserved *mon.BoundAccount
 
 	// clientParameters is the set of client-provided status parameters.
 	clientParameters tenantIndependentClientParameters
@@ -289,6 +287,14 @@ type PreServeStatus struct {
 // GetTenantName retrieves the selected tenant name.
 func (st PreServeStatus) GetTenantName() string {
 	return st.clientParameters.tenantName
+}
+
+// ReleaseMemory releases memory reserved for the "pre-serve" phase of a
+// connection.
+func (st PreServeStatus) ReleaseMemory(ctx context.Context) {
+	if st.State == PreServeReady {
+		st.Reserved.Clear(ctx)
+	}
 }
 
 // PreServe serves a single connection, up to and including the
@@ -392,7 +398,8 @@ func (s *PreServeConnHandler) PreServe(
 	// reduces pressure on the shared pool because the server monitor allocates in
 	// chunks from the shared pool and these chunks should be larger than
 	// baseSQLMemoryBudget.
-	st.Reserved = s.tenantIndependentConnMonitor.MakeBoundAccount()
+	connBoundAccount := s.tenantIndependentConnMonitor.MakeBoundAccount()
+	st.Reserved = &connBoundAccount
 	if err := st.Reserved.Grow(ctx, baseSQLMemoryBudget); err != nil {
 		return conn, st, errors.Wrapf(err, "unable to pre-allocate %d bytes for this connection",
 			baseSQLMemoryBudget)
@@ -400,9 +407,9 @@ func (s *PreServeConnHandler) PreServe(
 
 	// Load the client-provided session parameters.
 	st.clientParameters, err = parseClientProvidedSessionParameters(
-		ctx, &buf, conn.RemoteAddr(), s.trustClientProvidedRemoteAddr.Get(), s.acceptTenantName, s.acceptSystemIdentityOption.Get())
+		ctx, &buf, conn.RemoteAddr(), s.trustClientProvidedRemoteAddr.Load(), s.acceptTenantName, s.acceptSystemIdentityOption.Load())
 	if err != nil {
-		st.Reserved.Close(ctx)
+		st.Reserved.Clear(ctx)
 		return conn, st, s.sendErr(ctx, s.st, conn, err)
 	}
 	st.clientParameters.IsSSL = st.ConnType == hba.ConnHostSSL

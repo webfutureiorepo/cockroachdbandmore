@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tracing
 
@@ -30,8 +25,8 @@ func BenchmarkTracer_StartSpanCtx(b *testing.B) {
 	skip.UnderDeadlock(b, "span reuse triggers false-positives in the deadlock detector")
 	ctx := context.Background()
 
-	staticLogTags := logtags.Buffer{}
-	staticLogTags.Add("foo", "bar")
+	staticLogTags := &logtags.Buffer{}
+	staticLogTags = staticLogTags.Add("foo", "bar")
 	mockListener := &mockEventListener{}
 
 	for _, tc := range []struct {
@@ -40,11 +35,12 @@ func BenchmarkTracer_StartSpanCtx(b *testing.B) {
 		parent            bool
 		withEventListener bool
 		opts              []SpanOption
+		regexpFilter      string
 	}{
 		{name: "none", defaultMode: TracingModeOnDemand},
 		{name: "real", defaultMode: TracingModeActiveSpansRegistry},
 		{name: "real,logtag", defaultMode: TracingModeActiveSpansRegistry,
-			opts: []SpanOption{WithLogTags(&staticLogTags)}},
+			opts: []SpanOption{WithLogTags(staticLogTags)}},
 		{name: "real,autoparent", defaultMode: TracingModeActiveSpansRegistry, parent: true},
 		{name: "real,manualparent", defaultMode: TracingModeActiveSpansRegistry, parent: true,
 			opts: []SpanOption{WithDetachedRecording()}},
@@ -52,36 +48,64 @@ func BenchmarkTracer_StartSpanCtx(b *testing.B) {
 			parent: true, withEventListener: true},
 		{name: "real,manualparent,withEventListener", defaultMode: TracingModeActiveSpansRegistry, parent: true,
 			withEventListener: true, opts: []SpanOption{WithDetachedRecording()}},
+		{name: "real,regexp", defaultMode: TracingModeActiveSpansRegistry, regexpFilter: "op1|op2|op3|^op[a-zA-Z]+"},
 	} {
 		b.Run(fmt.Sprintf("opts=%s", tc.name), func(b *testing.B) {
-			tr := NewTracerWithOpt(ctx,
-				WithTracingMode(TracingModeActiveSpansRegistry),
-				WithSpanReusePercent(100))
-			b.ResetTimer()
+			// Note: testutils.RunTrueAndFalse is not used here because it
+			// would create a dependency cycle.
+			for _, parallel := range []bool{false, true} {
+				b.Run(fmt.Sprintf("%s=%v", "parallel", parallel), func(b *testing.B) {
+					tr := NewTracerWithOpt(ctx,
+						WithTracingMode(tc.defaultMode),
+						WithSpanReusePercent(100))
+					b.ResetTimer()
 
-			var parent *Span
-			var numOpts = len(tc.opts)
-			if tc.parent {
-				if tc.withEventListener {
-					parent = tr.StartSpan("one-off", WithEventListeners(mockListener))
-				} else {
-					parent = tr.StartSpan("one-off")
-				}
-				defer parent.Finish()
-				numOpts++
-			}
-			opts := make([]SpanOption, numOpts)
-			copy(opts, tc.opts)
+					if tc.regexpFilter != "" {
+						err := tr.setVerboseOpNameRegexp("op1|op2|op3|^op[a-zA-Z]+")
+						if err != nil {
+							b.Fatalf("failed to set verbose regexp: %v", err)
+						}
+					}
 
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				if parent != nil {
-					// The WithParent option needs to be re-created every time; it cannot be reused.
-					opts[len(opts)-1] = WithParent(parent)
-				}
-				newCtx, sp := tr.StartSpanCtx(ctx, "benching", opts...)
-				_ = newCtx
-				sp.Finish() // clean up
+					var parent *Span
+					var numOpts = len(tc.opts)
+					if tc.parent {
+						if tc.withEventListener {
+							parent = tr.StartSpan("one-off", WithEventListeners(mockListener))
+						} else {
+							parent = tr.StartSpan("one-off")
+						}
+						defer parent.Finish()
+						numOpts++
+					}
+					opts := make([]SpanOption, numOpts)
+					copy(opts, tc.opts)
+
+					b.ReportAllocs()
+					if parallel {
+						b.RunParallel(func(pb *testing.PB) {
+							for pb.Next() {
+								if parent != nil {
+									// The WithParent option needs to be re-created every time; it cannot be reused.
+									opts[len(opts)-1] = WithParent(parent)
+								}
+								newCtx, sp := tr.StartSpanCtx(ctx, "benching", opts...)
+								_ = newCtx
+								sp.Finish() // clean up
+							}
+						})
+					} else {
+						for i := 0; i < b.N; i++ {
+							if parent != nil {
+								// The WithParent option needs to be re-created every time; it cannot be reused.
+								opts[len(opts)-1] = WithParent(parent)
+							}
+							newCtx, sp := tr.StartSpanCtx(ctx, "benching", opts...)
+							_ = newCtx
+							sp.Finish() // clean up
+						}
+					}
+				})
 			}
 		})
 	}

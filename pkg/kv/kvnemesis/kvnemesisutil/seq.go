@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvnemesisutil
 
@@ -31,6 +26,12 @@ func (s Seq) String() string {
 type SeqContainer uint32
 
 var _ protoutil.Message = (*SeqContainer)(nil)
+
+// IsEmpty is used by generated marshalling code (with gogoproto.omitempty
+// extension).
+func (m SeqContainer) IsEmpty() bool {
+	return m == 0
+}
 
 // Reset implements (a part of) protoutil.Message.
 func (m *SeqContainer) Reset() {
@@ -113,6 +114,8 @@ func (m SeqContainer) Get() Seq {
 // proto messages. It uses no space. When the crdb_test build tag is set, this
 // type is instead represented by a NoopContainer.
 type NoopContainer struct{}
+
+func (m *NoopContainer) IsEmpty() bool { return true }
 
 func (m *NoopContainer) Reset() {}
 

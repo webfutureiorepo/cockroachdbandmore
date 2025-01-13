@@ -1,19 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metrics
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/state"
@@ -124,8 +120,8 @@ func (mt *Tracker) Tick(ctx context.Context, tick time.Time, s state.State) {
 		sms = append(sms, sm)
 	}
 
-	sort.Slice(sms, func(i, j int) bool {
-		return sms[i].StoreID < sms[j].StoreID
+	slices.SortFunc(sms, func(a, b StoreMetrics) int {
+		return cmp.Compare(a.StoreID, b.StoreID)
 	})
 
 	for _, listener := range mt.storeListeners {

@@ -1,17 +1,13 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
 import (
 	"context"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
@@ -20,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/errors"
 )
 
@@ -34,6 +31,20 @@ func (i *immediateVisitor) MarkDescriptorAsPublic(
 	return nil
 }
 
+func (i *immediateVisitor) InsertTemporarySchema(
+	ctx context.Context, op scop.InsertTemporarySchema,
+) error {
+	i.AddTemporarySchema(op.DescriptorID)
+	return nil
+}
+
+func (i *immediateVisitor) InsertTemporarySchemaParent(
+	ctx context.Context, op scop.InsertTemporarySchemaParent,
+) error {
+	i.AddTemporarySchemaParent(op.SchemaID, op.DatabaseID)
+	return nil
+}
+
 func (i *immediateVisitor) AddDescriptorName(ctx context.Context, op scop.AddDescriptorName) error {
 	nameDetails := descpb.NameInfo{
 		ParentID:       op.Namespace.DatabaseID,
@@ -41,6 +52,9 @@ func (i *immediateVisitor) AddDescriptorName(ctx context.Context, op scop.AddDes
 		Name:           op.Namespace.Name,
 	}
 	i.AddName(op.Namespace.DescriptorID, nameDetails)
+	if strings.HasPrefix(nameDetails.Name, catconstants.PgTempSchemaName) {
+		return nil
+	}
 	desc, err := i.checkOutDescriptor(ctx, op.Namespace.DescriptorID)
 	if err != nil {
 		return err

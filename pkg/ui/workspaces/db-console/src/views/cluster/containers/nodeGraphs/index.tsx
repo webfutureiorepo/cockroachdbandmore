@@ -1,40 +1,31 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import { Anchor, TimeScale } from "@cockroachlabs/cluster-ui";
+import has from "lodash/has";
+import map from "lodash/map";
+import moment from "moment-timezone";
 import React from "react";
 import { Helmet } from "react-helmet";
-import { compose } from "redux";
 import { connect } from "react-redux";
-import { createSelector } from "reselect";
 import { withRouter, RouteComponentProps } from "react-router-dom";
+import { createSelector } from "reselect";
 
-import {
-  nodeIDAttr,
-  dashboardNameAttr,
-  tenantNameAttr,
-} from "src/util/constants";
-import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
-import {
-  PageConfig,
-  PageConfigItem,
-} from "src/views/shared/components/pageconfig";
-import ClusterSummaryBar from "./summaryBar";
-
-import { AdminUIState } from "src/redux/state";
+import { InlineAlert } from "src/components";
+import { PayloadAction } from "src/interfaces/action";
 import {
   refreshNodes,
   refreshLiveness,
   refreshSettings,
   refreshTenantsList,
 } from "src/redux/apiReducers";
+import {
+  selectResolution10sStorageTTL,
+  selectResolution30mStorageTTL,
+} from "src/redux/clusterSettings";
+import { getCookieValue } from "src/redux/cookies";
 import {
   hoverStateSelector,
   HoverState,
@@ -48,31 +39,14 @@ import {
   nodeIDsSelector,
   nodeIDsStringifiedSelector,
   selectStoreIDsByNodeID,
+  nodeDisplayNameByIDSelectorWithoutAddress,
 } from "src/redux/nodes";
-import Alerts from "src/views/shared/containers/alerts";
-import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
-
+import { AdminUIState } from "src/redux/state";
 import {
-  GraphDashboardProps,
-  storeIDsForNode,
-} from "./dashboards/dashboardUtils";
-
-import overviewDashboard from "./dashboards/overview";
-import runtimeDashboard from "./dashboards/runtime";
-import sqlDashboard from "./dashboards/sql";
-import storageDashboard from "./dashboards/storage";
-import replicationDashboard from "./dashboards/replication";
-import distributedDashboard from "./dashboards/distributed";
-import queuesDashboard from "./dashboards/queues";
-import requestsDashboard from "./dashboards/requests";
-import hardwareDashboard from "./dashboards/hardware";
-import changefeedsDashboard from "./dashboards/changefeeds";
-import overloadDashboard from "./dashboards/overload";
-import ttlDashboard from "./dashboards/ttl";
-import crossClusterReplicationDashboard from "./dashboards/crossClusterReplication";
-import networkingDashboard from "./dashboards/networking";
-import { getMatchParamByName } from "src/util/query";
-import { PayloadAction } from "src/interfaces/action";
+  containsApplicationTenants,
+  isSystemTenant,
+  tenantDropdownOptions,
+} from "src/redux/tenants";
 import {
   setMetricsFixedWindow,
   TimeWindow,
@@ -80,19 +54,44 @@ import {
   setTimeScale,
   selectTimeScale,
 } from "src/redux/timeScale";
-import { InlineAlert } from "src/components";
-import TimeScaleDropdown from "../timeScaleDropdownWithSearchParams";
-import { Anchor, TimeScale } from "@cockroachlabs/cluster-ui";
-import { reduceStorageOfTimeSeriesDataOperationalFlags } from "src/util/docs";
-import moment from "moment-timezone";
 import {
-  selectResolution10sStorageTTL,
-  selectResolution30mStorageTTL,
-  selectCrossClusterReplicationEnabled,
-} from "src/redux/clusterSettings";
+  nodeIDAttr,
+  dashboardNameAttr,
+  tenantNameAttr,
+} from "src/util/constants";
 import { getDataFromServer } from "src/util/dataFromServer";
-import { getCookieValue } from "src/redux/cookies";
-import { isSystemTenant, tenantDropdownOptions } from "src/redux/tenants";
+import { reduceStorageOfTimeSeriesDataOperationalFlags } from "src/util/docs";
+import { getMatchParamByName } from "src/util/query";
+import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
+import {
+  PageConfig,
+  PageConfigItem,
+} from "src/views/shared/components/pageconfig";
+import Alerts from "src/views/shared/containers/alerts";
+import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
+
+import TimeScaleDropdown from "../timeScaleDropdownWithSearchParams";
+
+import changefeedsDashboard from "./dashboards/changefeeds";
+import crossClusterReplicationDashboard from "./dashboards/crossClusterReplication";
+import {
+  GraphDashboardProps,
+  storeIDsForNode,
+} from "./dashboards/dashboardUtils";
+import distributedDashboard from "./dashboards/distributed";
+import hardwareDashboard from "./dashboards/hardware";
+import logicalDataReplicationDashboard from "./dashboards/logicalDataReplication";
+import networkingDashboard from "./dashboards/networking";
+import overloadDashboard from "./dashboards/overload";
+import overviewDashboard from "./dashboards/overview";
+import queuesDashboard from "./dashboards/queues";
+import replicationDashboard from "./dashboards/replication";
+import requestsDashboard from "./dashboards/requests";
+import runtimeDashboard from "./dashboards/runtime";
+import sqlDashboard from "./dashboards/sql";
+import storageDashboard from "./dashboards/storage";
+import ttlDashboard from "./dashboards/ttl";
+import ClusterSummaryBar from "./summaryBar";
 
 interface GraphDashboard {
   label: string;
@@ -159,11 +158,16 @@ const dashboards: { [key: string]: GraphDashboard } = {
     component: crossClusterReplicationDashboard,
     isKvDashboard: true,
   },
+  logicalDataReplication: {
+    label: "Logical Data Replication",
+    component: logicalDataReplicationDashboard,
+    isKvDashboard: true,
+  },
 };
 
 const defaultDashboard = "overview";
 
-const dashboardDropdownOptions = _.map(dashboards, (dashboard, key) => {
+const dashboardDropdownOptions = map(dashboards, (dashboard, key) => {
   return {
     value: key,
     label: dashboard.label,
@@ -184,8 +188,7 @@ type MapStateToProps = {
   nodeDisplayNameByID: ReturnType<
     typeof nodeDisplayNameByIDSelector.resultFunc
   >;
-  crossClusterReplicationEnabled: boolean;
-  tenantOptions: ReturnType<() => DropdownOption[]>;
+  tenantOptions: DropdownOption[];
   currentTenant: string | null;
 };
 
@@ -320,7 +323,7 @@ export class NodeGraphs extends React.Component<
     if (dashboards[selectedDashboard].isKvDashboard && !canViewKvGraphs) {
       selectedDashboard = defaultDashboard;
     }
-    const dashboard = _.has(dashboards, selectedDashboard)
+    const dashboard = has(dashboards, selectedDashboard)
       ? selectedDashboard
       : defaultDashboard;
 
@@ -371,7 +374,7 @@ export class NodeGraphs extends React.Component<
     const graphs = dashboards[dashboard]
       .component(dashboardProps)
       .filter(d => canViewKvGraphs || !d.props.isKvGraph);
-    const graphComponents = _.map(graphs, (graph, idx) => {
+    const graphComponents = map(graphs, (graph, idx) => {
       const key = `nodes.${dashboard}.${idx}`;
       return (
         <MetricsDataProvider
@@ -397,29 +400,29 @@ export class NodeGraphs extends React.Component<
       nodeIDs.length > 8 ? 90 + Math.ceil(nodeIDs.length / 3) * 10 : 50;
     const filteredDropdownOptions = dashboardDropdownOptions
       // Don't show KV dashboards if the logged-in user doesn't have permission to view them.
-      .filter(option => canViewKvGraphs || !option.isKvDashboard)
-      // Don't show the replication dashboard if not enabled.
-      .filter(
-        option =>
-          this.props.crossClusterReplicationEnabled ||
-          option.label !== "Physical Cluster Replication",
-      );
+      .filter(option => canViewKvGraphs || !option.isKvDashboard);
 
     return (
       <div style={{ paddingBottom }}>
         <Helmet title={"Metrics"} />
         <h3 className="base-heading">Metrics</h3>
         <PageConfig>
-          {isSystemTenant(currentTenant) && tenantOptions.length > 1 && (
-            <PageConfigItem>
-              <Dropdown
-                title="Virtual Cluster"
-                options={tenantOptions}
-                selected={selectedTenant}
-                onChange={selection => this.setClusterPath("tenant", selection)}
-              />
-            </PageConfigItem>
-          )}
+          {/* By default, `tenantOptions` will have a length of 2 for
+          "All" and "system" tenant. We should omit showing the
+          dropdown in those cases */}
+          {isSystemTenant(currentTenant) &&
+            containsApplicationTenants(tenantOptions) && (
+              <PageConfigItem>
+                <Dropdown
+                  title="Virtual Cluster"
+                  options={tenantOptions}
+                  selected={selectedTenant}
+                  onChange={selection =>
+                    this.setClusterPath("tenant", selection)
+                  }
+                />
+              </PageConfigItem>
+            )}
           <PageConfigItem>
             <Dropdown
               title="Graph"
@@ -514,12 +517,12 @@ export class NodeGraphs extends React.Component<
  */
 const nodeDropdownOptionsSelector = createSelector(
   nodeIDsSelector,
-  nodeDisplayNameByIDSelector,
+  state => nodeDisplayNameByIDSelector(state),
   livenessStatusByNodeIDSelector,
   (nodeIds, nodeDisplayNameByID, livenessStatusByNodeID): DropdownOption[] => {
     const base = [{ value: "", label: "Cluster" }];
     return base.concat(
-      _.chain(nodeIds)
+      nodeIds
         .filter(
           id =>
             livenessStatusByNodeID[id] !==
@@ -528,8 +531,7 @@ const nodeDropdownOptionsSelector = createSelector(
         .map(id => ({
           value: id.toString(),
           label: nodeDisplayNameByID[id],
-        }))
-        .value(),
+        })),
     );
   },
 );
@@ -542,8 +544,7 @@ const mapStateToProps = (state: AdminUIState): MapStateToProps => ({
   nodeIds: nodeIDsStringifiedSelector(state),
   storeIDsByNodeID: selectStoreIDsByNodeID(state),
   nodeDropdownOptions: nodeDropdownOptionsSelector(state),
-  nodeDisplayNameByID: nodeDisplayNameByIDSelector(state),
-  crossClusterReplicationEnabled: selectCrossClusterReplicationEnabled(state),
+  nodeDisplayNameByID: nodeDisplayNameByIDSelectorWithoutAddress(state),
   tenantOptions: tenantDropdownOptions(state),
   currentTenant: getCookieValue("tenant"),
 });
@@ -559,7 +560,6 @@ const mapDispatchToProps: MapDispatchToProps = {
   setTimeScale: setTimeScale,
 };
 
-export default compose(
-  withRouter,
-  connect(mapStateToProps, mapDispatchToProps),
-)(NodeGraphs);
+export default withRouter(
+  connect(mapStateToProps, mapDispatchToProps)(NodeGraphs),
+);

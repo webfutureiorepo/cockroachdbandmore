@@ -1,15 +1,9 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import { createContext, useContext } from "react";
+import React, { createContext, useContext } from "react";
 
 export const CoordinatedUniversalTime = "Etc/UTC";
 export const TimezoneContext = createContext<string>(CoordinatedUniversalTime);
@@ -21,6 +15,7 @@ export interface WithTimezoneProps {
 // WithTimezone wraps a class component to provide the
 // context's timezone value as a component prop.
 export function WithTimezone<T>(
+  // eslint-disable-next-line @typescript-eslint/naming-convention
   Component: React.ComponentType<T & WithTimezoneProps>,
 ) {
   return (props: React.PropsWithChildren<T>) => {

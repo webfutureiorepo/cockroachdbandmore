@@ -1,22 +1,18 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import { ColumnDescriptor, SortedTable } from "../../sortedtable";
-import { ContendedExecution, ExecutionType } from "../types";
-import { Link } from "react-router-dom";
-import { StatusIcon } from "../statusIcon";
-import { executionsTableTitles } from "../execTableCommon";
-import { DATE_FORMAT_24_TZ, Duration, limitText } from "../../util";
 import { Tooltip } from "@cockroachlabs/ui-components";
+import React from "react";
+import { Link } from "react-router-dom";
+
+import { ColumnDescriptor, SortedTable } from "../../sortedtable";
 import { Timestamp } from "../../timestamp";
+import { DATE_FORMAT_24_TZ, Duration, limitText } from "../../util";
+import { executionsTableTitles } from "../execTableCommon";
+import { StatusIcon } from "../statusIcon";
+import { ContendedExecution, ExecutionType } from "../types";
 
 const getID = (item: ContendedExecution, execType: ExecutionType) =>
   execType === "transaction"

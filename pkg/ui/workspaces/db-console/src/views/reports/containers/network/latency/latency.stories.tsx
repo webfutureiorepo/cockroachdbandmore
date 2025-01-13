@@ -1,22 +1,20 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { storiesOf } from "@storybook/react";
+import React from "react";
 import { RenderFunction } from "storybook__react";
-import { Latency } from "./index";
+
+import { withRouterDecorator } from "src/util/decorators";
+
 import {
   latencyFixture,
   latencyFixtureWithNodeStatuses,
 } from "./latency.fixtures";
-import { withRouterDecorator } from "src/util/decorators";
+
+import { Latency } from "./index";
 
 storiesOf("Latency Table", module)
   .addDecorator(withRouterDecorator)

@@ -1,18 +1,12 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package distsql
 
 import (
 	"context"
-	crypto_rand "crypto/rand"
 	"io"
 	"time"
 
@@ -27,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra/execopnode"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/faketreeeval"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowflow"
@@ -35,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/pprofutil"
@@ -43,8 +37,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tochar"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/grpcinterceptor"
-	"github.com/cockroachdb/cockroach/pkg/util/ulid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 )
 
@@ -59,8 +53,6 @@ const minFlowDrainWait = 1 * time.Second
 //
 // See https://github.com/cockroachdb/cockroach/issues/47900.
 const MultiTenancyIssueNo = 47900
-
-var noteworthyMemoryUsageBytes = envutil.EnvOrDefaultInt64("COCKROACH_NOTEWORTHY_DISTSQL_MEMORY_USAGE", 1024*1024 /* 1MB */)
 
 // ServerImpl implements the server for the distributed SQL APIs.
 type ServerImpl struct {
@@ -84,18 +76,16 @@ func NewServer(
 		toCharFormatCache: tochar.NewFormatCache(512),
 		flowRegistry:      flowinfra.NewFlowRegistry(),
 		remoteFlowRunner:  remoteFlowRunner,
-		memMonitor: mon.NewMonitor(
-			"distsql",
-			mon.MemoryResource,
+		memMonitor: mon.NewMonitor(mon.Options{
+			Name: mon.MakeMonitorName("distsql"),
 			// Note that we don't use 'sql.mem.distsql.*' metrics here since
 			// that would double count them with the 'flow' monitor in
 			// setupFlow.
-			nil, /* curCount */
-			nil, /* maxHist */
-			-1,  /* increment: use default block size */
-			noteworthyMemoryUsageBytes,
-			cfg.Settings,
-		),
+			CurCount:   nil,
+			MaxHist:    nil,
+			Settings:   cfg.Settings,
+			LongLiving: true,
+		}),
 	}
 	ds.memMonitor.StartNoReserved(ctx, cfg.ParentMemoryMonitor)
 	// We have to initialize the flow runner at the same time we're creating
@@ -115,23 +105,6 @@ func NewServer(
 // initialized. For example, the initialization of the flow runner has to
 // happen in NewServer.
 func (ds *ServerImpl) Start() {
-	// Gossip the version info so that other nodes don't plan incompatible flows
-	// for us.
-	if g, ok := ds.ServerConfig.Gossip.Optional(MultiTenancyIssueNo); ok {
-		if nodeID, ok := ds.ServerConfig.NodeID.OptionalNodeID(); ok {
-			if err := g.AddInfoProto(
-				gossip.MakeDistSQLNodeVersionKey(base.SQLInstanceID(nodeID)),
-				&execinfrapb.DistSQLVersionGossipInfo{
-					Version:            execinfra.Version,
-					MinAcceptedVersion: execinfra.MinAcceptedVersion,
-				},
-				0, // ttl - no expiration
-			); err != nil {
-				panic(err)
-			}
-		}
-	}
-
 	if err := ds.setDraining(false); err != nil {
 		panic(err)
 	}
@@ -187,25 +160,14 @@ func (ds *ServerImpl) setDraining(drain bool) error {
 	return nil
 }
 
-// FlowVerIsCompatible checks a flow's version is compatible with this node's
-// DistSQL version.
-func FlowVerIsCompatible(
-	flowVer, minAcceptedVersion, serverVersion execinfrapb.DistSQLVersion,
-) bool {
-	return flowVer >= minAcceptedVersion && flowVer <= serverVersion
-}
-
 // setupFlow creates a Flow.
 //
-// Args:
-// reserved: Specifies the upfront memory reservation that the flow takes
+//   - reserved: specifies the upfront memory reservation that the flow takes
+//     ownership of. This account is already closed if an error is returned or
+//     will be closed through Flow.Cleanup.
 //
-//	ownership of. This account is already closed if an error is returned or
-//	will be closed through Flow.Cleanup.
-//
-// localState: Specifies if the flow runs entirely on this node and, if it does,
-//
-//	specifies the txn and other attributes.
+//   - localState: specifies if the flow runs entirely on this node and, if it
+//     does, specifies the txn and other attributes.
 //
 // Note: unless an error is returned, the returned context contains a span that
 // must be finished through Flow.Cleanup.
@@ -219,9 +181,9 @@ func (ds *ServerImpl) setupFlow(
 	batchSyncFlowConsumer execinfra.BatchReceiver,
 	localState LocalState,
 ) (retCtx context.Context, _ flowinfra.Flow, _ execopnode.OpChains, retErr error) {
-	var sp *tracing.Span          // will be Finish()ed by Flow.Cleanup()
-	var monitor *mon.BytesMonitor // will be closed in Flow.Cleanup()
-	var onFlowCleanupEnd func()   // will be called at the very end of Flow.Cleanup()
+	var sp *tracing.Span                       // will be Finish()ed by Flow.Cleanup()
+	var monitor, diskMonitor *mon.BytesMonitor // will be closed in Flow.Cleanup()
+	var onFlowCleanupEnd func(context.Context) // will be called at the very end of Flow.Cleanup()
 	// Make sure that we clean up all resources (which in the happy case are
 	// cleaned up in Flow.Cleanup()) if an error is encountered.
 	defer func() {
@@ -229,8 +191,11 @@ func (ds *ServerImpl) setupFlow(
 			if monitor != nil {
 				monitor.Stop(ctx)
 			}
+			if diskMonitor != nil {
+				diskMonitor.Stop(ctx)
+			}
 			if onFlowCleanupEnd != nil {
-				onFlowCleanupEnd()
+				onFlowCleanupEnd(ctx)
 			} else {
 				reserved.Close(ctx)
 			}
@@ -243,14 +208,15 @@ func (ds *ServerImpl) setupFlow(
 		}
 	}()
 
-	if !FlowVerIsCompatible(req.Version, execinfra.MinAcceptedVersion, execinfra.Version) {
+	if req.Version < execversion.MinAccepted || req.Version > execversion.Latest {
 		err := errors.Errorf(
 			"version mismatch in flow request: %d; this node accepts %d through %d",
-			req.Version, execinfra.MinAcceptedVersion, execinfra.Version,
+			req.Version, execversion.MinAccepted, execversion.Latest,
 		)
 		log.Warningf(ctx, "%v", err)
 		return ctx, nil, nil, err
 	}
+	ctx = execversion.WithVersion(ctx, req.Version)
 
 	const opName = "flow"
 	if parentSpan == nil {
@@ -272,18 +238,16 @@ func (ds *ServerImpl) setupFlow(
 		)
 	}
 
-	monitor = mon.NewMonitor(
-		"flow "+redact.RedactableString(req.Flow.FlowID.Short()),
-		mon.MemoryResource,
-		ds.Metrics.CurBytesCount,
-		ds.Metrics.MaxBytesHist,
-		-1, /* use default block size */
-		noteworthyMemoryUsageBytes,
-		ds.Settings,
-	)
+	monitor = mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorNameWithID("flow ", req.Flow.FlowID.Short()),
+		CurCount: ds.Metrics.CurBytesCount,
+		MaxHist:  ds.Metrics.MaxBytesHist,
+		Settings: ds.Settings,
+	})
 	monitor.Start(ctx, parentMonitor, reserved)
+	diskMonitor = execinfra.NewMonitor(ctx, ds.ParentDiskMonitor, "flow-disk-monitor")
 
-	makeLeaf := func() (*kv.Txn, error) {
+	makeLeaf := func(ctx context.Context) (*kv.Txn, error) {
 		tis := req.LeafTxnInputState
 		if tis == nil {
 			// This must be a flow running for some bulk-io operation that doesn't use
@@ -307,27 +271,34 @@ func (ds *ServerImpl) setupFlow(
 		// this allows us to avoid an unnecessary deserialization of the eval
 		// context proto.
 		evalCtx = localState.EvalContext
+		// We create an eval context variable scoped to this block and reference
+		// it in the onFlowCleanupEnd closure. If the closure referenced
+		// evalCtx, then the pointer would be heap allocated because it is
+		// modified in the other branch of the conditional, and Go's escape
+		// analysis cannot determine that the capture and modification are
+		// mutually exclusive.
+		localEvalCtx := evalCtx
 		// We're about to mutate the evalCtx and we want to restore its original
 		// state once the flow cleans up. Note that we could have made a copy of
 		// the whole evalContext, but that isn't free, so we choose to restore
 		// the original state in order to avoid performance regressions.
-		origTxn := evalCtx.Txn
-		onFlowCleanupEnd = func() {
-			evalCtx.Txn = origTxn
+		origTxn := localEvalCtx.Txn
+		onFlowCleanupEnd = func(ctx context.Context) {
+			localEvalCtx.Txn = origTxn
 			reserved.Close(ctx)
 		}
 		if localState.MustUseLeafTxn() {
 			var err error
-			leafTxn, err = makeLeaf()
+			leafTxn, err = makeLeaf(ctx)
 			if err != nil {
 				return nil, nil, nil, err
 			}
 			// Update the Txn field early (before f.SetTxn() below) since some
 			// processors capture the field in their constructor (see #41992).
-			evalCtx.Txn = leafTxn
+			localEvalCtx.Txn = leafTxn
 		}
 	} else {
-		onFlowCleanupEnd = func() {
+		onFlowCleanupEnd = func(ctx context.Context) {
 			reserved.Close(ctx)
 		}
 		if localState.IsLocal {
@@ -343,7 +314,7 @@ func (ds *ServerImpl) setupFlow(
 		// It's important to populate evalCtx.Txn early. We'll write it again in the
 		// f.SetTxn() call below, but by then it will already have been captured by
 		// processors.
-		leafTxn, err = makeLeaf()
+		leafTxn, err = makeLeaf(ctx)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -373,18 +344,14 @@ func (ds *ServerImpl) setupFlow(
 			SchemaTelemetryController: ds.ServerConfig.SchemaTelemetryController,
 			IndexUsageStatsController: ds.ServerConfig.IndexUsageStatsController,
 			RangeStatsFetcher:         ds.ServerConfig.RangeStatsFetcher,
-			ULIDEntropy:               ulid.Monotonic(crypto_rand.Reader, 0),
 		}
-		// Most processors will override this Context with their own context in
-		// ProcessorBase. StartInternal().
-		evalCtx.SetDeprecatedContext(ctx)
 		evalCtx.SetStmtTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.StmtTimestampNanos))
 		evalCtx.SetTxnTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.TxnTimestampNanos))
 	}
 
 	// Create the FlowCtx for the flow.
 	flowCtx := ds.newFlowContext(
-		ctx, req.Flow.FlowID, evalCtx, monitor, makeLeaf, req.TraceKV,
+		ctx, req.Flow.FlowID, evalCtx, monitor, diskMonitor, makeLeaf, req.TraceKV,
 		req.CollectStats, localState, req.Flow.Gateway == ds.NodeID.SQLInstanceID(),
 	)
 
@@ -409,20 +376,23 @@ func (ds *ServerImpl) setupFlow(
 	}
 
 	if !f.IsLocal() {
-		flowCtx.AmbientContext.AddLogTag("f", flowCtx.ID.Short())
+		bld := logtags.BuildBuffer()
+		bld.Add("f", flowCtx.ID.Short().String())
 		if req.JobTag != "" {
-			flowCtx.AmbientContext.AddLogTag("job", req.JobTag)
+			bld.Add("job", req.JobTag)
 		}
 		if req.StatementSQL != "" {
-			flowCtx.AmbientContext.AddLogTag("distsql.stmt", req.StatementSQL)
+			bld.Add("distsql.stmt", req.StatementSQL)
 		}
-		flowCtx.AmbientContext.AddLogTag("distsql.gateway", req.Flow.Gateway)
+		bld.Add("distsql.gateway", req.Flow.Gateway)
 		if req.EvalContext.SessionData.ApplicationName != "" {
-			flowCtx.AmbientContext.AddLogTag("distsql.appname", req.EvalContext.SessionData.ApplicationName)
+			bld.Add("distsql.appname", req.EvalContext.SessionData.ApplicationName)
 		}
 		if leafTxn != nil {
-			flowCtx.AmbientContext.AddLogTag("distsql.txn", leafTxn.ID())
+			// TODO(radu): boxing the UUID requires an allocation.
+			bld.Add("distsql.txn", leafTxn.ID())
 		}
+		flowCtx.AmbientContext.AddLogTags(bld.Finish())
 		ctx = flowCtx.AmbientContext.AnnotateCtx(ctx)
 		telemetry.Inc(sqltelemetry.DistSQLExecCounter)
 	}
@@ -448,7 +418,7 @@ func (ds *ServerImpl) setupFlow(
 	} else {
 		// If I haven't created the leaf already, do it now.
 		if leafTxn == nil {
-			leafTxn, err = makeLeaf()
+			leafTxn, err = makeLeaf(ctx)
 			if err != nil {
 				return nil, nil, nil, err
 			}
@@ -473,8 +443,8 @@ func (ds *ServerImpl) newFlowContext(
 	ctx context.Context,
 	id execinfrapb.FlowID,
 	evalCtx *eval.Context,
-	monitor *mon.BytesMonitor,
-	makeLeafTxn func() (*kv.Txn, error),
+	monitor, diskMonitor *mon.BytesMonitor,
+	makeLeafTxn func(context.Context) (*kv.Txn, error),
 	traceKV bool,
 	collectStats bool,
 	localState LocalState,
@@ -494,11 +464,7 @@ func (ds *ServerImpl) newFlowContext(
 		CollectStats:   collectStats,
 		Local:          localState.IsLocal,
 		Gateway:        isGatewayNode,
-		// The flow disk monitor is a child of the server's and is closed on
-		// Cleanup.
-		DiskMonitor: execinfra.NewMonitor(
-			ctx, ds.ParentDiskMonitor, "flow-disk-monitor",
-		),
+		DiskMonitor:    diskMonitor,
 	}
 
 	if localState.IsLocal && localState.Collection != nil {
@@ -530,7 +496,7 @@ func newFlow(
 	localProcessors []execinfra.LocalProcessor,
 	localVectorSources map[int32]any,
 	isVectorized bool,
-	onFlowCleanupEnd func(),
+	onFlowCleanupEnd func(context.Context),
 	statementSQL string,
 ) flowinfra.Flow {
 	base := flowinfra.NewFlowBase(flowCtx, sp, flowReg, rowSyncFlowConsumer, batchSyncFlowConsumer, localProcessors, localVectorSources, onFlowCleanupEnd, statementSQL)

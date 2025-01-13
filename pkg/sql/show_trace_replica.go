@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -34,10 +29,8 @@ import (
 // sovereignty work may require the RangeInfo plumbing and we should revisit
 // this then.
 type showTraceReplicaNode struct {
+	singleInputPlanNode
 	optColumnsSlot
-
-	// plan is the wrapped execution plan that will be traced.
-	plan planNode
 
 	run struct {
 		values tree.Datums
@@ -52,11 +45,11 @@ func (n *showTraceReplicaNode) Next(params runParams) (bool, error) {
 	var timestampD tree.Datum
 	var tag string
 	for {
-		ok, err := n.plan.Next(params)
+		ok, err := n.input.Next(params)
 		if !ok || err != nil {
 			return ok, err
 		}
-		values := n.plan.Values()
+		values := n.input.Values()
 		// The rows are received from showTraceNode; see ShowTraceColumns.
 		const (
 			tsCol  = 0
@@ -102,7 +95,7 @@ func (n *showTraceReplicaNode) Values() tree.Datums {
 }
 
 func (n *showTraceReplicaNode) Close(ctx context.Context) {
-	n.plan.Close(ctx)
+	n.input.Close(ctx)
 }
 
 var nodeStoreRangeRE = regexp.MustCompile(`^\[n(\d+),s(\d+),r(\d+)/`)

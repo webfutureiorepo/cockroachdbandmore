@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.roachpb;
@@ -14,7 +9,6 @@ option go_package = "github.com/cockroachdb/cockroach/pkg/roachpb";
 
 import "storage/enginepb/mvcc.proto";
 import "gogoproto/gogo.proto";
-import "google/api/annotations.proto";
 import "roachpb/data.proto";
 
 // SpanStatsRequest is used to request a SpanStatsResponse for the given key
@@ -40,6 +34,7 @@ message SpanStatsRequest {
 message SpanStats {
   // TotalStats are the logical MVCC stats for the requested span.
   cockroach.storage.enginepb.MVCCStats total_stats = 1 [(gogoproto.nullable) = false];
+
   // range_count measures the number of ranges that the request span falls within.
   // A SpanStatsResponse for a span that lies within a range, and whose start
   // key sorts after the range start, and whose end key sorts before the
@@ -63,7 +58,21 @@ message SpanStats {
   // It represents a physical value across all replicas.
   uint64 external_file_bytes = 6;
 
-  // NEXT ID: 7.
+  // ApproximateTotalStats is the approximate, post-replicated MVCC stats for
+  // the requested span. This is an approximate value as it is constructed by
+  // querying all replicas, which includes followers, and the value can be
+  // stale.
+  cockroach.storage.enginepb.MVCCStats approximate_total_stats = 7 [(gogoproto.nullable) = false];
+
+
+  // Unique store ids for the requested span.
+  repeated int32 store_ids = 8 [(gogoproto.customname) = "StoreIDs", (gogoproto.casttype) = "StoreID"];
+
+  // ReplicaCount is the total number of `voting_replicas` and `non_voting_replicas`
+  // for the span's ranges. It does not include `learner_replicas`.
+  int32 replica_count = 9;
+
+  // NEXT ID: 10.
 }
 
 message SpanStatsResponse {

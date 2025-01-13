@@ -1,18 +1,12 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
-	crypto_rand "crypto/rand"
 	"fmt"
 	"math"
 	"strings"
@@ -52,6 +46,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/regionliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/regions"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -68,9 +63,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/ulid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 )
 
 var schemaChangeJobMaxRetryBackoff = settings.RegisterDurationSetting(
@@ -253,7 +248,7 @@ func IsPermanentSchemaChangeError(err error) bool {
 	}
 
 	switch pgerror.GetPGCode(err) {
-	case pgcode.SerializationFailure, pgcode.InternalConnectionFailure:
+	case pgcode.SerializationFailure, pgcode.InternalConnectionFailure, pgcode.OutOfMemory:
 		return false
 
 	case pgcode.Internal, pgcode.RangeUnavailable:
@@ -307,7 +302,11 @@ func (sc *SchemaChanger) refreshMaterializedView(
 const schemaChangerBackfillTxnDebugName = "schemaChangerBackfill"
 
 func (sc *SchemaChanger) backfillQueryIntoTable(
-	ctx context.Context, table catalog.TableDescriptor, query string, ts hlc.Timestamp, desc string,
+	ctx context.Context,
+	table catalog.TableDescriptor,
+	query string,
+	ts hlc.Timestamp,
+	opName redact.SafeString,
 ) (err error) {
 	if fn := sc.testingKnobs.RunBeforeQueryBackfill; fn != nil {
 		if err := fn(); err != nil {
@@ -342,9 +341,9 @@ func (sc *SchemaChanger) backfillQueryIntoTable(
 		// Create an internal planner as the planner used to serve the user query
 		// would have committed by this point.
 		p, cleanup := NewInternalPlanner(
-			desc,
+			opName,
 			txn.KV(),
-			username.RootUserName(),
+			username.NodeUserName(),
 			&MemoryMetrics{},
 			sc.execCfg,
 			sd,
@@ -374,8 +373,10 @@ func (sc *SchemaChanger) backfillQueryIntoTable(
 			return err
 		}
 
+		localPlanner.MaybeReallocateAnnotations(stmt.NumAnnotations)
 		// Construct an optimized logical plan of the AS source stmt.
-		localPlanner.stmt = makeStatement(stmt, clusterunique.ID{} /* queryID */)
+		localPlanner.stmt = makeStatement(stmt, clusterunique.ID{}, /* queryID */
+			tree.FmtFlags(queryFormattingForFingerprintsMask.Get(&localPlanner.execCfg.Settings.SV)))
 		localPlanner.optPlanningCtx.init(localPlanner)
 
 		localPlanner.runWithOptions(resolveFlags{skipCache: true}, func() {
@@ -396,7 +397,7 @@ func (sc *SchemaChanger) backfillQueryIntoTable(
 				tbls := localPlanner.curPlan.mem.Metadata().AllTables()
 				for _, table := range tbls {
 					descID := table.Table.ID()
-					tbl, err := localPlanner.descCollection.ByID(localPlanner.Txn()).Get().Table(ctx, catid.DescID(descID))
+					tbl, err := localPlanner.descCollection.ByIDWithoutLeased(localPlanner.Txn()).Get().Table(ctx, catid.DescID(descID))
 					if err != nil {
 						return
 					}
@@ -456,10 +457,12 @@ func (sc *SchemaChanger) backfillQueryIntoTable(
 				}
 			}
 
-			isLocal := !getPlanDistribution(
+			planDistribution, _ := getPlanDistribution(
 				ctx, localPlanner.Descriptors().HasUncommittedTypes(),
-				localPlanner.extendedEvalCtx.SessionData().DistSQLMode, localPlanner.curPlan.main,
-			).WillDistribute()
+				localPlanner.extendedEvalCtx.SessionData(),
+				localPlanner.curPlan.main, &localPlanner.distSQLVisitor,
+			)
+			isLocal := !planDistribution.WillDistribute()
 			out := execinfrapb.ProcessorCoreUnion{BulkRowWriter: &execinfrapb.BulkRowWriterSpec{
 				Table: *table.TableDesc(),
 			}}
@@ -718,7 +721,7 @@ func (sc *SchemaChanger) getTargetDescriptor(ctx context.Context) (catalog.Descr
 	if err := sc.txn(ctx, func(
 		ctx context.Context, txn descs.Txn,
 	) (err error) {
-		desc, err = txn.Descriptors().ByID(txn.KV()).Get().Desc(ctx, sc.descID)
+		desc, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Desc(ctx, sc.descID)
 		return err
 	}); err != nil {
 		return nil, err
@@ -767,10 +770,7 @@ func (sc *SchemaChanger) checkForMVCCCompliantAddIndexMutations(
 //
 // If the txn that queued the schema changer did not commit, this will be a
 // no-op, as we'll fail to find the job for our mutation in the jobs registry.
-func (sc *SchemaChanger) exec(ctx context.Context) error {
-	sc.metrics.RunningSchemaChanges.Inc(1)
-	defer sc.metrics.RunningSchemaChanges.Dec(1)
-
+func (sc *SchemaChanger) exec(ctx context.Context) (retErr error) {
 	ctx = logtags.AddTags(ctx, sc.execLogTags())
 
 	// Pull out the requested descriptor.
@@ -796,6 +796,13 @@ func (sc *SchemaChanger) exec(ctx context.Context) error {
 	}
 	if err := sc.checkForMVCCCompliantAddIndexMutations(ctx, desc); err != nil {
 		return err
+	}
+	// Check that the DSC is not active for this descriptor.
+	if catalog.HasConcurrentDeclarativeSchemaChange(desc) {
+		log.Infof(ctx,
+			"aborting legacy schema change job execution because DSC was already active for %q (%d)",
+			desc.GetName(), desc.GetID())
+		return scerrors.ConcurrentSchemaChangeError(desc)
 	}
 
 	log.Infof(ctx,
@@ -917,7 +924,18 @@ func (sc *SchemaChanger) exec(ctx context.Context) error {
 	if sc.mutationID == descpb.InvalidMutationID {
 		// Nothing more to do.
 		isCreateTableAs := tableDesc.Adding() && tableDesc.IsAs()
-		return waitToUpdateLeases(isCreateTableAs /* refreshStats */)
+		// If we are converting a system database table to MR, we should force
+		// a stats refresh so that the stats also have the correct type. There is
+		// a potential race condition between waiting for leases and deleting the
+		// statistics using optimizeDatabase, where between those two point statistics
+		// with the wrong type could show up. To minimize any transient condition,
+		// lets force a refresh of stats here.
+		isSystemDatabaseTransformation := tableDesc.GetParentID() == keys.SystemDatabaseID &&
+			(strings.HasPrefix(sc.job.Payload().Description,
+				fmt.Sprintf(systemTableLocalityChangeJobName, tableDesc.GetName(), "regional by row")) ||
+				strings.HasPrefix(sc.job.Payload().Description,
+					fmt.Sprintf(systemTableLocalityChangeJobName, tableDesc.GetName(), "global")))
+		return waitToUpdateLeases(isCreateTableAs || isSystemDatabaseTransformation /* refreshStats */)
 	}
 
 	if err := sc.initJobRunningStatus(ctx); err != nil {
@@ -938,7 +956,7 @@ func (sc *SchemaChanger) exec(ctx context.Context) error {
 	}
 
 	defer func() {
-		if err := waitToUpdateLeases(err == nil /* refreshStats */); err != nil && !errors.Is(err, catalog.ErrDescriptorNotFound) {
+		if err := waitToUpdateLeases(retErr == nil /* refreshStats */); err != nil && !errors.Is(err, catalog.ErrDescriptorNotFound) {
 			// We only expect ErrDescriptorNotFound to be returned. This happens
 			// when the table descriptor was deleted. We can ignore this error.
 
@@ -1044,7 +1062,7 @@ func (sc *SchemaChanger) handlePermanentSchemaChangeError(
 // initialize the job running status.
 func (sc *SchemaChanger) initJobRunningStatus(ctx context.Context) error {
 	return sc.txn(ctx, func(ctx context.Context, txn descs.Txn) error {
-		desc, err := txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
+		desc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
 		if err != nil {
 			return err
 		}
@@ -1245,7 +1263,7 @@ func (sc *SchemaChanger) RunStateMachineBeforeBackfill(ctx context.Context) erro
 		if err != nil {
 			return err
 		}
-		dbDesc, err := txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Database(ctx, tbl.GetParentID())
+		dbDesc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, tbl.GetParentID())
 		if err != nil {
 			return err
 		}
@@ -1490,7 +1508,7 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 			return err
 		}
 
-		dbDesc, err := txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Database(ctx, scTable.GetParentID())
+		dbDesc, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, scTable.GetParentID())
 		if err != nil {
 			return err
 		}
@@ -1925,11 +1943,16 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 			return err
 		}
 
+		startTime := timeutil.FromUnixMicros(sc.job.Payload().StartedMicros)
 		var info logpb.EventPayload
 		if isRollback {
-			info = &eventpb.FinishSchemaChangeRollback{}
+			info = &eventpb.FinishSchemaChangeRollback{
+				LatencyNanos: timeutil.Since(startTime).Nanoseconds(),
+			}
 		} else {
-			info = &eventpb.FinishSchemaChange{}
+			info = &eventpb.FinishSchemaChange{
+				LatencyNanos: timeutil.Since(startTime).Nanoseconds(),
+			}
 		}
 
 		// Log "Finish Schema Change" or "Finish Schema Change Rollback"
@@ -1959,7 +1982,8 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 
 // maybeUpdateZoneConfigsForPKChange moves zone configs for any rewritten
 // indexes from the old index over to the new index. Noop if run on behalf of a
-// tenant.
+// tenant. If forceSwap is set, we copy the zone configs for primary keys
+// regardless of the table's locality.
 func maybeUpdateZoneConfigsForPKChange(
 	ctx context.Context,
 	txn descs.Txn,
@@ -1967,6 +1991,7 @@ func maybeUpdateZoneConfigsForPKChange(
 	kvTrace bool,
 	table *tabledesc.Mutable,
 	swapInfo *descpb.PrimaryKeySwap,
+	forceSwap bool,
 ) error {
 	zoneWithRaw, err := txn.Descriptors().GetZoneConfig(ctx, txn.KV(), table.GetID())
 	if err != nil {
@@ -1985,10 +2010,12 @@ func maybeUpdateZoneConfigsForPKChange(
 		oldIdxToNewIdx[oldID] = swapInfo.NewIndexes[i]
 	}
 
-	// It is safe to copy the zone config off a primary index of a REGIONAL BY ROW table.
-	// This is because the prefix of the PK we used to partition by will stay the same,
-	// so a direct copy will always work.
-	if table.IsLocalityRegionalByRow() {
+	// It is safe to copy the zone config off a primary index of a REGIONAL BY ROW
+	// table. This is because the prefix of the PK we used to partition by will
+	// stay the same, so a direct copy will always work. If forceSwap is true, we
+	// are performing an operation that does not need to worry about data (like
+	// for TRUNCATE).
+	if table.IsLocalityRegionalByRow() || forceSwap {
 		oldIdxToNewIdx[swapInfo.OldPrimaryIndexId] = swapInfo.NewPrimaryIndexId
 	}
 
@@ -2198,7 +2225,7 @@ func (sc *SchemaChanger) maybeReverseMutations(ctx context.Context, causingError
 			if err != nil {
 				return err
 			}
-			if err := sc.jobRegistry.Failed(ctx, txn, jobID, causingError); err != nil {
+			if err := sc.jobRegistry.UnsafeFailed(ctx, txn, jobID, causingError); err != nil {
 				return err
 			}
 		}
@@ -2206,14 +2233,16 @@ func (sc *SchemaChanger) maybeReverseMutations(ctx context.Context, causingError
 		// Log "Reverse Schema Change" event. Only the causing error and the
 		// mutation ID are logged; this can be correlated with the DDL statement
 		// that initiated the change using the mutation id.
+		startTime := timeutil.FromUnixMicros(sc.job.Payload().StartedMicros)
 		return logEventInternalForSchemaChanges(
 			ctx, sc.execCfg, txn,
 			sc.sqlInstanceID,
 			sc.descID,
 			sc.mutationID,
 			&eventpb.ReverseSchemaChange{
-				Error:    fmt.Sprintf("%+v", causingError),
-				SQLSTATE: pgerror.GetPGCode(causingError).String(),
+				Error:        redact.Sprintf("%+v", causingError),
+				SQLSTATE:     pgerror.GetPGCode(causingError).String(),
+				LatencyNanos: timeutil.Since(startTime).Nanoseconds(),
 			})
 	})
 	if err != nil || alreadyReversed {
@@ -2643,12 +2672,8 @@ func createSchemaChangeEvalCtx(
 			Locality:             execCfg.Locality,
 			OriginalLocality:     execCfg.Locality,
 			Tracer:               execCfg.AmbientCtx.Tracer,
-			ULIDEntropy:          ulid.Monotonic(crypto_rand.Reader, 0),
 		},
 	}
-	// TODO(andrei): This is wrong (just like on the main code path on
-	// setupFlow). Each processor should override Ctx with its own context.
-	evalCtx.SetDeprecatedContext(ctx)
 	// The backfill is going to use the current timestamp for the various
 	// functions, like now(), that need it.  It's possible that the backfill has
 	// been partially performed already by another SchemaChangeManager with
@@ -2719,7 +2744,6 @@ func (r schemaChangeResumer) Resume(ctx context.Context, execCtx interface{}) er
 			scErr = sc.exec(ctx)
 			switch {
 			case scErr == nil:
-				sc.metrics.Successes.Inc(1)
 				return nil
 			case errors.Is(scErr, catalog.ErrDescriptorNotFound):
 				// If the table descriptor for the ID can't be found, we assume that
@@ -2736,16 +2760,12 @@ func (r schemaChangeResumer) Resume(ctx context.Context, execCtx interface{}) er
 				// Check if the error is on a allowlist of errors we should retry on,
 				// including the schema change not having the first mutation in line.
 				log.Warningf(ctx, "error while running schema change, retrying: %v", scErr)
-				sc.metrics.RetryErrors.Inc(1)
 				if IsConstraintError(scErr) {
 					telemetry.Inc(sc.metrics.ConstraintErrors)
 				} else {
 					telemetry.Inc(sc.metrics.UncategorizedErrors)
 				}
 			default:
-				if ctx.Err() == nil {
-					sc.metrics.PermanentErrors.Inc(1)
-				}
 				if IsConstraintError(scErr) {
 					telemetry.Inc(sc.metrics.ConstraintErrors)
 				} else {
@@ -3133,6 +3153,7 @@ func (sc *SchemaChanger) applyZoneConfigChangeForMutation(
 		// necessary.
 		return maybeUpdateZoneConfigsForPKChange(
 			ctx, txn, sc.execCfg, false /* kvTrace */, tableDesc, pkSwap.PrimaryKeySwapDesc(),
+			false, /* forceSwap */
 		)
 	}
 	return nil
@@ -3142,7 +3163,8 @@ func (sc *SchemaChanger) applyZoneConfigChangeForMutation(
 func DeleteTableDescAndZoneConfig(
 	ctx context.Context, execCfg *ExecutorConfig, tableDesc catalog.TableDescriptor,
 ) error {
-	log.Infof(ctx, "removing table descriptor and zone config for table %d", tableDesc.GetID())
+	log.Infof(ctx, "removing table descriptor and zone config for table %d (has active dsc=%t)",
+		tableDesc.GetID(), catalog.HasConcurrentDeclarativeSchemaChange(tableDesc))
 	const kvTrace = false
 	return DescsTxn(ctx, execCfg, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
 		b := txn.KV().NewBatch()
@@ -3304,7 +3326,7 @@ func (p *planner) CanPerformDropOwnedBy(
 // owner references are allowed.
 func (p *planner) CanCreateCrossDBSequenceOwnerRef() error {
 	if !allowCrossDatabaseSeqOwner.Get(&p.execCfg.Settings.SV) {
-		return errors.WithHintf(
+		return errors.WithHint(
 			pgerror.Newf(pgcode.FeatureNotSupported,
 				"OWNED BY cannot refer to other databases; (see the '%s' cluster setting)",
 				allowCrossDatabaseSeqOwnerSetting),
@@ -3312,4 +3334,35 @@ func (p *planner) CanCreateCrossDBSequenceOwnerRef() error {
 		)
 	}
 	return nil
+}
+
+// CanCreateCrossDBSequenceRef returns if cross database sequence
+// references are allowed.
+func (p *planner) CanCreateCrossDBSequenceRef() error {
+	if !allowCrossDatabaseSeqReferences.Get(&p.execCfg.Settings.SV) {
+		return errors.WithHint(
+			pgerror.Newf(pgcode.FeatureNotSupported,
+				"sequence references cannot come from other databases; (see the '%s' cluster setting)",
+				allowCrossDatabaseSeqReferencesSetting),
+			crossDBReferenceDeprecationHint(),
+		)
+	}
+	return nil
+}
+
+// UpdateDescriptorCount updates our sql.schema_changer.object_count gauge with
+// a fresh count of objects in the system.descriptor table.
+func UpdateDescriptorCount(
+	ctx context.Context, execCfg *ExecutorConfig, metric *SchemaChangerMetrics,
+) error {
+	return DescsTxn(ctx, execCfg, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
+		row, err := txn.QueryRow(ctx, "sql-schema-changer-object-count", txn.KV(),
+			`SELECT count(*) FROM system.descriptor`)
+		if err != nil {
+			return err
+		}
+		count := *row[0].(*tree.DInt)
+		metric.ObjectCount.Update(int64(count))
+		return nil
+	})
 }

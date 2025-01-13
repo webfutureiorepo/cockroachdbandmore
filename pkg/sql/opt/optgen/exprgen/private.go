@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package exprgen
 
@@ -126,7 +121,9 @@ func (eg *exprGen) convertPrivateFieldValue(
 	if res := eg.castToDesiredType(value, fieldType); res != nil {
 		return res
 	}
-	panic(errorf("invalid value for %s.%s: %v", privType, fieldName, value))
+	panic(errorf(
+		"invalid value for %s.%s (%v): %v (%T)", privType, fieldName, fieldType, value, value,
+	))
 }
 
 // addTable resolves the given table name and adds the table to the metadata.

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package securitytest embeds the TLS test certificates.
 package securitytest
@@ -16,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/security/securityassets"
@@ -112,6 +108,11 @@ func AssetReadDir(name string) ([]os.FileInfo, error) {
 		info, err := e.Info()
 		if err != nil {
 			return nil, err
+		}
+		if strings.HasSuffix(e.Name(), ".md") ||
+			strings.HasSuffix(e.Name(), ".sh") ||
+			strings.HasSuffix(e.Name(), ".cnf") {
+			continue
 		}
 		infos = append(infos, &fileInfo{inner: info})
 	}

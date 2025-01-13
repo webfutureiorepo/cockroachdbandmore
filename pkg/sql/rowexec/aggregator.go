@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -52,6 +47,8 @@ func (af aggregateFuncs) close(ctx context.Context) {
 type aggregatorBase struct {
 	execinfra.ProcessorBase
 
+	evalCtx *eval.Context
+
 	// runningState represents the state of the aggregator. This is in addition to
 	// ProcessorBase.State - the runningState is only relevant when
 	// ProcessorBase.State == StateRunning.
@@ -59,7 +56,7 @@ type aggregatorBase struct {
 	input        execinfra.RowSource
 	inputDone    bool
 	inputTypes   []*types.T
-	funcs        []*aggregateFuncHolder
+	funcs        []aggregateFuncHolder
 	outputTypes  []*types.T
 	datumAlloc   tree.DatumAlloc
 	rowAlloc     rowenc.EncDatumRowAlloc
@@ -107,12 +104,14 @@ func (ag *aggregatorBase) init(
 	ag.groupCols = spec.GroupCols
 	ag.orderedGroupCols = spec.OrderedGroupCols
 	ag.aggregations = spec.Aggregations
-	ag.funcs = make([]*aggregateFuncHolder, len(spec.Aggregations))
+	ag.funcs = make([]aggregateFuncHolder, len(spec.Aggregations))
 	ag.outputTypes = make([]*types.T, len(spec.Aggregations))
 	ag.row = make(rowenc.EncDatumRow, len(spec.Aggregations))
 	ag.bucketsAcc = memMonitor.MakeBoundAccount()
 	ag.arena = stringarena.Make(&ag.bucketsAcc)
 	ag.aggFuncsAcc = memMonitor.MakeBoundAccount()
+	ag.evalCtx = flowCtx.NewEvalCtx()
+	ag.evalCtx.SingleDatumAggMemAccount = &ag.aggFuncsAcc
 
 	// Loop over the select expressions and extract any aggregate functions --
 	// non-aggregation functions are replaced with parser.NewIdentAggregate,
@@ -121,6 +120,7 @@ func (ag *aggregatorBase) init(
 	// the functions which need to be fed values.
 	ag.inputTypes = input.OutputTypes()
 	semaCtx := flowCtx.NewSemaContext(flowCtx.Txn)
+	pAlloc := execagg.MakeParamTypesAllocator(spec.Aggregations)
 	for i, aggInfo := range spec.Aggregations {
 		if aggInfo.FilterColIdx != nil {
 			col := *aggInfo.FilterColIdx
@@ -135,20 +135,24 @@ func (ag *aggregatorBase) init(
 			}
 		}
 		constructor, arguments, outputType, err := execagg.GetAggregateConstructor(
-			ctx, flowCtx.EvalCtx, semaCtx, &aggInfo, ag.inputTypes,
+			ctx, ag.evalCtx, semaCtx, &aggInfo, ag.inputTypes, &pAlloc,
 		)
 		if err != nil {
 			return err
 		}
-		ag.funcs[i] = ag.newAggregateFuncHolder(constructor, arguments)
+		ag.funcs[i] = aggregateFuncHolder{
+			create:    constructor,
+			arena:     &ag.arena,
+			arguments: arguments,
+		}
 		if aggInfo.Distinct {
 			ag.funcs[i].seen = make(map[string]struct{})
 		}
 		ag.outputTypes[i] = outputType
 	}
 
-	return ag.ProcessorBase.Init(
-		ctx, self, post, ag.outputTypes, flowCtx, processorID, memMonitor,
+	return ag.ProcessorBase.InitWithEvalCtx(
+		ctx, self, post, ag.outputTypes, flowCtx, ag.evalCtx, processorID, memMonitor,
 		execinfra.ProcStateOpts{
 			InputsToDrain:        []execinfra.RowSource{ag.input},
 			TrailingMetaCallback: trailingMetaCallback,
@@ -261,10 +265,14 @@ func newAggregator(
 	if spec.IsRowCount() {
 		return newCountAggregator(ctx, flowCtx, processorID, input, post)
 	}
-	if len(spec.OrderedGroupCols) == len(spec.GroupCols) {
-		return newOrderedAggregator(ctx, flowCtx, processorID, spec, input, post)
+	needHash, err := execagg.NeedHashAggregator(spec)
+	if err != nil {
+		return nil, err
 	}
-	return newHashAggregator(ctx, flowCtx, processorID, spec, input, post)
+	if needHash {
+		return newHashAggregator(ctx, flowCtx, processorID, spec, input, post)
+	}
+	return newOrderedAggregator(ctx, flowCtx, processorID, spec, input, post)
 }
 
 func newHashAggregator(
@@ -279,8 +287,7 @@ func newHashAggregator(
 		buckets:                 make(map[string]aggregateFuncs),
 		bucketsLenGrowThreshold: hashAggregatorBucketsInitialLen,
 	}
-
-	if err := ag.init(
+	return ag, ag.init(
 		ctx,
 		ag,
 		flowCtx,
@@ -292,15 +299,7 @@ func newHashAggregator(
 			ag.close()
 			return nil
 		},
-	); err != nil {
-		return nil, err
-	}
-
-	// A new tree.EvalCtx was created during initializing aggregatorBase above
-	// and will be used only by this aggregator, so it is ok to update EvalCtx
-	// directly.
-	ag.EvalCtx.SingleDatumAggMemAccount = &ag.aggFuncsAcc
-	return ag, nil
+	)
 }
 
 func newOrderedAggregator(
@@ -312,8 +311,7 @@ func newOrderedAggregator(
 	post *execinfrapb.PostProcessSpec,
 ) (*orderedAggregator, error) {
 	ag := &orderedAggregator{}
-
-	if err := ag.init(
+	return ag, ag.init(
 		ctx,
 		ag,
 		flowCtx,
@@ -325,15 +323,7 @@ func newOrderedAggregator(
 			ag.close()
 			return nil
 		},
-	); err != nil {
-		return nil, err
-	}
-
-	// A new tree.EvalCtx was created during initializing aggregatorBase above
-	// and will be used only by this aggregator, so it is ok to update EvalCtx
-	// directly.
-	ag.EvalCtx.SingleDatumAggMemAccount = &ag.aggFuncsAcc
-	return ag, nil
+	)
 }
 
 // Start is part of the RowSource interface.
@@ -401,9 +391,7 @@ func (ag *orderedAggregator) close() {
 // columns, and false otherwise.
 func (ag *aggregatorBase) matchLastOrdGroupCols(row rowenc.EncDatumRow) (bool, error) {
 	for _, colIdx := range ag.orderedGroupCols {
-		res, err := ag.lastOrdGroupCols[colIdx].Compare(
-			ag.inputTypes[colIdx], &ag.datumAlloc, ag.EvalCtx, &row[colIdx],
-		)
+		res, err := ag.lastOrdGroupCols[colIdx].Compare(ag.Ctx(), ag.inputTypes[colIdx], &ag.datumAlloc, ag.evalCtx, &row[colIdx])
 		if res != 0 || err != nil {
 			return false, err
 		}
@@ -903,16 +891,6 @@ const (
 	sizeOfAggregateFunc  = int64(unsafe.Sizeof(eval.AggregateFunc(nil)))
 )
 
-func (ag *aggregatorBase) newAggregateFuncHolder(
-	create func(*eval.Context, tree.Datums) eval.AggregateFunc, arguments tree.Datums,
-) *aggregateFuncHolder {
-	return &aggregateFuncHolder{
-		create:    create,
-		arena:     &ag.arena,
-		arguments: arguments,
-	}
-}
-
 // isDistinct returns whether this aggregateFuncHolder has not already seen the
 // encoding of grouping columns and argument columns. It should be used *only*
 // when we have DISTINCT aggregation so that we can aggregate only the "first"
@@ -963,7 +941,7 @@ func (ag *aggregatorBase) createAggregateFuncs() (aggregateFuncs, error) {
 	}
 	bucket := make(aggregateFuncs, len(ag.funcs))
 	for i, f := range ag.funcs {
-		agg := f.create(ag.EvalCtx, f.arguments)
+		agg := f.create(ag.evalCtx, f.arguments)
 		if err := ag.bucketsAcc.Grow(ag.Ctx(), agg.Size()); err != nil {
 			return nil, err
 		}

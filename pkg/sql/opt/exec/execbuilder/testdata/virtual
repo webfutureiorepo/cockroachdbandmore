@@ -143,12 +143,12 @@ vectorized: true
         └── • virtual table lookup join
             │ table: pg_attribute@pg_attribute_attrelid_idx
             │ equality: (oid) = (attrelid)
-            │ pred: column156 = attnum
+            │ pred: column158 = attnum
             │
             └── • render
                 │
                 └── • hash join
-                    │ equality: (attrelid, attnum) = (oid, column129)
+                    │ equality: (attrelid, attnum) = (oid, column130)
                     │
                     ├── • filter
                     │   │ filter: attrelid = 'b'::REGCLASS
@@ -227,8 +227,8 @@ vectorized: true
 │
 └── • subquery
     │ id: @S1
-    │ original sql: SELECT * FROM (SELECT database_name, grantee, privilege_type, is_grantable::BOOL FROM "".crdb_internal.cluster_database_privileges) WHERE database_name IN ('t',)
-    │ exec mode: all rows
+    │ original sql: SELECT * FROM (SELECT database_name, 'database' AS object_type, grantee, privilege_type, is_grantable::BOOL FROM "".crdb_internal.cluster_database_privileges) WHERE database_name IN ('t',)
+    │ exec mode: discard all rows
     │
     └── • buffer
         │ label: buffer 1 (r)
@@ -495,3 +495,49 @@ vectorized: true
 
 statement ok
 RESET testing_optimizer_disable_rule_probability
+
+# Regression test for applying cost penalty for each full scan of a virtual
+# table when disallow_full_table_scans is set (#122708).
+statement ok
+SET disallow_full_table_scans = true;
+
+# Don't penalize for each full scan, so we use hash joins.
+query T
+EXPLAIN SELECT i.relname, ix.indisprimary FROM pg_class AS t, pg_class AS i, pg_index AS ix
+        WHERE t.oid = ix.indrelid AND i.oid = ix.indexrelid AND t.relkind = 'r';
+----
+distribution: local
+vectorized: true
+·
+• hash join
+│ equality: (oid) = (indexrelid)
+│
+├── • virtual table
+│     table: pg_class@primary
+│
+└── • hash join
+    │ equality: (indrelid) = (oid)
+    │
+    ├── • virtual table
+    │     table: pg_index@primary
+    │
+    └── • filter
+        │ filter: relkind = 'r'
+        │
+        └── • virtual table
+              table: pg_class@primary
+
+statement ok
+RESET disallow_full_table_scans;
+
+# Verify that we're not fooling ourselves by showing that we can use a virtual
+# index when we actually can't (#108317).
+query T
+EXPLAIN SELECT * FROM crdb_internal.system_jobs WHERE id > 100;
+----
+distribution: local
+vectorized: true
+·
+• virtual table
+  table: system_jobs@primary
+  virtual table filter

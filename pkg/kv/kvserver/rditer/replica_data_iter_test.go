@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rditer
 
@@ -24,12 +19,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/echotest"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/olekukonko/tablewriter"
@@ -118,6 +116,13 @@ func createRangeData(
 			TxnUUID:  testTxnID,
 		},
 	}
+	lockMeta := enginepb.MVCCMetadata{
+		Txn:      &enginepb.TxnMeta{ID: testTxnID},
+		KeyBytes: storage.MVCCVersionTimestampSize,
+		ValBytes: int64(len(value.RawBytes)),
+	}
+	lockVal, err := protoutil.Marshal(&lockMeta)
+	require.NoError(t, err)
 
 	rs = append(rs, storage.MVCCRangeKey{ // emitted last because we emit all point keys before range keys
 		StartKey:  desc.StartKey.AsRawKey().Clone(),
@@ -134,7 +139,7 @@ func createRangeData(
 	}
 	for _, l := range locks {
 		sl, _ := l.ToEngineKey(nil)
-		require.NoError(t, eng.PutEngineKey(sl, []byte("fake lock")))
+		require.NoError(t, eng.PutEngineKey(sl, lockVal))
 	}
 
 	return ps, rs
@@ -165,7 +170,7 @@ func verifyIterateReplicaKeySpans(
 
 	require.NoError(t, IterateReplicaKeySpans(context.Background(), desc, readWriter, replicatedOnly,
 		replicatedSpansFilter,
-		func(iter storage.EngineIterator, span roachpb.Span, keyType storage.IterKeyType) error {
+		func(iter storage.EngineIterator, span roachpb.Span) error {
 			var err error
 			for ok := true; ok && err == nil; ok, err = iter.NextEngineKey() {
 				// Span should not be empty.
@@ -176,8 +181,8 @@ func verifyIterateReplicaKeySpans(
 				require.True(t, span.ContainsKey(key.Key), "%s not in %s", key, span)
 				require.True(t, key.IsLockTableKey() || key.IsMVCCKey(), "%s neither lock nor MVCC", key)
 
-				switch keyType {
-				case storage.IterKeyTypePointsOnly:
+				hasPoint, hasRange := iter.HasPointAndRange()
+				if hasPoint {
 					var mvccKey storage.MVCCKey
 					if key.IsMVCCKey() {
 						var err error
@@ -203,8 +208,8 @@ func verifyIterateReplicaKeySpans(
 						fmt.Sprintf("%x", key.Version),
 						mvccKey.String(),
 					})
-
-				case storage.IterKeyTypeRangesOnly:
+				}
+				if hasRange && iter.RangeKeyChanged() {
 					bounds, err := iter.EngineRangeBounds()
 					require.NoError(t, err)
 					require.True(t, span.Contains(bounds), "%s not contained in %s", bounds, span)
@@ -224,9 +229,6 @@ func verifyIterateReplicaKeySpans(
 							mvccRangeKey.String(),
 						})
 					}
-
-				default:
-					t.Fatalf("unexpected key type %v", keyType)
 				}
 			}
 			return err
@@ -336,8 +338,8 @@ func TestIterateMVCCReplicaKeySpansSpansSet(t *testing.T) {
 	// fragmented.
 	//
 	get := func(t *testing.T, useSpanSet, reverse bool) ([]storage.MVCCKey, []storage.MVCCRangeKey) {
-		readWriter := eng.NewReadOnly(storage.StandardDurability)
-		defer readWriter.Close()
+		reader := eng.NewReader(storage.StandardDurability)
+		defer reader.Close()
 		if useSpanSet {
 			var spans spanset.SpanSet
 			spans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{
@@ -352,12 +354,12 @@ func TestIterateMVCCReplicaKeySpansSpansSet(t *testing.T) {
 				Key:    desc.StartKey.AsRawKey(),
 				EndKey: desc.EndKey.AsRawKey(),
 			}, hlc.Timestamp{WallTime: 42})
-			readWriter = spanset.NewReadWriterAt(readWriter, &spans, hlc.Timestamp{WallTime: 42})
+			reader = spanset.NewReader(reader, &spans, hlc.Timestamp{WallTime: 42})
 		}
 		var rangeStart roachpb.Key
 		var actualKeys []storage.MVCCKey
 		var actualRanges []storage.MVCCRangeKey
-		err := IterateMVCCReplicaKeySpans(context.Background(), &desc, readWriter, IterateOptions{
+		err := IterateMVCCReplicaKeySpans(context.Background(), &desc, reader, IterateOptions{
 			CombineRangesAndPoints: false,
 			Reverse:                reverse,
 		}, func(iter storage.MVCCIterator, span roachpb.Span, keyType storage.IterKeyType) error {
@@ -472,9 +474,11 @@ func TestReplicaDataIteratorGlobalRangeKey(t *testing.T) {
 				var actualSpans []roachpb.Span
 				require.NoError(t, IterateReplicaKeySpans(
 					context.Background(), &desc, snapshot, replicatedOnly, ReplicatedSpansAll,
-					func(iter storage.EngineIterator, span roachpb.Span, keyType storage.IterKeyType) error {
+					func(iter storage.EngineIterator, span roachpb.Span) error {
 						// We should never see any point keys.
-						require.Equal(t, storage.IterKeyTypeRangesOnly, keyType)
+						hasPoint, hasRange := iter.HasPointAndRange()
+						require.False(t, hasPoint)
+						require.True(t, hasRange)
 
 						// The iterator should already be positioned on the range key, which should
 						// span the entire key span and be the only range key.
@@ -543,7 +547,7 @@ func benchReplicaEngineDataIterator(b *testing.B, numRanges, numKeysPerRange, va
 
 	// Write data for ranges.
 	eng, err := storage.Open(ctx,
-		storage.Filesystem(b.TempDir()),
+		fs.MustInitPhysicalTestingEnv(b.TempDir()),
 		cluster.MakeTestingClusterSettings(),
 		storage.CacheSize(1e9))
 	require.NoError(b, err)
@@ -580,7 +584,7 @@ func benchReplicaEngineDataIterator(b *testing.B, numRanges, numKeysPerRange, va
 		for _, desc := range descs {
 			err := IterateReplicaKeySpans(
 				context.Background(), &desc, snapshot, false /* replicatedOnly */, ReplicatedSpansAll,
-				func(iter storage.EngineIterator, _ roachpb.Span, _ storage.IterKeyType) error {
+				func(iter storage.EngineIterator, _ roachpb.Span) error {
 					var err error
 					for ok := true; ok && err == nil; ok, err = iter.NextEngineKey() {
 						_, _ = iter.UnsafeEngineKey()

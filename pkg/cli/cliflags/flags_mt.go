@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cliflags
 
@@ -138,5 +133,14 @@ listeners, if the headers are allowed.`,
 	TestDirectoryTenantBaseDir = FlagInfo{
 		Name:        "base-dir",
 		Description: "If set, the tenant processes will use it as a store location.",
+	}
+
+	Virtualized = FlagInfo{
+		Name:        "virtualized",
+		Description: "If set, the cluster will be initialized as a virtualized cluster.",
+	}
+	VirtualizedEmpty = FlagInfo{
+		Name:        "virtualized-empty",
+		Description: "If set, the cluster will be initialized as a virtualized cluster without main virtual cluster.",
 	}
 )

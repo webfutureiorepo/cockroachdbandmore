@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package contentionutils
 
@@ -120,6 +115,18 @@ func (c *ConcurrentBufferGuard) AtomicWrite(op bufferWriteOp) {
 func (c *ConcurrentBufferGuard) ForceSync() {
 	c.flushSyncLock.Lock()
 	defer c.flushSyncLock.Unlock()
+	c.syncLocked()
+}
+
+// ForceSyncExec blocks all inflight and upcoming write operation, to allow
+// the onBufferFullHandler to be executed. However, unlike ForceSync, ForceSyncExec
+// executes the provided function prior to executing onBufferFullHandler, which allows
+// callers to atomically apply state to this specific execution of the
+// onBufferFullHandler.
+func (c *ConcurrentBufferGuard) ForceSyncExec(fn func()) {
+	c.flushSyncLock.Lock()
+	defer c.flushSyncLock.Unlock()
+	fn()
 	c.syncLocked()
 }
 

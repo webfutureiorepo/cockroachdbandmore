@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/dev/io/exec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/dev/io/os"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/spf13/cobra"
 )
 
@@ -29,9 +25,7 @@ type dev struct {
 	debug bool
 
 	knobs struct { // testing knobs
-		skipDoctorCheck           bool
-		skipCacheCheckDuringBuild bool
-		devBinOverride            string
+		devBinOverride string
 	}
 }
 
@@ -142,8 +136,8 @@ Typical usage:
 		skipDoctorCheckCommands := []string{
 			"builder",
 			"doctor",
+			"go",
 			"help",
-			"merge-test-xmls",
 		}
 		var skipDoctorCheck bool
 		for _, skipDoctorCheckCommand := range skipDoctorCheckCommands {
@@ -154,6 +148,34 @@ Typical usage:
 				return err
 			}
 		}
+
+		ctx := cmd.Context()
+		skipCacheCheckCommands := []string{
+			"cache",
+		}
+		skipCacheCheckCommands = append(skipCacheCheckCommands, skipDoctorCheckCommands...)
+		skipCacheCheck := buildutil.CrdbTestBuild || ret.os.Getenv("DEV_NO_REMOTE_CACHE") != ""
+		for _, skipCacheCheckCommand := range skipCacheCheckCommands {
+			skipCacheCheck = skipCacheCheck || cmd.Name() == skipCacheCheckCommand
+		}
+		// Check if we're running in remote mode: we don't want to setup
+		// the cache in this case.
+		if !skipCacheCheck {
+			workspace, err := ret.getWorkspace(ctx)
+			if err != nil {
+				return err
+			}
+			if ret.checkUsingConfig(workspace, "engflow") {
+				skipCacheCheck = true
+			}
+		}
+		if !skipCacheCheck {
+			_, err := ret.setUpCache(ctx)
+			if err != nil {
+				return err
+			}
+		}
+
 		if ret.debug {
 			ret.log.SetOutput(stdos.Stderr)
 		}

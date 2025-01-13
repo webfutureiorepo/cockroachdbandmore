@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -19,7 +14,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
-	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/stretchr/testify/require"
 )
@@ -34,8 +28,10 @@ func registerPop(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		startOpts := option.DefaultStartOptsInMemory()
-		startOpts.RoachprodOpts.SQLPort = config.DefaultSQLPort
+		startOpts := option.NewStartOpts(sqlClientsInMemoryDB)
+		// pop expects secure clusters, indicated by cockroach_ssl, to have SQL Port 26259.
+		// See: https://github.com/gobuffalo/pop/blob/main/database.yml#L26-L28
+		startOpts.RoachprodOpts.SQLPort = 26259
 		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -81,31 +77,39 @@ func registerPop(r registry.Registry) {
 
 		t.Status("building and setting up tests")
 
+		// pop expects to find certificates in a specific path.
+		err = c.RunE(ctx, option.WithNodes(node), "mkdir -p /mnt/data1/pop/crdb/certs")
+		require.NoError(t, err)
+		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf("cp -r %s /mnt/data1/pop/crdb/", install.CockroachNodeCertsDir))
+		require.NoError(t, err)
+
 		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && go build -v -tags sqlite -o tsoda ./soda`, popPath))
 		require.NoError(t, err)
 
-		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && ./tsoda drop -e cockroach -c ./database.yml -p ./testdata/migrations`, popPath))
+		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && ./tsoda drop -e cockroach_ssl -c ./database.yml -p ./testdata/migrations`, popPath))
 		require.NoError(t, err)
 
-		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && ./tsoda create -e cockroach -c ./database.yml -p ./testdata/migrations`, popPath))
+		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && ./tsoda create -e cockroach_ssl -c ./database.yml -p ./testdata/migrations`, popPath))
 		require.NoError(t, err)
 
-		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && ./tsoda migrate -e cockroach -c ./database.yml -p ./testdata/migrations`, popPath))
+		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && ./tsoda migrate -e cockroach_ssl -c ./database.yml -p ./testdata/migrations`, popPath))
 		require.NoError(t, err)
 
 		t.Status("running pop test suite")
 
 		// No tests are expected to fail.
-		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && SODA_DIALECT=cockroach go test -race -tags sqlite -v ./... -count=1`, popPath))
+		err = c.RunE(ctx, option.WithNodes(node), fmt.Sprintf(`cd %s && SODA_DIALECT=cockroach_ssl go test -race -tags sqlite -v ./... -count=1`, popPath))
 		require.NoError(t, err, "error while running pop tests")
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             "pop",
-		Owner:            registry.OwnerSQLFoundations,
-		Cluster:          r.MakeClusterSpec(1),
-		Leases:           registry.MetamorphicLeases,
-		CompatibleClouds: registry.AllExceptAWS,
+		Name:    "pop",
+		Owner:   registry.OwnerSQLFoundations,
+		Cluster: r.MakeClusterSpec(1),
+		Leases:  registry.MetamorphicLeases,
+		// This test requires custom ports but service registration is
+		// currently only supported on GCE.
+		CompatibleClouds: registry.OnlyGCE,
 		Suites:           registry.Suites(registry.Nightly, registry.ORM),
 		Run:              runPop,
 	})

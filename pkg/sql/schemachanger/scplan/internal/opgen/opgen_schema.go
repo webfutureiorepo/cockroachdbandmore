@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -22,14 +17,28 @@ func init() {
 			equiv(scpb.Status_DROPPED),
 			to(scpb.Status_DESCRIPTOR_ADDED,
 				emit(func(this *scpb.Schema) *scop.CreateSchemaDescriptor {
+					if this.IsTemporary {
+						return nil
+					}
 					return &scop.CreateSchemaDescriptor{
 						SchemaID: this.SchemaID,
+					}
+				}),
+				emit(func(this *scpb.Schema) *scop.InsertTemporarySchema {
+					if !this.IsTemporary {
+						return nil
+					}
+					return &scop.InsertTemporarySchema{
+						DescriptorID: this.SchemaID,
 					}
 				}),
 			),
 			to(scpb.Status_PUBLIC,
 				revertible(false),
 				emit(func(this *scpb.Schema) *scop.MarkDescriptorAsPublic {
+					if this.IsTemporary {
+						return nil
+					}
 					return &scop.MarkDescriptorAsPublic{
 						DescriptorID: this.SchemaID,
 					}

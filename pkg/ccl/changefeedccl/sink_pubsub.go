@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -12,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"hash/crc32"
+	"net"
 	"net/url"
 
 	"cloud.google.com/go/pubsub"
@@ -22,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -31,7 +30,7 @@ const numOfWorkers = 128
 
 type deprecatedPubsubClient interface {
 	init() error
-	closeTopics()
+	close() error
 	flushTopics()
 	sendMessage(content []byte, topic string, key string) error
 	sendMessageToAllTopics(content []byte) error
@@ -74,7 +73,8 @@ type deprecatedGcpPubsubClient struct {
 		topics          map[string]*pubsub.Topic
 	}
 
-	knobs *TestingKnobs
+	knobs   *TestingKnobs
+	metrics metricsRecorder
 }
 
 type deprecatedPubsubSink struct {
@@ -114,7 +114,7 @@ func makeDeprecatedPubsubSink(
 	mb metricsRecorderBuilder,
 	knobs *TestingKnobs,
 ) (Sink, error) {
-
+	m := mb(requiresResourceAccounting)
 	pubsubURL := sinkURL{URL: u, q: u.Query()}
 	pubsubTopicName := pubsubURL.consumeParam(changefeedbase.SinkParamTopicName)
 
@@ -142,7 +142,7 @@ func makeDeprecatedPubsubSink(
 		numWorkers:  numOfWorkers,
 		exitWorkers: cancel,
 		format:      formatType,
-		metrics:     mb(requiresResourceAccounting),
+		metrics:     m,
 	}
 
 	// creates custom pubsub object based on scheme
@@ -177,6 +177,7 @@ func makeDeprecatedPubsubSink(
 			endpoint:   endpoint,
 			url:        pubsubURL,
 			knobs:      knobs,
+			metrics:    m,
 		}
 		p.client = g
 		p.topicNamer = tn
@@ -278,7 +279,6 @@ func (p *deprecatedPubsubSink) flush(ctx context.Context) error {
 
 // Close closes all the channels and shutdowns the topic
 func (p *deprecatedPubsubSink) Close() error {
-	p.client.closeTopics()
 	p.exitWorkers()
 	_ = p.workerGroup.Wait()
 	if p.errChan != nil {
@@ -292,6 +292,9 @@ func (p *deprecatedPubsubSink) Close() error {
 			close(p.eventsChans[i])
 		}
 	}
+	if err := p.client.close(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -302,8 +305,8 @@ func (p *deprecatedPubsubSink) Topics() []string {
 }
 
 func (p *deprecatedGcpPubsubClient) cacheTopicLocked(name string, topic *pubsub.Topic) {
-	//TODO (zinger): Investigate whether changing topics to a sync.Map would be
-	//faster here, I think it would.
+	// TODO(zinger): Investigate whether changing topics to a syncutil.Map would
+	// be faster here, I think it would.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.mu.topics[name] = topic
@@ -455,15 +458,21 @@ func (p *deprecatedGcpPubsubClient) init() error {
 	if err != nil {
 		return err
 	}
+
+	// Set up the network metrics for tracking bytes in/out.
+	dialContext := p.metrics.netMetrics().Wrap((&net.Dialer{}).DialContext, "pubsub")
+	dial := func(ctx context.Context, target string) (net.Conn, error) {
+		return dialContext(ctx, "tcp", target)
+	}
+
 	// Sending messages to the same region ensures they are received in order
 	// even when multiple publishers are used.
 	// region can be changed from query parameter to config option
-
 	client, err = pubsub.NewClient(
 		p.ctx,
 		p.projectID,
 		creds,
-		option.WithEndpoint(p.endpoint),
+		option.WithEndpoint(p.endpoint), option.WithGRPCDialOption(grpc.WithContextDialer(dial)),
 	)
 
 	if err != nil {
@@ -496,15 +505,23 @@ func (p *deprecatedGcpPubsubClient) openTopic(topicName string) (*pubsub.Topic, 
 	return t, nil
 }
 
-func (p *deprecatedGcpPubsubClient) closeTopics() {
+func (p *deprecatedGcpPubsubClient) close() error {
+	if p.client == nil {
+		return nil
+	}
 	_ = p.forEachTopic(func(_ string, t *pubsub.Topic) error {
 		t.Stop()
 		return nil
 	})
+	// Close the client to release resources held by the client to avoid memory
+	// leaks.
+	return p.client.Close()
 }
 
 // sendMessage sends a message to the topic
 func (p *deprecatedGcpPubsubClient) sendMessage(m []byte, topic string, key string) error {
+	defer p.metrics.timers().DownstreamClientSend.Start()()
+
 	t, err := p.getTopicClient(topic)
 	if err != nil {
 		return err

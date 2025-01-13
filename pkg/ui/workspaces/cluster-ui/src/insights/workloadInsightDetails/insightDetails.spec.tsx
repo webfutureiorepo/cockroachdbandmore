@@ -1,27 +1,24 @@
 // Copyright 2024 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { createSandbox } from "sinon";
+import React from "react";
 import { MemoryRouter as Router } from "react-router-dom";
+import { createSandbox } from "sinon";
+
+import * as sqlApi from "../../api/sqlApi";
+import { SqlApiResponse } from "../../api/sqlApi";
+import * as stmtInsightsApi from "../../api/stmtInsightsApi";
+import { CollapseWhitespace, MockSqlResponse } from "../../util/testing";
+import { StmtInsightEvent } from "../types";
+
+import { getStatementInsightPropsFixture } from "./insightDetails.fixture";
 import {
   StatementInsightDetails,
   StatementInsightDetailsProps,
 } from "./statementInsightDetails";
-import { getStatementInsightPropsFixture } from "./insightDetails.fixture";
-import * as sqlApi from "../../api/sqlApi";
-import * as stmtInsightsApi from "../../api/stmtInsightsApi";
-import { SqlApiResponse } from "../../api/sqlApi";
-import { StmtInsightEvent } from "../types";
-import { CollapseWhitespace, MockSqlResponse } from "../../util/testing";
 
 const sandbox = createSandbox();
 

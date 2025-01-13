@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -30,7 +25,13 @@ func registerJasyncSQL(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(), c.All())
+		// jasync does not support changing the default sslmode for postgresql, defaulting
+		// sslmode=disable. See: https://github.com/jasync-sql/jasync-sql/issues/422
+		// TODO(darrylwong): If the above issue is addressed we can enable secure mode
+		c.Start(
+			ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB),
+			install.MakeClusterSettings(install.SecureOption(false)),
+		)
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -93,7 +94,7 @@ func registerJasyncSQL(r registry.Registry) {
 		_ = c.RunE(
 			ctx,
 			option.WithNodes(node),
-			`cd /mnt/data1/jasync-sql && PGUSER=test_admin PGHOST=localhost PGPORT={pgport:1} PGDATABASE=defaultdb ./gradlew :postgresql-async:test`,
+			`cd /mnt/data1/jasync-sql && PGHOST=localhost PGUSER=test_admin PGPORT={pgport:1} PGDATABASE=defaultdb ./gradlew :postgresql-async:test`,
 		)
 
 		_ = c.RunE(ctx, option.WithNodes(node), `mkdir -p ~/logs/report/jasyncsql-results`)

@@ -28,6 +28,7 @@ go_library(
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_cockroachdb_redact//:redact",
     ],
 )
 
@@ -40,11 +41,6 @@ go_test(
         "chunked_event_queue_test.go",
     ],
     embed = [":kvevent"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
-    tags = ["ccl_test"],
     deps = [
         "//pkg/jobs/jobspb",
         "//pkg/keys",

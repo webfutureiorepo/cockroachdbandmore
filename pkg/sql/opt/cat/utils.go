@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cat
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
@@ -59,7 +55,9 @@ func ResolveTableIndex(
 // and testing. With redactableValues set to true, all user-supplied constants
 // and literals (e.g. DEFAULT values, constants in generated column expressions,
 // etc.) are surrounded by redaction markers.
-func FormatTable(cat Catalog, tab Table, tp treeprinter.Node, redactableValues bool) {
+func FormatTable(
+	ctx context.Context, cat Catalog, tab Table, tp treeprinter.Node, redactableValues bool,
+) {
 	child := tp.Childf("TABLE %s", tab.Name())
 	if tab.IsVirtualTable() {
 		child.Child("virtual table")
@@ -90,11 +88,11 @@ func FormatTable(cat Catalog, tab Table, tp treeprinter.Node, redactableValues b
 	}
 
 	for i := 0; i < tab.OutboundForeignKeyCount(); i++ {
-		formatCatalogFKRef(cat, false /* inbound */, tab.OutboundForeignKey(i), child)
+		formatCatalogFKRef(ctx, cat, false /* inbound */, tab.OutboundForeignKey(i), child)
 	}
 
 	for i := 0; i < tab.InboundForeignKeyCount(); i++ {
-		formatCatalogFKRef(cat, true /* inbound */, tab.InboundForeignKey(i), child)
+		formatCatalogFKRef(ctx, cat, true /* inbound */, tab.InboundForeignKey(i), child)
 	}
 
 	for i := 0; i < tab.UniqueCount(); i++ {
@@ -127,6 +125,8 @@ func formatCatalogIndex(tab Table, ord int, tp treeprinter.Node, redactableValue
 		idxType = "UNIQUE "
 	} else if idx.IsInverted() {
 		idxType = "INVERTED "
+	} else if idx.IsVector() {
+		idxType = "VECTOR "
 	}
 	mutation := ""
 	if IsMutationIndex(tab, ord) {
@@ -210,13 +210,17 @@ func formatCols(tab Table, numCols int, colOrdinal func(tab Table, i int) int) s
 // formatCatalogFKRef nicely formats a catalog foreign key reference using a
 // treeprinter for debugging and testing.
 func formatCatalogFKRef(
-	catalog Catalog, inbound bool, fkRef ForeignKeyConstraint, tp treeprinter.Node,
+	ctx context.Context,
+	catalog Catalog,
+	inbound bool,
+	fkRef ForeignKeyConstraint,
+	tp treeprinter.Node,
 ) {
-	originDS, _, err := catalog.ResolveDataSourceByID(context.TODO(), Flags{}, fkRef.OriginTableID())
+	originDS, _, err := catalog.ResolveDataSourceByID(ctx, Flags{}, fkRef.OriginTableID())
 	if err != nil {
 		panic(err)
 	}
-	refDS, _, err := catalog.ResolveDataSourceByID(context.TODO(), Flags{}, fkRef.ReferencedTableID())
+	refDS, _, err := catalog.ResolveDataSourceByID(ctx, Flags{}, fkRef.ReferencedTableID())
 	if err != nil {
 		panic(err)
 	}
@@ -323,7 +327,7 @@ func formatFamily(family Family, buf *bytes.Buffer) {
 // markRedactable is true.
 func MaybeMarkRedactable(unsafe string, markRedactable bool) string {
 	if markRedactable {
-		return string(redact.Sprintf("%s", redact.Unsafe(unsafe)))
+		return string(redact.Sprintf("%s", encoding.Unsafe(unsafe)))
 	}
 	return unsafe
 }

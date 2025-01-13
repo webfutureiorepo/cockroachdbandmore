@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvpb
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -298,6 +294,8 @@ const (
 	RefreshFailedErrType                    ErrorDetailType = 43
 	MVCCHistoryMutationErrType              ErrorDetailType = 44
 	LockConflictErrType                     ErrorDetailType = 45
+	ReplicaUnavailableErrType               ErrorDetailType = 46
+	ProxyFailedErrType                      ErrorDetailType = 47
 	// When adding new error types, don't forget to update NumErrors below.
 
 	// CommunicationErrType indicates a gRPC error; this is not an ErrorDetail.
@@ -307,7 +305,7 @@ const (
 	// detail. The value 25 is chosen because it's reserved in the errors proto.
 	InternalErrType ErrorDetailType = 25
 
-	NumErrors int = 46
+	NumErrors int = 48
 )
 
 // Register the migration of all errors that used to be in the roachpb package
@@ -1183,7 +1181,13 @@ func (e *ConditionFailedError) Error() string {
 }
 
 func (e *ConditionFailedError) SafeFormatError(p errors.Printer) (next error) {
-	p.Printf("unexpected value: %s", e.ActualValue)
+	if e.HadNewerOriginTimestamp {
+		p.Printf("higher OriginTimestamp but unexpected value: %s", e.ActualValue)
+	} else if e.OriginTimestampOlderThan.IsSet() {
+		p.Printf("OriginTimestamp older than %s", e.OriginTimestampOlderThan)
+	} else {
+		p.Printf("unexpected value: %s", e.ActualValue)
+	}
 	return nil
 }
 
@@ -1356,7 +1360,11 @@ func (e *BatchTimestampBeforeGCError) Error() string {
 }
 
 func (e *BatchTimestampBeforeGCError) SafeFormatError(p errors.Printer) (next error) {
-	p.Printf("batch timestamp %v must be after replica GC threshold %v", e.Timestamp, e.Threshold)
+	p.Printf(
+		"batch timestamp %v must be after replica GC threshold %v (r%d: %s)",
+		e.Timestamp, e.Threshold, e.RangeID,
+		roachpb.RSpan{Key: []byte(e.StartKey), EndKey: []byte(e.EndKey)},
+	)
 	return nil
 }
 
@@ -1601,8 +1609,19 @@ func (e *RefreshFailedError) Type() ErrorDetailType {
 var _ ErrorDetailInterface = &RefreshFailedError{}
 
 func (e *InsufficientSpaceError) Error() string {
-	return fmt.Sprintf("store %d has insufficient remaining capacity to %s (remaining: %s / %.1f%%, min required: %.1f%%)",
-		e.StoreID, e.Op, humanizeutil.IBytes(e.Available), float64(e.Available)/float64(e.Capacity)*100, e.Required*100)
+	return fmt.Sprint(e)
+}
+
+// Format implements fmt.Formatter.
+func (e *InsufficientSpaceError) Format(s fmt.State, verb rune) {
+	errors.FormatError(e, s, verb)
+}
+
+// SafeFormatError implements errors.SafeFormatter.
+func (e *InsufficientSpaceError) SafeFormatError(p errors.Printer) (next error) {
+	p.Printf("store %d has insufficient remaining capacity to %s (remaining: %s / %.1f%%, min required: %.1f%%)",
+		e.StoreID, redact.SafeString(e.Op), humanizeutil.IBytes(e.Available), float64(e.Available)/float64(e.Capacity)*100, e.Required*100)
+	return nil
 }
 
 // NewNotLeaseHolderError returns a NotLeaseHolderError initialized with the
@@ -1703,6 +1722,92 @@ func (e *DescNotFoundError) SafeFormatError(p errors.Printer) (next error) {
 	return nil
 }
 
+// Type is part of the ErrorDetailInterface.
+func (e *ReplicaUnavailableError) Type() ErrorDetailType {
+	return ReplicaUnavailableErrType
+}
+
+var _ ErrorDetailInterface = &ReplicaUnavailableError{}
+
+// Type is part of the ErrorDetailInterface.
+func (e *ProxyFailedError) Type() ErrorDetailType {
+	return ProxyFailedErrType
+}
+
+// Error is part of the builtin err interface
+func (e *ProxyFailedError) Error() string {
+	return redact.Sprint(e).StripMarkers()
+}
+
+// Format implements fmt.Formatter.
+func (e *ProxyFailedError) Format(s fmt.State, verb rune) { errors.FormatError(e, s, verb) }
+
+// SafeFormatError is part of the SafeFormatter
+func (e *ProxyFailedError) SafeFormatError(p errors.Printer) (next error) {
+	p.Printf("proxy failed with send error")
+	return nil
+}
+
+// Unwrap implements errors.Wrapper.
+func (e *ProxyFailedError) Unwrap() error {
+	return errors.DecodeError(context.Background(), e.Cause)
+}
+
+// NewProxyFailedError returns an ProxyFailedError wrapping (via
+// errors.Wrapper) the supplied error.
+func NewProxyFailedError(err error) *ProxyFailedError {
+	return &ProxyFailedError{
+		Cause: errors.EncodeError(context.Background(), err),
+	}
+}
+
+var _ ErrorDetailInterface = &ProxyFailedError{}
+var _ errors.SafeFormatter = (*ProxyFailedError)(nil)
+var _ fmt.Formatter = (*ProxyFailedError)(nil)
+var _ errors.Wrapper = (*ProxyFailedError)(nil)
+
+// KeyCollisionError represents a failed attempt to ingest the same key twice.
+type KeyCollisionError struct {
+	Key   roachpb.Key
+	Value []byte
+}
+
+// Format implements fmt.Formatter.
+func (d *KeyCollisionError) Format(s fmt.State, verb rune) {
+	errors.FormatError(d, s, verb)
+}
+
+func (d *KeyCollisionError) SafeFormatError(p errors.Printer) (next error) {
+	p.Printf("ingested key collides with an existing one: %s", d.Key)
+	return nil
+}
+
+func (d *KeyCollisionError) Error() string {
+	return fmt.Sprint(d)
+}
+
+// NewKeyCollisionError constructs a KeyCollisionError, copying its input.
+func NewKeyCollisionError(key roachpb.Key, value []byte) error {
+	ret := &KeyCollisionError{
+		Key:   key.Clone(),
+		Value: slices.Clone(value),
+	}
+	return ret
+}
+
+func init() {
+	encode := func(ctx context.Context, err error) (msgPrefix string, safeDetails []string, payload proto.Message) {
+		errors.As(err, &payload) // payload = err.(proto.Message)
+		return "", nil, payload
+	}
+	decode := func(ctx context.Context, cause error, msgPrefix string, safeDetails []string, payload proto.Message) error {
+		return payload.(*ProxyFailedError)
+	}
+	typeName := errors.GetTypeKey((*ProxyFailedError)(nil))
+	errors.RegisterWrapperEncoder(typeName, encode)
+	errors.RegisterWrapperDecoder(typeName, decode)
+}
+
 func init() {
 	errors.RegisterLeafDecoder(errors.GetTypeKey((*MissingRecordError)(nil)), func(_ context.Context, _ string, _ []string, _ proto.Message) error {
 		return &MissingRecordError{}
@@ -1746,3 +1851,6 @@ var _ errors.SafeFormatter = &MinTimestampBoundUnsatisfiableError{}
 var _ errors.SafeFormatter = &RefreshFailedError{}
 var _ errors.SafeFormatter = &MVCCHistoryMutationError{}
 var _ errors.SafeFormatter = &UnhandledRetryableError{}
+var _ errors.SafeFormatter = &ReplicaUnavailableError{}
+var _ errors.SafeFormatter = &ProxyFailedError{}
+var _ errors.SafeFormatter = &KeyCollisionError{}

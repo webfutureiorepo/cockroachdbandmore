@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto2";
 package cockroach.sql.distsqlrun;
@@ -173,6 +168,15 @@ message KVStats {
   // UsedStreamer indicates whether the Streamer API was used to perform KV
   // operations.
   optional bool used_streamer = 25 [(gogoproto.nullable) = false];
+
+  // NodeIDs are the NodeIDs of the KV servers that evaluated the requests.
+  repeated int32 node_ids = 26 [(gogoproto.customname) = "NodeIDs"];
+  // Regions are all regions that the KV servers which evaluated the requests
+  // reside in.
+  repeated string regions = 27;
+  // UsedFollowerRead indicates whether at least some reads were served by the
+  // follower replicas.
+  optional bool used_follower_read = 28 [(gogoproto.nullable) = false];
 }
 
 // ExecStats contains statistics about the execution of a component.

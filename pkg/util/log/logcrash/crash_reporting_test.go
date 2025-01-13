@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logcrash
 
@@ -83,7 +78,7 @@ Error types: (1) *runtime.TypeAssertionError`,
 			expErr: `some visible detail: interface conversion: interface {} is nil, not int
 (1) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -105,7 +100,7 @@ Error types: (1) *withstack.withStack (2) *errutil.withPrefix (3) *runtime.TypeA
 			expErr: `interface conversion: interface {} is nil, not int
 (1) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -137,7 +132,7 @@ Error types: (1) *safedetails.withSafeDetails (2) *runtime.TypeAssertionError`,
 			expErr: `I like A and my pin code is ` + rm + ` or 9999
 (1) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -157,7 +152,7 @@ Error types: (1) *withstack.withStack (2) *errutil.leafError`,
 			expErr: `this is preserved: 6: context canceled
 (1) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -193,7 +188,7 @@ Error types: (1) *os.LinkError (2) *safedetails.withSafeDetails (3) logcrash.lea
 			expErr: `this is reportable as well: this is reportable too: this is reportable: ` + rm + `
 (1) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -206,7 +201,7 @@ Error types: (1) *os.LinkError (2) *safedetails.withSafeDetails (3) logcrash.lea
 Wraps: (2) this is reportable as well
 Wraps: (3) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -219,13 +214,13 @@ Wraps: (3) attached stack trace
 Wraps: (4) this is reportable too
 Wraps: (5) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | [...repeated from below...]
 Wraps: (6) this is reportable
 Wraps: (7) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -258,7 +253,7 @@ Error types: (1) *net.OpError (2) logcrash.leafErr`,
 			expErr: `this embed an error: this is reportable too: this is reportable: ` + rm + `
 (1) attached stack trace
   -- stack trace:
-  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   | 	...crash_reporting_test.go:NN
   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   | 	...crash_reporting_test.go:NN
@@ -274,7 +269,7 @@ Wraps: (2) secondary error attachment
   | this is reportable too: this is reportable: ` + rm + `
   | (1) attached stack trace
   |   -- stack trace:
-  |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   |   | 	...crash_reporting_test.go:NN
   |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   |   | 	...crash_reporting_test.go:NN
@@ -287,13 +282,13 @@ Wraps: (2) secondary error attachment
   | Wraps: (2) this is reportable too
   | Wraps: (3) attached stack trace
   |   -- stack trace:
-  |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   |   | 	...crash_reporting_test.go:NN
   |   | [...repeated from below...]
   | Wraps: (4) this is reportable
   | Wraps: (5) attached stack trace
   |   -- stack trace:
-  |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.glob..func2
+  |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init.func2
   |   | 	...crash_reporting_test.go:NN
   |   | github.com/cockroachdb/cockroach/pkg/util/log/logcrash.init
   |   | 	...crash_reporting_test.go:NN

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kv
 
@@ -55,7 +50,7 @@ type Batch struct {
 	reqs            []kvpb.RequestUnion
 
 	// approxMutationReqBytes tracks the approximate size of keys and values in
-	// mutations added to this batch via Put, CPut, InitPut, Del, etc.
+	// mutations added to this batch via Put, CPut, Del, etc.
 	approxMutationReqBytes int
 	// Set when AddRawRequest is used, in which case using the "other"
 	// operations renders the batch unusable.
@@ -93,8 +88,8 @@ type BulkSourceIterator[T GValue] interface {
 }
 
 // ApproximateMutationBytes returns the approximate byte size of the mutations
-// added to this batch via Put, CPut, InitPut, Del, etc methods. Mutations added
-// via AddRawRequest are not tracked.
+// added to this batch via Put, CPut, Del, etc methods. Mutations added via
+// AddRawRequest are not tracked.
 func (b *Batch) ApproximateMutationBytes() int {
 	return b.approxMutationReqBytes
 }
@@ -305,6 +300,7 @@ func (b *Batch) fillResults(ctx context.Context) {
 			case *kvpb.MigrateRequest:
 			case *kvpb.QueryResolvedTimestampRequest:
 			case *kvpb.BarrierRequest:
+			case *kvpb.LinkExternalSSTableRequest:
 			default:
 				if result.Err == nil {
 					result.Err = errors.Errorf("unsupported reply: %T for %T",
@@ -558,6 +554,37 @@ func (b *Batch) CPutAllowingIfNotExists(key, value interface{}, expValue []byte)
 	b.cputInternal(key, value, expValue, true, false)
 }
 
+// CPutWithOriginTimestamp is like CPut except that it also sets the
+// OriginTimestamp and ShouldWinOriginTimestampTie fields.
+//
+// See the comments on kvpb.ConditionalPutRequest related to these
+// fields for a full description of the semantics.
+//
+// This is used by logical data replication and other uses of this API
+// are discouraged since the semantics are subject to change as
+// required by that feature.
+func (b *Batch) CPutWithOriginTimestamp(
+	key, value interface{}, expValue []byte, ts hlc.Timestamp, shouldWinTie bool,
+) {
+	k, err := marshalKey(key)
+	if err != nil {
+		b.initResult(0, 1, notRaw, err)
+		return
+	}
+
+	v, err := marshalValue(value)
+	if err != nil {
+		b.initResult(0, 1, notRaw, err)
+		return
+	}
+	r := kvpb.NewConditionalPut(k, v, expValue, false)
+	r.(*kvpb.ConditionalPutRequest).OriginTimestamp = ts
+	r.(*kvpb.ConditionalPutRequest).ShouldWinOriginTimestampTie = shouldWinTie
+	b.appendReqs(r)
+	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
+	b.initResult(1, 1, notRaw, nil)
+}
+
 // CPutInline conditionally sets the value for a key if the existing value is
 // equal to expValue, but does not maintain multi-version values. To
 // conditionally set a value only if the key doesn't currently exist, pass an
@@ -596,6 +623,32 @@ func (b *Batch) cputInternal(
 	}
 	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	b.initResult(1, 1, notRaw, nil)
+}
+
+// CPutBytesEmpty allows multiple []byte value type CPut requests to be added to
+// the batch using BulkSource interface. The values for these keys are
+// expected to be empty.
+func (b *Batch) CPutBytesEmpty(bs BulkSource[[]byte]) {
+	numKeys := bs.Len()
+	reqs := make([]struct {
+		req   kvpb.ConditionalPutRequest
+		union kvpb.RequestUnion_ConditionalPut
+	}, numKeys)
+	i := 0
+	bsi := bs.Iter()
+	b.bulkRequest(numKeys, func() (kvpb.RequestUnion, int) {
+		pr := &reqs[i].req
+		union := &reqs[i].union
+		union.ConditionalPut = pr
+		pr.AllowIfDoesNotExist = false
+		pr.ExpBytes = nil
+		i++
+		k, v := bsi.Next()
+		pr.Key = k
+		pr.Value.SetBytes(v)
+		pr.Value.InitChecksum(k)
+		return kvpb.RequestUnion{Value: union}, len(k) + len(pr.Value.RawBytes)
+	})
 }
 
 // CPutTuplesEmpty allows multiple CPut tuple requests to be added to the batch
@@ -645,76 +698,6 @@ func (b *Batch) CPutValuesEmpty(bs BulkSource[roachpb.Value]) {
 		k, v := bsi.Next()
 		pr.Key = k
 		pr.Value = v
-		pr.Value.InitChecksum(k)
-		return kvpb.RequestUnion{Value: union}, len(k) + len(pr.Value.RawBytes)
-	})
-}
-
-// InitPut sets the first value for a key to value. An ConditionFailedError is
-// reported if a value already exists for the key and it's not equal to the
-// value passed in. If failOnTombstones is set to true, tombstones will return
-// a ConditionFailedError just like a mismatched value.
-//
-// key can be either a byte slice or a string. value can be any key type, a
-// protoutil.Message or any Go primitive type (bool, int, etc). It is illegal
-// to set value to nil.
-func (b *Batch) InitPut(key, value interface{}, failOnTombstones bool) {
-	k, err := marshalKey(key)
-	if err != nil {
-		b.initResult(0, 1, notRaw, err)
-		return
-	}
-	v, err := marshalValue(value)
-	if err != nil {
-		b.initResult(0, 1, notRaw, err)
-		return
-	}
-	b.appendReqs(kvpb.NewInitPut(k, v, failOnTombstones))
-	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
-	b.initResult(1, 1, notRaw, nil)
-}
-
-// InitPutBytes allows multiple []byte value type InitPut requests to be added to
-// the batch using BulkSource interface.
-func (b *Batch) InitPutBytes(bs BulkSource[[]byte]) {
-	numKeys := bs.Len()
-	reqs := make([]struct {
-		req   kvpb.InitPutRequest
-		union kvpb.RequestUnion_InitPut
-	}, numKeys)
-	i := 0
-	bsi := bs.Iter()
-	b.bulkRequest(numKeys, func() (kvpb.RequestUnion, int) {
-		pr := &reqs[i].req
-		union := &reqs[i].union
-		union.InitPut = pr
-		i++
-		k, v := bsi.Next()
-		pr.Key = k
-		pr.Value.SetBytes(v)
-		pr.Value.InitChecksum(k)
-		return kvpb.RequestUnion{Value: union}, len(k) + len(pr.Value.RawBytes)
-	})
-}
-
-// InitPutTuples allows multiple tuple value type InitPut to be added to the
-// batch using BulkSource interface.
-func (b *Batch) InitPutTuples(bs BulkSource[[]byte]) {
-	numKeys := bs.Len()
-	reqs := make([]struct {
-		req   kvpb.InitPutRequest
-		union kvpb.RequestUnion_InitPut
-	}, numKeys)
-	i := 0
-	bsi := bs.Iter()
-	b.bulkRequest(numKeys, func() (kvpb.RequestUnion, int) {
-		pr := &reqs[i].req
-		union := &reqs[i].union
-		union.InitPut = pr
-		i++
-		k, v := bsi.Next()
-		pr.Key = k
-		pr.Value.SetTuple(v)
 		pr.Value.InitChecksum(k)
 		return kvpb.RequestUnion{Value: union}, len(k) + len(pr.Value.RawBytes)
 	})
@@ -1035,7 +1018,6 @@ func (b *Batch) adminRelocateRange(
 func (b *Batch) addSSTable(
 	s, e interface{},
 	data []byte,
-	remoteFile kvpb.AddSSTableRequest_RemoteFile,
 	disallowConflicts bool,
 	disallowShadowing bool,
 	disallowShadowingBelow hlc.Timestamp,
@@ -1059,13 +1041,26 @@ func (b *Batch) addSSTable(
 			EndKey: end,
 		},
 		Data:                           data,
-		RemoteFile:                     remoteFile,
 		DisallowConflicts:              disallowConflicts,
 		DisallowShadowing:              disallowShadowing,
 		DisallowShadowingBelow:         disallowShadowingBelow,
 		MVCCStats:                      stats,
 		IngestAsWrites:                 ingestAsWrites,
 		SSTTimestampToRequestTimestamp: sstTimestampToRequestTimestamp,
+	}
+	b.appendReqs(req)
+	b.initResult(1, 0, notRaw, nil)
+}
+
+func (b *Batch) linkExternalSSTable(
+	span roachpb.Span, externalFile kvpb.LinkExternalSSTableRequest_ExternalFile,
+) {
+	req := &kvpb.LinkExternalSSTableRequest{
+		RequestHeader: kvpb.RequestHeader{
+			Key:    span.Key,
+			EndKey: span.EndKey,
+		},
+		ExternalFile: externalFile,
 	}
 	b.appendReqs(req)
 	b.initResult(1, 0, notRaw, nil)
@@ -1153,6 +1148,10 @@ func (b *Batch) bulkRequest(
 }
 
 // GetResult retrieves the Result and Result row KeyValue for a particular index.
+//
+// WARNING: introduce new usages of this function with care. See discussion in
+// https://github.com/cockroachdb/cockroach/pull/112937.
+// TODO(yuzefovich): look into removing this confusing function.
 func (b *Batch) GetResult(idx int) (*Result, KeyValue, error) {
 	origIdx := idx
 	for i := range b.Results {
@@ -1160,6 +1159,8 @@ func (b *Batch) GetResult(idx int) (*Result, KeyValue, error) {
 		if idx < r.calls {
 			if idx < len(r.Rows) {
 				return r, r.Rows[idx], nil
+			} else if idx < len(r.Keys) {
+				return r, KeyValue{Key: r.Keys[idx]}, nil
 			} else {
 				return r, KeyValue{}, nil
 			}

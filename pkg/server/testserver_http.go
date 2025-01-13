@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -18,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -26,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -88,6 +85,9 @@ func (ts *httpTestServer) GetUnauthenticatedHTTPClient() (http.Client, error) {
 		RoundTripper: client.Transport,
 		tenantName:   ts.t.tenantName,
 	}
+	if util.RaceEnabled {
+		client.Timeout = 30 * time.Second
+	}
 	return client, nil
 }
 
@@ -96,6 +96,9 @@ func (ts *httpTestServer) GetAdminHTTPClient() (http.Client, error) {
 	httpClient, _, err := ts.GetAuthenticatedHTTPClientAndCookie(
 		apiconstants.TestingUserName(), true, serverutils.SingleTenantSession,
 	)
+	if util.RaceEnabled {
+		httpClient.Timeout = 30 * time.Second
+	}
 	return httpClient, err
 }
 
@@ -108,6 +111,9 @@ func (ts *httpTestServer) GetAuthenticatedHTTPClient(
 		authUser = apiconstants.TestingUserNameNoAdmin()
 	}
 	httpClient, _, err := ts.GetAuthenticatedHTTPClientAndCookie(authUser, isAdmin, session)
+	if util.RaceEnabled {
+		httpClient.Timeout = 30 * time.Second
+	}
 	return httpClient, err
 }
 
@@ -194,7 +200,7 @@ func (ts *httpTestServer) GetAuthenticatedHTTPClientAndCookie(
 func (ts *httpTestServer) CreateAuthUser(userName username.SQLUsername, isAdmin bool) error {
 	if _, err := ts.t.sqlServer.internalExecutor.ExecEx(context.TODO(),
 		"create-auth-user", nil,
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf("CREATE USER %s", userName.Normalized()),
 	); err != nil {
 		return err
@@ -202,7 +208,7 @@ func (ts *httpTestServer) CreateAuthUser(userName username.SQLUsername, isAdmin 
 	if isAdmin {
 		if _, err := ts.t.sqlServer.internalExecutor.ExecEx(context.TODO(),
 			"grant-admin", nil,
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			fmt.Sprintf("GRANT admin TO %s WITH ADMIN OPTION", userName.Normalized()),
 		); err != nil {
 			return err

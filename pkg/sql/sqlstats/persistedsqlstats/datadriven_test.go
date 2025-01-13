@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sqlstats is a subsystem that is responsible for tracking the
 // statistics of statements and transactions.
@@ -70,7 +65,7 @@ func TestSQLStatsDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderStressRace(t)
+	skip.UnderRace(t)
 
 	stubTime := &stubTime{}
 	injector := newRuntimeKnobsInjector()
@@ -91,7 +86,7 @@ func TestSQLStatsDataDriven(t *testing.T) {
 	server := cluster.Server(0 /* idx */).ApplicationLayer()
 	sqlStats := server.SQLServer().(*sql.Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats)
 
-	appStats := sqlStats.GetApplicationStats("app1", false)
+	appStats := sqlStats.GetApplicationStats("app1")
 
 	// Open two connections so that we can run statements without messing up
 	// the SQL stats.
@@ -126,7 +121,7 @@ func TestSQLStatsDataDriven(t *testing.T) {
 			}
 			return strings.Join(rows, "\n")
 		case "sql-stats-flush":
-			sqlStats.Flush(ctx)
+			sqlStats.MaybeFlush(ctx, cluster.ApplicationLayer(0).AppStopper())
 		case "set-time":
 			mustHaveArgsOrFatal(t, d, timeArgs)
 

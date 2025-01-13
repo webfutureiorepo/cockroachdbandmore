@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -16,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -413,7 +409,7 @@ func (i *immediateVisitor) AddColumnToIndex(ctx context.Context, op scop.AddColu
 	}
 	// If this is an inverted column, note that.
 	if indexDesc.Type == descpb.IndexDescriptor_INVERTED && op.ColumnID == indexDesc.InvertedColumnID() {
-		indexDesc.InvertedColumnKinds = append(indexDesc.InvertedColumnKinds, op.InvertedKind)
+		indexDesc.InvertedColumnKinds = []catpb.InvertedIndexColumnKind{op.InvertedKind}
 	}
 	return nil
 }
@@ -495,5 +491,19 @@ func (m *deferredVisitor) MaybeAddSplitForIndex(
 	_ context.Context, op scop.MaybeAddSplitForIndex,
 ) error {
 	m.AddIndexForMaybeSplitAndScatter(op.TableID, op.IndexID)
+	return nil
+}
+
+func (i *immediateVisitor) AddIndexZoneConfig(_ context.Context, op scop.AddIndexZoneConfig) error {
+	i.ImmediateMutationStateUpdater.UpdateSubzoneConfig(
+		op.TableID, op.Subzone, op.SubzoneSpans, op.SubzoneIndexToDelete)
+	return nil
+}
+
+func (i *immediateVisitor) AddPartitionZoneConfig(
+	_ context.Context, op scop.AddPartitionZoneConfig,
+) error {
+	i.ImmediateMutationStateUpdater.UpdateSubzoneConfig(
+		op.TableID, op.Subzone, op.SubzoneSpans, op.SubzoneIndexToDelete)
 	return nil
 }

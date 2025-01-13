@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -31,7 +26,7 @@ var asyncpgBlocklist = blocklist{
 	`test_codecs.TestCodecs.test_array_with_custom_json_text_codec`:                                       "unsupported feature - https://github.com/cockroachdb/cockroach/issues/23468",
 	`test_codecs.TestCodecs.test_composites_in_arrays`:                                                    "unsupported feature - https://github.com/cockroachdb/cockroach/issues/27792",
 	`test_codecs.TestCodecs.test_enum_and_range`:                                                          "unsupported feature - https://github.com/cockroachdb/cockroach/issues/27791",
-	`test_codecs.TestCodecs.test_enum_in_composite`:                                                       "unsupported feature - https://github.com/cockroachdb/cockroach/issues/27792",
+	`test_codecs.TestCodecs.test_enum_in_composite`:                                                       "unsupported feature - https://github.com/cockroachdb/cockroach/issues/91779",
 	`test_codecs.TestCodecs.test_invalid_input`:                                                           "default int size discrepancy",
 	`test_codecs.TestCodecs.test_relacl_array_type`:                                                       "unsupported feature - https://github.com/cockroachdb/cockroach/issues/40283",
 	`test_codecs.TestCodecs.test_unhandled_type_fallback`:                                                 "unsupported feature - https://github.com/cockroachdb/cockroach/issues/54516",
@@ -39,20 +34,12 @@ var asyncpgBlocklist = blocklist{
 	`test_codecs.TestCodecs.test_void`:                                                                    "unknown",
 	`test_connect.TestSettings.test_get_settings_01`:                                                      "unknown",
 	`test_copy.TestCopyFrom.test_copy_from_table_basics`:                                                  "no support for COPY TO - https://github.com/cockroachdb/cockroach/issues/85571",
-	`test_copy.TestCopyTo.test_copy_to_table_basics`:                                                      "unknown",
 	`test_cursor.TestCursor.test_cursor_02`:                                                               "unknown",
 	`test_cursor.TestCursor.test_cursor_04`:                                                               "unknown",
 	`test_cursor.TestIterableCursor.test_cursor_iterable_02`:                                              "unsupported feature - https://github.com/cockroachdb/cockroach/issues/77099",
 	`test_exceptions.TestExceptions.test_exceptions_str`:                                                  "unknown",
 	`test_exceptions.TestExceptions.test_exceptions_unpacking`:                                            "unknown",
 	`test_execute.TestExecuteMany.test_executemany_client_failure_in_transaction`:                         "unknown",
-	`test_execute.TestExecuteMany.test_executemany_client_server_failure_conflict`:                        "unknown",
-	`test_execute.TestExecuteMany.test_executemany_prepare`:                                               "unknown",
-	`test_execute.TestExecuteMany.test_executemany_server_failure`:                                        "unknown",
-	`test_execute.TestExecuteMany.test_executemany_server_failure_after_writes`:                           "unknown",
-	`test_execute.TestExecuteMany.test_executemany_server_failure_during_writes`:                          "unknown",
-	`test_execute.TestExecuteMany.test_executemany_timeout`:                                               "unknown",
-	`test_execute.TestExecuteMany.test_executemany_timeout_flow_control`:                                  "unknown",
 	`test_execute.TestExecuteScript.test_execute_script_3`:                                                "unknown",
 	`test_execute.TestExecuteScript.test_execute_script_check_transactionality`:                           "unknown",
 	`test_introspection.TestIntrospection.test_introspection_no_stmt_cache_01`:                            "hstore - https://github.com/cockroachdb/cockroach/issues/41284",
@@ -60,7 +47,6 @@ var asyncpgBlocklist = blocklist{
 	`test_introspection.TestIntrospection.test_introspection_on_large_db`:                                 "unsupported feature - https://github.com/cockroachdb/cockroach/issues/22456",
 	`test_introspection.TestIntrospection.test_introspection_retries_after_cache_bust`:                    "unsupported feature - https://github.com/cockroachdb/cockroach/issues/27796",
 	`test_introspection.TestIntrospection.test_introspection_sticks_for_ps`:                               "unknown type: pg_catalog.json",
-	`test_listeners.TestListeners.test_dangling_listener_warns`:                                           "LISTEN - https://github.com/cockroachdb/cockroach/issues/41522",
 	`test_listeners.TestListeners.test_listen_01`:                                                         "LISTEN - https://github.com/cockroachdb/cockroach/issues/41522",
 	`test_listeners.TestListeners.test_listen_02`:                                                         "LISTEN - https://github.com/cockroachdb/cockroach/issues/41522",
 	`test_listeners.TestListeners.test_listen_notletters`:                                                 "LISTEN - https://github.com/cockroachdb/cockroach/issues/41522",
@@ -68,7 +54,6 @@ var asyncpgBlocklist = blocklist{
 	`test_listeners.TestLogListeners.test_log_listener_02`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_listeners.TestLogListeners.test_log_listener_03`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_pool.TestPool.test_pool_remote_close`:                                                           "unsupported pg_terminate_backend() function",
-	`test_prepare.TestPrepare.test_prepare_08_big_result`:                                                 "unknown",
 	`test_prepare.TestPrepare.test_prepare_09_raise_error`:                                                "unsupported feature - https://github.com/cockroachdb/cockroach/issues/17511",
 	`test_prepare.TestPrepare.test_prepare_14_explain`:                                                    "unknown",
 	`test_prepare.TestPrepare.test_prepare_16_command_result`:                                             "unknown",
@@ -81,5 +66,20 @@ var asyncpgBlocklist = blocklist{
 }
 
 var asyncpgIgnoreList = blocklist{
-	`test_pool.TestPool.test_pool_01`: "can't parse output",
+	`test_pool.TestPool.test_pool_01`:                                   "can't parse output",
+	`test_copy.TestCopyFrom.test_copy_from_query_basics`:                "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyFrom.test_copy_from_query_cancellation_explicit`: "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyFrom.test_copy_from_query_timeout_1`:             "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyFrom.test_copy_from_query_to_sink`:               "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyFrom.test_copy_from_table_large_rows`:            "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_records_to_table_1`:                 "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_records_to_table_no_binary_codec`:   "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_basics`:                    "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_fail_in_source_1`:          "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_fail_in_source_2`:          "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_from_bytes_like`:           "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_from_file_path`:            "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_large_rows`:                "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_copy.TestCopyTo.test_copy_to_table_timeout`:                   "flaky; see #119291 and https://github.com/MagicStack/asyncpg/issues/240",
+	`test_listeners.TestListeners.test_dangling_listener_warns`:         "flaky",
 }

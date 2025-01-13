@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package vtable
 
@@ -100,6 +95,7 @@ CREATE TABLE pg_catalog.pg_attribute (
 	attfdwoptions STRING[],
 	atthasmissing BOOL,
 	attmissingval STRING[],
+	attishidden BOOL, -- CRDB only field to indicate if a column is NOT VISIBLE.
   INDEX(attrelid)
 )`
 
@@ -589,7 +585,7 @@ CREATE TABLE pg_catalog.pg_prepared_statements (
 )`
 
 // PGCatalogProc describes the schema of the pg_catalog.pg_proc table.
-// https://www.postgresql.org/docs/9.5/catalog-pg-proc.html,
+// https://www.postgresql.org/docs/16/catalog-pg-proc.html,
 const PGCatalogProc = `
 CREATE TABLE pg_catalog.pg_proc (
 	oid OID,
@@ -600,9 +596,8 @@ CREATE TABLE pg_catalog.pg_proc (
 	procost FLOAT4,
 	prorows FLOAT4,
 	provariadic OID,
-	protransform STRING,
-	proisagg BOOL,
-	proiswindow BOOL,
+	prosupport REGPROC,
+	prokind "char",
 	prosecdef BOOL,
 	proleakproof BOOL,
 	proisstrict BOOL,
@@ -620,10 +615,9 @@ CREATE TABLE pg_catalog.pg_proc (
 	protrftypes OID[],
 	prosrc STRING,
 	probin STRING,
+	prosqlbody STRING,
 	proconfig STRING[],
 	proacl STRING[],
-	prokind "char",
-	prosupport REGPROC,
 	INDEX(oid)
 )`
 

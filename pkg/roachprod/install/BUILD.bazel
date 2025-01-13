@@ -17,6 +17,7 @@ go_library(
         "staging.go",
     ],
     embedsrcs = [
+        "files/cockroachdb-logging.yaml",
         "scripts/download.sh",
         "scripts/start.sh",
         "scripts/open_ports.sh",
@@ -24,7 +25,7 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/roachprod/install",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/cli/exit",
+        "//pkg/ccl/utilccl/licenseccl",
         "//pkg/roachprod/cloud",
         "//pkg/roachprod/config",
         "//pkg/roachprod/errors",
@@ -45,6 +46,7 @@ go_library(
         "@com_github_cockroachdb_errors//:errors",
         "@org_golang_x_exp//maps",
         "@org_golang_x_sync//errgroup",
+        "@org_golang_x_sys//unix",
     ],
 )
 
@@ -59,16 +61,14 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":install"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/roachprod/cloud",
         "//pkg/roachprod/logger",
         "//pkg/roachprod/vm",
+        "//pkg/roachprod/vm/gce/testutils",
         "//pkg/roachprod/vm/local",
         "//pkg/testutils/datapathutils",
+        "//pkg/util/randutil",
         "//pkg/util/retry",
         "@com_github_cockroachdb_datadriven//:datadriven",
         "@com_github_cockroachdb_errors//:errors",

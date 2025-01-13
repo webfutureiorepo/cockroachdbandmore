@@ -1,26 +1,23 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import {
   ActiveStatementFilters,
   defaultFilters,
   SortSetting,
 } from "@cockroachlabs/cluster-ui";
+
+import { refreshLiveWorkload } from "src/redux/apiReducers";
+import { LocalSetting } from "src/redux/localsettings";
+import { AdminUIState } from "src/redux/state";
 import {
   selectActiveStatements,
   selectAppName,
   selectClusterLocksMaxApiSizeReached,
 } from "src/selectors";
-import { refreshLiveWorkload } from "src/redux/apiReducers";
-import { LocalSetting } from "src/redux/localsettings";
-import { AdminUIState } from "src/redux/state";
+
 import { autoRefreshLocalSetting } from "../transactions/activeTransactionsSelectors";
 
 const selectedColumnsLocalSetting = new LocalSetting<

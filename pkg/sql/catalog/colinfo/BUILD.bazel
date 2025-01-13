@@ -16,7 +16,8 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/clusterversion",
+        "//pkg/base",
+        "//pkg/settings/cluster",
         "//pkg/sql/catalog",
         "//pkg/sql/catalog/catpb",
         "//pkg/sql/catalog/descpb",
@@ -43,10 +44,6 @@ go_test(
         "result_columns_test.go",
     ],
     embed = [":colinfo"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/sql/catalog/colinfo/colinfotestutils",
         "//pkg/sql/sem/tree",

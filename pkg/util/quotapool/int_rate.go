@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package quotapool
 
@@ -14,9 +9,9 @@ import (
 	"context"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/tokenbucket"
 )
 
@@ -33,7 +28,7 @@ func Inf() Limit {
 // in the case that they end up not getting used.
 type RateLimiter struct {
 	qp    *AbstractPool
-	isInf syncutil.AtomicBool
+	isInf atomic.Bool
 }
 
 // NewRateLimiter defines a new RateLimiter. The limiter is implemented as a
@@ -47,7 +42,7 @@ func NewRateLimiter(name string, rate Limit, burst int64, options ...Option) *Ra
 	tb := &tokenbucket.TokenBucket{}
 	rl.qp = New(name, tb, options...)
 	tb.InitWithNowFn(tokenbucket.TokensPerSecond(rate), tokenbucket.Tokens(burst), rl.qp.timeSource.Now)
-	rl.isInf.Set(math.IsInf(float64(rate), 1))
+	rl.isInf.Store(math.IsInf(float64(rate), 1))
 	return rl
 }
 
@@ -67,7 +62,7 @@ func (rl *RateLimiter) WaitN(ctx context.Context, n int64) error {
 		// Special case 0 acquisition.
 		return nil
 	}
-	if rl.isInf.Get() {
+	if rl.isInf.Load() {
 		return nil
 	}
 	r := rl.newRateRequest(n)
@@ -82,7 +77,7 @@ func (rl *RateLimiter) WaitN(ctx context.Context, n int64) error {
 // false and not block if there is currently insufficient quota or the pool is
 // closed.
 func (rl *RateLimiter) AdmitN(n int64) bool {
-	if rl.isInf.Get() {
+	if rl.isInf.Load() {
 		return true
 	}
 
@@ -99,7 +94,7 @@ func (rl *RateLimiter) AdmitN(n int64) bool {
 // putting the limiter into debt.
 func (rl *RateLimiter) UpdateLimit(rate Limit, burst int64) {
 	rl.qp.Update(func(res Resource) (shouldNotify bool) {
-		rl.isInf.Set(math.IsInf(float64(rate), 1))
+		rl.isInf.Store(math.IsInf(float64(rate), 1))
 		tb := res.(*tokenbucket.TokenBucket)
 		tb.UpdateConfig(tokenbucket.TokensPerSecond(rate), tokenbucket.Tokens(burst))
 		return true

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -75,6 +70,7 @@ func TestSqlActivityUpdateJob(t *testing.T) {
 	ts := srv.ApplicationLayer()
 
 	db := sqlutils.MakeSQLRunner(sqlDB)
+	db.Exec(t, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
 
 	var count int
 	row := db.QueryRow(t, "SELECT count_rows() FROM system.public.transaction_activity")
@@ -107,7 +103,7 @@ func TestSqlActivityUpdateJob(t *testing.T) {
 	db.Exec(t, "SET SESSION application_name=$1", appName)
 	db.Exec(t, "SELECT 1;")
 
-	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, srv.AppStopper())
 
 	db.Exec(t, "SET SESSION application_name=$1", "randomIgnore")
 
@@ -145,6 +141,7 @@ func TestMergeFunctionLogic(t *testing.T) {
 	defer srv.Stopper().Stop(context.Background())
 
 	db := sqlutils.MakeSQLRunner(sqlDB)
+	db.Exec(t, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
 
 	appName := "TestMergeFunctionLogic"
 	db.Exec(t, "SET SESSION application_name=$1", appName)
@@ -152,7 +149,7 @@ func TestMergeFunctionLogic(t *testing.T) {
 	db.Exec(t, "SELECT * FROM system.statement_statistics")
 	db.Exec(t, "SELECT count_rows() FROM system.transaction_statistics")
 
-	srv.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+	srv.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, srv.AppStopper())
 
 	db.Exec(t, "SET SESSION application_name=$1", "randomIgnore")
 
@@ -237,7 +234,7 @@ func TestSqlActivityUpdateTopLimitJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderStressRace(t, "test is too slow to run under race")
+	skip.UnderRace(t, "test is too slow to run under race")
 
 	stubTime := timeutil.Now().Truncate(time.Hour)
 	sqlStatsKnobs := sqlstats.CreateTestingKnobs()
@@ -258,6 +255,7 @@ func TestSqlActivityUpdateTopLimitJob(t *testing.T) {
 	ts := srv.ApplicationLayer()
 
 	db := sqlutils.MakeSQLRunner(sqlDB)
+	db.Exec(t, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
 
 	// Give permission to write to sys tables.
 	db.Exec(t, "INSERT INTO system.users VALUES ('node', NULL, true, 3)")
@@ -316,7 +314,7 @@ func TestSqlActivityUpdateTopLimitJob(t *testing.T) {
 		db.Exec(t, "SET SESSION application_name=$1", "randomIgnore")
 
 		db.Exec(t, "SET CLUSTER SETTING sql.stats.flush.enabled  = true;")
-		ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+		ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, srv.AppStopper())
 		db.Exec(t, "SET CLUSTER SETTING sql.stats.flush.enabled  = false;")
 
 		// Run the updater to add rows to the activity tables.
@@ -502,7 +500,9 @@ func TestSqlActivityJobRunsAfterStatsFlush(t *testing.T) {
 	defer srv.Stopper().Stop(context.Background())
 	defer db.Close()
 
-	_, err := db.ExecContext(ctx, "SET CLUSTER SETTING sql.stats.flush.interval = '100ms'")
+	_, err := db.ExecContext(ctx, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "SET CLUSTER SETTING sql.stats.flush.interval = '100ms'")
 	require.NoError(t, err)
 	appName := "TestScheduledSQLStatsCompaction"
 	_, err = db.ExecContext(ctx, "SET SESSION application_name=$1", appName)
@@ -566,6 +566,7 @@ func TestTransactionActivityMetadata(t *testing.T) {
 	updater := newSqlActivityUpdater(st, execCfg.InternalDB, sqlStatsKnobs)
 
 	db := sqlutils.MakeSQLRunner(sqlDB)
+	db.Exec(t, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
 	db.Exec(t, "SET SESSION application_name = 'test_txn_activity_table'")
 
 	// Generate some sql stats data.
@@ -573,7 +574,7 @@ func TestTransactionActivityMetadata(t *testing.T) {
 
 	// Flush and transfer stats.
 	var metadataJSON string
-	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, s.AppStopper())
 
 	// Ensure that the metadata column contains the populated 'stmtFingerprintIDs' field.
 	var metadata struct {
@@ -590,7 +591,7 @@ func TestTransactionActivityMetadata(t *testing.T) {
 	db.Exec(t, "SELECT 1")
 
 	// Flush and transfer top stats.
-	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, s.AppStopper())
 	require.NoError(t, updater.transferTopStats(ctx, stubTime, 100, 100, 100))
 
 	// Ensure that the metadata column contains the populated 'stmtFingerprintIDs' field.
@@ -633,8 +634,9 @@ func TestActivityStatusCombineAPI(t *testing.T) {
 	updater := newSqlActivityUpdater(st, execCfg.InternalDB, sqlStatsKnobs)
 
 	db := sqlutils.MakeSQLRunner(sqlDB)
+	db.Exec(t, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
 	// Generate a random app name each time to avoid conflicts
-	appName := "test_status_api" + uuid.FastMakeV4().String()
+	appName := "test_status_api" + uuid.MakeV4().String()
 	db.Exec(t, "SET SESSION application_name = $1", appName)
 
 	// Generate some sql stats data.
@@ -645,7 +647,7 @@ func TestActivityStatusCombineAPI(t *testing.T) {
 
 	// Flush and transfer stats.
 	var metadataJSON string
-	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+	ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, s.AppStopper())
 
 	// Ensure that the metadata column contains the populated 'stmtFingerprintIDs' field.
 	var metadata struct {
@@ -778,6 +780,7 @@ func TestFlushToActivityWithDifferentAggTs(t *testing.T) {
 	ts := srv.ApplicationLayer()
 
 	db := sqlutils.MakeSQLRunner(sqlDB)
+	db.Exec(t, `SET CLUSTER SETTING sql.stats.activity.flush.enabled = true;`)
 
 	// Start with empty activity tables.
 	execCfg := ts.ExecutorConfig().(ExecutorConfig)
@@ -837,7 +840,7 @@ func TestFlushToActivityWithDifferentAggTs(t *testing.T) {
 				fmt.Fprintf(&buf, "%s\n", strings.Join(row, ","))
 			}
 		case "flush-stats":
-			ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).Flush(ctx)
+			ts.SQLServer().(*Server).GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats).MaybeFlush(ctx, srv.AppStopper())
 		case "update-top-activity":
 			// Populate the Top Activity. This will use the transfer all scenarios
 			// with there only being a few rows.
@@ -922,7 +925,7 @@ func verifyActivityTableContentHelper(t *testing.T, db *sqlutils.SQLRunner, appN
 
 		// Metadata objects are changed because it's an aggregate.
 		query = fmt.Sprintf(`SELECT count_rows() 
-		FROM (select fingerprint_id, app_name, crdb_internal.merge_stats_metadata(array_agg(metadata)) AS metadata FROM system.public.statement_statistics GROUP BY fingerprint_id, app_name) ss
+		FROM (select fingerprint_id, app_name, merge_stats_metadata(metadata) AS metadata FROM system.public.statement_statistics GROUP BY fingerprint_id, app_name) ss
 		INNER JOIN	(SELECT * FROM %s) sa using (fingerprint_id, app_name)
 		WHERE app_name = $1 AND
 		      sa.metadata = ss.metadata`, table)
@@ -948,7 +951,7 @@ func verifyTopActivityTableContentHelper(t *testing.T, db *sqlutils.SQLRunner, l
 		                        fingerprint_id,
 		                        app_name,
 		                        max(metadata) AS max_metadata,
-		                        crdb_internal.merge_transaction_stats(array_agg(statistics)) as statistics
+		                        merge_transaction_stats(statistics) as statistics
 					from system.public.transaction_statistics 
 						where app_name not like '$ internal%%' and app_name != 'randomIgnore'
 						group by aggregated_ts, fingerprint_id, app_name)
@@ -988,8 +991,8 @@ func verifyTopActivityTableContentHelper(t *testing.T, db *sqlutils.SQLRunner, l
 		                        aggregated_ts,
 		                        fingerprint_id,
 		                        app_name,
-		                        crdb_internal.merge_stats_metadata(array_agg(metadata))    AS merged_metadata,
-		                        crdb_internal.merge_statement_stats(array_agg(statistics)) as statistics
+		                        merge_stats_metadata(metadata)    AS merged_metadata,
+		                        merge_statement_stats(statistics) as statistics
 					from system.public.statement_statistics 
 						where app_name not like '$ internal%%' and app_name != 'randomIgnore'
 						group by aggregated_ts, fingerprint_id, app_name)

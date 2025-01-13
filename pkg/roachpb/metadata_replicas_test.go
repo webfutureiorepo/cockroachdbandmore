@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachpb
 
@@ -16,16 +11,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/raft/confchange"
+	"github.com/cockroachdb/cockroach/pkg/raft/quorum"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/confchange"
-	"go.etcd.io/raft/v3/quorum"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 func rd(typ ReplicaType, id uint64) ReplicaDescriptor {
@@ -187,8 +182,8 @@ func TestReplicaDescriptorsConfState(t *testing.T) {
 	for _, test := range tests {
 		t.Run("", func(t *testing.T) {
 			r := MakeReplicaSet(test.in)
-			cs := r.ConfState()
-			require.Equal(t, test.out, raft.DescribeConfState(cs))
+			cs := r.ConfState().Describe()
+			require.Equal(t, test.out, cs)
 		})
 	}
 }
@@ -337,7 +332,12 @@ func TestReplicaDescriptorsCanMakeProgressRandom(t *testing.T) {
 
 		raftCanMakeProgress, skip := func() (res bool, skip bool) {
 			cfg, _, err := confchange.Restore(
-				confchange.Changer{Tracker: tracker.MakeProgressTracker(1, 0)},
+				confchange.Changer{
+					Config:           quorum.MakeEmptyConfig(),
+					ProgressMap:      tracker.MakeEmptyProgressMap(),
+					MaxInflight:      1,
+					MaxInflightBytes: 0,
+				},
 				rng.ConfState(),
 			)
 			if err != nil {
@@ -346,10 +346,10 @@ func TestReplicaDescriptorsCanMakeProgressRandom(t *testing.T) {
 				}
 				return false, true
 			}
-			votes := make(map[uint64]bool, len(rng.wrapped))
+			votes := make(map[raftpb.PeerID]bool, len(rng.wrapped))
 			for _, rDesc := range rng.wrapped {
 				if liveness[rDesc.ReplicaID-1] {
-					votes[uint64(rDesc.ReplicaID)] = true
+					votes[raftpb.PeerID(rDesc.ReplicaID)] = true
 				}
 			}
 			return cfg.Voters.VoteResult(votes) == quorum.VoteWon, false

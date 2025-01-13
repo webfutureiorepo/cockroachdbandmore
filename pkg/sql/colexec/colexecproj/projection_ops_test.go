@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecproj
 
@@ -148,7 +143,7 @@ func TestRandomComparisons(t *testing.T) {
 		lVec := b.ColVec(0)
 		rVec := b.ColVec(1)
 		ret := b.ColVec(2)
-		for _, vec := range []coldata.Vec{lVec, rVec} {
+		for _, vec := range []*coldata.Vec{lVec, rVec} {
 			coldatatestutils.RandomVec(
 				coldatatestutils.RandomVecArgs{
 					Rand:             rng,
@@ -167,7 +162,8 @@ func TestRandomComparisons(t *testing.T) {
 		}
 		for _, cmpOpSymbol := range supportedCmpOps {
 			for i := range lDatums {
-				cmp := lDatums[i].Compare(&evalCtx, rDatums[i])
+				cmp, err := lDatums[i].Compare(ctx, &evalCtx, rDatums[i])
+				require.NoError(t, err)
 				var b bool
 				switch cmpOpSymbol {
 				case treecmp.EQ:
@@ -186,7 +182,7 @@ func TestRandomComparisons(t *testing.T) {
 				expected[i] = b
 			}
 			cmpOp := treecmp.MakeComparisonOperator(cmpOpSymbol)
-			input := colexectestutils.NewChunkingBatchSource(testAllocator, typs, []coldata.Vec{lVec, rVec, ret}, numTuples)
+			input := colexectestutils.NewChunkingBatchSource(testAllocator, typs, []*coldata.Vec{lVec, rVec, ret}, numTuples)
 			op, err := colexectestutils.CreateTestProjectingOperator(
 				ctx, flowCtx, input, []*types.T{typ, typ},
 				fmt.Sprintf("@1 %s @2", cmpOp), testMemAcc,

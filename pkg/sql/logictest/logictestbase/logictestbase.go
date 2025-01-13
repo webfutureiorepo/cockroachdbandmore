@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logictestbase
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
 var (
@@ -82,6 +78,9 @@ type TestClusterConfig struct {
 	// disableLocalityOptimizedSearch disables the cluster setting
 	// locality_optimized_partitioned_index_scan, which is enabled by default.
 	DisableLocalityOptimizedSearch bool
+	// EnableDefaultIsolationLevel uses the specified isolation level for all
+	// transactions by default.
+	EnableDefaultIsolationLevel tree.IsolationLevel
 	// DeclarativeCorpusCollection enables support for collecting corpuses
 	// for the declarative schema changer.
 	DeclarativeCorpusCollection bool
@@ -299,6 +298,20 @@ var LogicTestConfigs = []TestClusterConfig{
 		OverrideVectorize:   "off",
 	},
 	{
+		Name:                        "local-read-committed",
+		NumNodes:                    1,
+		OverrideDistSQLMode:         "off",
+		IsCCLConfig:                 true,
+		EnableDefaultIsolationLevel: tree.ReadCommittedIsolation,
+	},
+	{
+		Name:                        "local-repeatable-read",
+		NumNodes:                    1,
+		OverrideDistSQLMode:         "off",
+		IsCCLConfig:                 true,
+		EnableDefaultIsolationLevel: tree.RepeatableReadIsolation,
+	},
+	{
 		Name:                "fakedist",
 		NumNodes:            3,
 		UseFakeSpanResolver: true,
@@ -471,39 +484,21 @@ var LogicTestConfigs = []TestClusterConfig{
 		Localities: multiregion15node5region3azsLocalities,
 	},
 	{
-		// This config runs tests using 23.1 cluster version, simulating a node that
+		// This config runs tests using 24.3 cluster version, simulating a node that
 		// is operating in a mixed-version cluster.
-		Name:                        "local-mixed-23.1",
+		Name:                        "local-mixed-24.3",
 		NumNodes:                    1,
 		OverrideDistSQLMode:         "off",
-		BootstrapVersion:            clusterversion.V23_1,
-		DisableUpgrade:              true,
-		DeclarativeCorpusCollection: true,
-	},
-	{
-		// This config runs tests using 23.2 cluster version, simulating a node that
-		// is operating in a mixed-version cluster.
-		Name:                        "local-mixed-23.2",
-		NumNodes:                    1,
-		OverrideDistSQLMode:         "off",
-		BootstrapVersion:            clusterversion.V23_2,
+		BootstrapVersion:            clusterversion.V24_3,
 		DisableUpgrade:              true,
 		DeclarativeCorpusCollection: true,
 	},
 	{
 		// This config runs a cluster with 3 nodes, with a separate process per
-		// node. The nodes initially start on v23.1.
-		Name:                     "cockroach-go-testserver-23.1",
+		// node. The nodes initially start on v24.3.
+		Name:                     "cockroach-go-testserver-24.3",
 		UseCockroachGoTestserver: true,
-		BootstrapVersion:         clusterversion.V23_1,
-		NumNodes:                 3,
-	},
-	{
-		// This config runs a cluster with 3 nodes, with a separate process per
-		// node. The nodes initially start on v23.2.
-		Name:                     "cockroach-go-testserver-23.2",
-		UseCockroachGoTestserver: true,
-		BootstrapVersion:         clusterversion.V23_2,
+		BootstrapVersion:         clusterversion.V24_3,
 		NumNodes:                 3,
 	},
 }
@@ -511,11 +506,21 @@ var LogicTestConfigs = []TestClusterConfig{
 // ConfigIdx is an index in the above slice.
 type ConfigIdx int
 
+func (idx ConfigIdx) Name() string {
+	return LogicTestConfigs[idx].Name
+}
+
 // ConfigSet is a collection of configurations.
 type ConfigSet []ConfigIdx
 
-// ConfigIdxToName is a map of ConfigIdx to the corresponding configuration name.
-var ConfigIdxToName = make(map[ConfigIdx]string)
+// ConfigNames returns the configuration names in the set.
+func (cs ConfigSet) ConfigNames() []string {
+	res := make([]string, len(cs))
+	for i, idx := range cs {
+		res[i] = idx.Name()
+	}
+	return res
+}
 
 // LineScanner handles reading from input test files.
 type LineScanner struct {
@@ -562,42 +567,61 @@ func (l *LineScanner) Text() string {
 	return l.Scanner.Text()
 }
 
-var (
-	// DefaultConfigName is a special alias for the default configs.
-	DefaultConfigName = "default-configs"
-	// DefaultConfigNames is the list of default configs captured by the DefaultConfigName.
-	DefaultConfigNames = []string{
+// DefaultConfigSet is an alias for the set of default configs.
+const DefaultConfigSet = "default-configs"
+
+// DefaultConfigSets are sets of configs that have an alias which can be used
+// instead of specific config names.
+//
+// Config sets allow referring to multiple configs more conveniently, and allow
+// updating some of these lists without changing the test files.
+var DefaultConfigSets = map[string]ConfigSet{
+	// Default configs which are used when a logictest file doesn't specify any
+	// specific configs.
+	DefaultConfigSet: makeConfigSet(
 		"local",
 		"local-legacy-schema-changer",
 		"local-vec-off",
+		"local-read-committed",
+		"local-repeatable-read",
 		"fakedist",
 		"fakedist-vec-off",
 		"fakedist-disk",
-		"local-mixed-23.1",
-		"local-mixed-23.2",
-	}
-	// FiveNodeDefaultConfigName is a special alias for all 5 node configs.
-	FiveNodeDefaultConfigName = "5node-default-configs"
-	// FiveNodeDefaultConfigNames is the list of 5 node configs.
-	FiveNodeDefaultConfigNames = []string{
+		"local-mixed-24.3",
+	),
+
+	// Special alias for all 5 node configs.
+	"5node-default-configs": makeConfigSet(
 		"5node",
 		"5node-disk",
-	}
-	// ThreeNodeTenantDefaultConfigName is a special alias for all 3-node tenant
-	// configs.
-	ThreeNodeTenantDefaultConfigName = "3node-tenant-default-configs"
-	// ThreeNodeTenantDefaultConfigNames is the list of 3 node tenant configs.
-	ThreeNodeTenantDefaultConfigNames = []string{
+	),
+
+	// Special alias for all 3-node tenant configs.
+	"3node-tenant-default-configs": makeConfigSet(
 		"3node-tenant",
 		"3node-tenant-multiregion",
-	}
-	// DefaultConfig is the default test configuration.
-	DefaultConfig = parseTestConfig(DefaultConfigNames)
-	// FiveNodeDefaultConfig is the five-node default test configuration.
-	FiveNodeDefaultConfig = parseTestConfig(FiveNodeDefaultConfigNames)
-	// ThreeNodeTenantDefaultConfig is the three-node tenant default test configuration.
-	ThreeNodeTenantDefaultConfig = parseTestConfig(ThreeNodeTenantDefaultConfigNames)
-)
+	),
+
+	// Special alias for all enterprise configs.
+	"enterprise-configs": makeConfigSet(
+		"3node-tenant",
+		"3node-tenant-multiregion",
+		"local-read-committed",
+		"local-repeatable-read",
+	),
+
+	// Special alias for all configs which default to a weak transaction isolation
+	// level.
+	"weak-iso-level-configs": makeConfigSet(
+		"local-read-committed",
+		"local-repeatable-read",
+	),
+
+	// Special alias for all testserver configs (for mixed-version testing).
+	"cockroach-go-testserver-configs": makeConfigSet(
+		"cockroach-go-testserver-24.3",
+	),
+}
 
 // logger is an interface implemented by testing.TB as well as stdlogger below.
 type logger interface {
@@ -777,16 +801,11 @@ func processConfigs(
 
 		idx, ok := findLogicTestConfig(configName)
 		if !ok {
-			switch configName {
-			case DefaultConfigName:
-				configs = append(configs, applyBlocklistToConfigs(defaults, blocklist)...)
-			case FiveNodeDefaultConfigName:
-				configs = append(configs, applyBlocklistToConfigs(FiveNodeDefaultConfig, blocklist)...)
-			case ThreeNodeTenantDefaultConfigName:
-				configs = append(configs, applyBlocklistToConfigs(ThreeNodeTenantDefaultConfig, blocklist)...)
-			default:
+			configSet, ok := DefaultConfigSets[configName]
+			if !ok {
 				t.Fatalf("%s: unknown config name %s", path, configName)
 			}
+			configs = append(configs, applyBlocklistToConfigs(configSet, blocklist)...)
 		} else {
 			configs = append(configs, idx)
 		}
@@ -803,7 +822,7 @@ func applyBlocklistToConfigs(configs ConfigSet, blocklist map[string]int) Config
 	}
 	var newConfigs ConfigSet
 	for _, idx := range configs {
-		if _, ok := blocklist[ConfigIdxToName[idx]]; ok {
+		if _, ok := blocklist[idx.Name()]; ok {
 			continue
 		}
 		newConfigs = append(newConfigs, idx)
@@ -811,7 +830,7 @@ func applyBlocklistToConfigs(configs ConfigSet, blocklist map[string]int) Config
 	return newConfigs
 }
 
-func parseTestConfig(names []string) ConfigSet {
+func makeConfigSet(names ...string) ConfigSet {
 	ret := make(ConfigSet, len(names))
 	for i, name := range names {
 		idx, ok := findLogicTestConfig(name)
@@ -832,12 +851,6 @@ func findLogicTestConfig(name string) (ConfigIdx, bool) {
 	return -1, false
 }
 
-func init() {
-	for i, cfg := range LogicTestConfigs {
-		ConfigIdxToName[ConfigIdx(i)] = cfg.Name
-	}
-}
-
 // ConfigIsInDefaultList returns true if defaultName is one of the default
 // config lists and configName is a config included in that list.
 func ConfigIsInDefaultList(configName, defaultName string) bool {
@@ -850,15 +863,7 @@ func ConfigIsInDefaultList(configName, defaultName string) bool {
 }
 
 func getDefaultConfigListNames(name string) []string {
-	switch name {
-	case DefaultConfigName:
-		return DefaultConfigNames
-	case FiveNodeDefaultConfigName:
-		return FiveNodeDefaultConfigNames
-	case ThreeNodeTenantDefaultConfigName:
-		return ThreeNodeTenantDefaultConfigNames
-	}
-	return []string{}
+	return DefaultConfigSets[name].ConfigNames()
 }
 
 // ConfigCalculator is used to enumerate a map of configuration -> file.
@@ -886,17 +891,16 @@ func (c ConfigCalculator) Enumerate(globs ...string) ([][]string, error) {
 	// of paths per config.
 	configPaths := make([][]string, len(LogicTestConfigs))
 	var configFilter map[string]struct{}
-	configDefaults := DefaultConfig
+	configDefaults := DefaultConfigSets[DefaultConfigSet]
 	if len(c.ConfigOverrides) > 0 {
 		// If a config override is provided, we use it to replace the default
 		// config set. This ensures that the overrides are used for files where:
-		// 1. no config directive is present
-		// 2. a config directive containing only a blocklist is present
-		// 3. a config directive containing "default-configs" is present
+		// 1. no config directive is present, or
+		// 2. a config directive containing only a blocklist is present.
 		//
 		// We also create a filter to restrict configs to only those in the
 		// override list.
-		configDefaults = parseTestConfig(c.ConfigOverrides)
+		configDefaults = makeConfigSet(c.ConfigOverrides...)
 		configFilter = make(map[string]struct{})
 		for _, name := range c.ConfigOverrides {
 			configFilter[name] = struct{}{}

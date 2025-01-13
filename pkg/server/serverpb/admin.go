@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package serverpb
 
@@ -91,12 +86,10 @@ func GetInternalTimeseriesNamesFromServer(
 	var sl []string
 	for name, meta := range resp.Metadata {
 		if meta.MetricType == io_prometheus_client.MetricType_HISTOGRAM {
-			// See usage of RecordHistogramQuantiles in pkg/server/status/recorder.go.
-			for _, q := range metric.RecordHistogramQuantiles {
+			// See usage of HistogramMetricComputers in pkg/server/status/recorder.go.
+			for _, q := range metric.HistogramMetricComputers {
 				sl = append(sl, name+q.Suffix)
 			}
-			sl = append(sl, name+"-avg")
-			sl = append(sl, name+"-count")
 		} else {
 			sl = append(sl, name)
 		}

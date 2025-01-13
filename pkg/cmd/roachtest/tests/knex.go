@@ -1,31 +1,36 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 import (
 	"context"
+	_ "embed"
+	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
-	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
 	"github.com/stretchr/testify/require"
 )
 
 // WARNING: DO NOT MODIFY the name of the below constant/variable without approval from the docs team.
 // This is used by docs automation to produce a list of supported versions for ORM's.
 const supportedKnexTag = "2.5.1"
+
+// Embed the config file, so we don't need to know where it is
+// relative to the roachtest runner, just relative to this test.
+// This way we can still find it if roachtest changes paths.
+//
+//go:embed knexfile.js
+var knexfile string
 
 // This test runs one of knex's test suite against a single cockroach
 // node.
@@ -41,9 +46,7 @@ func registerKnex(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		startOpts := option.DefaultStartOptsInMemory()
-		startOpts.RoachprodOpts.SQLPort = config.DefaultSQLPort
-		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		require.NoError(t, err)
@@ -57,7 +60,7 @@ func registerKnex(r registry.Registry) {
 			c,
 			node,
 			"create sql database",
-			`./cockroach sql --insecure -e "CREATE DATABASE test"`,
+			`./cockroach sql --url={pgurl:1} -e "CREATE DATABASE test"`,
 		)
 		require.NoError(t, err)
 
@@ -121,33 +124,46 @@ echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.co
 		)
 		require.NoError(t, err)
 
+		// Write the knexfile test config into the test suite to use.
+		// The default test config does not support ssl connections.
+		err = c.PutString(ctx, knexfile, "/mnt/data1/knex/knexfile.js", 0755, c.Node(1))
+		require.NoError(t, err)
+
 		t.Status("running knex tests")
 		result, err := c.RunWithDetailsSingleNode(
 			ctx,
 			t.L(),
 			option.WithNodes(node),
-			`cd /mnt/data1/knex/ && DB='cockroachdb' npm test`,
+			fmt.Sprintf(`cd /mnt/data1/knex/ && PGUSER=%s PGPASSWORD=%s PGPORT={pgport:1} PGSSLROOTCERT=$HOME/%s/ca.crt \
+				KNEX_TEST='/mnt/data1/knex/knexfile.js' DB='cockroachdb' npm test`,
+				install.DefaultUser, install.DefaultPassword, install.CockroachNodeCertsDir),
 		)
 		rawResultsStr := result.Stdout + result.Stderr
 		t.L().Printf("Test Results: %s", rawResultsStr)
 		if err != nil {
-			// Ignore failures from test expecting `DELETE FROM ... USING` syntax to
-			// fail (https://github.com/cockroachdb/cockroach/issues/40963). We don't
-			// have a good way of parsing test results from javascript, so we do
-			// substring matching instead. This can be removed once the upstream knex
-			// repo updates to test with v23.1.
+			// We don't have a good way of parsing test results from javascript, so
+			// we do substring matching instead.
+			// - (1) and (2) ignore failures from a test that expects `DELETE FROM
+			//   ... USING` syntax to fail (https://github.com/cockroachdb/cockroach/issues/40963).
+			//   This can be removed once the upstream knex repo updates to test with
+			//   v23.1.
+			// - (3) ignores a failure caused by our use of the autocommit_before_ddl
+			//   setting, which makes a test that drops a primary key and then re-adds
+			//   it in the same transaction fail.
 			if !strings.Contains(rawResultsStr, "1) should handle basic delete with join") ||
 				!strings.Contains(rawResultsStr, "2) should handle returning") ||
-				strings.Contains(rawResultsStr, " 3) ") {
+				!strings.Contains(rawResultsStr, "3) #1430 - .primary() & .dropPrimary() same for all dialects") ||
+				strings.Contains(rawResultsStr, " 4) ") {
 				t.Fatal(err)
 			}
 		}
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             "knex",
-		Owner:            registry.OwnerSQLFoundations,
-		Cluster:          r.MakeClusterSpec(1),
+		Name:  "knex",
+		Owner: registry.OwnerSQLFoundations,
+		// Requires a pre-built node-oracledb binary for linux arm64.
+		Cluster:          r.MakeClusterSpec(1, spec.Arch(vm.ArchAMD64)),
 		Leases:           registry.MetamorphicLeases,
 		NativeLibs:       registry.LibGEOS,
 		CompatibleClouds: registry.AllExceptAWS,

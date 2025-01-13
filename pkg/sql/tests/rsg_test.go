@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests_test
 
@@ -19,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinsregistry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -42,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/ring"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -83,18 +81,53 @@ type verifyFormatDB struct {
 		syncutil.Mutex
 		// active holds the currently executing statements.
 		active map[string]int
+		// lastStmtBuffer contains the last set of statements executed
+		// within a ring buffer.
+		lastStmtBuffer ring.Buffer[string]
+		// lastStatementsDumped indicates if the statements have already been
+		// dumped.
+		lastStatementsDumped bool
 		// lastCompletedStmt tracks the time when the last statement finished
 		// executing, which will be used for resettable timeouts.
 		lastCompletedStmt time.Time
 	}
 }
 
+// dumpLastStatements dumps out diagnostic information of currently active and the past 50 queries
+// that were executed.
+func (db *verifyFormatDB) dumpLastStatements(printFn func(format string, args ...any)) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	// Only dump this information once inside the test.
+	if db.mu.lastStatementsDumped {
+		return
+	}
+	db.mu.lastStatementsDumped = true
+	for i := 0; i < db.mu.lastStmtBuffer.Len(); i++ {
+		// Assuming a fully populated buffer, start from the insertion
+		// point which will be the oldest statement (if the buffer is fully
+		// filled).
+		if len(db.mu.lastStmtBuffer.Get(i)) == 0 {
+			continue
+		}
+		printFn("Last executed (%d): %s", i, db.mu.lastStmtBuffer.Get(i))
+	}
+	// Next dump the set of active statements.
+	printFn("Currently active statements: %v", db.mu.active)
+}
+
 // Incr records sql in the active map and returns a func to decrement it.
 func (db *verifyFormatDB) Incr(sql string) func() {
 	db.mu.Lock()
+	const MaxStatementBufferSize = 50
 	if db.mu.active == nil {
 		db.mu.active = make(map[string]int)
+		db.mu.lastStmtBuffer = ring.MakeBuffer(make([]string, MaxStatementBufferSize))
 	}
+	if db.mu.lastStmtBuffer.Len() == MaxStatementBufferSize {
+		db.mu.lastStmtBuffer.RemoveFirst()
+	}
+	db.mu.lastStmtBuffer.AddLast(sql)
 	db.mu.active[sql]++
 	db.mu.Unlock()
 
@@ -196,8 +229,9 @@ func (db *verifyFormatDB) execWithResettableTimeout(
 						strings.Contains(es, "driver: bad connection") ||
 						strings.Contains(es, "unexpected error inside CockroachDB") {
 						return &crasher{
-							sql: sql,
-							err: err,
+							sql:    sql,
+							err:    err,
+							detail: pgerror.FullError(err),
 						}
 					}
 					return &nonCrasher{sql: sql, err: err}
@@ -446,7 +480,6 @@ func TestRandomSyntaxFunctions(t *testing.T) {
 		// involve schema changes like truncates. In general this should make
 		// this test more resilient as the timeouts are reset as long progress
 		// is made on *some* connection.
-		t.Logf("Running %q", s)
 		return db.execWithResettableTimeout(t, ctx, s, *flagRSGExecTimeout, *flagRSGGoRoutines)
 	})
 }
@@ -476,16 +509,30 @@ func TestRandomSyntaxSchemaChangeDatabase(t *testing.T) {
 		"drop_user_stmt",
 		"alter_user_stmt",
 	}
-
+	// Create multiple databases, so that in concurrent scenarios two connections
+	// will always share the same database.
+	numDatabases := max(*flagRSGGoRoutines/2, 1)
+	databases := make([]string, 0, numDatabases)
+	for dbIdx := 0; dbIdx < numDatabases; dbIdx++ {
+		databases = append(databases, fmt.Sprintf("ident_%d", dbIdx))
+	}
+	var nextDatabaseName atomic.Int64
 	testRandomSyntax(t, true, "ident", func(ctx context.Context, db *verifyFormatDB, r *rsg.RSG) error {
 		if err := db.exec(t, ctx, "SET CLUSTER SETTING sql.catalog.descriptor_lease_duration = '30s'"); err != nil {
 			return err
 		}
-		return db.exec(t, ctx, `CREATE DATABASE ident;`)
+		for _, dbName := range databases {
+			if err := db.exec(t, ctx, fmt.Sprintf(`CREATE DATABASE %s;`, dbName)); err != nil {
+				return err
+			}
+		}
+		return nil
 	}, func(ctx context.Context, db *verifyFormatDB, r *rsg.RSG) error {
 		n := r.Intn(len(roots))
 		s := r.Generate(roots[n], 30)
-		return db.exec(t, ctx, s)
+		// Select a database and use it in the generated statement.
+		dbName := databases[nextDatabaseName.Add(1)%int64(len(databases))]
+		return db.exec(t, ctx, strings.Replace(s, "ident", dbName, -1))
 	})
 }
 
@@ -763,7 +810,7 @@ func TestRandomDatumRoundtrip(t *testing.T) {
 		}
 		serializedGen := tree.Serialize(generated)
 
-		sema := tree.MakeSemaContext()
+		sema := tree.MakeSemaContext(nil /* resolver */)
 		// We don't care about errors below because they are often
 		// caused by sqlsmith generating bogus queries. We're just
 		// looking for datums that don't match.
@@ -798,7 +845,9 @@ func TestRandomDatumRoundtrip(t *testing.T) {
 		if serialized1 != serialized2 {
 			panic(errors.Errorf("serialized didn't match:\nexpr: %s\nfirst: %s\nsecond: %s", generated, serialized1, serialized2))
 		}
-		if datum1.Compare(&ec, datum2) != 0 {
+		if cmp, err := datum1.Compare(ctx, &ec, datum2); err != nil {
+			panic(err)
+		} else if cmp != 0 {
 			panic(errors.Errorf("%s [%[1]T] != %s [%[2]T] (original expr: %s)", serialized1, serialized2, serializedGen))
 		}
 		return nil
@@ -831,6 +880,12 @@ func testRandomSyntax(
 	srv, rawDB, _ := serverutils.StartServer(t, params)
 	defer srv.Stopper().Stop(ctx)
 	db := &verifyFormatDB{db: rawDB}
+	// If the test fails we can log the previous set of statements.
+	defer func() {
+		if t.Failed() {
+			db.dumpLastStatements(t.Logf)
+		}
+	}()
 	err := db.exec(t, ctx, "SET CLUSTER SETTING schemachanger.job.max_retry_backoff='1s'")
 	require.NoError(t, err)
 
@@ -906,7 +961,7 @@ func testRandomSyntax(
 					// NOTE: Changes to this output format must be kept in-sync
 					// with logic in CondensedMessage.RSGCrash in order for
 					// crashes to be correctly reported to Github.
-					t.Errorf("Crash detected: %s\n%s;\n\nStack trace:\n%s", c.Error(), c.sql, c.detail)
+					t.Errorf("Crash detected: %s\n%s;\n\nMore details:\n%s", c.Error(), c.sql, c.detail)
 				}
 			}
 			countsMu.Unlock()

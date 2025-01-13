@@ -1,16 +1,12 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scop
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
@@ -141,6 +137,17 @@ type MarkDescriptorAsPublic struct {
 	DescriptorID descpb.ID
 }
 
+type InsertTemporarySchema struct {
+	immediateMutationOp
+	DescriptorID descpb.ID
+}
+
+type InsertTemporarySchemaParent struct {
+	immediateMutationOp
+	SchemaID   descpb.ID
+	DatabaseID descpb.ID
+}
+
 // MarkDescriptorAsDropped changes the descriptor's state to DROPPED.
 type MarkDescriptorAsDropped struct {
 	immediateMutationOp
@@ -215,10 +222,23 @@ type MakeAbsentColumnDeleteOnly struct {
 	Column scpb.Column
 }
 
-// SetAddedColumnType sets the type of a new column.
-type SetAddedColumnType struct {
+// UpsertColumnType sets the type of a new column.
+type UpsertColumnType struct {
 	immediateMutationOp
 	ColumnType scpb.ColumnType
+}
+
+// AddColumnComputeExpression will add a new compute expression to a column.
+type AddColumnComputeExpression struct {
+	immediateMutationOp
+	ComputeExpression scpb.ColumnComputeExpression
+}
+
+// RemoveColumnComputeExpression will remove the compute expression from a column.
+type RemoveColumnComputeExpression struct {
+	immediateMutationOp
+	TableID  descpb.ID
+	ColumnID descpb.ColumnID
 }
 
 // MakeWriteOnlyColumnPublic moves a new column from its mutation to public.
@@ -504,6 +524,70 @@ type RemoveColumnOnUpdateExpression struct {
 	ColumnID descpb.ColumnID
 }
 
+// AddTrigger adds a trigger to a table.
+type AddTrigger struct {
+	immediateMutationOp
+	Trigger scpb.Trigger
+}
+
+// SetTriggerName sets the name of a trigger.
+type SetTriggerName struct {
+	immediateMutationOp
+	Name scpb.TriggerName
+}
+
+// SetTriggerEnabled sets the "enabled" status of a trigger, which indicates
+// whether it will be executed in response to a triggering event.
+type SetTriggerEnabled struct {
+	immediateMutationOp
+	Enabled scpb.TriggerEnabled
+}
+
+// SetTriggerTiming sets the timing of a trigger, which indicates when it
+// executes in relation to the triggering event.
+type SetTriggerTiming struct {
+	immediateMutationOp
+	Timing scpb.TriggerTiming
+}
+
+// SetTriggerEvents sets the events for a trigger, which indicate the operations
+// that fire the trigger.
+type SetTriggerEvents struct {
+	immediateMutationOp
+	Events scpb.TriggerEvents
+}
+
+// SetTriggerTransition sets the transition alias(es) of a trigger.
+type SetTriggerTransition struct {
+	immediateMutationOp
+	Transition scpb.TriggerTransition
+}
+
+// SetTriggerWhen sets the WHEN condition of a trigger.
+type SetTriggerWhen struct {
+	immediateMutationOp
+	When scpb.TriggerWhen
+}
+
+// SetTriggerFunctionCall sets the trigger-function call for a trigger.
+type SetTriggerFunctionCall struct {
+	immediateMutationOp
+	FunctionCall scpb.TriggerFunctionCall
+}
+
+// SetTriggerForwardReferences sets the forward references to relations, types,
+// and routines for a trigger.
+type SetTriggerForwardReferences struct {
+	immediateMutationOp
+	Deps scpb.TriggerDeps
+}
+
+// RemoveTrigger is used to delete a trigger associated with a table.
+type RemoveTrigger struct {
+	immediateMutationOp
+	Trigger scpb.Trigger
+}
+
 // UpdateTableBackReferencesInTypes updates back references to a table
 // in the specified types.
 type UpdateTableBackReferencesInTypes struct {
@@ -528,6 +612,13 @@ type RemoveBackReferenceInTypes struct {
 	immediateMutationOp
 	BackReferencedDescriptorID descpb.ID
 	TypeIDs                    []descpb.ID
+}
+
+type RemoveBackReferenceInFunctions struct {
+	immediateMutationOp
+
+	BackReferencedDescriptorID descpb.ID
+	FunctionIDs                []descpb.ID
 }
 
 // UpdateTableBackReferencesInSequences updates back references to a table expression
@@ -565,6 +656,15 @@ type RemoveTableConstraintBackReferencesFromFunctions struct {
 	FunctionIDs                []descpb.ID
 }
 
+// AddTableColumnBackReferencesInFunctions adds back-references to columns
+// from referenced functions.
+type AddTableColumnBackReferencesInFunctions struct {
+	immediateMutationOp
+	BackReferencedTableID  descpb.ID
+	BackReferencedColumnID descpb.ColumnID
+	FunctionIDs            []descpb.ID
+}
+
 // RemoveTableColumnBackReferencesInFunctions removes back-references to columns
 // from referenced functions.
 type RemoveTableColumnBackReferencesInFunctions struct {
@@ -572,6 +672,24 @@ type RemoveTableColumnBackReferencesInFunctions struct {
 	BackReferencedTableID  descpb.ID
 	BackReferencedColumnID descpb.ColumnID
 	FunctionIDs            []descpb.ID
+}
+
+// AddTriggerBackReferencesInRoutines adds back references to a trigger from
+// referenced functions.
+type AddTriggerBackReferencesInRoutines struct {
+	immediateMutationOp
+	BackReferencedTableID   descpb.ID
+	BackReferencedTriggerID descpb.TriggerID
+	RoutineIDs              []descpb.ID
+}
+
+// RemoveTriggerBackReferencesInRoutines removes back-references to a trigger
+// from referenced functions.
+type RemoveTriggerBackReferencesInRoutines struct {
+	immediateMutationOp
+	BackReferencedTableID   descpb.ID
+	BackReferencedTriggerID descpb.TriggerID
+	RoutineIDs              []descpb.ID
 }
 
 // SetColumnName renames a column.
@@ -643,6 +761,19 @@ type UpsertTableComment struct {
 type RemoveTableComment struct {
 	immediateMutationOp
 	TableID descpb.ID
+}
+
+// UpsertTypeComment is used to add a comment to a Type.
+type UpsertTypeComment struct {
+	immediateMutationOp
+	TypeID  descpb.ID
+	Comment string
+}
+
+// RemoveTypeComment is used to delete a comment associated with a Type.
+type RemoveTypeComment struct {
+	immediateMutationOp
+	TypeID descpb.ID
 }
 
 // UpsertDatabaseComment is used to add a comment to a database.
@@ -785,9 +916,10 @@ type SetFunctionBody struct {
 	Body scpb.FunctionBody
 }
 
-type SetFunctionParamDefaultExpr struct {
+type SetFunctionSecurity struct {
 	immediateMutationOp
-	Expr scpb.FunctionParamDefaultExpression
+	FunctionID descpb.ID
+	Security   catpb.Function_Security
 }
 
 type UpdateFunctionTypeReferences struct {
@@ -798,10 +930,17 @@ type UpdateFunctionTypeReferences struct {
 
 type UpdateFunctionRelationReferences struct {
 	immediateMutationOp
-	FunctionID      descpb.ID
-	TableReferences []scpb.FunctionBody_TableReference
-	ViewReferences  []scpb.FunctionBody_ViewReference
-	SequenceIDs     []descpb.ID
+	FunctionID         descpb.ID
+	TableReferences    []scpb.FunctionBody_TableReference
+	ViewReferences     []scpb.FunctionBody_ViewReference
+	SequenceIDs        []descpb.ID
+	FunctionReferences []descpb.ID
+}
+
+type UpdateTableBackReferencesInRelations struct {
+	immediateMutationOp
+	TableID     descpb.ID
+	RelationIDs []descpb.ID
 }
 
 type SetObjectParentID struct {
@@ -827,6 +966,7 @@ type CreateSchemaDescriptor struct {
 type CreateSequenceDescriptor struct {
 	immediateMutationOp
 	SequenceID descpb.ID
+	Temporary  bool
 }
 
 type SetSequenceOptions struct {
@@ -846,4 +986,76 @@ type InitSequence struct {
 type CreateDatabaseDescriptor struct {
 	immediateMutationOp
 	DatabaseID descpb.ID
+}
+
+// AddNamedRangeZoneConfig adds a zone config to a named range.
+type AddNamedRangeZoneConfig struct {
+	immediateMutationOp
+	RangeName  zonepb.NamedZone
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// DiscardNamedRangeZoneConfig discards a zone config from a named range.
+type DiscardNamedRangeZoneConfig struct {
+	immediateMutationOp
+	RangeName zonepb.NamedZone
+}
+
+// AddDatabaseZoneConfig adds a zone config to a database.
+type AddDatabaseZoneConfig struct {
+	immediateMutationOp
+	DatabaseID descpb.ID
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// DiscardZoneConfig discards the zone config for the given ID. For table IDs,
+// we use DiscardTableZoneConfig as some extra work is needed for subzones.
+type DiscardZoneConfig struct {
+	immediateMutationOp
+	DescID descpb.ID
+}
+
+// DiscardTableZoneConfig discards the zone config for the given table ID. If
+// the table has subzones, we mark the table's zone config as a subzone
+// placeholder.
+type DiscardTableZoneConfig struct {
+	immediateMutationOp
+	TableID    descpb.ID
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// DiscardSubzoneConfig discards the subzone config for the given descriptor ID.
+// If this is the only subzone for the table, we delete the entry from
+// system.zones.
+type DiscardSubzoneConfig struct {
+	immediateMutationOp
+	TableID              descpb.ID
+	Subzone              zonepb.Subzone
+	SubzoneSpans         []zonepb.SubzoneSpan
+	SubzoneIndexToDelete int32
+}
+
+// AddTableZoneConfig adds a zone config to a table.
+type AddTableZoneConfig struct {
+	immediateMutationOp
+	TableID    descpb.ID
+	ZoneConfig zonepb.ZoneConfig
+}
+
+// AddIndexZoneConfig adds a zone config to an index.
+type AddIndexZoneConfig struct {
+	immediateMutationOp
+	TableID              descpb.ID
+	Subzone              zonepb.Subzone
+	SubzoneSpans         []zonepb.SubzoneSpan
+	SubzoneIndexToDelete int32
+}
+
+// AddPartitionZoneConfig adds a zone config to a partition.
+type AddPartitionZoneConfig struct {
+	immediateMutationOp
+	TableID              descpb.ID
+	Subzone              zonepb.Subzone
+	SubzoneSpans         []zonepb.SubzoneSpan
+	SubzoneIndexToDelete int32
 }

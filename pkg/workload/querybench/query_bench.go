@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package querybench
 
@@ -83,6 +78,9 @@ func (*queryBench) Meta() workload.Meta { return queryBenchMeta }
 // Flags implements the Flagser interface.
 func (g *queryBench) Flags() workload.Flags { return g.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (g *queryBench) ConnFlags() *workload.ConnFlags { return g.connFlags }
+
 // Hooks implements the Hookser interface.
 func (g *queryBench) Hooks() workload.Hooks {
 	return workload.Hooks{
@@ -116,10 +114,6 @@ func (*queryBench) Tables() []workload.Table {
 func (g *queryBench) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(g, g.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -140,7 +134,7 @@ func (g *queryBench) Ops(
 		maxNumStmts = g.numRunsPerQuery * len(stmts)
 	}
 
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	for i := 0; i < g.connFlags.Concurrency; i++ {
 		op := queryBenchWorker{
 			hists:       reg.GetHandle(),

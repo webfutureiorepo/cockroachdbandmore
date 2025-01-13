@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package funcinfo
 
@@ -121,6 +116,8 @@ func FunctionLangToProto(v tree.RoutineLanguage) (catpb.Function_Language, error
 // type.
 func ParamClassToProto(v tree.RoutineParamClass) (catpb.Function_Param_Class, error) {
 	switch v {
+	case tree.RoutineParamDefault:
+		return catpb.Function_Param_DEFAULT, nil
 	case tree.RoutineParamIn:
 		return catpb.Function_Param_IN, nil
 	case tree.RoutineParamOut:
@@ -132,4 +129,15 @@ func ParamClassToProto(v tree.RoutineParamClass) (catpb.Function_Param_Class, er
 	}
 
 	return -1, errors.AssertionFailedf("unknown function parameter class %q", v)
+}
+
+// SecurityToProto converts sql statement input security to protobuf type.
+func SecurityToProto(v tree.RoutineSecurity) (catpb.Function_Security, error) {
+	switch v {
+	case tree.RoutineInvoker:
+		return catpb.Function_INVOKER, nil
+	case tree.RoutineDefiner:
+		return catpb.Function_DEFINER, nil
+	}
+	return -1, errors.AssertionFailedf("unknown function security class %q", v)
 }

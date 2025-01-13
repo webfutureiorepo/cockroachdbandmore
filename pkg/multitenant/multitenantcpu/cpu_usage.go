@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multitenantcpu
 
@@ -52,7 +47,7 @@ func (h *CPUUsageHelper) StartCollection(
 // get the estimated number of RUs consumed due to CPU usage. It returns zero
 // for non-tenants. It is a no-op if StartCollection was never called.
 func (h *CPUUsageHelper) EndCollection(ctx context.Context) (ruFomCPU float64) {
-	if h.costController == nil || h.costController.GetCostConfig() == nil {
+	if h.costController == nil || h.costController.GetRequestUnitModel() == nil {
 		return 0
 	}
 	cpuDelta := GetCPUSeconds(ctx) - h.startCPU
@@ -67,7 +62,7 @@ func (h *CPUUsageHelper) EndCollection(ctx context.Context) (ruFomCPU float64) {
 		// bound the estimate above to reduce the possibility of gross error.
 		cpuUsageSeconds = timeElapsed
 	}
-	return float64(h.costController.GetCostConfig().PodCPUCost(cpuUsageSeconds))
+	return float64(h.costController.GetRequestUnitModel().PodCPUCost(cpuUsageSeconds))
 }
 
 // GetCPUSeconds returns the total CPU usage of the current process in seconds.

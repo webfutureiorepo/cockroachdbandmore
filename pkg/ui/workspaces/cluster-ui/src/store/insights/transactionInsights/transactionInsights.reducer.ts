@@ -1,18 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
-import { DOMAIN_NAME } from "../../utils";
-import { TxnInsightEvent } from "src/insights";
 import moment, { Moment } from "moment-timezone";
+
 import { SqlApiResponse, TxnInsightsRequest } from "src/api";
+import { TxnInsightEvent } from "src/insights";
+
+import { DOMAIN_NAME } from "../../utils";
 
 export type TxnInsightsState = {
   data: SqlApiResponse<TxnInsightEvent[]>;

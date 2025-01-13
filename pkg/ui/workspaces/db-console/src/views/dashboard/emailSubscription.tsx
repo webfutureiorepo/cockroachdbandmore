@@ -1,29 +1,24 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 import { connect } from "react-redux";
 
-import { EmailSubscriptionForm } from "src/views/shared/components/emailSubscriptionForm";
+import { emailSubscriptionAlertLocalSetting } from "src/redux/alerts";
 import { signUpForEmailSubscription } from "src/redux/customAnalytics";
-import { AdminUIState } from "src/redux/state";
 import { clusterIdSelector } from "src/redux/nodes";
-
-import "./emailSubscription.styl";
+import { AdminUIState } from "src/redux/state";
 import {
   loadUIData,
   RELEASE_NOTES_SIGNUP_DISMISSED_KEY,
   saveUIData,
 } from "src/redux/uiData";
 import { dismissReleaseNotesSignupForm } from "src/redux/uiDataSelectors";
-import { emailSubscriptionAlertLocalSetting } from "src/redux/alerts";
+import { EmailSubscriptionForm } from "src/views/shared/components/emailSubscriptionForm";
+
+import "./emailSubscription.styl";
 
 type EmailSubscriptionProps = MapDispatchToProps & MapStateToProps;
 

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colflow
 
@@ -179,7 +174,7 @@ type routerOutputOpArgs struct {
 	// when it is exceeded.
 	memoryLimit     int64
 	diskAcc         *mon.BoundAccount
-	converterMemAcc *mon.BoundAccount
+	diskQueueMemAcc *mon.BoundAccount
 	cfg             colcontainer.DiskQueueCfg
 	fdSemaphore     semaphore.Semaphore
 
@@ -210,7 +205,7 @@ func newRouterOutputOp(args routerOutputOpArgs) *routerOutputOp {
 			DiskQueueCfg:       args.cfg,
 			FDSemaphore:        args.fdSemaphore,
 			DiskAcc:            args.diskAcc,
-			ConverterMemAcc:    args.converterMemAcc,
+			DiskQueueMemAcc:    args.diskQueueMemAcc,
 		},
 	)
 
@@ -481,7 +476,7 @@ func NewHashRouter(
 	diskQueueCfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
 	diskAccounts []*mon.BoundAccount,
-	converterMemAccounts []*mon.BoundAccount,
+	diskQueueMemAccounts []*mon.BoundAccount,
 ) (*HashRouter, []colexecop.DrainableClosableOperator) {
 	outputs := make([]routerOutput, len(unlimitedAllocators))
 	outputsAsOps := make([]colexecop.DrainableClosableOperator, len(unlimitedAllocators))
@@ -507,7 +502,7 @@ func NewHashRouter(
 				unlimitedAllocator:  unlimitedAllocators[i],
 				memoryLimit:         memoryLimitPerOutput,
 				diskAcc:             diskAccounts[i],
-				converterMemAcc:     converterMemAccounts[i],
+				diskQueueMemAcc:     diskQueueMemAccounts[i],
 				cfg:                 diskQueueCfg,
 				fdSemaphore:         fdSemaphore,
 				unblockedEventsChan: unblockEventsChan,

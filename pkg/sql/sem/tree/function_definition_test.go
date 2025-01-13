@@ -1,16 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -108,8 +104,13 @@ func TestMatchOverload(t *testing.T) {
 				Overload: &tree.Overload{Oid: 3, Type: tree.UDFRoutine, Types: tree.ParamTypes{}},
 			},
 			{
-				Schema:   "sc2",
-				Overload: &tree.Overload{Oid: 4, Type: tree.UDFRoutine, Types: tree.ParamTypes{tree.ParamType{Typ: types.Int}}},
+				Schema: "sc2",
+				Overload: &tree.Overload{
+					Oid:          4,
+					Type:         tree.UDFRoutine,
+					Types:        tree.ParamTypes{tree.ParamType{Typ: types.Int}},
+					DefaultExprs: tree.Exprs{tree.DZero},
+				},
 			},
 			{
 				Schema: "sc3",
@@ -130,13 +131,14 @@ func TestMatchOverload(t *testing.T) {
 	}
 
 	testCase := []struct {
-		testName       string
-		argTypes       []*types.T
-		explicitSchema string
-		path           []string
-		routineType    tree.RoutineType
-		expectedOid    oid.Oid
-		expectedErr    string
+		testName        string
+		argTypes        []*types.T
+		explicitSchema  string
+		path            []string
+		routineType     tree.RoutineType
+		expectedOid     oid.Oid
+		expectedErr     string
+		tryDefaultExprs bool
 	}{
 		{
 			testName:    "nil arg types implicit pg_catalog in path",
@@ -228,29 +230,63 @@ func TestMatchOverload(t *testing.T) {
 		{
 			testName:    "multiple parameters exact match on same family type",
 			argTypes:    []*types.T{types.Int2, types.Int4},
-			path:        []string{"sc3", "sc3", "pg_catalog"},
+			path:        []string{"sc3", "sc2", "pg_catalog"},
 			routineType: tree.UDFRoutine,
 			expectedOid: 5,
 		},
 		{
 			testName:    "multiple parameters exact match on same family type not exists",
 			argTypes:    []*types.T{types.Int, types.Int4},
-			path:        []string{"sc3", "sc3", "pg_catalog"},
+			path:        []string{"sc3", "sc2", "pg_catalog"},
 			routineType: tree.UDFRoutine,
 			expectedErr: `function f\(int,int4\) does not exist`,
+		},
+		{
+			testName:        "using DEFAULT expr",
+			argTypes:        []*types.T{},
+			explicitSchema:  "sc2",
+			path:            []string{"sc2", "sc1", "pg_catalog"},
+			routineType:     tree.UDFRoutine,
+			expectedOid:     4,
+			tryDefaultExprs: true,
+		},
+		{
+			testName:        "not using DEFAULT expr",
+			argTypes:        []*types.T{},
+			explicitSchema:  "sc2",
+			path:            []string{"sc2", "sc1", "pg_catalog"},
+			routineType:     tree.UDFRoutine,
+			expectedErr:     `function f\(\) does not exist`,
+			tryDefaultExprs: false,
 		},
 	}
 
 	for _, tc := range testCase {
 		t.Run(tc.testName, func(t *testing.T) {
+			routineObj := tree.RoutineObj{
+				FuncName: tree.MakeQualifiedRoutineName("", tc.explicitSchema, "f"),
+			}
+			if tc.argTypes != nil {
+				routineObj.Params = make(tree.RoutineParams, 0, len(tc.argTypes))
+				for _, typ := range tc.argTypes {
+					routineObj.Params = append(routineObj.Params, tree.RoutineParam{
+						Type:  typ,
+						Class: tree.RoutineParamIn,
+					})
+				}
+			}
 			path := sessiondata.MakeSearchPath(tc.path)
 			ol, err := fd.MatchOverload(
-				tc.argTypes,
-				tc.explicitSchema,
+				context.Background(),
+				nil, /* typeRes */
+				&routineObj,
 				&path,
 				tc.routineType,
+				false, /* inDropContext */
+				tc.tryDefaultExprs,
 			)
 			if tc.expectedErr != "" {
+				require.Error(t, err)
 				require.Regexp(t, tc.expectedErr, err.Error())
 				return
 			}

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -37,8 +32,6 @@ func init() {
 	// should probably move keys/protos elsewhere.
 	config.ZoneConfigHook = zoneConfigHook
 }
-
-var errNoZoneConfigApplies = errors.New("no zone config applies")
 
 // getZoneConfig recursively looks up entries in system.zones until an
 // entry that applies to the object with the specified id is
@@ -119,7 +112,7 @@ func getZoneConfig(
 	}
 
 	// No descriptor or not a table.
-	return 0, nil, 0, nil, errNoZoneConfigApplies
+	return 0, nil, 0, nil, sqlerrors.ErrNoZoneConfigApplies
 }
 
 // completeZoneConfig takes a zone config pointer and fills in the
@@ -184,7 +177,7 @@ func zoneConfigHook(
 		false, /* getInheritedDefault */
 		mayBeTable,
 	)
-	if errors.Is(err, errNoZoneConfigApplies) {
+	if errors.Is(err, sqlerrors.ErrNoZoneConfigApplies) {
 		return nil, nil, true, nil
 	} else if err != nil {
 		return nil, nil, false, err

@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -489,8 +484,10 @@ func runStartInternal(
 	// GOMAXPROCS(0) by now.
 	cgroups.AdjustMaxProcs(ctx)
 
+	fs := cliflagcfg.FlagSetForCmd(cmd)
+
 	// Check the --join flag.
-	if fl := cliflagcfg.FlagSetForCmd(cmd).Lookup(cliflags.Join.Name); fl != nil && !fl.Changed {
+	if fl := fs.Lookup(cliflags.Join.Name); fl != nil && !fl.Changed {
 		err := errors.WithHint(
 			errors.New("no --join flags provided to 'cockroach start'"),
 			"Consider using 'cockroach init' or 'cockroach start-single-node' instead")
@@ -498,10 +495,19 @@ func runStartInternal(
 	}
 
 	// Check the --tenant-id-file flag.
-	if fl := cliflagcfg.FlagSetForCmd(cmd).Lookup(cliflags.TenantIDFile.Name); fl != nil && fl.Changed {
+	if fl := fs.Lookup(cliflags.TenantIDFile.Name); fl != nil && fl.Changed {
 		fileName := fl.Value.String()
-		serverCfg.DelayedSetTenantID = func(ctx context.Context) (roachpb.TenantID, error) {
-			return tenantIDFromFile(ctx, fileName, nil, nil, nil)
+		serverCfg.DelayedSetTenantID = func(
+			ctx context.Context,
+		) (roachpb.TenantID, roachpb.Locality, error) {
+			tenantID, err := tenantIDFromFile(ctx, fileName, nil, nil, nil)
+			if err != nil {
+				return roachpb.TenantID{}, roachpb.Locality{}, err
+			}
+			if err := tryReadLocalityFileFlag(fs); err != nil {
+				return roachpb.TenantID{}, roachpb.Locality{}, err
+			}
+			return tenantID, serverCfg.Locality, nil
 		}
 	}
 
@@ -550,6 +556,42 @@ func runStartInternal(
 			log.Ops.Infof(ctx, "soft memory limit of Go runtime is set to %s", humanizeutil.IBytes(goMemLimit))
 		}
 		debug.SetMemoryLimit(goMemLimit)
+		return nil
+	}(); err != nil {
+		return err
+	}
+
+	// Set the GC target percent on the Go runtime.
+	if err := func() error {
+		var goGCPercent int
+		if fs.Changed(cliflags.GoGCPercent.Name) {
+			goGCPercent = startCtx.goGCPercent
+		} else {
+			if _, envVarSet := envutil.ExternalEnvString("GOGC", 1); envVarSet {
+				// When --go-gc-percent is not specified but the env var is, we defer to
+				// the env var.
+				return nil
+			}
+			// When neither the --go-gc-percent flag nor the GOGC env var is set,
+			// increase the GC target percent to 300% (default 100%) to reduce the
+			// frequency of GC cycles. However, only do so if a soft memory limit is
+			// also configured, to avoid introducing OOMs.
+			goMemLimit := debug.SetMemoryLimit(-1 /* get without adjusting */)
+			if goMemLimit == math.MaxInt64 {
+				// If the soft memory limit is disabled, don't adjust the GC percent.
+				// Leave it at the default 100%.
+				return nil
+			}
+			goGCPercent = 300
+		}
+		var goGCPercentStr redact.RedactableString
+		if goGCPercent < 0 {
+			goGCPercentStr = `"off"`
+		} else {
+			goGCPercentStr = redact.Sprintf("%d%%", goGCPercent)
+		}
+		log.Ops.Infof(ctx, "GC target percentage of Go runtime is set to %s", goGCPercentStr)
+		debug.SetGCPercent(goGCPercent)
 		return nil
 	}(); err != nil {
 		return err
@@ -697,8 +739,11 @@ func getDefaultGoMemLimit(ctx context.Context) int64 {
 		log.Ops.Shoutf(
 			ctx, severity.WARNING, "recommended default value of "+
 				"--max-go-memory (%s) was truncated to %s, consider reducing "+
-				"--max-sql-memory and / or --cache",
+				"--max-sql-memory (%s) and / or --cache (%s); total system/cgroup memory: %s.",
 			humanizeutil.IBytes(limit), humanizeutil.IBytes(maxGoMemLimit),
+			humanizeutil.IBytes(serverCfg.MemoryPoolSize),
+			humanizeutil.IBytes(serverCfg.CacheSize),
+			humanizeutil.IBytes(sysMem),
 		)
 		limit = maxGoMemLimit
 	}
@@ -1510,14 +1555,15 @@ func reportReadinessExternally(ctx context.Context, cmd *cobra.Command, waitForI
 				"Check the log file(s) for progress. ")
 	}
 
-	// Ensure the configuration logging is written to disk in case a
-	// process is waiting for the sdnotify readiness to read important
-	// information from there.
-	log.FlushAllSync()
-
-	// Signal readiness. This unblocks the process when running with
-	// --background or under systemd.
-	if err := sdnotify.Ready(); err != nil {
+	// Try to signal readiness. This unblocks the process when running under
+	// systemd. Otherwise, it will be a no-op.
+	if err := sdnotify.Ready(func() {
+		// Ensure the configuration logging is written to disk in case a
+		// process is waiting for the sdnotify readiness to read important
+		// information from there. Given that this blocks and is only used for
+		// the sdnotify readiness, we will only run it conditionally.
+		log.FlushAllSync()
+	}); err != nil {
 		log.Ops.Errorf(ctx, "failed to signal readiness using systemd protocol: %s", err)
 	}
 }

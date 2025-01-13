@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gcjob_test
 
@@ -127,12 +122,12 @@ func doTestSchemaChangeGCJob(t *testing.T, dropItem DropItem, ttlTime TTLTime) {
 	var myTableDesc *tabledesc.Mutable
 	var myOtherTableDesc *tabledesc.Mutable
 	if err := sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
-		myImm, err := col.ByID(txn.KV()).Get().Table(ctx, myTableID)
+		myImm, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, myTableID)
 		if err != nil {
 			return err
 		}
 		myTableDesc = tabledesc.NewBuilder(myImm.TableDesc()).BuildExistingMutableTable()
-		myOtherImm, err := col.ByID(txn.KV()).Get().Table(ctx, myOtherTableID)
+		myOtherImm, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, myOtherTableID)
 		if err != nil {
 			return err
 		}
@@ -267,7 +262,7 @@ func doTestSchemaChangeGCJob(t *testing.T, dropItem DropItem, ttlTime TTLTime) {
 	}
 
 	if err := sql.TestingDescsTxn(ctx, s, func(ctx context.Context, txn isql.Txn, col *descs.Collection) error {
-		myImm, err := col.ByID(txn.KV()).Get().Table(ctx, myTableID)
+		myImm, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, myTableID)
 		if err != nil {
 			if ttlTime != FUTURE && (dropItem == TABLE || dropItem == DATABASE) {
 				// We dropped the table, so expect it to not be found.
@@ -277,7 +272,7 @@ func doTestSchemaChangeGCJob(t *testing.T, dropItem DropItem, ttlTime TTLTime) {
 			return err
 		}
 		myTableDesc = tabledesc.NewBuilder(myImm.TableDesc()).BuildExistingMutableTable()
-		myOtherImm, err := col.ByID(txn.KV()).Get().Table(ctx, myOtherTableID)
+		myOtherImm, err := col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, myOtherTableID)
 		if err != nil {
 			if ttlTime != FUTURE && dropItem == DATABASE {
 				// We dropped the entire database, so expect none of the tables to be found.
@@ -334,14 +329,14 @@ SELECT job_id
 
 	const expectedRunningStatus = string(sql.RunningStatusWaitingForMVCCGC)
 	testutils.SucceedsSoon(t, func() error {
-		var status, runningStatus, lastRun, nextRun, numRuns, jobErr gosql.NullString
+		var status, runningStatus, jobErr gosql.NullString
 		tdb.QueryRow(t, fmt.Sprintf(`
-SELECT status, running_status, error, last_run, next_run, num_runs
+SELECT status, running_status, error
 FROM crdb_internal.jobs
-WHERE job_id = %s`, jobID)).Scan(&status, &runningStatus, &jobErr, &lastRun, &nextRun, &numRuns)
+WHERE job_id = %s`, jobID)).Scan(&status, &runningStatus, &jobErr)
 
-		t.Logf(`details about SCHEMA CHANGE GC job: {status: %#v, running_status: %#v, error: %#v, last_run: %#v, next_run: %#v, num_runs: %#v}`,
-			status, runningStatus, jobErr, lastRun, nextRun, numRuns)
+		t.Logf(`details about SCHEMA CHANGE GC job: {status: %#v, running_status: %#v, error: %#v}`,
+			status, runningStatus, jobErr)
 
 		if !runningStatus.Valid {
 			return errors.Newf(`running_status is NULL but expected %q`, expectedRunningStatus)
@@ -480,7 +475,7 @@ func TestGCTenant(t *testing.T) {
 		_, err := sql.CreateTenantRecord(
 			ctx, execCfg.Codec, execCfg.Settings,
 			txn,
-			execCfg.SpanConfigKVAccessor.WithTxn(ctx, txn.KV()),
+			execCfg.SpanConfigKVAccessor.WithISQLTxn(ctx, txn),
 			&mtinfopb.TenantInfoWithUsage{
 				SQLInfo: mtinfopb.SQLInfo{ID: activeTenID},
 			},
@@ -495,7 +490,7 @@ func TestGCTenant(t *testing.T) {
 		_, err := sql.CreateTenantRecord(
 			ctx, execCfg.Codec, execCfg.Settings,
 			txn,
-			execCfg.SpanConfigKVAccessor.WithTxn(ctx, txn.KV()),
+			execCfg.SpanConfigKVAccessor.WithISQLTxn(ctx, txn),
 			&mtinfopb.TenantInfoWithUsage{
 				SQLInfo: mtinfopb.SQLInfo{
 					ID:        dropTenID,

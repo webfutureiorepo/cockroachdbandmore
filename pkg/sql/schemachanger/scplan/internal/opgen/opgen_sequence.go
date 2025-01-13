@@ -1,17 +1,11 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 )
@@ -26,11 +20,11 @@ func init() {
 				emit(func(this *scpb.Sequence) *scop.CreateSequenceDescriptor {
 					return &scop.CreateSequenceDescriptor{
 						SequenceID: this.SequenceID,
+						Temporary:  this.IsTemporary,
 					}
 				}),
 			),
 			to(scpb.Status_PUBLIC,
-				revertible(false),
 				emit(func(this *scpb.Sequence) *scop.InitSequence {
 					return &scop.InitSequence{
 						SequenceID:     this.SequenceID,
@@ -57,13 +51,6 @@ func init() {
 			),
 			to(scpb.Status_ABSENT,
 				emit(func(this *scpb.Sequence, md *opGenContext) *scop.CreateGCJobForTable {
-					if !md.ActiveVersion.IsActive(clusterversion.V23_1) {
-						return &scop.CreateGCJobForTable{
-							TableID:             this.SequenceID,
-							DatabaseID:          databaseIDFromDroppedNamespaceTarget(md, this.SequenceID),
-							StatementForDropJob: statementForDropJob(this, md),
-						}
-					}
 					return nil
 				}),
 			),

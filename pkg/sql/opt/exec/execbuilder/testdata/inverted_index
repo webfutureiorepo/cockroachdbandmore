@@ -35,21 +35,21 @@ query T kvtrace
 INSERT INTO d VALUES(0, '{"a": "b"}')
 ----
 CPut /Table/106/1/0/0 -> /TUPLE/
-InitPut /Table/106/2/"a"/"b"/0/0 -> /BYTES/
+CPut /Table/106/2/"a"/"b"/0/0 -> /BYTES/
 
 # Make sure duplicate values don't get inserted.
 query T kvtrace
 INSERT INTO d VALUES(1, '[7,0,7]')
 ----
 CPut /Table/106/1/1/0 -> /TUPLE/
-InitPut /Table/106/2/Arr/0/1/0 -> /BYTES/
-InitPut /Table/106/2/Arr/7/1/0 -> /BYTES/
+CPut /Table/106/2/Arr/0/1/0 -> /BYTES/
+CPut /Table/106/2/Arr/7/1/0 -> /BYTES/
 
 # Make sure duplicate values don't get deleted either.
 query T kvtrace
 DELETE FROM d WHERE a=1
 ----
-Scan /Table/106/1/1/0
+Scan /Table/106/1/1/0 lock Exclusive (Block, Unreplicated)
 Del /Table/106/2/Arr/0/1/0
 Del /Table/106/2/Arr/7/1/0
 Del /Table/106/1/1/0
@@ -58,17 +58,17 @@ query T kvtrace
 INSERT INTO d VALUES(2, '[{"a": "b"}, 3, {"a": "b"}]')
 ----
 CPut /Table/106/1/2/0 -> /TUPLE/
-InitPut /Table/106/2/Arr/3/2/0 -> /BYTES/
-InitPut /Table/106/2/Arr/"a"/"b"/2/0 -> /BYTES/
+CPut /Table/106/2/Arr/3/2/0 -> /BYTES/
+CPut /Table/106/2/Arr/"a"/"b"/2/0 -> /BYTES/
 
 query T kvtrace
 INSERT INTO d VALUES(3, '[{"a": [0,1,0]}, 3, {"a": "b"}]')
 ----
 CPut /Table/106/1/3/0 -> /TUPLE/
-InitPut /Table/106/2/Arr/3/3/0 -> /BYTES/
-InitPut /Table/106/2/Arr/"a"/"b"/3/0 -> /BYTES/
-InitPut /Table/106/2/Arr/"a"/Arr/0/3/0 -> /BYTES/
-InitPut /Table/106/2/Arr/"a"/Arr/1/3/0 -> /BYTES/
+CPut /Table/106/2/Arr/3/3/0 -> /BYTES/
+CPut /Table/106/2/Arr/"a"/"b"/3/0 -> /BYTES/
+CPut /Table/106/2/Arr/"a"/Arr/0/3/0 -> /BYTES/
+CPut /Table/106/2/Arr/"a"/Arr/1/3/0 -> /BYTES/
 
 # Make sure that inserting NULL doesn't make an index entry.
 query T kvtrace
@@ -80,15 +80,15 @@ CPut /Table/106/1/4/0 -> /TUPLE/
 query T kvtrace
 UPDATE d SET b='[1]' WHERE a=4
 ----
-Scan /Table/106/1/4/0
+Scan /Table/106/1/4/0 lock Exclusive (Block, Unreplicated)
 Put /Table/106/1/4/0 -> /TUPLE/
-InitPut /Table/106/2/Arr/1/4/0 -> /BYTES/
+CPut /Table/106/2/Arr/1/4/0 -> /BYTES/
 
 # Update back to null.
 query T kvtrace
 UPDATE d SET b=NULL WHERE a=4
 ----
-Scan /Table/106/1/4/0
+Scan /Table/106/1/4/0 lock Exclusive (Block, Unreplicated)
 Put /Table/106/1/4/0 -> /TUPLE/
 Del /Table/106/2/Arr/1/4/0
 
@@ -96,7 +96,7 @@ Del /Table/106/2/Arr/1/4/0
 query T kvtrace
 DELETE FROM d WHERE a=4
 ----
-Scan /Table/106/1/4/0
+Scan /Table/106/1/4/0 lock Exclusive (Block, Unreplicated)
 Del /Table/106/1/4/0
 
 # Tests for array inverted indexes.
@@ -106,19 +106,20 @@ Del /Table/106/1/4/0
 query T kvtrace
 INSERT INTO e VALUES(0, ARRAY[7,0,0,1,NULL,10,0,1,7,NULL])
 ----
+Scan /Table/20/1/10{7-8}
 CPut /Table/107/1/0/0 -> /TUPLE/
-InitPut /Table/107/2/NULL/0/0 -> /BYTES/
-InitPut /Table/107/2/0/0/0 -> /BYTES/
-InitPut /Table/107/2/1/0/0 -> /BYTES/
-InitPut /Table/107/2/7/0/0 -> /BYTES/
-InitPut /Table/107/2/10/0/0 -> /BYTES/
+CPut /Table/107/2/NULL/0/0 -> /BYTES/
+CPut /Table/107/2/0/0/0 -> /BYTES/
+CPut /Table/107/2/1/0/0 -> /BYTES/
+CPut /Table/107/2/7/0/0 -> /BYTES/
+CPut /Table/107/2/10/0/0 -> /BYTES/
 
 # Make sure that empty arrays emit a key.
 query T kvtrace
 INSERT INTO e VALUES(1, ARRAY[])
 ----
 CPut /Table/107/1/1/0 -> /TUPLE/
-InitPut /Table/107/2/[]/1/0 -> /BYTES/
+CPut /Table/107/2/[]/1/0 -> /BYTES/
 
 # Make sure that NULL arrays do not emit any keys at all.
 query T kvtrace
@@ -131,7 +132,7 @@ query T kvtrace
 INSERT INTO e VALUES(3, ARRAY[NULL])
 ----
 CPut /Table/107/1/3/0 -> /TUPLE/
-InitPut /Table/107/2/NULL/3/0 -> /BYTES/
+CPut /Table/107/2/NULL/3/0 -> /BYTES/
 
 # Make sure that we're emitting the right plan for array index scans even if
 # a column is both forward and inverted indexed.
@@ -199,17 +200,18 @@ vectorized: true
 query T kvtrace
 INSERT INTO f VALUES(0, ARRAY[7,0,0,1.000,10,0,1,7,1.0,1.00])
 ----
+Scan /Table/20/1/10{8-9}
 CPut /Table/108/1/0/0 -> /TUPLE/
-InitPut /Table/108/2/0/0/0 -> /BYTES/
-InitPut /Table/108/2/1/0/0 -> /BYTES/
-InitPut /Table/108/2/7/0/0 -> /BYTES/
-InitPut /Table/108/2/1E+1/0/0 -> /BYTES/
+CPut /Table/108/2/0/0/0 -> /BYTES/
+CPut /Table/108/2/1/0/0 -> /BYTES/
+CPut /Table/108/2/7/0/0 -> /BYTES/
+CPut /Table/108/2/1E+1/0/0 -> /BYTES/
 
 query T kvtrace
 INSERT INTO f VALUES(1, ARRAY[])
 ----
 CPut /Table/108/1/1/0 -> /TUPLE/
-InitPut /Table/108/2/[]/1/0 -> /BYTES/
+CPut /Table/108/2/[]/1/0 -> /BYTES/
 
 query T kvtrace
 INSERT INTO f VALUES(2, NULL)
@@ -222,10 +224,13 @@ CPut /Table/108/1/2/0 -> /TUPLE/
 query T kvtrace
 UPDATE f SET b = ARRAY[0,15,7,10] WHERE a = 0
 ----
-Scan /Table/108/1/0/0
+Scan /Table/108/1/0/0 lock Exclusive (Block, Unreplicated)
 Put /Table/108/1/0/0 -> /TUPLE/
 Del /Table/108/2/1/0/0
-InitPut /Table/108/2/15/0/0 -> /BYTES/
+CPut /Table/108/2/15/0/0 -> /BYTES/
+
+statement error pgcode XXUUU could not produce a query plan conforming to the FORCE_INVERTED_INDEX hint
+SELECT * from d@{FORCE_INVERTED_INDEX}
 
 query T
 EXPLAIN (VERBOSE) SELECT * from d where b @>'{"a": "b"}'
@@ -362,7 +367,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /[]-/{} /???-/???
+              spans: /[]-/{} /Arr/-/Arr//PrefixEnd
 
 
 # TODO(rytaft): Fix the stats so we don't choose an inverted index scan here
@@ -392,7 +397,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /{}-/{}/PrefixEnd /???-/[]
+              spans: /{}-/{}/PrefixEnd /""-/[]
 
 query T
 EXPLAIN (VERBOSE) SELECT * from d where b->'a' = '"b"'
@@ -822,7 +827,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"foo"-/"foo"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /???-/???
+              spans: /"foo"-/"foo"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /???-/Arr/
 
 # Note: we use an index hint here because we're unable to determine the
 # selectivity of the filter, which leads to a bad plan without the hint.
@@ -851,7 +856,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"foo"-/"foo"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /"a"/"b"-/"a"/"b"/PrefixEnd /???-/???
+              spans: /"foo"-/"foo"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /"a"/"b"-/"a"/"b"/PrefixEnd /???-/Arr/
 
 query T
 EXPLAIN (VERBOSE) SELECT * from d where b ? 'foo' AND b->'b' @> '{"a": "b"}'
@@ -878,7 +883,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"foo"-/"foo"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /"b"/"a"/"b"-/"b"/"a"/"b"/PrefixEnd /???-/???
+              spans: /"foo"-/"foo"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /"b"/"a"/"b"-/"b"/"a"/"b"/PrefixEnd /???-/Arr/
 
 query T
 EXPLAIN (VERBOSE) SELECT * from d where b ?| ARRAY['foo', 'bar']
@@ -905,7 +910,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"bar"-/"bar"/PrefixEnd /"foo"-/"foo"/PrefixEnd /Arr/"bar"-/Arr/"bar"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /???-/??? /???-/???
+              spans: /"bar"-/"bar"/PrefixEnd /"foo"-/"foo"/PrefixEnd /Arr/"bar"-/Arr/"bar"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /???-/Arr/ /???-/Arr/
 
 query T
 EXPLAIN (VERBOSE) SELECT * from d where b ?& ARRAY['foo', 'bar']
@@ -932,7 +937,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"bar"-/"bar"/PrefixEnd /"foo"-/"foo"/PrefixEnd /Arr/"bar"-/Arr/"bar"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /???-/??? /???-/???
+              spans: /"bar"-/"bar"/PrefixEnd /"foo"-/"foo"/PrefixEnd /Arr/"bar"-/Arr/"bar"/PrefixEnd /Arr/"foo"-/Arr/"foo"/PrefixEnd /???-/Arr/ /???-/Arr/
 
 # Multi-path contains queries. Should create zigzag joins.
 
@@ -1125,7 +1130,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"a"/{}-/"a"/{}/PrefixEnd /???-/??? /"b"/2-/"b"/2/PrefixEnd
+              spans: /"a"/{}-/"a"/{}/PrefixEnd /"a"/-/Arr/ /"b"/2-/"b"/2/PrefixEnd
 
 query T
 EXPLAIN (VERBOSE) SELECT * from d where b @> '{"a": {}, "b": {}}'
@@ -1152,7 +1157,7 @@ vectorized: true
               columns: (a, b_inverted_key)
               estimated row count: 111 (missing stats)
               table: d@foo_inv
-              spans: /"a"/{}-/"a"/{}/PrefixEnd /???-/??? /"b"/{}-/"b"/{}/PrefixEnd /???-/???
+              spans: /"a"/{}-/"a"/{}/PrefixEnd /"a"/-/Arr/ /"b"/{}-/"b"/{}/PrefixEnd /"b"/-/Arr/
 
 # Replicating the logic tests for filters with an integer on the RHS of the
 # fetch value.
@@ -1193,7 +1198,7 @@ vectorized: true
                       columns: (a, b_inverted_key)
                       estimated row count: 111 (missing stats)
                       table: d@foo_inv
-                      spans: /Arr/[]-/Arr/{} /???-/???
+                      spans: /Arr/[]-/Arr/{} /Arr/Arr/-/Arr/Arr//PrefixEnd
 
 query T
 EXPLAIN (VERBOSE) SELECT * FROM d WHERE b->0 = '"a"'
@@ -2221,7 +2226,7 @@ vectorized: true
                       columns: (a, b_inverted_key)
                       estimated row count: 111 (missing stats)
                       table: d@foo_inv
-                      spans: /{}-/{}/PrefixEnd /???-/[]
+                      spans: /{}-/{}/PrefixEnd /""-/[]
 
 query T
 EXPLAIN (VERBOSE) SELECT a FROM d WHERE b = '[]'
@@ -2256,7 +2261,7 @@ vectorized: true
                       columns: (a, b_inverted_key)
                       estimated row count: 111 (missing stats)
                       table: d@foo_inv
-                      spans: /[]-/{} /???-/???
+                      spans: /[]-/{} /Arr/-/Arr//PrefixEnd
 
 query T
 EXPLAIN (VERBOSE) SELECT a FROM d WHERE b = '{"b": 2, "a": 1}'
@@ -2509,7 +2514,7 @@ vectorized: true
                       columns: (a, b_inverted_key)
                       estimated row count: 111 (missing stats)
                       table: d@foo_inv
-                      spans: /[]-/{} /???-/???
+                      spans: /[]-/{} /Arr/-/Arr//PrefixEnd
 
 query T
 EXPLAIN (VERBOSE) SELECT a FROM d WHERE b IN ('[1, 2, 3]', '[1]')
@@ -2579,7 +2584,7 @@ vectorized: true
                       columns: (a, b_inverted_key)
                       estimated row count: 111 (missing stats)
                       table: d@foo_inv
-                      spans: /"a"/[]-/"a"/{}/PrefixEnd /???-/??? /???-/???
+                      spans: /"a"/[]-/"a"/{}/PrefixEnd /"a"/Arr/-/"a"/Arr//PrefixEnd /"a"/-/Arr/
 
 
 query T
@@ -2676,58 +2681,55 @@ ALTER TABLE d INJECT STATISTICS '[
     }
 ]';
 
-# Filter with a fully-specified array. This should use a zigzag join.
+# Filter with a fully-specified array. This should use a minimal inverted index
+# scan.
 query T
 EXPLAIN SELECT a FROM d WHERE b @> '[1, 2]' ORDER BY a
 ----
 distribution: local
 vectorized: true
 ·
-• sort
+• filter
 │ estimated row count: 1,247
-│ order: +a
+│ filter: b @> '[1, 2]'
 │
-└── • lookup join
-    │ estimated row count: 1,247
+└── • index join
+    │ estimated row count: 1,020
     │ table: d@d_pkey
-    │ equality: (a) = (a)
-    │ equality cols are key
     │
-    └── • zigzag join
-          estimated row count: 1,247
-          left table: d@foo_inv
-          left columns: (a, b_inverted_key)
-          left fixed values: 1 column
-          right table: d@foo_inv
-          right columns: (a, b_inverted_key)
-          right fixed values: 1 column
+    └── • sort
+        │ estimated row count: 1,020
+        │ order: +a
+        │
+        └── • scan
+              estimated row count: 1,020 (1.0% of the table; stats collected <hidden> ago)
+              table: d@foo_inv
+              spans: 1 span
 
 # Combine predicates with AND. Should have the same output as b @> '[1, 2]'.
-# This should use a zigzag join.
+# This should use a minimal inverted index scan.
 query T
 EXPLAIN SELECT a FROM d WHERE b @> '[1]' AND b @> '[2]' ORDER BY a
 ----
 distribution: local
 vectorized: true
 ·
-• sort
+• filter
 │ estimated row count: 1,247
-│ order: +a
+│ filter: (b @> '[1]') AND (b @> '[2]')
 │
-└── • lookup join
-    │ estimated row count: 1,247
+└── • index join
+    │ estimated row count: 1,020
     │ table: d@d_pkey
-    │ equality: (a) = (a)
-    │ equality cols are key
     │
-    └── • zigzag join
-          estimated row count: 1,247
-          left table: d@foo_inv
-          left columns: (a, b_inverted_key)
-          left fixed values: 1 column
-          right table: d@foo_inv
-          right columns: (a, b_inverted_key)
-          right fixed values: 1 column
+    └── • sort
+        │ estimated row count: 1,020
+        │ order: +a
+        │
+        └── • scan
+              estimated row count: 1,020 (1.0% of the table; stats collected <hidden> ago)
+              table: d@foo_inv
+              spans: 1 span
 
 # Filter with a nested array. This index expression is not tight.
 # This should use a zigzag join.
@@ -3231,9 +3233,10 @@ CREATE INVERTED INDEX ON t(y)
 query T kvtrace
 INSERT INTO t VALUES (1.00, ARRAY[1,2])
 ----
+Scan /Table/20/1/109{-/PrefixEnd}
 CPut /Table/109/1/1/0 -> /TUPLE/1:1:Decimal/1.00/
-InitPut /Table/109/2/1/1/0 -> /BYTES/0x1503348964
-InitPut /Table/109/2/2/1/0 -> /BYTES/0x1503348964
+CPut /Table/109/2/1/1/0 -> /BYTES/0x1503348964
+CPut /Table/109/2/2/1/0 -> /BYTES/0x1503348964
 
 statement ok
 CREATE TABLE geo_table(
@@ -3288,23 +3291,23 @@ EXPLAIN (OPT, VERBOSE) SELECT * FROM geo_table2 JOIN geo_table@geom_index
 ON ST_Intersects(geo_table2.geom, geo_table.geom)
 ----
 inner-join (lookup geo_table)
- ├── columns: k:1 geom:2 k:5 geom:6
- ├── key columns: [11] = [5]
+ ├── columns: k:1 geom:2 k:7 geom:8
+ ├── key columns: [15] = [7]
  ├── lookup columns are key
  ├── immutable
  ├── stats: [rows=9801]
  ├── cost: 112716.87
- ├── key: (1,5)
- ├── fd: (1)-->(2), (5)-->(6)
+ ├── key: (1,7)
+ ├── fd: (1)-->(2), (7)-->(8)
  ├── distribution: test
- ├── prune: (1,5)
- ├── inner-join (inverted geo_table@geom_index)
- │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:11
+ ├── prune: (1,7)
+ ├── inner-join (inverted geo_table@geom_index,inverted)
+ │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:15
  │    ├── inverted-expr
- │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:12)
- │    ├── stats: [rows=10000, distinct(11)=999.957, null(11)=0]
+ │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:16)
+ │    ├── stats: [rows=10000, distinct(15)=999.957, null(15)=0]
  │    ├── cost: 41812.84
- │    ├── key: (1,11)
+ │    ├── key: (1,15)
  │    ├── fd: (1)-->(2)
  │    ├── distribution: test
  │    ├── scan geo_table2
@@ -3315,10 +3318,10 @@ inner-join (lookup geo_table)
  │    │    ├── fd: (1)-->(2)
  │    │    ├── distribution: test
  │    │    ├── prune: (1,2)
- │    │    └── unfiltered-cols: (1-4)
+ │    │    └── unfiltered-cols: (1-6)
  │    └── filters (true)
  └── filters
-      └── st_intersects(geo_table2.geom:2, geo_table.geom:6) [outer=(2,6), immutable, constraints=(/2: (/NULL - ]; /6: (/NULL - ])]
+      └── st_intersects(geo_table2.geom:2, geo_table.geom:8) [outer=(2,8), immutable, constraints=(/2: (/NULL - ]; /8: (/NULL - ])]
 
 query T
 EXPLAIN (VERBOSE) SELECT * FROM geo_table2 JOIN geo_table@geom_index
@@ -3379,26 +3382,26 @@ EXPLAIN (OPT, VERBOSE) SELECT * FROM geo_table2 LEFT JOIN geo_table@geom_index
 ON ST_Intersects(geo_table2.geom, geo_table.geom)
 ----
 left-join (lookup geo_table)
- ├── columns: k:1 geom:2 k:5 geom:6
- ├── key columns: [11] = [5]
+ ├── columns: k:1 geom:2 k:7 geom:8
+ ├── key columns: [15] = [7]
  ├── lookup columns are key
  ├── second join in paired joiner
  ├── immutable
  ├── stats: [rows=10000]
  ├── cost: 112716.87
- ├── key: (1,5)
- ├── fd: (1)-->(2), (5)-->(6)
+ ├── key: (1,7)
+ ├── fd: (1)-->(2), (7)-->(8)
  ├── distribution: test
- ├── prune: (1,5)
- ├── left-join (inverted geo_table@geom_index)
- │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:11 continuation:16
- │    ├── first join in paired joiner; continuation column: continuation:16
+ ├── prune: (1,7)
+ ├── left-join (inverted geo_table@geom_index,inverted)
+ │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:15 continuation:22
+ │    ├── first join in paired joiner; continuation column: continuation:22
  │    ├── inverted-expr
- │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:12)
- │    ├── stats: [rows=10000, distinct(11)=999.957, null(11)=0]
+ │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:16)
+ │    ├── stats: [rows=10000, distinct(15)=999.957, null(15)=0]
  │    ├── cost: 41812.84
- │    ├── key: (1,11)
- │    ├── fd: (1)-->(2), (11)-->(16)
+ │    ├── key: (1,15)
+ │    ├── fd: (1)-->(2), (15)-->(22)
  │    ├── distribution: test
  │    ├── scan geo_table2
  │    │    ├── columns: geo_table2.k:1 geo_table2.geom:2
@@ -3408,10 +3411,10 @@ left-join (lookup geo_table)
  │    │    ├── fd: (1)-->(2)
  │    │    ├── distribution: test
  │    │    ├── prune: (1,2)
- │    │    └── unfiltered-cols: (1-4)
+ │    │    └── unfiltered-cols: (1-6)
  │    └── filters (true)
  └── filters
-      └── st_intersects(geo_table2.geom:2, geo_table.geom:6) [outer=(2,6), immutable, constraints=(/2: (/NULL - ]; /6: (/NULL - ])]
+      └── st_intersects(geo_table2.geom:2, geo_table.geom:8) [outer=(2,8), immutable, constraints=(/2: (/NULL - ]; /8: (/NULL - ])]
 
 query T
 EXPLAIN (OPT, VERBOSE) SELECT * FROM geo_table2 WHERE EXISTS (SELECT * FROM geo_table@geom_index
@@ -3419,7 +3422,7 @@ WHERE ST_Intersects(geo_table2.geom, geo_table.geom))
 ----
 semi-join (lookup geo_table)
  ├── columns: k:1 geom:2
- ├── key columns: [11] = [5]
+ ├── key columns: [16] = [7]
  ├── lookup columns are key
  ├── second join in paired joiner
  ├── immutable
@@ -3429,15 +3432,15 @@ semi-join (lookup geo_table)
  ├── fd: (1)-->(2)
  ├── distribution: test
  ├── prune: (1)
- ├── inner-join (inverted geo_table@geom_index)
- │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:11 continuation:16
- │    ├── first join in paired joiner; continuation column: continuation:16
+ ├── inner-join (inverted geo_table@geom_index,inverted)
+ │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:16 continuation:23
+ │    ├── first join in paired joiner; continuation column: continuation:23
  │    ├── inverted-expr
- │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:12)
- │    ├── stats: [rows=10000, distinct(11)=999.957, null(11)=0]
+ │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:17)
+ │    ├── stats: [rows=10000, distinct(16)=999.957, null(16)=0]
  │    ├── cost: 41812.84
- │    ├── key: (1,11)
- │    ├── fd: (1)-->(2), (11)-->(16)
+ │    ├── key: (1,16)
+ │    ├── fd: (1)-->(2), (16)-->(23)
  │    ├── distribution: test
  │    ├── scan geo_table2
  │    │    ├── columns: geo_table2.k:1 geo_table2.geom:2
@@ -3448,10 +3451,10 @@ semi-join (lookup geo_table)
  │    │    ├── distribution: test
  │    │    ├── prune: (1,2)
  │    │    ├── interesting orderings: (+1)
- │    │    └── unfiltered-cols: (1-4)
+ │    │    └── unfiltered-cols: (1-6)
  │    └── filters (true)
  └── filters
-      └── st_intersects(geo_table2.geom:2, geo_table.geom:6) [outer=(2,6), immutable, constraints=(/2: (/NULL - ]; /6: (/NULL - ])]
+      └── st_intersects(geo_table2.geom:2, geo_table.geom:8) [outer=(2,8), immutable, constraints=(/2: (/NULL - ]; /8: (/NULL - ])]
 
 query T
 EXPLAIN (OPT, VERBOSE) SELECT * FROM geo_table2 WHERE NOT EXISTS (SELECT * FROM geo_table@geom_index
@@ -3459,7 +3462,7 @@ WHERE ST_Intersects(geo_table2.geom, geo_table.geom))
 ----
 anti-join (lookup geo_table)
  ├── columns: k:1 geom:2
- ├── key columns: [11] = [5]
+ ├── key columns: [16] = [7]
  ├── lookup columns are key
  ├── second join in paired joiner
  ├── immutable
@@ -3469,15 +3472,15 @@ anti-join (lookup geo_table)
  ├── fd: (1)-->(2)
  ├── distribution: test
  ├── prune: (1)
- ├── left-join (inverted geo_table@geom_index)
- │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:11 continuation:16
- │    ├── first join in paired joiner; continuation column: continuation:16
+ ├── left-join (inverted geo_table@geom_index,inverted)
+ │    ├── columns: geo_table2.k:1 geo_table2.geom:2 geo_table.k:16 continuation:23
+ │    ├── first join in paired joiner; continuation column: continuation:23
  │    ├── inverted-expr
- │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:12)
- │    ├── stats: [rows=10000, distinct(11)=999.957, null(11)=0]
+ │    │    └── st_intersects(geo_table2.geom:2, geo_table.geom:17)
+ │    ├── stats: [rows=10000, distinct(16)=999.957, null(16)=0]
  │    ├── cost: 41812.84
- │    ├── key: (1,11)
- │    ├── fd: (1)-->(2), (11)-->(16)
+ │    ├── key: (1,16)
+ │    ├── fd: (1)-->(2), (16)-->(23)
  │    ├── distribution: test
  │    ├── scan geo_table2
  │    │    ├── columns: geo_table2.k:1 geo_table2.geom:2
@@ -3487,10 +3490,10 @@ anti-join (lookup geo_table)
  │    │    ├── fd: (1)-->(2)
  │    │    ├── distribution: test
  │    │    ├── prune: (1,2)
- │    │    └── unfiltered-cols: (1-4)
+ │    │    └── unfiltered-cols: (1-6)
  │    └── filters (true)
  └── filters
-      └── st_intersects(geo_table2.geom:2, geo_table.geom:6) [outer=(2,6), immutable, constraints=(/2: (/NULL - ]; /6: (/NULL - ])]
+      └── st_intersects(geo_table2.geom:2, geo_table.geom:8) [outer=(2,8), immutable, constraints=(/2: (/NULL - ]; /8: (/NULL - ])]
 
 # Tests for multi-column inverted indexes.
 subtest multi_column
@@ -3509,6 +3512,7 @@ CREATE TABLE m (
 query T kvtrace
 SELECT k FROM m@i1 WHERE a = 10 AND j @> '{"a": "b"}'
 ----
+Scan /Table/20/1/11{2-3}
 Scan /Table/112/2/10/"a"/"b"{-/PrefixEnd}
 
 # Combine multiple constraint spans with the inverted constraint.
@@ -3555,12 +3559,12 @@ index-join t117979
  ├── fd: (1)-->(2)
  ├── distribution: test
  ├── prune: (1)
- └── scan t117979@idx_links [as=t]
+ └── scan t117979@idx_links,inverted [as=t]
       ├── columns: id:1
-      ├── inverted constraint: /5/1
-      │    └── spans: ["\x12str1\x00\x01", "\x12str1\x00\x01"]
+      ├── inverted constraint: /7/1
+      │    └── spans: ["str1", "str1"]
       ├── flags: force-index=idx_links
-      ├── stats: [rows=111.1111, distinct(5)=100, null(5)=0]
+      ├── stats: [rows=111.1111, distinct(7)=100, null(7)=0]
       ├── cost: 135.797778
       ├── key: (1)
       └── distribution: test

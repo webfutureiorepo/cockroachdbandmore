@@ -1,30 +1,27 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * This module maintains a globally-available time window, currently used by all
  * metrics graphs in the ui.
  */
 
+import { defaultTimeScaleOptions, TimeScale } from "@cockroachlabs/cluster-ui";
+import cloneDeep from "lodash/cloneDeep";
+import moment from "moment-timezone";
 import { Action } from "redux";
 import { put, takeEvery, all } from "redux-saga/effects";
-import { PayloadAction } from "src/interfaces/action";
-import _ from "lodash";
-import { defaultTimeScaleOptions, TimeScale } from "@cockroachlabs/cluster-ui";
-import moment from "moment-timezone";
 import { createSelector } from "reselect";
-import { AdminUIState } from "src/redux/state";
+
+import { PayloadAction } from "src/interfaces/action";
 import {
   getValueFromSessionStorage,
   setLocalSetting,
 } from "src/redux/localsettings";
+import { AdminUIState } from "src/redux/state";
+
 import {
   invalidateExecutionInsights,
   invalidateTxnInsights,
@@ -81,10 +78,14 @@ export class TimeScaleState {
         fixedWindowEnd: val.fixedWindowEnd && moment(val.fixedWindowEnd),
       };
     } catch (e) {
-      console.warn(
-        `Couldn't retrieve or parse TimeScale options from SessionStorage`,
-        e,
-      );
+      // Don't log this in tests because it pollutes the output.
+      if (process.env.NODE_ENV !== "test") {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `Couldn't retrieve or parse TimeScale options from SessionStorage`,
+          e,
+        );
+      }
     }
     this.scale = timeScale || {
       ...defaultTimeScaleOptions["Past Hour"],
@@ -109,7 +110,7 @@ export function timeScaleReducer(
   switch (action.type) {
     case SET_SCALE: {
       const { payload: scale } = action as PayloadAction<TimeScale>;
-      state = _.cloneDeep(state);
+      state = cloneDeep(state);
       state.metricsTime.isFixedWindow = scale.key === "Custom";
       state.scale = scale;
       state.metricsTime.shouldUpdateMetricsWindowFromScale = true;
@@ -120,14 +121,14 @@ export function timeScaleReducer(
       // We don't want to deep clone the state here, because we're
       // not changing the scale object here. For components observing
       // timescale changes, we don't want to update them unnecessarily.
-      state = { ...state, metricsTime: _.cloneDeep(state.metricsTime) };
+      state = { ...state, metricsTime: cloneDeep(state.metricsTime) };
       state.metricsTime.currentWindow = tw;
       state.metricsTime.shouldUpdateMetricsWindowFromScale = false;
       return state;
     }
     case SET_METRICS_FIXED_WINDOW: {
       const { payload: data } = action as PayloadAction<TimeWindow>;
-      state = { ...state, metricsTime: _.cloneDeep(state.metricsTime) };
+      state = { ...state, metricsTime: cloneDeep(state.metricsTime) };
       state.metricsTime.currentWindow = data;
       state.metricsTime.isFixedWindow = true;
       state.metricsTime.shouldUpdateMetricsWindowFromScale = false;

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -191,4 +186,19 @@ func (n *unionNode) Values() tree.Datums {
 func (n *unionNode) Close(ctx context.Context) {
 	n.right.Close(ctx)
 	n.left.Close(ctx)
+}
+
+func (n *unionNode) InputCount() int {
+	return 2
+}
+
+func (n *unionNode) Input(i int) (planNode, error) {
+	switch i {
+	case 0:
+		return n.right, nil
+	case 1:
+		return n.left, nil
+	default:
+		return nil, errors.AssertionFailedf("input index %d is out of range", i)
+	}
 }

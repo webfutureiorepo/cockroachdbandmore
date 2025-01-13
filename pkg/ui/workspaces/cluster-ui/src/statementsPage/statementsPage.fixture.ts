@@ -1,25 +1,24 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /* eslint-disable prettier/prettier */
-import { StatementsPageProps } from "./statementsPage";
-import moment from "moment-timezone";
-import { createMemoryHistory } from "history";
-import Long from "long";
-import { noop } from "lodash";
-import { RequestError } from "src/util";
-import { StatementDiagnosticsReport } from "../api";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import * as protos from "@cockroachlabs/crdb-protobuf-client";
+import { createMemoryHistory } from "history";
+import noop from "lodash/noop";
+import Long from "long";
+import moment from "moment-timezone";
+
 import { DEFAULT_STATS_REQ_OPTIONS } from "src/api/statementsApi";
 import { mockStmtStats } from "src/api/testUtils";
-import * as protos from "@cockroachlabs/crdb-protobuf-client";
+import { RequestError } from "src/util";
+
+
+import { StatementDiagnosticsReport } from "../api";
+
+import { StatementsPageProps } from "./statementsPage";
 
 const history = createMemoryHistory({ initialEntries: ["/statements"] });
 const timestamp = new protos.google.protobuf.Timestamp({
@@ -416,7 +415,6 @@ export const statementsPagePropsWithRequestError: StatementsPageProps = {
     lastUpdated,
     valid: true,
     error: new RequestError(
-      "request_error",
       403,
       "this operation requires admin privilege",
     ),

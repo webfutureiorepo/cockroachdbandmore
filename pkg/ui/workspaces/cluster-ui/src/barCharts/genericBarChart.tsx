@@ -1,22 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { Tooltip } from "@cockroachlabs/ui-components";
 import classNames from "classnames/bind";
-import { scaleLinear } from "d3-scale";
 import { format as d3Format } from "d3-format";
+import { scaleLinear } from "d3-scale";
+import React from "react";
 
 import { stdDevLong, longToInt, NumericStat } from "src/util";
-import { Tooltip } from "@cockroachlabs/ui-components";
-import { clamp, normalizeClosedDomain } from "./utils";
+
 import styles from "./barCharts.module.scss";
+import { clamp, normalizeClosedDomain } from "./utils";
 
 const cx = classNames.bind(styles);
 

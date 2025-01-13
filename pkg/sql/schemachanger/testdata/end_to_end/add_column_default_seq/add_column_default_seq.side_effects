@@ -133,8 +133,8 @@ upsert descriptor #107
   +    columnIds:
   +    - 2
   +    id: 106
-     families:
-     - columnIds:
+     formatVersion: 3
+     id: 107
   ...
        start: "1"
      unexposedParentSchemaId: 105
@@ -159,6 +159,8 @@ upsert descriptor #106
   +      columns:
   +        "1": i
   +        "2": l
+  +        "4294967292": crdb_internal_origin_timestamp
+  +        "4294967293": crdb_internal_origin_id
   +        "4294967294": tableoid
   +        "4294967295": crdb_internal_mvcc_timestamp
   +      families:
@@ -287,8 +289,8 @@ upsert descriptor #107
   +    columnIds:
   +    - 2
   +    id: 106
-     families:
-     - columnIds:
+     formatVersion: 3
+     id: 107
   ...
        start: "1"
      unexposedParentSchemaId: 105
@@ -661,6 +663,8 @@ upsert descriptor #106
   -      columns:
   -        "1": i
   -        "2": l
+  -        "4294967292": crdb_internal_origin_timestamp
+  -        "4294967293": crdb_internal_origin_id
   -        "4294967294": tableoid
   -        "4294967295": crdb_internal_mvcc_timestamp
   -      families:

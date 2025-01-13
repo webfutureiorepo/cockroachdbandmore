@@ -1,30 +1,31 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import _ from "lodash";
 import { assert } from "chai";
-import { mount, ReactWrapper } from "enzyme";
 import classNames from "classnames/bind";
+import { mount, ReactWrapper } from "enzyme";
+import each from "lodash/each";
+import sortBy from "lodash/sortBy";
+import sumBy from "lodash/sumBy";
+import React from "react";
+
+import styles from "src/sortabletable/sortabletable.module.scss";
 import {
   SortedTable,
   ColumnDescriptor,
   ISortedTablePagination,
   SortSetting,
 } from "src/sortedtable";
-import styles from "src/sortabletable/sortabletable.module.scss";
 
 const cx = classNames.bind(styles);
 
 class TestRow {
-  constructor(public name: string, public value: number) {}
+  constructor(
+    public name: string,
+    public value: number,
+  ) {}
 }
 
 const columns: ColumnDescriptor<TestRow>[] = [
@@ -39,7 +40,7 @@ const columns: ColumnDescriptor<TestRow>[] = [
     title: "second",
     cell: tr => tr.value.toString(),
     sort: tr => tr.value,
-    rollup: trs => _.sumBy(trs, tr => tr.value),
+    rollup: trs => sumBy(trs, tr => tr.value),
   },
 ];
 
@@ -121,7 +122,7 @@ describe("<SortedTable>", function () {
     let wrapper = makeTable(data, undefined);
     const assertMatches = (expected: TestRow[]) => {
       const rows = wrapper.find("tbody");
-      _.each(expected, (rowData, dataIndex) => {
+      each(expected, (rowData, dataIndex) => {
         const row = rows.childAt(dataIndex);
         assert.equal(
           row.childAt(0).childAt(0).text(),
@@ -140,14 +141,14 @@ describe("<SortedTable>", function () {
       ascending: true,
       columnTitle: "first",
     });
-    assertMatches(_.sortBy(data, r => r.name));
+    assertMatches(sortBy(data, r => r.name));
     wrapper.setProps({
       uiSortSetting: {
         ascending: true,
         columnTitle: "second",
       } as SortSetting,
     });
-    assertMatches(_.sortBy(data, r => r.value));
+    assertMatches(sortBy(data, r => r.value));
   });
 
   describe("with expandableConfig", function () {

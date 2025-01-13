@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -84,7 +80,7 @@ func (r *Replica) executeReadOnlyBatch(
 	// Pin engine state eagerly so that all iterators created over this Reader are
 	// based off the state of the engine as of this point and are mutually
 	// consistent.
-	readCategory := storage.BatchEvalReadCategory
+	readCategory := fs.BatchEvalReadCategory
 	for _, union := range ba.Requests {
 		inner := union.GetInner()
 		switch inner.(type) {
@@ -132,7 +128,7 @@ func (r *Replica) executeReadOnlyBatch(
 	}
 
 	var result result.Result
-	br, result, pErr = r.executeReadOnlyBatchWithServersideRefreshes(ctx, rw, rec, ba, g, &st, ui, evalPath)
+	ba, br, result, pErr = r.executeReadOnlyBatchWithServersideRefreshes(ctx, rw, rec, ba, g, &st, ui, evalPath)
 
 	// If the request hit a server-side concurrency retry error, immediately
 	// propagate the error. Don't assume ownership of the concurrency guard.
@@ -314,6 +310,7 @@ func (r *Replica) canDropLatchesBeforeEval(
 	)
 
 	maxLockConflicts := storage.MaxConflictsPerLockConflictError.Get(&r.store.cfg.Settings.SV)
+	targetLockConflictBytes := storage.TargetBytesPerLockConflictError.Get(&r.store.cfg.Settings.SV)
 	var intents []roachpb.Intent
 	// Check if any of the requests within the batch need to resolve any intents
 	// or if any of them need to use an intent interleaving iterator.
@@ -325,7 +322,7 @@ func (r *Replica) canDropLatchesBeforeEval(
 			txnID = ba.Txn.ID
 		}
 		needsIntentInterleavingForThisRequest, err := storage.ScanConflictingIntentsForDroppingLatchesEarly(
-			ctx, rw, txnID, ba.Header.Timestamp, start, end, &intents, maxLockConflicts,
+			ctx, rw, txnID, ba.Header.Timestamp, start, end, &intents, maxLockConflicts, targetLockConflictBytes,
 		)
 		if err != nil {
 			return false /* ok */, true /* stillNeedsIntentInterleaving */, kvpb.NewError(
@@ -420,7 +417,7 @@ func (r *Replica) executeReadOnlyBatchWithServersideRefreshes(
 	st *kvserverpb.LeaseStatus,
 	ui uncertainty.Interval,
 	evalPath batchEvalPath,
-) (br *kvpb.BatchResponse, res result.Result, pErr *kvpb.Error) {
+) (_ *kvpb.BatchRequest, br *kvpb.BatchResponse, res result.Result, pErr *kvpb.Error) {
 	log.Event(ctx, "executing read-only batch")
 
 	var rootMonitor *mon.BytesMonitor
@@ -465,8 +462,9 @@ func (r *Replica) executeReadOnlyBatchWithServersideRefreshes(
 
 	for retries := 0; ; retries++ {
 		if retries > 0 {
-			// It is safe to call Clear on an uninitialized BoundAccount.
-			boundAccount.Clear(ctx)
+			if boundAccount != nil {
+				boundAccount.Clear(ctx)
+			}
 			log.VEventf(ctx, 2, "server-side retry of batch")
 		}
 		now := timeutil.Now()
@@ -486,7 +484,11 @@ func (r *Replica) executeReadOnlyBatchWithServersideRefreshes(
 		// retry at a higher timestamp because it is not isolated at higher
 		// timestamps.
 		latchesHeld := g != nil
-		if !latchesHeld || !canDoServersideRetry(ctx, pErr, ba, g, hlc.Timestamp{}) {
+		var ok bool
+		if latchesHeld {
+			ba, ok = canDoServersideRetry(ctx, pErr, ba, g, hlc.Timestamp{})
+		}
+		if !ok {
 			// TODO(aayush,arul): These metrics are incorrect at the moment since
 			// hitting this branch does not mean that we won't serverside retry, it
 			// just means that we will have to reacquire latches.
@@ -504,9 +506,9 @@ func (r *Replica) executeReadOnlyBatchWithServersideRefreshes(
 			EncounteredIntents: res.Local.DetachEncounteredIntents(),
 			Metrics:            res.Local.Metrics,
 		}
-		return nil, res, pErr
+		return ba, nil, res, pErr
 	}
-	return br, res, nil
+	return ba, br, res, nil
 }
 
 func (r *Replica) handleReadOnlyLocalEvalResult(

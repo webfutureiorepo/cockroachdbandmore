@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package oidcccl
 
@@ -15,6 +12,7 @@ import (
 	"encoding/base64"
 	"net/http"
 
+	"github.com/cockroachdb/cockroach/pkg/server/authserver"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -61,16 +59,13 @@ func newKeyAndSignedToken(
 		return nil, err
 	}
 
-	secretKeyCookie := http.Cookie{
-		Name:     secretCookieName,
-		Value:    base64.URLEncoding.EncodeToString(secretKey),
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
+	secretKeyCookie := authserver.CreateOIDCCookie(
+		secretCookieName,
+		base64.URLEncoding.EncodeToString(secretKey),
+	)
 
 	return &keyAndSignedToken{
-		&secretKeyCookie,
+		secretKeyCookie,
 		signedTokenEncoded,
 	}, nil
 }

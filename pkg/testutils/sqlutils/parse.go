@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlutils
 
@@ -51,13 +46,19 @@ func parseOne(t *testing.T, input string, plpgsql bool) (tree.NodeFormatter, err
 // VerifyParseFormat is used in the SQL and PL/pgSQL datadriven parser tests to
 // check that a successfully parsed expression round trips and correctly handles
 // formatting flags.
-func VerifyParseFormat(t *testing.T, input string, plpgsql bool) string {
+//
+// -reParseWithoutLiterals indicates whether the statement should be re-parsed
+// after constants are removed. This can be needed to handle cases where quotes
+// are formatted differently depending on the string content.
+func VerifyParseFormat(
+	t *testing.T, input, pos string, plpgsql, reParseWithoutLiterals bool,
+) string {
 	t.Helper()
 
 	// Check parse.
 	stmts, err := parse(t, input, plpgsql)
 	if err != nil {
-		t.Fatalf("unexpected parse error: %v", err)
+		t.Fatalf("%s\nunexpected parse error: %v", pos, err)
 	}
 
 	// Check pretty-print roundtrip.
@@ -81,20 +82,22 @@ func VerifyParseFormat(t *testing.T, input string, plpgsql bool) string {
 	constantsHidden := stmts.StringWithFlags(tree.FmtHideConstants)
 	fmt.Fprintln(&buf, constantsHidden, "-- literals removed")
 
-	// As of this writing, the SQL statement stats proceed as follows:
-	// first the literals are removed from statement to form a stat key,
-	// then the stat key is re-parsed, to undergo the anonymization stage.
-	// We also want to check the re-parsing is fine.
-	reparsedStmts, err := parse(t, constantsHidden, plpgsql)
-	if err != nil {
-		t.Fatalf("unexpected error when reparsing without literals: %+v", err)
-	} else {
-		reparsedStmtsS := reparsedStmts.String()
-		if reparsedStmtsS != constantsHidden {
-			t.Fatalf(
-				"mismatched AST when reparsing without literals:\noriginal: %s\nexpected: %s\nactual:   %s",
-				input, constantsHidden, reparsedStmtsS,
-			)
+	if reParseWithoutLiterals {
+		// As of this writing, the SQL statement stats proceed as follows:
+		// first the literals are removed from statement to form a stat key,
+		// then the stat key is re-parsed, to undergo the anonymization stage.
+		// We also want to check the re-parsing is fine.
+		reparsedStmts, err := parse(t, constantsHidden, plpgsql)
+		if err != nil {
+			t.Fatalf("%s\nunexpected error when reparsing without literals: %+v", pos, err)
+		} else {
+			reparsedStmtsS := reparsedStmts.String()
+			if reparsedStmtsS != constantsHidden {
+				t.Fatalf(
+					"%s\nmismatched AST when reparsing without literals:\noriginal: %s\nexpected: %s\nactual:   %s",
+					pos, input, constantsHidden, reparsedStmtsS,
+				)
+			}
 		}
 	}
 
@@ -111,9 +114,6 @@ var issueLinkRE = regexp.MustCompile("https://go.crdb.dev/issue-v/([0-9]+)/.*")
 // VerifyParseError is used in the SQL and PL/pgSQL datadriven parser tests to
 // check that an unsuccessfully parsed expression returns an expected error.
 func VerifyParseError(err error) string {
-	if err == nil {
-		return ""
-	}
 	pgerr := pgerror.Flatten(err)
 	msg := pgerr.Message
 	if pgerr.Detail != "" {

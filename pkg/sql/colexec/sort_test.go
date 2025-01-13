@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -367,17 +362,11 @@ func BenchmarkSortUUID(b *testing.B) {
 						// all abbreviated values are the same, then comparing
 						// them is unnecessary work because we must always fall
 						// back to full comparisons.
-						id, err := uuid.NewV4()
-						if err != nil {
-							b.Fatalf("unexpected error: %s", err)
-						}
+						id := uuid.NewV4()
 						constPrefix := id[:8]
 
 						for j := 0; j < coldata.BatchSize(); j++ {
-							id, err := uuid.NewV4()
-							if err != nil {
-								b.Fatalf("unexpected error: %s", err)
-							}
+							id := uuid.NewV4()
 							idBytes := id[:16]
 							// Make the abbreviated bytes constant constAbbrPct% of
 							// the time.

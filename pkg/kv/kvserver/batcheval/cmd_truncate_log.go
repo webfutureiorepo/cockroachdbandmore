@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
@@ -133,9 +129,10 @@ func TruncateLog(
 	}
 
 	var pd result.Result
-	pd.Replicated.State = &kvserverpb.ReplicaState{
-		TruncatedState: tState,
-	}
+	pd.Replicated.SetRaftTruncatedState(tState,
+		cArgs.EvalCtx.ClusterSettings().Version.IsActive(
+			ctx, clusterversion.V25_1_MoveRaftTruncatedState),
+	)
 	pd.Replicated.RaftLogDelta = ms.SysBytes
 	pd.Replicated.RaftExpectedFirstIndex = firstIndex
 	return pd, nil

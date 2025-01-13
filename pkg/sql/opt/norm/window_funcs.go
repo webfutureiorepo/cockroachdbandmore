@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm
 
@@ -201,4 +196,25 @@ func (c *CustomFuncs) LimitToRowNumberFilter(
 			c.f.ConstructLe(c.f.ConstructVariable(rowNumCol), c.f.ConstructConstVal(limit, types.Int)),
 		),
 	}
+}
+
+// WindowsAreAggregations returns true if all the window functions are aggregate
+// functions.
+func (c *CustomFuncs) WindowsAreAggregations(windows memo.WindowsExpr) bool {
+	for i := range windows {
+		if !opt.IsAggregateOp(windows[i].Function) {
+			return false
+		}
+	}
+	return true
+}
+
+// WindowFuncOutputCols collects all columns projected by the given set of
+// window functions.
+func (c *CustomFuncs) WindowFuncOutputCols(windows memo.WindowsExpr) opt.ColSet {
+	var cols opt.ColSet
+	for i := range windows {
+		cols.Add(windows[i].Col)
+	}
+	return cols
 }

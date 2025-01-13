@@ -1,42 +1,54 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import { AxisUnits, TimeScale } from "@cockroachlabs/cluster-ui";
+import flatMap from "lodash/flatMap";
+import flow from "lodash/flow";
+import isEmpty from "lodash/isEmpty";
+import keys from "lodash/keys";
+import map from "lodash/map";
+import sortBy from "lodash/sortBy";
+import startsWith from "lodash/startsWith";
 import React from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 import { createSelector } from "reselect";
 
+import TimeScaleDropdown from "oss/src/views/cluster/containers/timeScaleDropdownWithSearchParams";
+import { PayloadAction } from "src/interfaces/action";
 import {
   refreshMetricMetadata,
   refreshNodes,
   refreshTenantsList,
 } from "src/redux/apiReducers";
-import { nodesSummarySelector, NodesSummary } from "src/redux/nodes";
-import { AdminUIState } from "src/redux/state";
-import LineGraph from "src/views/cluster/components/linegraph";
-import { DropdownOption } from "src/views/shared/components/dropdown";
-import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
-import { Metric, Axis } from "src/views/shared/components/metricQuery";
-import TimeScaleDropdown from "oss/src/views/cluster/containers/timeScaleDropdownWithSearchParams";
-import { AxisUnits, TimeScale } from "@cockroachlabs/cluster-ui";
-import {
-  PageConfig,
-  PageConfigItem,
-} from "src/views/shared/components/pageconfig";
+import { getCookieValue } from "src/redux/cookies";
 import {
   MetricsMetadata,
   metricsMetadataSelector,
 } from "src/redux/metricMetadata";
+import { nodesSummarySelector, NodesSummary } from "src/redux/nodes";
+import { AdminUIState } from "src/redux/state";
+import { tenantDropdownOptions } from "src/redux/tenants";
+import {
+  TimeWindow,
+  setMetricsFixedWindow,
+  selectTimeScale,
+  setTimeScale,
+} from "src/redux/timeScale";
 import { INodeStatus } from "src/util/proto";
+import { queryByName } from "src/util/query";
+import LineGraph from "src/views/cluster/components/linegraph";
+import { BackToAdvanceDebug } from "src/views/reports/containers/util";
+import { DropdownOption } from "src/views/shared/components/dropdown";
+import { Metric, Axis } from "src/views/shared/components/metricQuery";
+import {
+  PageConfig,
+  PageConfigItem,
+} from "src/views/shared/components/pageconfig";
+import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
 
 import {
   CustomChartState,
@@ -44,17 +56,6 @@ import {
   CustomMetricState,
 } from "./customMetric";
 import "./customChart.styl";
-import { queryByName } from "src/util/query";
-import { PayloadAction } from "src/interfaces/action";
-import {
-  TimeWindow,
-  setMetricsFixedWindow,
-  selectTimeScale,
-  setTimeScale,
-} from "src/redux/timeScale";
-import { BackToAdvanceDebug } from "src/views/reports/containers/util";
-import { getCookieValue } from "src/redux/cookies";
-import { tenantDropdownOptions } from "src/redux/tenants";
 
 export interface CustomChartProps {
   refreshNodes: typeof refreshNodes;
@@ -74,6 +75,35 @@ interface UrlState {
   charts: string;
 }
 
+export const getSources = (
+  nodesSummary: NodesSummary,
+  metricState: CustomMetricState,
+  metricsMetadata: MetricsMetadata,
+): string[] => {
+  if (!(nodesSummary?.nodeStatuses?.length > 0)) {
+    return [];
+  }
+  // If we have no nodeSource, and we're not asking for perSource metrics,
+  // then the user is asking for cluster-wide metrics. We can return an empty
+  // source list.
+  if (metricState.nodeSource === "" && !metricState.perSource) {
+    return [];
+  }
+  if (isStoreMetric(metricsMetadata.recordedNames, metricState.metric)) {
+    // If a specific node is selected, return the storeIDs associated with that node.
+    // Otherwise, we're at the cluster level, so we grab each store ID.
+    return metricState.nodeSource
+      ? nodesSummary.storeIDsByNodeID[metricState.nodeSource]
+      : Object.values(nodesSummary.storeIDsByNodeID).flatMap(s => s);
+  } else {
+    // If it's not a store metric, and a specific nodeSource is chosen, just return that.
+    // Otherwise, return all known node IDs.
+    return metricState.nodeSource
+      ? [metricState.nodeSource]
+      : nodesSummary.nodeIDs;
+  }
+};
+
 export class CustomChart extends React.Component<
   CustomChartProps & RouteComponentProps
 > {
@@ -85,15 +115,17 @@ export class CustomChart extends React.Component<
     (nodeStatuses, nodeDisplayNameByID): DropdownOption[] => {
       const base = [{ value: "", label: "Cluster" }];
       return base.concat(
-        _.chain(nodeStatuses)
-          .map(ns => {
-            return {
+        flow(
+          (statuses: INodeStatus[]) =>
+            map(statuses, ns => ({
               value: ns.desc.node_id.toString(),
               label: nodeDisplayNameByID[ns.desc.node_id],
-            };
-          })
-          .sortBy(value => _.startsWith(value.label, "[decommissioned]"))
-          .value(),
+            })),
+          values =>
+            sortBy(values, value =>
+              startsWith(value.label, "[decommissioned]"),
+            ),
+        )(nodeStatuses),
       );
     },
   );
@@ -101,23 +133,18 @@ export class CustomChart extends React.Component<
   // Selector which computes dropdown options based on the metrics which are
   // currently being stored on the cluster.
   private metricOptions = createSelector(
-    (summary: NodesSummary) => summary.nodeStatuses,
-    (_summary: NodesSummary, metricsMetadata: MetricsMetadata) =>
-      metricsMetadata,
-    (nodeStatuses, metadata = {}): DropdownOption[] => {
-      if (_.isEmpty(nodeStatuses)) {
+    (metricsMetadata: MetricsMetadata) => metricsMetadata,
+    (metricsMetadata): DropdownOption[] => {
+      if (isEmpty(metricsMetadata?.metadata)) {
         return [];
       }
 
-      return _.keys(nodeStatuses[0].metrics).map(k => {
-        const fullMetricName = isStoreMetric(nodeStatuses[0], k)
-          ? "cr.store." + k
-          : "cr.node." + k;
-
+      return keys(metricsMetadata.recordedNames).map(k => {
+        const fullMetricName = metricsMetadata.recordedNames[k];
         return {
           value: fullMetricName,
           label: k,
-          description: metadata[k] && metadata[k].help,
+          description: metricsMetadata.metadata[k]?.help,
         };
       });
     },
@@ -211,49 +238,42 @@ export class CustomChart extends React.Component<
   // This function handles the logic related to creating Metric components
   // based on perNode and perTenant flags.
   renderMetricComponents = (metrics: CustomMetricState[], index: number) => {
-    const { nodesSummary, tenantOptions } = this.props;
+    const { nodesSummary, tenantOptions, metricsMetadata } = this.props;
+    // We require nodes information to determine sources (storeIDs/nodeIDs) down below.
+    if (!(nodesSummary?.nodeStatuses?.length > 0)) {
+      return;
+    }
     const tenants = tenantOptions.length > 1 ? tenantOptions.slice(1) : [];
     return metrics.map((m, i) => {
       if (m.metric === "") {
         return "";
       }
-      if (m.perNode && m.perTenant) {
-        return _.flatMap(nodesSummary.nodeIDs, nodeID => {
+      const sources = getSources(nodesSummary, m, metricsMetadata);
+      if (m.perSource && m.perTenant) {
+        return flatMap(sources, source => {
           return tenants.map(tenant => (
             <Metric
-              key={`${index}${i}${nodeID}${tenant.value}`}
-              title={`${nodeID}-${tenant.value}: ${m.metric} (${i})`}
+              key={`${index}${i}${source}${tenant.value}`}
+              title={`${source}-${tenant.value}: ${m.metric} (${i})`}
               name={m.metric}
               aggregator={m.aggregator}
               downsampler={m.downsampler}
               derivative={m.derivative}
-              sources={
-                isStoreMetric(nodesSummary.nodeStatuses[0], m.metric)
-                  ? _.map(nodesSummary.storeIDsByNodeID[nodeID] || [], n =>
-                      n.toString(),
-                    )
-                  : [nodeID]
-              }
+              sources={[source]}
               tenantSource={tenant.value}
             />
           ));
         });
-      } else if (m.perNode) {
-        return _.map(nodesSummary.nodeIDs, nodeID => (
+      } else if (m.perSource) {
+        return map(sources, source => (
           <Metric
-            key={`${index}${i}${nodeID}`}
-            title={`${nodeID}: ${m.metric} (${i})`}
+            key={`${index}${i}${source}`}
+            title={`${source}: ${m.metric} (${i})`}
             name={m.metric}
             aggregator={m.aggregator}
             downsampler={m.downsampler}
             derivative={m.derivative}
-            sources={
-              isStoreMetric(nodesSummary.nodeStatuses[0], m.metric)
-                ? _.map(nodesSummary.storeIDsByNodeID[nodeID] || [], n =>
-                    n.toString(),
-                  )
-                : [nodeID]
-            }
+            sources={[source]}
             tenantSource={m.tenantSource}
           />
         ));
@@ -266,7 +286,7 @@ export class CustomChart extends React.Component<
             aggregator={m.aggregator}
             downsampler={m.downsampler}
             derivative={m.derivative}
-            sources={m.source === "" ? [] : [m.source]}
+            sources={sources}
             tenantSource={tenant.value}
           />
         ));
@@ -279,7 +299,7 @@ export class CustomChart extends React.Component<
             aggregator={m.aggregator}
             downsampler={m.downsampler}
             derivative={m.derivative}
-            sources={m.source === "" ? [] : [m.source]}
+            sources={sources}
             tenantSource={m.tenantSource}
           />
         );
@@ -311,7 +331,7 @@ export class CustomChart extends React.Component<
   renderCharts() {
     const charts = this.currentCharts();
 
-    if (_.isEmpty(charts)) {
+    if (isEmpty(charts)) {
       return <h3>Click "Add Chart" to add a chart to the custom dashboard.</h3>;
     }
 
@@ -329,7 +349,7 @@ export class CustomChart extends React.Component<
       <>
         {charts.map((chart, i) => (
           <CustomChartTable
-            metricOptions={this.metricOptions(nodesSummary, metricsMetadata)}
+            metricOptions={this.metricOptions(metricsMetadata)}
             nodeOptions={this.nodeOptions(nodesSummary)}
             tenantOptions={tenantOptions}
             currentTenant={currentTenant}
@@ -345,6 +365,9 @@ export class CustomChart extends React.Component<
   }
 
   render() {
+    // Note: the vertical spacing below is to ensure we can scroll the page up
+    // enough for the drop-down metric menu to be visible.
+    // TODO(radu): remove this when we upgrade to a better component.
     return (
       <>
         <Helmet title="Custom Chart | Debug" />
@@ -375,6 +398,18 @@ export class CustomChart extends React.Component<
           </div>
         </section>
         <section className="section">{this.renderChartTables()}</section>
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
+        <br />
       </>
     );
   }
@@ -401,6 +436,12 @@ export default withRouter(
   connect(mapStateToProps, mapDispatchToProps)(CustomChart),
 );
 
-function isStoreMetric(nodeStatus: INodeStatus, metricName: string) {
-  return _.has(nodeStatus.store_statuses[0].metrics, metricName);
+function isStoreMetric(
+  recordedNames: Record<string, string>,
+  metricName: string,
+) {
+  if (metricName?.startsWith("cr.store")) {
+    return true;
+  }
+  return recordedNames[metricName]?.startsWith("cr.store") || false;
 }

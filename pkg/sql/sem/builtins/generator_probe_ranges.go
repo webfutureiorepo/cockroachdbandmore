@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -31,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 func init() {
@@ -119,7 +115,7 @@ func makeProbeRangeGenerator(
 	ctx context.Context, evalCtx *eval.Context, args tree.Datums,
 ) (eval.ValueGenerator, error) {
 	if err := evalCtx.SessionAccessor.CheckPrivilege(
-		ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.REPAIRCLUSTERMETADATA,
+		ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.REPAIRCLUSTER,
 	); err != nil {
 		return nil, err
 	}
@@ -175,14 +171,14 @@ func (p *probeRangeGenerator) Next(ctx context.Context) (bool, error) {
 	p.ranges = p.ranges[1:]
 	p.curr = probeRangeRow{}
 
-	var opName string
+	var opName redact.RedactableString
 	if p.isWrite {
 		opName = "write probe"
 	} else {
 		opName = "read probe"
 	}
 	ctx, sp := tracing.EnsureChildSpan(
-		ctx, p.tracer, opName,
+		ctx, p.tracer, opName.StripMarkers(),
 		tracing.WithRecording(tracingpb.RecordingVerbose),
 	)
 	defer func() {

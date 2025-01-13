@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -674,7 +669,7 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v TEXT);
 // rollbackStrategy is the type of statement which a client can use to
 // rollback aborted txns from retryable errors. We accept two statements
 // for rolling back to the cockroach_restart savepoint. See
-// *Executor.execStmtInAbortedTxn for more about transaction retries.
+// *connExecutor.execStmtInAbortedState for more about transaction retries.
 type rollbackStrategy int
 
 const (
@@ -1177,7 +1172,7 @@ func TestReacquireLeaseOnRestart(t *testing.T) {
 						atomic.AddInt32(&restartDone, 1)
 						// Return ReadWithinUncertaintyIntervalError to update
 						// the transaction timestamp on retry.
-						txn := ba.Txn
+						txn := ba.Txn.Clone()
 						txn.ResetObservedTimestamps()
 						now := s.Clock().NowAsClockTimestamp()
 						txn.UpdateObservedTimestamp(s.NodeID(), now)
@@ -1530,6 +1525,16 @@ func TestTxnAutoRetriesDisabledAfterResultsHaveBeenSentToClient(t *testing.T) {
 	params, _ := createTestServerParams()
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
+	defer sqlDB.Close()
+
+	// Tests rely on a smaller buffer size. The setting only affects newly created
+	// connections, so we take care to create new connections for each test using
+	// the Conn() method.
+	ctx := context.Background()
+	sqlConn, err := sqlDB.Conn(ctx)
+	require.NoError(t, err)
+	_, err = sqlConn.ExecContext(ctx, "SET CLUSTER SETTING sql.defaults.results_buffer.size = '16KiB'")
+	require.NoError(t, err)
 
 	tests := []struct {
 		name                              string
@@ -1555,22 +1560,8 @@ func TestTxnAutoRetriesDisabledAfterResultsHaveBeenSentToClient(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Cleanup the connection state after each test so the next one can run
-			// statements.
-			// TODO(andrei): Once we're on go 1.9, this test should use the new
-			// db.Conn() method to tie each test to a connection; then this cleanup
-			// wouldn't be necessary. Also, the test is currently technically
-			// incorrect, as there's no guarantee that the state check at the end will
-			// happen on the right connection.
-			defer func(autoCommit bool) {
-				if autoCommit {
-					// No cleanup necessary.
-					return
-				}
-				if _, err := sqlDB.Exec("ROLLBACK"); err != nil {
-					t.Fatal(err)
-				}
-			}(tc.autoCommit)
+			sqlConn, err := sqlDB.Conn(ctx)
+			require.NoError(t, err)
 
 			var savepoint string
 			if tc.clientDirectedRetry {
@@ -1597,12 +1588,12 @@ func TestTxnAutoRetriesDisabledAfterResultsHaveBeenSentToClient(t *testing.T) {
         FROM generate_series(1, 10000) AS t(x);
 				%s`,
 				prefix, suffix)
-			_, err := sqlDB.Exec(sql)
+			_, err = sqlConn.ExecContext(ctx, sql)
 			if !isRetryableErr(err) {
 				t.Fatalf("expected retriable error, got: %v", err)
 			}
 			var state string
-			if err := sqlDB.QueryRow("SHOW TRANSACTION STATUS").Scan(&state); err != nil {
+			if err := sqlConn.QueryRowContext(ctx, "SHOW TRANSACTION STATUS").Scan(&state); err != nil {
 				t.Fatal(err)
 			}
 			if expStateStr := tc.expectedTxnStateAfterRetriableErr; state != expStateStr {

@@ -1,18 +1,13 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -122,8 +117,8 @@ type testIterator struct {
 
 func newTestIterator(kvs []storage.MVCCKeyValue, upperBound roachpb.Key) *testIterator {
 	// Ensure that the key-values are sorted.
-	if !sort.SliceIsSorted(kvs, func(i, j int) bool {
-		return kvs[i].Key.Less(kvs[j].Key)
+	if !slices.IsSortedFunc(kvs, func(a, b storage.MVCCKeyValue) int {
+		return a.Key.Compare(b.Key)
 	}) {
 		panic("unsorted kvs")
 	}
@@ -316,7 +311,7 @@ func TestInitResolvedTSScan(t *testing.T) {
 			roachpb.MakeLock(&txn1.TxnMeta, roachpb.Key("p"), lock.Exclusive),
 		}
 		for _, l := range testLocks {
-			err := storage.MVCCAcquireLock(ctx, engine, &txn1, l.Strength, l.Key, nil, 0)
+			err := storage.MVCCAcquireLock(ctx, engine, &txn1, l.Strength, l.Key, nil, 0, 0)
 			require.NoError(t, err)
 		}
 		return engine

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package xform contains logic for transforming SQL queries.
 package xform
@@ -162,7 +157,7 @@ func (c *CustomFuncs) handleSingleRowInsert(
 			return nil, false
 		}
 		// ... and that the span has a single key.
-		if !span.HasSingleKey(c.e.evalCtx) {
+		if !span.HasSingleKey(c.e.ctx, c.e.evalCtx) {
 			return nil, false
 		}
 		keySpecification := make(memo.ScalarListExpr, span.StartKey().Length())

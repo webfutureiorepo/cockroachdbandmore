@@ -15,6 +15,7 @@ go_library(
         "//pkg/roachpb",
         "//pkg/storage",
         "//pkg/storage/enginepb",
+        "//pkg/storage/fs",
         "//pkg/util/hlc",
         "//pkg/util/log",
         "//pkg/util/protoutil",
@@ -30,19 +31,15 @@ go_test(
         "stateloader_test.go",
     ],
     embed = [":stateloader"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/kv/kvpb",
         "//pkg/kv/kvserver/kvserverpb",
+        "//pkg/raft/raftpb",
         "//pkg/roachpb",
         "//pkg/storage",
         "//pkg/testutils",
         "//pkg/util/leaktest",
         "//pkg/util/stop",
         "@com_github_stretchr_testify//require",
-        "@io_etcd_go_raft_v3//raftpb",
     ],
 )

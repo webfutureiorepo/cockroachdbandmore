@@ -10,9 +10,12 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/schemachange",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/settings/cluster",
+        "//pkg/sql/catalog/colinfo",
         "//pkg/sql/pgwire/pgcode",
         "//pkg/sql/pgwire/pgerror",
         "//pkg/sql/sem/tree",
+        "//pkg/sql/sqlerrors",
         "//pkg/sql/types",
     ],
 )
@@ -25,10 +28,6 @@ go_test(
         "main_test.go",
     ],
     embed = [":schemachange"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/security/securityassets",
@@ -46,6 +45,7 @@ go_test(
         "//pkg/util/log",
         "//pkg/util/randutil",
         "//pkg/util/uuid",
+        "@com_github_stretchr_testify//require",
     ],
 )
 

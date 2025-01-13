@@ -1,19 +1,14 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package delegate
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/deprecatedshowranges"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -59,7 +54,7 @@ func TryDelegate(
 		return d.delegateShowEnums(t)
 
 	case *tree.ShowTypes:
-		return d.delegateShowTypes()
+		return d.delegateShowTypes(t)
 
 	case *tree.ShowCreate:
 		return d.delegateShowCreate(t)
@@ -97,6 +92,9 @@ func TryDelegate(
 	case *tree.ShowJobs:
 		return d.delegateShowJobs(t)
 
+	case *tree.ShowLogicalReplicationJobs:
+		return d.delegateShowLogicalReplicationJobs(t)
+
 	case *tree.ShowChangefeedJobs:
 		return d.delegateShowChangefeedJobs(t)
 
@@ -104,13 +102,6 @@ func TryDelegate(
 		return d.delegateShowQueries(t)
 
 	case *tree.ShowRanges:
-		// Remove in v23.2.
-		//
-		// This chooses a different implementation of the SHOW statement
-		// depending on a run-time config setting.
-		if deprecatedshowranges.EnableDeprecatedBehavior(ctx, evalCtx.Settings, evalCtx.ClientNoticeSender) {
-			return d.delegateShowRangesDEPRECATED(t)
-		}
 		return d.delegateShowRanges(t)
 
 	case *tree.ShowRangeForRow:
@@ -279,4 +270,24 @@ func (d *delegator) resolveAndModifyTableIndexName(
 		(*name).Table = resName.ToUnresolvedObjectName().ToTableName()
 	}
 	return dataSource, resName, nil
+}
+
+func (d *delegator) getCommentQuery(
+	commentTableName string, classOidType int, objIdColumn string,
+) (string, string) {
+	commentColumn := `, comment`
+	commentJoin := fmt.Sprintf(`
+			LEFT JOIN
+				(
+					SELECT 
+						objoid, description as comment
+					FROM
+						%s
+					WHERE
+						classoid = %d
+				) c
+			ON
+				%s = c.objoid`, commentTableName, classOidType, objIdColumn)
+
+	return commentColumn, commentJoin
 }

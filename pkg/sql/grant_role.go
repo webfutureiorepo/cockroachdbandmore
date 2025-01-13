@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -32,6 +27,7 @@ import (
 // GrantRoleNode creates entries in the system.role_members table.
 // This is called from GRANT <ROLE>
 type GrantRoleNode struct {
+	zeroInputPlanNode
 	roles       []username.SQLUsername
 	members     []username.SQLUsername
 	adminOption bool
@@ -184,7 +180,7 @@ VALUES ($1, $2, $3, (SELECT user_id FROM system.users WHERE username = $1), (SEL
 ON CONFLICT ("role", "member")`
 	if n.adminOption {
 		// admin option: true, set "isAdmin" even if the membership exists.
-		memberStmt += ` DO UPDATE SET "isAdmin" = true`
+		memberStmt += ` DO UPDATE SET "isAdmin" = true WHERE role_members."isAdmin" IS NOT true`
 	} else {
 		// admin option: false, do not clear it from existing memberships.
 		memberStmt += ` DO NOTHING`
@@ -194,7 +190,7 @@ ON CONFLICT ("role", "member")`
 		for _, m := range n.members {
 			memberStmtRowsAffected, err := params.p.InternalSQLTxn().ExecEx(
 				params.ctx, "grant-role", params.p.Txn(),
-				sessiondata.RootUserSessionDataOverride,
+				sessiondata.NodeUserSessionDataOverride,
 				memberStmt,
 				r.Normalized(),
 				m.Normalized(),

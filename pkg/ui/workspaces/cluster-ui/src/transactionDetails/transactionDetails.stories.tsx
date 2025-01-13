@@ -1,17 +1,15 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { storiesOf } from "@storybook/react";
+import noop from "lodash/noop";
+import moment from "moment-timezone";
+import React from "react";
 import { MemoryRouter } from "react-router-dom";
-import { noop } from "lodash";
+
 import {
   nodeRegions,
   requestTime,
@@ -22,8 +20,7 @@ import {
 } from "./transactionDetails.fixture";
 
 import { TransactionDetails } from ".";
-import moment from "moment-timezone";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+
 import StatsSortOptions = cockroach.server.serverpb.StatsSortOptions;
 
 storiesOf("Transactions Details", module)

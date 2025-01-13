@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -135,7 +130,7 @@ type _AGG_TYPE_AGGKINDAgg struct {
 var _ AggregateFunc = &_AGG_TYPE_AGGKINDAgg{}
 
 // {{if eq "_AGGKIND" "Ordered"}}
-func (a *_AGG_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
+func (a *_AGG_TYPE_AGGKINDAgg) SetOutput(vec *coldata.Vec) {
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	a.col = vec._TYPE()
 }
@@ -143,13 +138,13 @@ func (a *_AGG_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 // {{end}}
 
 func (a *_AGG_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []*coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
 ) {
 	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec._TYPE(), vec.Nulls()
 	// {{if not (eq "_AGGKIND" "Window")}}
-	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
+	a.allocator.PerformOperation([]*coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups and col to force bounds check to work. See
 		// https://github.com/golang/go/issues/39756
@@ -276,7 +271,7 @@ func (a *_AGG_TYPE_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 // window_aggregator_tmpl.go). This allows min and max operators to be used when
 // the window frame only grows. For the case when the window frame can shrink,
 // a specialized implementation is needed (see min_max_removable_agg_tmpl.go).
-func (*_AGG_TYPE_AGGKINDAgg) Remove(vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int) {
+func (*_AGG_TYPE_AGGKINDAgg) Remove(vecs []*coldata.Vec, inputIdxs []uint32, startIdx, endIdx int) {
 	colexecerror.InternalError(errors.AssertionFailedf("Remove called on _AGG_TYPE_AGGKINDAgg"))
 }
 

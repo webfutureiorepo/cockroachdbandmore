@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -53,10 +48,10 @@ func runNetworkAuthentication(ctx context.Context, t test.Test, c cluster.Cluste
 	// 3 will re-recreate a separate set of certs, which
 	// we don't want. Starting all nodes at once ensures
 	// that they use coherent certs.
-	settings := install.MakeClusterSettings(install.SecureOption(true))
+	settings := install.MakeClusterSettings()
 
 	// Don't create a backup schedule as this test shuts the cluster down immediately.
-	c.Start(ctx, t.L(), option.DefaultStartOptsNoBackups(), settings, serverNodes)
+	c.Start(ctx, t.L(), option.NewStartOpts(option.NoBackupSchedule), settings, serverNodes)
 	require.NoError(t, c.StopE(ctx, t.L(), option.DefaultStopOpts(), serverNodes))
 
 	t.L().Printf("restarting nodes...")
@@ -71,23 +66,23 @@ func runNetworkAuthentication(ctx context.Context, t test.Test, c cluster.Cluste
 	// Currently, creating a scheduled backup at start fails, potentially due to
 	// the induced network partition. Further investigation required to allow scheduled backups
 	// to run on this test.
-	startOpts := option.DefaultStartOptsNoBackups()
+	startOpts := option.NewStartOpts(option.NoBackupSchedule)
 	startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs, "--locality=node=1", "--accept-sql-without-tls")
 	c.Start(ctx, t.L(), startOpts, settings, c.Node(1))
 
 	// See comment above about env vars.
 	// "--env=COCKROACH_SCAN_INTERVAL=200ms",
 	// "--env=COCKROACH_SCAN_MAX_IDLE_TIME=20ms",
-	startOpts = option.DefaultStartOptsNoBackups()
+	startOpts = option.NewStartOpts(option.NoBackupSchedule)
 	startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs, "--locality=node=other", "--accept-sql-without-tls")
 	c.Start(ctx, t.L(), startOpts, settings, c.Range(2, n-1))
 
 	t.L().Printf("retrieving server addresses...")
-	serverAddrs, err := c.InternalAddr(ctx, t.L(), serverNodes)
+	serverUrls, err := c.InternalPGUrl(ctx, t.L(), serverNodes, roachprod.PGURLOptions{Auth: install.AuthUserPassword})
 	require.NoError(t, err)
 
 	t.L().Printf("fetching certs...")
-	certsDir := "/home/ubuntu/certs"
+	certsDir := fmt.Sprintf("/home/ubuntu/%s", install.CockroachNodeCertsDir)
 	localCertsDir, err := filepath.Abs("./network-certs")
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(localCertsDir))
@@ -109,13 +104,7 @@ func runNetworkAuthentication(ctx context.Context, t test.Test, c cluster.Cluste
 	defer db.Close()
 
 	// Wait for up-replication. This will also print a progress message.
-	err = WaitFor3XReplication(ctx, t, db)
-	require.NoError(t, err)
-
-	t.L().Printf("creating test user...")
-	_, err = db.Exec(`CREATE USER testuser WITH PASSWORD 'password' VALID UNTIL '2060-01-01'`)
-	require.NoError(t, err)
-	_, err = db.Exec(`GRANT admin TO testuser`)
+	err = roachtestutil.WaitFor3XReplication(ctx, t.L(), db)
 	require.NoError(t, err)
 
 	const expectedLeaseholder = 1
@@ -209,7 +198,7 @@ SELECT $1::INT = ALL (
 				}
 
 				// Construct a connection URL to server i.
-				url := fmt.Sprintf("postgres://testuser:password@%s/defaultdb?sslmode=require", serverAddrs[server-1])
+				url := serverUrls[server-1]
 
 				// Attempt a client connection to that server.
 				t.L().Printf("server %d, attempt %d; url: %s\n", server, attempt, url)
@@ -326,7 +315,7 @@ func runClientNetworkConnectionTimeout(ctx context.Context, t test.Test, c clust
 	}
 	n := c.Spec().NodeCount
 	serverNodes, clientNode := c.Range(1, n-1), c.Nodes(n)
-	settings := install.MakeClusterSettings(install.SecureOption(true))
+	settings := install.MakeClusterSettings()
 	c.Start(ctx, t.L(), option.DefaultStartOpts(), settings, serverNodes)
 	certsDir := "/home/ubuntu/certs"
 	t.L().Printf("connecting to cluster from roachtest...")

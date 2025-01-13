@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/zone"
 	"github.com/cockroachdb/cockroach/pkg/sql/decodeusername"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -46,6 +42,7 @@ import (
 )
 
 type alterDatabaseOwnerNode struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseOwner
 	desc *dbdesc.Mutable
 }
@@ -131,6 +128,7 @@ func (n *alterDatabaseOwnerNode) Values() tree.Datums          { return tree.Dat
 func (n *alterDatabaseOwnerNode) Close(context.Context)        {}
 
 type alterDatabaseAddRegionNode struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseAddRegion
 	desc *dbdesc.Mutable
 }
@@ -202,6 +200,16 @@ var GetMultiRegionEnumAddValuePlacementCCL = func(
 	)
 }
 
+// validateExistingZoneCfg validates existing zone configs for a given descriptor
+// ID.
+func (p *planner) validateExistingZoneCfg(ctx context.Context, id descpb.ID) error {
+	zc, err := p.Descriptors().GetZoneConfig(ctx, p.txn, id)
+	if err != nil || zc == nil {
+		return err
+	}
+	return zc.ZoneConfigProto().Validate()
+}
+
 func (n *alterDatabaseAddRegionNode) startExec(params runParams) error {
 	if err := params.p.validateZoneConfigForMultiRegionDatabaseWasNotModifiedByUser(
 		params.ctx,
@@ -217,6 +225,13 @@ func (n *alterDatabaseAddRegionNode) startExec(params runParams) error {
 		catpb.RegionName(n.n.Region),
 		n.desc.ID == keys.SystemDatabaseID,
 	); err != nil {
+		return err
+	}
+
+	// Validate if the existing zone config of this descriptor is sane,
+	// since otherwise, any modifications for multi-region could fail during
+	// the job phase.
+	if err := params.p.validateExistingZoneCfg(params.ctx, n.desc.ID); err != nil {
 		return err
 	}
 
@@ -261,6 +276,19 @@ func (n *alterDatabaseAddRegionNode) startExec(params runParams) error {
 		return err
 	}
 
+	// Once more than one region exists on the system database, we will
+	// force it into region survival mode.
+	if n.desc.GetID() == keys.SystemDatabaseID {
+		if err := params.p.setSystemDatabaseSurvival(params.ctx); err != nil {
+			return err
+		}
+
+		params.p.BufferClientNotice(
+			params.ctx,
+			pgnotice.Newf("Rolling restart is recommended after adding a region to system database in order to propogate region information."),
+		)
+	}
+
 	// Validate the type descriptor after the changes. We have to do this explicitly here, because
 	// we're using an internal call to addEnumValue above which doesn't perform validation.
 	if err := validateDescriptor(params.ctx, params.p, typeDesc); err != nil {
@@ -283,6 +311,7 @@ func (n *alterDatabaseAddRegionNode) Values() tree.Datums          { return tree
 func (n *alterDatabaseAddRegionNode) Close(context.Context)        {}
 
 type alterDatabaseDropRegionNode struct {
+	zeroInputPlanNode
 	n                     *tree.AlterDatabaseDropRegion
 	desc                  *dbdesc.Mutable
 	removingPrimaryRegion bool
@@ -461,15 +490,15 @@ func (p *planner) AlterDatabaseDropRegion(
 	if err != nil {
 		return nil, err
 	}
-	if err := multiregion.CanDropRegion(catpb.RegionName(n.Region), regionConfig); err != nil {
+	if err := multiregion.CanDropRegion(catpb.RegionName(n.Region), regionConfig, dbDesc.GetID() == keys.SystemDatabaseID); err != nil {
 		return nil, err
 	}
 
 	return &alterDatabaseDropRegionNode{
-		n,
-		dbDesc,
-		removingPrimaryRegion,
-		toDrop,
+		n:                     n,
+		desc:                  dbDesc,
+		removingPrimaryRegion: removingPrimaryRegion,
+		toDrop:                toDrop,
 	}, nil
 }
 
@@ -508,7 +537,7 @@ func (p *planner) checkCanDropSystemDatabaseRegion(ctx context.Context, region t
 		return err
 	}
 	typeIDsToFetch := typeIDsToFetchSet.Ordered()
-	dbTypes, err := p.Descriptors().ByID(p.txn).Get().Descs(ctx, typeIDsToFetch)
+	dbTypes, err := p.Descriptors().ByIDWithoutLeased(p.txn).Get().Descs(ctx, typeIDsToFetch)
 	if err != nil {
 		return errors.Wrapf(err, "failed to fetch multi-region enums while attempting to drop"+
 			" system database region %s", &region)
@@ -568,18 +597,16 @@ func (p *planner) checkPrivilegesForMultiRegionOp(
 	ctx context.Context, desc catalog.Descriptor,
 ) error {
 
-	// Ensure that only secondary tenants may have their system database
-	// set up for multi-region operations. Even then, ensure that only the
-	// node user may configure the system database.
+	// Unless MultiRegionSystemDatabaseEnabled is true, only secondary tenants may
+	// have their system database set up for multi-region operations. Even then,
+	// ensure that only the node user may configure the system database.
 	//
-	// Operations to configure the system database will be sent as tasks using
-	// the autoconfig infrastucture.
-	//
-	// TODO(ajwerner): Adopt the auto-config infrastructure for configuring
-	// multi-region primitives in the system database. For now, we also allow
-	// root to perform the various operations to enable testing.
+	// TODO(rafi): For now, we also allow root to perform the various operations
+	// to enable testing. When MultiRegionSystemDatabaseEnabled leaves preview,
+	// we may want to allow any admin user to perform these operations as well.
 	if desc.GetID() == keys.SystemDatabaseID {
-		if p.execCfg.Codec.ForSystemTenant() {
+		if multiRegionSystemDatabase := sqlclustersettings.MultiRegionSystemDatabaseEnabled.Get(&p.execCfg.Settings.SV); !multiRegionSystemDatabase &&
+			p.execCfg.Codec.ForSystemTenant() {
 			return pgerror.Newf(
 				pgcode.FeatureNotSupported,
 				"modifying the regions of system database is not supported",
@@ -714,6 +741,14 @@ func (n *alterDatabaseDropRegionNode) startExec(params runParams) error {
 	if n.n == nil {
 		return nil
 	}
+
+	// Validate if the existing zone config of this descriptor is sane,
+	// since otherwise, any modifications for multi-region could fail during
+	// the job phase.
+	if err := params.p.validateExistingZoneCfg(params.ctx, n.desc.ID); err != nil {
+		return err
+	}
+
 	typeDesc, err := params.p.Descriptors().MutableByID(params.p.txn).Type(params.ctx, n.desc.RegionConfig.RegionEnumID)
 	if err != nil {
 		return err
@@ -794,6 +829,7 @@ func (n *alterDatabaseDropRegionNode) Values() tree.Datums          { return tre
 func (n *alterDatabaseDropRegionNode) Close(context.Context)        {}
 
 type alterDatabasePrimaryRegionNode struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabasePrimaryRegion
 	desc *dbdesc.Mutable
 }
@@ -1125,6 +1161,13 @@ func (n *alterDatabasePrimaryRegionNode) setInitialPrimaryRegion(params runParam
 
 func (n *alterDatabasePrimaryRegionNode) startExec(params runParams) error {
 
+	// Validate if the existing zone config of this descriptor is sane,
+	// since otherwise, any modifications for multi-region could fail during
+	// the job phase.
+	if err := params.p.validateExistingZoneCfg(params.ctx, n.desc.ID); err != nil {
+		return err
+	}
+
 	// There are two paths to consider here: either this is the first setting of
 	// the primary region, OR we're updating the primary region. In the case where
 	// this is the first setting of the primary region, the call will turn the
@@ -1173,6 +1216,7 @@ func (n *alterDatabasePrimaryRegionNode) Close(context.Context)        {}
 func (n *alterDatabasePrimaryRegionNode) ReadingOwnWrites()            {}
 
 type alterDatabaseSurvivalGoalNode struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseSurvivalGoal
 	desc *dbdesc.Mutable
 }
@@ -1201,16 +1245,9 @@ func (p *planner) AlterDatabaseSurvivalGoal(
 }
 
 func (n *alterDatabaseSurvivalGoalNode) startExec(params runParams) error {
-	if err := params.p.alterDatabaseSurvivalGoal(
+	return params.p.alterDatabaseSurvivalGoal(
 		params.ctx, n.desc, n.n.SurvivalGoal, tree.AsStringWithFQNames(n.n, params.Ann()),
-	); err != nil {
-		return err
-	}
-
-	if n.desc.GetID() == keys.SystemDatabaseID {
-		return nil
-	}
-	return params.p.maybeUpdateSystemDBSurvivalGoal(params.ctx)
+	)
 }
 
 // alterDatabaseSurvivalGoal modifies a multi-region database's survival goal,
@@ -1314,80 +1351,12 @@ func (p *planner) alterDatabaseSurvivalGoal(
 	)
 }
 
-// maybeUpdateSystemDBSurvivalGoal updates the survival goal of system database
-// to the max survival goal of all non-system databases, which means that the
-// survival goal could be either upgraded or downgraded.
-func (p *planner) maybeUpdateSystemDBSurvivalGoal(ctx context.Context) error {
-	sysDB, err := p.Descriptors().MutableByID(p.Txn()).Database(ctx, keys.SystemDatabaseID)
-	if err != nil {
-		return err
-	}
-
-	if !sysDB.IsMultiRegion() {
-		return nil
-	}
-
-	var maxSurvivalGoal descpb.SurvivalGoal
-	maybeUpdateMaxGoal := func(db catalog.DatabaseDescriptor) {
-		// Skip if it's a system db.
-		if db.GetID() == keys.SystemDatabaseID {
-			return
-		}
-		if !db.IsMultiRegion() {
-			return
-		}
-		if db.Dropped() {
-			return
-		}
-		curGoal := db.GetRegionConfig().SurvivalGoal
-		if curGoal > maxSurvivalGoal {
-			maxSurvivalGoal = curGoal
-		}
-	}
-
-	dbs, err := p.Descriptors().GetAllDatabases(ctx, p.Txn())
-	if err != nil {
-		return err
-	}
-
-	if err := dbs.ForEachDescriptor(func(desc catalog.Descriptor) error {
-		db, ok := desc.(catalog.DatabaseDescriptor)
-		if !ok {
-			return errors.WithDetailf(
-				errors.AssertionFailedf(
-					"got unexpected non-database %T while iterating databases",
-					desc,
-				),
-				"unexpected descriptor: %v", desc)
-		}
-		maybeUpdateMaxGoal(db)
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	cfg := sysDB.GetRegionConfig()
-	if cfg.SurvivalGoal == maxSurvivalGoal {
-		return nil
-	}
-
-	targetSurvivalGoal, err := TranslateProtoSurvivalGoal(maxSurvivalGoal)
-	if err != nil {
-		return err
-	}
-	return p.alterDatabaseSurvivalGoal(
-		ctx,
-		sysDB,
-		targetSurvivalGoal,
-		"update system database survival goal to max non-system db survival goal", /* jobDesc */
-	)
-}
-
 func (n *alterDatabaseSurvivalGoalNode) Next(runParams) (bool, error) { return false, nil }
 func (n *alterDatabaseSurvivalGoalNode) Values() tree.Datums          { return tree.Datums{} }
 func (n *alterDatabaseSurvivalGoalNode) Close(context.Context)        {}
 
 type alterDatabasePlacementNode struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabasePlacement
 	desc *dbdesc.Mutable
 }
@@ -1531,6 +1500,7 @@ func (n *alterDatabasePlacementNode) Values() tree.Datums          { return tree
 func (n *alterDatabasePlacementNode) Close(context.Context)        {}
 
 type alterDatabaseAddSuperRegion struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseAddSuperRegion
 	desc *dbdesc.Mutable
 }
@@ -1635,6 +1605,7 @@ func (n *alterDatabaseAddSuperRegion) Values() tree.Datums          { return tre
 func (n *alterDatabaseAddSuperRegion) Close(context.Context)        {}
 
 type alterDatabaseDropSuperRegion struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseDropSuperRegion
 	desc *dbdesc.Mutable
 }
@@ -1757,6 +1728,7 @@ func (p *planner) getSuperRegionsForDatabase(
 }
 
 type alterDatabaseAlterSuperRegion struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseAlterSuperRegion
 	desc *dbdesc.Mutable
 }
@@ -1924,6 +1896,7 @@ func (p *planner) addSuperRegion(
 }
 
 type alterDatabaseSecondaryRegion struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseSecondaryRegion
 	desc *dbdesc.Mutable
 }
@@ -1960,6 +1933,13 @@ func (n *alterDatabaseSecondaryRegion) startExec(params runParams) error {
 				"ALTER DATABASE %s PRIMARY REGION <region_name>",
 			n.n.DatabaseName.String(),
 		)
+	}
+
+	// Validate if the existing zone config of this descriptor is sane,
+	// since otherwise, any modifications for multi-region could fail during
+	// the job phase.
+	if err := params.p.validateExistingZoneCfg(params.ctx, n.desc.ID); err != nil {
+		return err
 	}
 
 	// Verify that the secondary region is part of the region list.
@@ -2065,6 +2045,7 @@ func (n *alterDatabaseSecondaryRegion) Values() tree.Datums          { return tr
 func (n *alterDatabaseSecondaryRegion) Close(context.Context)        {}
 
 type alterDatabaseDropSecondaryRegion struct {
+	zeroInputPlanNode
 	n    *tree.AlterDatabaseDropSecondaryRegion
 	desc *dbdesc.Mutable
 }
@@ -2214,10 +2195,11 @@ func (n *alterDatabaseDropSecondaryRegion) Values() tree.Datums          { retur
 func (n *alterDatabaseDropSecondaryRegion) Close(context.Context)        {}
 
 type alterDatabaseSetZoneConfigExtensionNode struct {
+	zeroInputPlanNode
 	n          *tree.AlterDatabaseSetZoneConfigExtension
 	desc       *dbdesc.Mutable
 	yamlConfig tree.TypedExpr
-	options    map[tree.Name]optionValue
+	options    map[tree.Name]zone.OptionValue
 }
 
 // AlterDatabaseSetZoneConfigExtension transforms a
@@ -2392,7 +2374,7 @@ func (n *alterDatabaseSetZoneConfigExtensionNode) startExec(params runParams) er
 		}
 
 		// Validate that there are no conflicts in the zone setup.
-		if err := validateNoRepeatKeysInZone(newZone); err != nil {
+		if err := zonepb.ValidateNoRepeatKeysInZone(newZone); err != nil {
 			return err
 		}
 

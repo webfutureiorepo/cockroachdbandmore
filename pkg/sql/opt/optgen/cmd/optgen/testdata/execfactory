@@ -68,9 +68,10 @@ type Factory interface {
 	ConstructPlan(
 		root Node,
 		subqueries []Subquery,
-		cascades []Cascade,
+		cascades, triggers []PostQuery,
 		checks []Node,
 		rootRowCount int64,
+		flags PlanFlags,
 	) (Plan, error)
 
 	// Ctx returns the ctx of this execution.
@@ -105,9 +106,10 @@ var _ Factory = StubFactory{}
 func (StubFactory) ConstructPlan(
 	root Node,
 	subqueries []Subquery,
-	cascades []Cascade,
+	cascades, triggers []PostQuery,
 	checks []Node,
 	rootRowCount int64,
+	flags PlanFlags,
 ) (Plan, error) {
 	return struct{}{}, nil
 }

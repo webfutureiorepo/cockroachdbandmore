@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import {
   all,
@@ -16,15 +11,18 @@ import {
   takeEvery,
   takeLatest,
 } from "redux-saga/effects";
+
 import {
   cancelStatementDiagnosticsReport,
   createStatementDiagnosticsReport,
   getStatementDiagnosticsReports,
 } from "src/api/statementDiagnosticsApi";
-import { actions } from "./statementDiagnostics.reducer";
-import { CACHE_INVALIDATION_PERIOD, throttleWithReset } from "../utils";
+import { maybeError } from "src/util";
 
 import { rootActions } from "../rootActions";
+import { CACHE_INVALIDATION_PERIOD, throttleWithReset } from "../utils";
+
+import { actions } from "./statementDiagnostics.reducer";
 
 export function* createDiagnosticsReportSaga(
   action: ReturnType<typeof actions.createReport>,
@@ -36,7 +34,7 @@ export function* createDiagnosticsReportSaga(
     // requested statement.
     yield put(actions.request());
   } catch (e) {
-    yield put(actions.createReportFailed(e));
+    yield put(actions.createReportFailed(maybeError(e)));
   }
 }
 
@@ -54,7 +52,7 @@ export function* cancelDiagnosticsReportSaga(
     yield put(actions.cancelReportCompleted());
     yield put(actions.request());
   } catch (e) {
-    yield put(actions.cancelReportFailed(e));
+    yield put(actions.cancelReportFailed(maybeError(e)));
   }
 }
 
@@ -67,7 +65,7 @@ export function* requestStatementsDiagnosticsSaga(): any {
     const response = yield call(getStatementDiagnosticsReports);
     yield put(actions.received(response));
   } catch (e) {
-    yield put(actions.failed(e));
+    yield put(actions.failed(maybeError(e)));
   }
 }
 

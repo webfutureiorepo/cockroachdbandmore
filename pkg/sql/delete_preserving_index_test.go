@@ -1,27 +1,21 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
 import (
 	"context"
-	"math"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/backup"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
@@ -84,7 +78,7 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 	require.NoError(t, err)
 	defer server.Stopper().Stop(context.Background())
 
-	getRevisionsForTest := func(setupSQL, schemaChangeSQL, dataSQL string, deletePreservingEncoding bool) ([]kvclient.VersionedValues, []byte, error) {
+	getRevisionsForTest := func(setupSQL, schemaChangeSQL, dataSQL string, deletePreservingEncoding bool) ([]backup.VersionedValues, []byte, error) {
 		setupStmts := strings.Split(setupSQL, ";")
 		for _, stmt := range setupStmts {
 			if _, err := sqlDB.Exec(stmt); err != nil {
@@ -129,14 +123,14 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 		prefix := rowenc.MakeIndexKeyPrefix(keys.SystemSQLCodec, tableDesc.GetID(), index.ID)
 		prefixEnd := append(prefix, []byte("\xff")...)
 
-		revisionsCh := make(chan []kvclient.VersionedValues)
+		revisionsCh := make(chan []backup.VersionedValues)
 		g := ctxgroup.WithContext(ctx)
 		g.GoCtx(func(ctx context.Context) error {
 			defer close(revisionsCh)
-			return kvclient.GetAllRevisions(context.Background(), kvDB, prefix, prefixEnd, now, end, revisionsCh)
+			return backup.GetAllRevisions(context.Background(), kvDB, prefix, prefixEnd, now, end, revisionsCh)
 		})
 
-		var revisions []kvclient.VersionedValues
+		var revisions []backup.VersionedValues
 		g.GoCtx(func(ctx context.Context) error {
 			for r := range revisionsCh {
 				revisions = append(revisions, r...)
@@ -249,13 +243,14 @@ func TestDeletePreservingIndexEncoding(t *testing.T) {
 func TestDeletePreservingIndexEncodingUsesNormalDeletesInDeleteOnly(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	// The descriptor changes made must have an immediate effect
-	// so disable leases on tables.
-	defer lease.TestingDisableTableLeases()()
 
 	params, _ := createTestServerParams()
 	server, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer server.Stopper().Stop(context.Background())
+
+	// The descriptor changes made must have an immediate effect
+	// so disable leases on tables.
+	defer lease.TestingDisableTableLeases()()
 
 	setupSQL := `
 CREATE DATABASE t;
@@ -313,13 +308,15 @@ CREATE UNIQUE INDEX test_index_to_mutate ON t.test (b);
 func TestDeletePreservingIndexEncodingWithEmptyValues(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	// The descriptor changes made must have an immediate effect
-	// so disable leases on tables.
-	defer lease.TestingDisableTableLeases()()
 
 	params, _ := createTestServerParams()
 	server, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer server.Stopper().Stop(context.Background())
+
+	// The descriptor changes made must have an immediate effect
+	// so disable leases on tables.
+	defer lease.TestingDisableTableLeases()()
+
 	setupSQL := `
 CREATE DATABASE t;
 CREATE TABLE t.test (
@@ -398,9 +395,9 @@ type WrappedVersionedValues struct {
 }
 
 func compareRevisionHistories(
-	expectedHistory []kvclient.VersionedValues,
+	expectedHistory []backup.VersionedValues,
 	expectedPrefixLength int,
-	deletePreservingHistory []kvclient.VersionedValues,
+	deletePreservingHistory []backup.VersionedValues,
 	deletePreservingPrefixLength int,
 ) error {
 	decodedExpected, err := decodeVersionedValues(expectedHistory, false)
@@ -417,7 +414,7 @@ func compareRevisionHistories(
 }
 
 func decodeVersionedValues(
-	revisions []kvclient.VersionedValues, deletePreserving bool,
+	revisions []backup.VersionedValues, deletePreserving bool,
 ) ([]WrappedVersionedValues, error) {
 	wrappedVersionedValues := make([]WrappedVersionedValues, len(revisions))
 
@@ -515,8 +512,6 @@ func TestMergeProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-
-	defer lease.TestingDisableTableLeases()()
 
 	params, _ := createTestServerParams()
 
@@ -616,6 +611,7 @@ func TestMergeProcessor(t *testing.T) {
 	run := func(t *testing.T, test TestCase) {
 		server, tdb, kvDB := serverutils.StartServer(t, params)
 		defer server.Stopper().Stop(context.Background())
+		defer lease.TestingDisableTableLeases()()
 
 		// Run the initial setupSQL.
 		if _, err := tdb.Exec(test.setupSQL); err != nil {
@@ -627,7 +623,10 @@ func TestMergeProcessor(t *testing.T) {
 		settings := server.ClusterSettings()
 		execCfg := server.ExecutorConfig().(sql.ExecutorConfig)
 		evalCtx := eval.Context{Settings: settings, Codec: codec}
-		mm := mon.NewUnlimitedMonitor(ctx, "MemoryMonitor", mon.MemoryResource, nil, nil, math.MaxInt64, settings)
+		mm := mon.NewUnlimitedMonitor(ctx, mon.Options{
+			Name:     mon.MakeMonitorName("MemoryMonitor"),
+			Settings: settings,
+		})
 		flowCtx := execinfra.FlowCtx{
 			Cfg: &execinfra.ServerConfig{
 				DB:                execCfg.InternalDB,
@@ -703,7 +702,7 @@ func TestMergeProcessor(t *testing.T) {
 		sp := tableDesc.IndexSpan(codec, srcIndex.GetID())
 
 		output := fakeReceiver{}
-		im, err := backfill.NewIndexBackfillMerger(ctx, &flowCtx, 0 /* processorID */, execinfrapb.IndexBackfillMergerSpec{
+		im := backfill.NewIndexBackfillMerger(&flowCtx, 0 /* processorID */, execinfrapb.IndexBackfillMergerSpec{
 			Table:            tableDesc.TableDescriptor,
 			TemporaryIndexes: []descpb.IndexID{srcIndex.GetID()},
 			AddedIndexes:     []descpb.IndexID{dstIndex.GetID()},
@@ -711,9 +710,6 @@ func TestMergeProcessor(t *testing.T) {
 			SpanIdx:          []int32{0},
 			MergeTimestamp:   kvDB.Clock().Now(),
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
 
 		im.Run(ctx, &output)
 		if output.err != nil {

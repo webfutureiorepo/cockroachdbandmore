@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package persistedsqlstats
 
@@ -137,10 +132,10 @@ var sqlStatsLimitTableSizeEnabled = settings.RegisterBoolSetting(
 	true,
 )
 
-// sqlStatsLimitTableCheckInterval is the cluster setting the controls what
+// SQLStatsLimitTableCheckInterval is the cluster setting the controls what
 // interval the check is done if the statement and transaction statistics
 // tables have grown past the sql.stats.persisted_rows.max.
-var sqlStatsLimitTableCheckInterval = settings.RegisterDurationSetting(
+var SQLStatsLimitTableCheckInterval = settings.RegisterDurationSetting(
 	settings.ApplicationLevel,
 	"sql.stats.limit_table_size_check.interval",
 	"controls what interval the check is done if the statement and "+

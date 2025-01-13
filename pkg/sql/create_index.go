@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -41,6 +36,7 @@ import (
 )
 
 type createIndexNode struct {
+	zeroInputPlanNode
 	n         *tree.CreateIndex
 	tableDesc *tabledesc.Mutable
 }
@@ -91,7 +87,7 @@ func (p *planner) CreateIndex(ctx context.Context, n *tree.CreateIndex) (planNod
 	}
 
 	// Disallow schema changes if this table's schema is locked.
-	if err := checkTableSchemaUnlocked(tableDesc); err != nil {
+	if err := checkSchemaChangeIsAllowed(tableDesc, n); err != nil {
 		return nil, err
 	}
 
@@ -147,6 +143,9 @@ func makeIndexDescriptor(
 			`"bucket_count" storage param should only be set with "USING HASH" for hash sharded index`,
 		)
 	}
+	if n.Vector {
+		return nil, unimplemented.NewWithIssuef(137370, "VECTOR indexes are not yet supported")
+	}
 	// Since we mutate the columns below, we make copies of them
 	// here so that on retry we do not attempt to validate the
 	// mutated columns.
@@ -199,10 +198,6 @@ func makeIndexDescriptor(
 		return nil, err
 	}
 
-	if !activeVersion.IsActive(clusterversion.V23_2) &&
-		n.Invisibility.Value > 0.0 && n.Invisibility.Value < 1.0 {
-		return nil, unimplemented.New("partially visible indexes", "partially visible indexes are not yet supported")
-	}
 	indexDesc := descpb.IndexDescriptor{
 		Name:              string(n.Name),
 		Unique:            n.Unique,
@@ -326,7 +321,6 @@ func checkIndexColumns(
 	version clusterversion.ClusterVersion,
 ) error {
 	for i, colDef := range columns {
-		lastCol := i == len(columns)-1
 		col, err := catalog.MustFindColumnByTreeName(desc, colDef.Column)
 		if err != nil {
 			return errors.Wrapf(err, "finding column %d", i)
@@ -341,20 +335,6 @@ func checkIndexColumns(
 			return pgerror.New(pgcode.DatatypeMismatch,
 				"operator classes are only allowed for the last column of an inverted index")
 		}
-
-		// Checking if JSON Columns can be forward indexed for a given cluster version.
-		if col.GetType().Family() == types.JsonFamily && (!inverted || !lastCol) && !version.IsActive(clusterversion.V23_2) {
-			return errors.WithHint(
-				pgerror.Newf(
-					pgcode.InvalidTableDefinition,
-					"index element %s of type %s is not indexable in a non-inverted index",
-					col.GetName(),
-					col.GetType().Name(),
-				),
-				"you may want to create an inverted index instead. See the documentation for inverted indexes: "+docs.URL("inverted-indexes.html"),
-			)
-		}
-
 	}
 	for i, colName := range storing {
 		col, err := catalog.MustFindColumnByTreeName(desc, colName)
@@ -560,18 +540,6 @@ func replaceExpressionElemsWithVirtualCols(
 						elem.Expr.String(),
 					),
 					"consider adding a type cast to the expression",
-				)
-			}
-
-			if typ.Family() == types.JsonFamily && !version.IsActive(clusterversion.V23_2) {
-				return errors.WithHint(
-					pgerror.Newf(
-						pgcode.InvalidTableDefinition,
-						"index element %s of type %s is not indexable in a non-inverted index",
-						elem.Expr.String(),
-						typ.Name(),
-					),
-					"you may want to create an inverted index instead. See the documentation for inverted indexes: "+docs.URL("inverted-indexes.html"),
 				)
 			}
 

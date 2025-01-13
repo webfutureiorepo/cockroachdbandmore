@@ -1,27 +1,16 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package insights
 
 import (
-	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/obs"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
-	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	prometheus "github.com/prometheus/client_model/go"
 )
 
@@ -91,16 +80,6 @@ var HighRetryCountThreshold = settings.RegisterIntSetting(
 	settings.NonNegativeInt,
 	settings.WithPublic)
 
-var SQLInsightsStatsExportEnabled = settings.RegisterBoolSetting(
-	settings.ApplicationLevel,
-	"sql.insights.export.enabled",
-	"controls whether statement and transaction insights statistics are exported to "+
-		"the address pointed to by the CLI flag, --"+cliflags.ObsServiceAddr.Name+
-		". Insights are exported as soon as they're detected. Note that if the --"+
-		cliflags.ObsServiceAddr.Name+" was not set at node startup, enabling this setting will "+
-		"have no effect until the node is restarted with the flag set.",
-	false)
-
 // Metrics holds running measurements of various insights-related runtime stats.
 type Metrics struct {
 	// Fingerprints measures the number of statement fingerprints being monitored for
@@ -147,66 +126,24 @@ func NewMetrics() Metrics {
 	}
 }
 
-// Writer observes statement and transaction executions.
-type Writer interface {
-	// ObserveStatement notifies the registry of a statement execution.
-	ObserveStatement(sessionID clusterunique.ID, statement *Statement)
-
-	// ObserveTransaction notifies the registry of the end of a transaction.
-	ObserveTransaction(ctx context.Context, sessionID clusterunique.ID, transaction *Transaction)
-}
-
-// WriterProvider offers a Writer.
-// Pass true for internal when called by the internal executor.
-type WriterProvider func(internal bool) Writer
-
-// Reader offers access to the currently retained set of insights.
-type Reader interface {
-	// IterateInsights calls visitor with each of the currently retained set of insights.
-	IterateInsights(context.Context, func(context.Context, *Insight))
-}
-
-type LatencyInformation interface {
-	GetPercentileValues(fingerprintID appstatspb.StmtFingerprintID, shouldFlush bool) PercentileValues
-}
-
 type PercentileValues struct {
 	P50 float64
 	P90 float64
 	P99 float64
 }
 
-// Provider offers access to the insights subsystem.
-type Provider interface {
-	// Start launches the background tasks necessary for processing insights.
-	Start(ctx context.Context, stopper *stop.Stopper)
-
-	// Writer returns an object that observes statement and transaction executions.
-	// Pass true for internal when called by the internal executor.
-	Writer(internal bool) Writer
-
-	// Reader returns an object that offers read access to any detected insights.
-	Reader() Reader
-
-	// LatencyInformation returns an object that offers read access to latency information,
-	// such as percentiles.
-	LatencyInformation() LatencyInformation
-}
-
 // New builds a new Provider.
-func New(
-	st *cluster.Settings, metrics Metrics, eventsExporter obs.EventsExporterInterface,
-) Provider {
-	store := newStore(st, eventsExporter)
+func New(st *cluster.Settings, metrics Metrics, knobs *TestingKnobs) *Provider {
+	store := newStore(st)
 	anomalyDetector := newAnomalyDetector(st, metrics)
 
-	return &defaultProvider{
+	return &Provider{
 		store: store,
 		ingester: newConcurrentBufferIngester(
 			newRegistry(st, &compositeDetector{detectors: []detector{
 				&latencyThresholdDetector{st: st},
 				anomalyDetector,
-			}}, store),
+			}}, store, knobs),
 		),
 		anomalyDetector: anomalyDetector,
 	}

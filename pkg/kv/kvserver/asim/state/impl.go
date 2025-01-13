@@ -1,20 +1,17 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package state
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,14 +24,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/config"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/workload"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigreporter"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/google/btree"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 type state struct {
@@ -142,11 +141,11 @@ func (s *state) PrettyPrint() string {
 	builder := &strings.Builder{}
 	nStores := len(s.stores)
 	builder.WriteString(fmt.Sprintf("stores(%d)=[", nStores))
-	var storeIDs StoreIDSlice
+	var storeIDs []StoreID
 	for storeID := range s.stores {
 		storeIDs = append(storeIDs, storeID)
 	}
-	sort.Sort(storeIDs)
+	slices.Sort(storeIDs)
 
 	for i, storeID := range storeIDs {
 		store := s.stores[storeID]
@@ -176,11 +175,11 @@ func (s *state) String() string {
 
 	// Sort the unordered map storeIDs by its key to ensure deterministic
 	// printing.
-	var storeIDs StoreIDSlice
+	var storeIDs []StoreID
 	for storeID := range s.stores {
 		storeIDs = append(storeIDs, storeID)
 	}
-	sort.Sort(storeIDs)
+	slices.Sort(storeIDs)
 
 	for i, storeID := range storeIDs {
 		store := s.stores[storeID]
@@ -222,7 +221,9 @@ func (s *state) Stores() []Store {
 		store := s.stores[key]
 		stores = append(stores, store)
 	}
-	sort.Slice(stores, func(i, j int) bool { return stores[i].StoreID() < stores[j].StoreID() })
+	slices.SortFunc(stores, func(a, b Store) int {
+		return cmp.Compare(a.StoreID(), b.StoreID())
+	})
 	return stores
 }
 
@@ -311,7 +312,9 @@ func (s *state) Nodes() []Node {
 	for _, node := range s.nodes {
 		nodes = append(nodes, node)
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID() < nodes[j].NodeID() })
+	slices.SortFunc(nodes, func(a, b Node) int {
+		return cmp.Compare(a.NodeID(), b.NodeID())
+	})
 	return nodes
 }
 
@@ -347,11 +350,13 @@ func (s *state) rng(rangeID RangeID) (*rng, bool) {
 
 // Ranges returns all ranges that exist in this state.
 func (s *state) Ranges() []Range {
-	ranges := []Range{}
+	ranges := make([]Range, 0, len(s.ranges.rangeMap))
 	for _, r := range s.ranges.rangeMap {
 		ranges = append(ranges, r)
 	}
-	sort.Slice(ranges, func(i, j int) bool { return ranges[i].RangeID() < ranges[j].RangeID() })
+	slices.SortFunc(ranges, func(a, b Range) int {
+		return cmp.Compare(a.RangeID(), b.RangeID())
+	})
 	return ranges
 }
 
@@ -378,18 +383,18 @@ func (r replicaList) Less(i, j int) bool {
 
 // Replicas returns all replicas that exist on a store.
 func (s *state) Replicas(storeID StoreID) []Replica {
-	replicas := []Replica{}
+	var replicas []Replica
 	store, ok := s.stores[storeID]
 	if !ok {
 		return replicas
 	}
 
 	repls := make(replicaList, 0, len(store.replicas))
-	var rangeIDs RangeIDSlice
+	var rangeIDs []RangeID
 	for rangeID := range store.replicas {
 		rangeIDs = append(rangeIDs, rangeID)
 	}
-	sort.Sort(rangeIDs)
+	slices.Sort(rangeIDs)
 	for _, rangeID := range rangeIDs {
 		rng := s.ranges.rangeMap[rangeID]
 		if replica := rng.replicas[storeID]; replica != nil {
@@ -1058,6 +1063,10 @@ func (s *state) TickClock(tick time.Time) {
 	s.clock.Set(tick.UnixNano())
 }
 
+func (s *state) Clock() timeutil.TimeSource {
+	return s.clock
+}
+
 // UpdateStorePool modifies the state of the StorePool for the Store with
 // ID StoreID.
 func (s *state) UpdateStorePool(
@@ -1179,7 +1188,7 @@ func (s *state) LoadSplitterFor(storeID StoreID) LoadSplitter {
 // with ID RangeID, on the store with ID StoreID.
 func (s *state) RaftStatus(rangeID RangeID, storeID StoreID) *raft.Status {
 	status := &raft.Status{
-		Progress: make(map[uint64]tracker.Progress),
+		Progress: make(map[raftpb.PeerID]tracker.Progress),
 	}
 
 	leader, ok := s.LeaseHolderReplica(rangeID)
@@ -1193,14 +1202,14 @@ func (s *state) RaftStatus(rangeID RangeID, storeID StoreID) *raft.Status {
 
 	// TODO(kvoli): The raft leader will always be the current leaseholder
 	// here. This should change to enable testing this scenario.
-	status.Lead = uint64(leader.ReplicaID())
-	status.RaftState = raft.StateLeader
+	status.Lead = raftpb.PeerID(leader.ReplicaID())
+	status.RaftState = raftpb.StateLeader
 	status.Commit = 2
 	// TODO(kvoli): A replica is never behind on their raft log, this should
 	// change to enable testing this scenario where replicas fall behind. e.g.
 	// FirstIndex on all replicas will return 2.
 	for _, replica := range rng.replicas {
-		status.Progress[uint64(replica.ReplicaID())] = tracker.Progress{
+		status.Progress[raftpb.PeerID(replica.ReplicaID())] = tracker.Progress{
 			Match: 2,
 			State: tracker.StateReplicate,
 		}
@@ -1237,12 +1246,15 @@ func (s *state) ComputeSplitKey(
 // SpanConfigConformanceReport.
 func (s *state) GetSpanConfigForKey(
 	ctx context.Context, key roachpb.RKey,
-) (roachpb.SpanConfig, error) {
+) (roachpb.SpanConfig, roachpb.Span, error) {
 	rng := s.rangeFor(ToKey(key.AsRawKey()))
 	if rng == nil {
 		panic(fmt.Sprintf("programming error: range for key %s doesn't exist", key))
 	}
-	return *rng.config, nil
+	return *rng.config, roachpb.Span{
+		Key:    rng.startKey.ToRKey().AsRawKey(),
+		EndKey: rng.endKey.ToRKey().AsRawKey(),
+	}, nil
 }
 
 // Scan is added for the rangedesc.Scanner interface, required for
@@ -1360,11 +1372,11 @@ func (s *store) String() string {
 
 	// Sort the unordered map rangeIDs by its key to ensure deterministic
 	// printing.
-	var rangeIDs RangeIDSlice
+	var rangeIDs []RangeID
 	for rangeID := range s.replicas {
 		rangeIDs = append(rangeIDs, rangeID)
 	}
-	sort.Sort(rangeIDs)
+	slices.Sort(rangeIDs)
 
 	for i, rangeID := range rangeIDs {
 		replicaID := s.replicas[rangeID]
@@ -1427,11 +1439,11 @@ func (r *rng) String() string {
 
 	// Sort the unordered map storeIDs by its key to ensure deterministic
 	// printing.
-	var storeIDs StoreIDSlice
+	var storeIDs []StoreID
 	for storeID := range r.replicas {
 		storeIDs = append(storeIDs, storeID)
 	}
-	sort.Sort(storeIDs)
+	slices.Sort(storeIDs)
 
 	for i, storeID := range storeIDs {
 		replica := r.replicas[storeID]

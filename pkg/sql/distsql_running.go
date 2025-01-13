@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,11 +10,13 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
@@ -34,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra/execopnode"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -409,27 +407,27 @@ func (dsp *DistSQLPlanner) setupFlows(
 	if len(statementSQL) > setupFlowRequestStmtMaxLength {
 		statementSQL = statementSQL[:setupFlowRequestStmtMaxLength]
 	}
-	getJobTag := func(ctx context.Context) string {
-		tags := logtags.FromContext(ctx)
-		if tags != nil {
-			for _, tag := range tags.Get() {
-				if tag.Key() == "job" {
-					return tag.ValueStr()
-				}
-			}
-		}
-		return ""
+	execVersion := execversion.V24_3
+	if dsp.st.Version.IsActive(ctx, clusterversion.V25_1) {
+		execVersion = execversion.V25_1
 	}
 	setupReq := execinfrapb.SetupFlowRequest{
-		// TODO(yuzefovich): avoid populating some fields of the SetupFlowRequest
-		// for local plans.
 		LeafTxnInputState: leafInputState,
-		Version:           execinfra.Version,
-		EvalContext:       execinfrapb.MakeEvalContext(&evalCtx.Context),
+		Version:           execVersion,
 		TraceKV:           evalCtx.Tracing.KVTracingEnabled(),
 		CollectStats:      planCtx.collectExecStats,
 		StatementSQL:      statementSQL,
-		JobTag:            getJobTag(ctx),
+	}
+	if localState.IsLocal {
+		// VectorizeMode is the only field that the setup code expects to be set
+		// in the local flows.
+		setupReq.EvalContext.SessionData.VectorizeMode = evalCtx.SessionData().VectorizeMode
+	} else {
+		// In distributed plans populate some extra state.
+		setupReq.EvalContext = execinfrapb.MakeEvalContext(&evalCtx.Context)
+		if jobTag, ok := logtags.FromContext(ctx).GetTag("job"); ok {
+			setupReq.JobTag = jobTag.ValueStr()
+		}
 	}
 
 	var isVectorized bool
@@ -466,7 +464,11 @@ func (dsp *DistSQLPlanner) setupFlows(
 		batchReceiver = recv
 	}
 	origCtx := ctx
-	ctx, flow, opChains, err := dsp.distSQLSrv.SetupLocalSyncFlow(ctx, evalCtx.Planner.Mon(), &setupReq, recv, batchReceiver, localState)
+	parentMonitor := evalCtx.Planner.Mon()
+	if planCtx.OverridePlannerMon != nil {
+		parentMonitor = planCtx.OverridePlannerMon
+	}
+	ctx, flow, opChains, err := dsp.distSQLSrv.SetupLocalSyncFlow(ctx, parentMonitor, &setupReq, recv, batchReceiver, localState)
 	if err == nil && planCtx.saveFlows != nil {
 		err = planCtx.saveFlows(flows, opChains, planCtx.infra.LocalProcessors, isVectorized)
 	}
@@ -712,6 +714,9 @@ func (dsp *DistSQLPlanner) Run(
 		// Txn can be nil in some cases, like BulkIO flows. In such a case, we
 		// cannot create a LeafTxn, so we cannot parallelize scans.
 		planCtx.parallelizeScansIfLocal = false
+		for _, flow := range flows {
+			localState.HasConcurrency = localState.HasConcurrency || execinfra.HasParallelProcessors(flow)
+		}
 	} else {
 		if planCtx.isLocal && noMutations && planCtx.parallelizeScansIfLocal {
 			// Even though we have a single flow on the gateway node, we might
@@ -740,15 +745,14 @@ func (dsp *DistSQLPlanner) Run(
 			// during the flow setup, we need to populate leafInputState below,
 			// so we tell the localState that there is concurrency.
 
-			// At the moment, we disable the usage of the Streamer API for local
-			// plans when non-default key locking modes are requested on some of
-			// the processors. This is the case since the lock spans propagation
-			// doesn't happen for the leaf txns which can result in excessive
-			// contention for future reads (since the acquired locks are not
-			// cleaned up properly when the txn commits).
-			// TODO(yuzefovich): fix the propagation of the lock spans with the
-			// leaf txns and remove this check. See #94290.
-			containsNonDefaultLocking := planCtx.planner != nil && planCtx.planner.curPlan.flags.IsSet(planFlagContainsNonDefaultLocking)
+			// At the moment, we disable the usage of the Streamer API for local plans
+			// when locking is used by any of the processors. This is the case since
+			// the lock spans propagation doesn't happen for the leaf txns which can
+			// result in excessive contention for future reads (since the acquired
+			// locks are not cleaned up properly when the txn commits).
+			// TODO(yuzefovich): fix the propagation of the lock spans with the leaf
+			// txns and remove this check. See #94290.
+			containsLocking := planCtx.planner != nil && planCtx.planner.curPlan.flags.IsSet(planFlagContainsLocking)
 
 			// We also currently disable the usage of the Streamer API whenever
 			// we have a wrapped planNode. This is done to prevent scenarios
@@ -769,7 +773,21 @@ func (dsp *DistSQLPlanner) Run(
 				}
 				return false
 			}()
-			if !containsNonDefaultLocking && !mustUseRootTxn {
+			// We disable the usage of the Streamer API whenever usage of
+			// DistSQL was prohibited with an error. The thinking behind it is
+			// that we might have a plan where some expression (e.g. a cast to
+			// an Oid type) uses the planner's txn (which is the RootTxn), so
+			// it'd be illegal to use LeafTxns for a part of such plan.
+			// TODO(yuzefovich): this check is both excessive and insufficient.
+			// For example:
+			// - it disables the usage of the Streamer when a subquery has an
+			// Oid type, but that would have no impact on usage of the Streamer
+			// in the main query;
+			// - it might allow the usage of the Streamer even when the internal
+			// executor is used by a part of the plan, and the IE would use the
+			// RootTxn. Arguably, this would be a bug in not prohibiting the
+			// DistSQL altogether.
+			if !containsLocking && !mustUseRootTxn && planCtx.distSQLProhibitedErr == nil {
 				if evalCtx.SessionData().StreamerEnabled {
 					for _, proc := range plan.Processors {
 						if jr := proc.Spec.Core.JoinReader; jr != nil {
@@ -803,7 +821,9 @@ func (dsp *DistSQLPlanner) Run(
 
 	if !planCtx.skipDistSQLDiagramGeneration && log.ExpensiveLogEnabled(ctx, 2) {
 		var stmtStr string
-		if planCtx.planner != nil && planCtx.planner.stmt.AST != nil {
+		if planCtx.stmtForDistSQLDiagram != "" {
+			stmtStr = planCtx.stmtForDistSQLDiagram
+		} else if planCtx.planner != nil && planCtx.planner.stmt.AST != nil {
 			stmtStr = planCtx.planner.stmt.String()
 		}
 		_, url, err := execinfrapb.GeneratePlanDiagramURL(stmtStr, flows, execinfrapb.DiagramFlags{})
@@ -816,8 +836,8 @@ func (dsp *DistSQLPlanner) Run(
 
 	log.VEvent(ctx, 2, "running DistSQL plan")
 
-	dsp.distSQLSrv.ServerConfig.Metrics.QueryStart()
-	defer dsp.distSQLSrv.ServerConfig.Metrics.QueryStop()
+	dsp.distSQLSrv.ServerConfig.Metrics.RunStart(len(flows) > 1 /* distributed */)
+	defer dsp.distSQLSrv.ServerConfig.Metrics.RunStop()
 
 	recv.outputTypes = plan.GetResultTypes()
 	if execinfra.IncludeRUEstimateInExplainAnalyze.Get(&dsp.st.SV) &&
@@ -844,6 +864,9 @@ func (dsp *DistSQLPlanner) Run(
 				dsp.cancelFlowsCoordinator.addFlowsToCancel(flows)
 			}
 		}()
+		if planCtx.planner != nil {
+			planCtx.planner.curPlan.flags.Set(planFlagDistributedExecution)
+		}
 	}
 
 	// Currently, we get the statement only if there is a planner available in
@@ -1111,6 +1134,37 @@ func (w *errOnlyResultWriter) AddBatch(ctx context.Context, batch coldata.Batch)
 
 func (w *errOnlyResultWriter) SetRowsAffected(ctx context.Context, n int) {
 	panic("SetRowsAffected not supported by errOnlyResultWriter")
+}
+
+// droppingResultWriter drops all rows that are added to it. It only tracks
+// errors with the SetError and Err functions.
+type droppingResultWriter struct {
+	err error
+}
+
+var _ rowResultWriter = &droppingResultWriter{}
+var _ batchResultWriter = &droppingResultWriter{}
+
+// AddRow is part of the rowResultWriter interface.
+func (d *droppingResultWriter) AddRow(ctx context.Context, row tree.Datums) error {
+	return nil
+}
+
+func (d *droppingResultWriter) AddBatch(ctx context.Context, batch coldata.Batch) error {
+	return nil
+}
+
+// SetRowsAffected is part of the rowResultWriter interface.
+func (d *droppingResultWriter) SetRowsAffected(ctx context.Context, n int) {}
+
+// SetError is part of the rowResultWriter interface.
+func (d *droppingResultWriter) SetError(err error) {
+	d.err = err
+}
+
+// Err is part of the rowResultWriter interface.
+func (d *droppingResultWriter) Err() error {
+	return d.err
 }
 
 // RowResultWriter is a thin wrapper around a RowContainer.
@@ -1655,7 +1709,7 @@ func (dsp *DistSQLPlanner) PlanAndRunAll(
 			ppInfo.resumableFlow.cleanup.isComplete = true
 		}
 		if retErr != nil && planCtx.getPortalPauseInfo() != nil {
-			planCtx.getPortalPauseInfo().resumableFlow.cleanup.run()
+			planCtx.getPortalPauseInfo().resumableFlow.cleanup.run(ctx)
 		}
 	}()
 	if len(planner.curPlan.subqueryPlans) != 0 {
@@ -1698,10 +1752,8 @@ func (dsp *DistSQLPlanner) PlanAndRunAll(
 			}
 		}
 		if !p.resumableFlow.cleanup.isComplete {
-			p.resumableFlow.cleanup.appendFunc(namedFunc{
-				fName: "cleanup flow", f: func() {
-					p.resumableFlow.flow.Cleanup(ctx)
-				},
+			p.resumableFlow.cleanup.appendFunc(func(ctx context.Context) {
+				p.resumableFlow.flow.Cleanup(ctx)
 			})
 		}
 	}
@@ -1716,7 +1768,7 @@ func (dsp *DistSQLPlanner) PlanAndRunAll(
 		}
 	}
 
-	dsp.PlanAndRunCascadesAndChecks(
+	dsp.PlanAndRunPostQueries(
 		ctx, planner, evalCtxFactory, &planner.curPlan.planComponents, recv,
 	)
 
@@ -1779,15 +1831,16 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 	skipDistSQLDiagramGeneration bool,
 	mustUseLeafTxn bool,
 ) error {
-	distributeSubquery := getPlanDistribution(
+	subqueryDistribution, distSQLProhibitedErr := getPlanDistribution(
 		ctx, planner.Descriptors().HasUncommittedTypes(),
-		planner.SessionData().DistSQLMode, subqueryPlan.plan,
-	).WillDistribute()
-	distribute := DistributionType(DistributionTypeNone)
-	if distributeSubquery {
-		distribute = DistributionTypeAlways
+		planner.SessionData(), subqueryPlan.plan, &planner.distSQLVisitor,
+	)
+	distribute := DistributionType(LocalDistribution)
+	if subqueryDistribution.WillDistribute() {
+		distribute = FullDistribution
 	}
 	subqueryPlanCtx := dsp.NewPlanningCtx(ctx, evalCtx, planner, planner.txn, distribute)
+	subqueryPlanCtx.distSQLProhibitedErr = distSQLProhibitedErr
 	subqueryPlanCtx.stmtType = tree.Rows
 	subqueryPlanCtx.skipDistSQLDiagramGeneration = skipDistSQLDiagramGeneration
 	subqueryPlanCtx.subOrPostQuery = true
@@ -1811,18 +1864,28 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 	defer subqueryRecv.Release()
 	defer recv.stats.add(&subqueryRecv.stats)
 	var typs []*types.T
-	if subqueryPlan.execMode == rowexec.SubqueryExecModeExists {
+	switch subqueryPlan.execMode {
+	case rowexec.SubqueryExecModeExists:
 		subqueryRecv.existsMode = true
 		typs = []*types.T{}
-	} else {
+	case rowexec.SubqueryExecModeDiscardAllRows:
+	default:
 		typs = subqueryPhysPlan.GetResultTypes()
 	}
 	var rows rowContainerHelper
-	rows.Init(ctx, typs, evalCtx, "subquery" /* opName */)
-	defer rows.Close(ctx)
+	if subqueryPlan.execMode != rowexec.SubqueryExecModeDiscardAllRows {
+		rows.Init(ctx, typs, evalCtx, "subquery" /* opName */)
+		defer rows.Close(ctx)
+	}
 
 	// TODO(yuzefovich): consider implementing batch receiving result writer.
-	subqueryRowReceiver := NewRowResultWriter(&rows)
+	var subqueryRowReceiver rowResultWriter
+	if subqueryPlan.execMode == rowexec.SubqueryExecModeDiscardAllRows {
+		// Use a row receiver that ignores all results except for errors.
+		subqueryRowReceiver = &droppingResultWriter{}
+	} else {
+		subqueryRowReceiver = NewRowResultWriter(&rows)
+	}
 	subqueryRecv.resultWriter = subqueryRowReceiver
 	subqueryPlans[planIdx].started = true
 	finishedSetupFn, cleanup := getFinishedSetupFn(planner)
@@ -1859,7 +1922,7 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 				// a single value against a tuple.
 				toAppend = row[0]
 			} else {
-				toAppend = &tree.DTuple{D: row}
+				toAppend = planner.datumAlloc.NewDTuple(tree.DTuple{D: row})
 			}
 			// Perform memory accounting for this datum. We do this in an
 			// incremental fashion since we might be materializing a lot of data
@@ -1878,7 +1941,7 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 			// we've already accounted for. That's ok because below we will
 			// reconcile the incremental accounting with the final result's
 			// memory footprint.
-			result.Normalize(&evalCtx.Context)
+			result.Normalize(ctx, &evalCtx.Context)
 		}
 		subqueryPlans[planIdx].result = &result
 	case rowexec.SubqueryExecModeOneRow:
@@ -1905,6 +1968,8 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 			return pgerror.Newf(pgcode.CardinalityViolation,
 				"more than one row returned by a subquery used as an expression")
 		}
+	case rowexec.SubqueryExecModeDiscardAllRows:
+		subqueryPlans[planIdx].result = tree.DNull
 	default:
 		return fmt.Errorf("unexpected subqueryExecMode: %d", subqueryPlan.execMode)
 	}
@@ -2029,7 +2094,7 @@ func (dsp *DistSQLPlanner) PlanAndRun(
 		// is no point in providing the locality filter since it will be ignored
 		// anyway, so we don't use NewPlanningCtxWithOracle constructor.
 		localPlanCtx := dsp.NewPlanningCtx(
-			ctx, evalCtx, planCtx.planner, evalCtx.Txn, DistributionTypeNone,
+			ctx, evalCtx, planCtx.planner, evalCtx.Txn, LocalDistribution,
 		)
 		localPlanCtx.setUpForMainQuery(ctx, planCtx.planner, recv)
 		localPhysPlan, localPhysPlanCleanup, err := dsp.createPhysPlan(ctx, localPlanCtx, plan)
@@ -2046,187 +2111,293 @@ func (dsp *DistSQLPlanner) PlanAndRun(
 	}
 }
 
-// PlanAndRunCascadesAndChecks runs any cascade and check queries.
+// PlanAndRunPostQueries runs any cascade, check, and trigger queries.
 //
-// Because cascades can themselves generate more cascades or check queries, this
-// method can append to plan.cascades and plan.checkPlans (and all these plans
-// must be closed later).
+// Because cascades and triggers can themselves generate more cascades, check,
+// or trigger queries, this method can append to plan.cascades, plan.checkPlans,
+// and plan.triggers (and all these plans must be closed later).
 //
 // Returns false if an error was encountered and sets that error in the provided
 // receiver.
-func (dsp *DistSQLPlanner) PlanAndRunCascadesAndChecks(
+func (dsp *DistSQLPlanner) PlanAndRunPostQueries(
 	ctx context.Context,
 	planner *planner,
 	evalCtxFactory func(usedConcurrently bool) *extendedEvalContext,
 	plan *planComponents,
 	recv *DistSQLReceiver,
 ) bool {
-	if len(plan.cascades) == 0 && len(plan.checkPlans) == 0 {
+	if len(plan.cascades) == 0 && len(plan.checkPlans) == 0 && len(plan.triggers) == 0 {
 		return false
 	}
 
 	prevSteppingMode := planner.Txn().ConfigureStepping(ctx, kv.SteppingEnabled)
 	defer func() { _ = planner.Txn().ConfigureStepping(ctx, prevSteppingMode) }()
 
-	defaultGetSaveFlowsFunc := func() func(map[base.SQLInstanceID]*execinfrapb.FlowSpec, execopnode.OpChains, []execinfra.LocalProcessor, bool) error {
+	defaultGetSaveFlowsFunc := func() SaveFlowsFunc {
 		return getDefaultSaveFlowsFunc(ctx, planner, planComponentTypePostquery)
 	}
 
-	// We treat plan.cascades as a queue.
-	for i := 0; i < len(plan.cascades); i++ {
-		// The original bufferNode is stored in c.Buffer; we can refer to it
-		// directly.
-		// TODO(radu): this requires keeping all previous plans "alive" until the
-		// very end. We may want to make copies of the buffer nodes and clean up
-		// everything else.
-		buf := plan.cascades[i].Buffer
-		var numBufferedRows int
-		if buf != nil {
-			numBufferedRows = buf.(*bufferNode).rows.rows.Len()
-			if numBufferedRows == 0 {
+	checksContainLocking := planner.curPlan.flags.IsSet(planFlagCheckContainsLocking)
+
+	// We treat plan.cascades, plan.checkPlans, and plan.triggers as queues.
+	// Cascades and triggers can queue more cascades, checks, and triggers.
+	// Cascades are executed first, then checks, and then triggers. Then, the
+	// cycle begins again with newly queued post-queries.
+	var cascadesIdx, checksIdx, triggersIdx int
+	for cascadesIdx < len(plan.cascades) || checksIdx < len(plan.checkPlans) || triggersIdx < len(plan.triggers) {
+		// Run cascades first.
+		numCascades := len(plan.cascades)
+		for ; cascadesIdx < numCascades; cascadesIdx++ {
+			hasBuffer, numBufferedRows := checkPostQueryBuffer(plan.cascades[cascadesIdx])
+			if hasBuffer && numBufferedRows == 0 {
 				// No rows were actually modified.
 				continue
 			}
-		}
 
-		log.VEventf(ctx, 2, "executing cascade for constraint %s", plan.cascades[i].FKConstraint.Name())
+			log.VEventf(ctx, 2, "executing cascade for constraint %s",
+				plan.cascades[cascadesIdx].FKConstraint.Name())
 
-		// We place a sequence point before every cascade, so that each subsequent
-		// cascade can observe the writes by the previous step. However, The
-		// external read timestamp is not allowed to advance, since the checks are
-		// run as part of the same statement as the corresponding mutations.
-		if err := planner.Txn().Step(ctx, false /* allowReadTimestampStep */); err != nil {
-			recv.SetError(err)
-			return false
-		}
-
-		evalCtx := evalCtxFactory(false /* usedConcurrently */)
-		execFactory := newExecFactory(ctx, planner)
-		// The cascading query is allowed to autocommit only if it is the last
-		// cascade and there are no check queries to run.
-		//
-		// Note that even if it's the last cascade, we still might not be able
-		// to autocommit in case there are more checks to run during or after
-		// this cascade. Such scenario is handled in the execbuilder where we
-		// need to explicitly enable autocommit on each mutation planNode. In
-		// other words, allowAutoCommit = true here means that the plan _might_
-		// autocommit but doesn't guarantee that.
-		allowAutoCommit := planner.autoCommit
-		if len(plan.checkPlans) > 0 || i < len(plan.cascades)-1 {
-			allowAutoCommit = false
-		}
-		cascadePlan, err := plan.cascades[i].PlanFn(
-			ctx, &planner.semaCtx, &evalCtx.Context, execFactory,
-			buf, numBufferedRows, allowAutoCommit,
-		)
-		if err != nil {
-			recv.SetError(err)
-			return false
-		}
-		cp := cascadePlan.(*planComponents)
-		plan.cascades[i].plan = cp.main
-		if len(cp.subqueryPlans) > 0 {
-			recv.SetError(errors.AssertionFailedf("cascades should not have subqueries"))
-			return false
-		}
-
-		// Queue any new cascades.
-		if len(cp.cascades) > 0 {
-			plan.cascades = append(plan.cascades, cp.cascades...)
-		}
-
-		// Collect any new checks.
-		if len(cp.checkPlans) > 0 {
-			plan.checkPlans = append(plan.checkPlans, cp.checkPlans...)
-		}
-
-		// In cyclical reference situations, the number of cascading operations can
-		// be arbitrarily large. To avoid OOM, we enforce a limit. This is also a
-		// safeguard in case we have a bug that results in an infinite cascade loop.
-		if limit := int(evalCtx.SessionData().OptimizerFKCascadesLimit); len(plan.cascades) > limit {
-			telemetry.Inc(sqltelemetry.CascadesLimitReached)
-			err := pgerror.Newf(pgcode.TriggeredActionException, "cascades limit (%d) reached", limit)
-			recv.SetError(err)
-			return false
-		}
-
-		if err := dsp.planAndRunPostquery(
-			ctx,
-			cp.main,
-			planner,
-			evalCtx,
-			recv,
-			false, /* parallelCheck */
-			defaultGetSaveFlowsFunc,
-			planner.instrumentation.getAssociateNodeWithComponentsFn(),
-			recv.stats.add,
-		); err != nil {
-			recv.SetError(err)
-			return false
-		}
-	}
-
-	if len(plan.checkPlans) == 0 {
-		return true
-	}
-
-	// We place a sequence point before the checks, so that they observe the
-	// writes of the main query and/or any cascades. However, The external read
-	// timestamp is not allowed to advance, since the checks are run as part of
-	// the same statement as the corresponding mutations.
-	if err := planner.Txn().Step(ctx, false /* allowReadTimestampStep */); err != nil {
-		recv.SetError(err)
-		return false
-	}
-
-	// We'll run the checks in parallel if the parallelization is enabled, we have
-	// multiple checks to run, none of the checks have non-default locking, and
-	// we're likely to have quota to do so.
-	runParallelChecks := parallelizeChecks.Get(&dsp.st.SV) &&
-		len(plan.checkPlans) > 1 &&
-		!planner.curPlan.flags.IsSet(planFlagCheckContainsNonDefaultLocking) &&
-		dsp.parallelChecksSem.ApproximateQuota() > 0
-	if runParallelChecks {
-		// At the moment, we rely on not using the newer DistSQL spec factory to
-		// enable parallelization.
-		// TODO(yuzefovich): the planObserver logic in
-		// planAndRunChecksInParallel will need to be adjusted when we switch to
-		// using the DistSQL spec factory.
-		for i := range plan.checkPlans {
-			if plan.checkPlans[i].plan.isPhysicalPlan() {
-				runParallelChecks = false
-				break
-			}
-		}
-	}
-	if runParallelChecks {
-		if err := dsp.planAndRunChecksInParallel(ctx, plan.checkPlans, planner, evalCtxFactory, recv); err != nil {
-			recv.SetError(err)
-			return false
-		}
-	} else {
-		if len(plan.checkPlans) > 1 {
-			log.VEventf(ctx, 2, "executing %d checks serially", len(plan.checkPlans))
-		}
-		for i := range plan.checkPlans {
-			log.VEventf(ctx, 2, "executing check query %d out of %d", i+1, len(plan.checkPlans))
-			if err := dsp.planAndRunPostquery(
-				ctx,
-				plan.checkPlans[i].plan,
-				planner,
-				evalCtxFactory(false /* usedConcurrently */),
-				recv,
-				false, /* parallelCheck */
-				defaultGetSaveFlowsFunc,
-				planner.instrumentation.getAssociateNodeWithComponentsFn(),
-				recv.stats.add,
-			); err != nil {
+			// We place a sequence point before every cascade, so that each subsequent
+			// cascade can observe the writes by the previous step. However, The
+			// external read timestamp is not allowed to advance, since the checks are
+			// run as part of the same statement as the corresponding mutations.
+			if err := planner.Txn().Step(ctx, false /* allowReadTimestampStep */); err != nil {
 				recv.SetError(err)
 				return false
 			}
+
+			// The cascading query is allowed to autocommit only if it is the last
+			// cascade and there are no check queries to run.
+			//
+			// Note that even if it's the last cascade, we still might not be able
+			// to autocommit in case there are more checks to run during or after
+			// this cascade. Such scenario is handled in the execbuilder where we
+			// need to explicitly enable autocommit on each mutation planNode. In
+			// other words, allowAutoCommit = true here means that the plan _might_
+			// autocommit but doesn't guarantee that.
+			allowAutoCommit := planner.autoCommit
+			if len(plan.checkPlans) > 0 || cascadesIdx < len(plan.cascades)-1 {
+				allowAutoCommit = false
+			}
+			evalCtx := evalCtxFactory(false /* usedConcurrently */)
+			ok, newChecksContainLocking := dsp.planAndRunCascadeOrTrigger(
+				ctx, planner, evalCtx, plan, recv, allowAutoCommit, numBufferedRows,
+				&plan.cascades[cascadesIdx], defaultGetSaveFlowsFunc,
+			)
+			if !ok {
+				return false
+			}
+			checksContainLocking = checksContainLocking || newChecksContainLocking
+		}
+
+		if len(plan.triggers) == 0 && cascadesIdx < len(plan.cascades) {
+			// If there are more (newly queued) cascades to run and no triggers, execute
+			// the cascades before any checks. This is an optimization to batch the
+			// execution of checks.
+			//
+			// We don't do this when there are triggers to ensure that the correct
+			// order of mutations is observed.
+			continue
+		}
+
+		// Next, run checks.
+		if checksIdx < len(plan.checkPlans) {
+			// We place a sequence point before the checks, so that they observe the
+			// writes of the main query and/or any cascades. However, The external
+			// read timestamp is not allowed to advance, since the checks are run as
+			// part of the same statement as the corresponding mutations.
+			if err := planner.Txn().Step(ctx, false /* allowReadTimestampStep */); err != nil {
+				recv.SetError(err)
+				return false
+			}
+
+			// We'll run the checks in parallel if the parallelization is enabled, we have
+			// multiple checks to run, none of the checks have non-default locking, and
+			// we're likely to have quota to do so.
+			runParallelChecks := parallelizeChecks.Get(&dsp.st.SV) &&
+				(len(plan.checkPlans)-checksIdx) > 1 && !checksContainLocking &&
+				dsp.parallelChecksSem.ApproximateQuota() > 0
+			if runParallelChecks {
+				// At the moment, we rely on not using the newer DistSQL spec factory to
+				// enable parallelization.
+				// TODO(yuzefovich): the planObserver logic in
+				// planAndRunChecksInParallel will need to be adjusted when we switch to
+				// using the DistSQL spec factory.
+				for i := checksIdx; i < len(plan.checkPlans); i++ {
+					if plan.checkPlans[i].plan.isPhysicalPlan() {
+						runParallelChecks = false
+						break
+					}
+				}
+			}
+			if runParallelChecks {
+				checksToRun := plan.checkPlans[checksIdx:]
+				if err := dsp.planAndRunChecksInParallel(ctx, checksToRun, planner, evalCtxFactory, recv); err != nil {
+					recv.SetError(err)
+					return false
+				}
+			} else {
+				if (len(plan.checkPlans) - checksIdx) > 1 {
+					log.VEventf(ctx, 2, "executing %d checks serially", len(plan.checkPlans))
+				}
+				for i := checksIdx; i < len(plan.checkPlans); i++ {
+					log.VEventf(ctx, 2, "executing check query %d out of %d", i+1, len(plan.checkPlans))
+					if err := dsp.planAndRunPostquery(
+						ctx,
+						plan.checkPlans[i].plan,
+						planner,
+						evalCtxFactory(false /* usedConcurrently */),
+						recv,
+						false, /* parallelCheck */
+						defaultGetSaveFlowsFunc,
+						planner.instrumentation.getAssociateNodeWithComponentsFn(),
+						recv.stats.add,
+					); err != nil {
+						recv.SetError(err)
+						return false
+					}
+				}
+			}
+			// Now that the current batch of checks has been run, reset
+			// checksContainLocking for the next batch (if any).
+			checksContainLocking = false
+			checksIdx = len(plan.checkPlans)
+		}
+
+		// Finally, run triggers.
+		numTriggers := len(plan.triggers)
+		for ; triggersIdx < numTriggers; triggersIdx++ {
+			trigger := &plan.triggers[triggersIdx]
+			hasBuffer, numBufferedRows := checkPostQueryBuffer(plan.triggers[triggersIdx])
+			if hasBuffer && numBufferedRows == 0 {
+				// No rows were actually modified.
+				continue
+			}
+			if log.ExpensiveLogEnabled(ctx, 2) {
+				names := make([]string, len(trigger.Triggers))
+				for j := range trigger.Triggers {
+					names[j] = string(trigger.Triggers[j].Name())
+				}
+				log.VEventf(ctx, 2, "executing triggers %s",
+					strings.Join(names, ","))
+			}
+			const allowAutoCommit = false
+			evalCtx := evalCtxFactory(false /* usedConcurrently */)
+			ok, newChecksContainLocking := dsp.planAndRunCascadeOrTrigger(
+				ctx, planner, evalCtx, plan, recv, allowAutoCommit, numBufferedRows,
+				&plan.triggers[triggersIdx], defaultGetSaveFlowsFunc,
+			)
+			if !ok {
+				return false
+			}
+			checksContainLocking = checksContainLocking || newChecksContainLocking
 		}
 	}
+	return true
+}
 
+// checkPostQueryBuffer checks whether the given post-query has an input buffer
+// node, and returns the number of buffered rows.
+func checkPostQueryBuffer(postQuery postQueryMetadata) (hasBuffer bool, numBufferedRows int) {
+	// The original bufferNode is stored in c.Buffer; we can refer to it
+	// directly.
+	// TODO(radu): this requires keeping all previous plans "alive" until the
+	// very end. We may want to make copies of the buffer nodes and clean up
+	// everything else.
+	buf := postQuery.Buffer
+	if buf == nil {
+		return false, 0
+	}
+	return true, buf.(*bufferNode).rows.rows.Len()
+}
+
+// planAndRunCascadeOrTrigger builds the plan for a cascade or trigger query and
+// runs it. It returns false if an error was encountered and sets that error in
+// the provided receiver. It also returns checksContainLocking, which is true if
+// any new checks were generated that will take locks.
+//
+// NOTE: planAndRunCascadeOrTrigger has the following side effects:
+//   - It may append new cascades, checks, and triggers to "plan".
+//   - It will populate the built plan in the given postQueryMetadata.
+func (dsp *DistSQLPlanner) planAndRunCascadeOrTrigger(
+	ctx context.Context,
+	planner *planner,
+	evalCtx *extendedEvalContext,
+	plan *planComponents,
+	recv *DistSQLReceiver,
+	allowAutoCommit bool,
+	numBufferedRows int,
+	pq *postQueryMetadata,
+	defaultGetSaveFlowsFunc func() SaveFlowsFunc,
+) (ok, checksContainLocking bool) {
+	execFactory := newExecFactory(ctx, planner)
+	cascadePlan, err := pq.PlanFn(
+		ctx, &planner.semaCtx, &evalCtx.Context, execFactory,
+		pq.Buffer, numBufferedRows, allowAutoCommit,
+	)
+	if err != nil {
+		recv.SetError(err)
+		return false, false
+	}
+	cp := cascadePlan.(*planComponents)
+	pq.plan = cp.main
+	if len(cp.subqueryPlans) > 0 {
+		recv.SetError(errors.AssertionFailedf("post-query should not have subqueries"))
+		return false, false
+	}
+	checksContainLocking = cp.flags.IsSet(planFlagCheckContainsLocking)
+
+	// add any newly generated post-queries to the queue.
+	addPostQueriesFromPlan(evalCtx, recv, cp, plan)
+
+	if err := dsp.planAndRunPostquery(
+		ctx,
+		cp.main,
+		planner,
+		evalCtx,
+		recv,
+		false, /* parallelCheck */
+		defaultGetSaveFlowsFunc,
+		planner.instrumentation.getAssociateNodeWithComponentsFn(),
+		recv.stats.add,
+	); err != nil {
+		recv.SetError(err)
+		return false, false
+	}
+	return true, checksContainLocking
+}
+
+// addPostQueriesFromPlan queues any cascades, checks, and triggers from the
+// given "fromPlan" to the given "toPlan". It returns false if an error was
+// encountered and sets that error in the provided receiver, otherwise true.
+func addPostQueriesFromPlan(
+	evalCtx *extendedEvalContext, recv *DistSQLReceiver, fromPlan, toPlan *planComponents,
+) bool {
+
+	// Collect any new checks.
+	if len(fromPlan.checkPlans) > 0 {
+		toPlan.checkPlans = append(toPlan.checkPlans, fromPlan.checkPlans...)
+	}
+
+	// Queue any new cascades.
+	if len(fromPlan.cascades) > 0 {
+		toPlan.cascades = append(toPlan.cascades, fromPlan.cascades...)
+	}
+
+	// Queue any new triggers.
+	if len(fromPlan.triggers) > 0 {
+		toPlan.triggers = append(toPlan.triggers, fromPlan.triggers...)
+	}
+
+	// In cyclical reference situations, the number of cascading operations can
+	// be arbitrarily large. To avoid OOM, we enforce a limit. This is also a
+	// safeguard in case we have a bug that results in an infinite cascade loop.
+	if limit := int(evalCtx.SessionData().OptimizerFKCascadesLimit); len(toPlan.cascades) > limit {
+		telemetry.Inc(sqltelemetry.CascadesLimitReached)
+		err := pgerror.Newf(pgcode.TriggeredActionException, "cascades limit (%d) reached", limit)
+		recv.SetError(err)
+		return false
+	}
 	return true
 }
 
@@ -2267,19 +2438,20 @@ func (dsp *DistSQLPlanner) planAndRunPostquery(
 	evalCtx *extendedEvalContext,
 	recv *DistSQLReceiver,
 	parallelCheck bool,
-	getSaveFlowsFunc func() func(map[base.SQLInstanceID]*execinfrapb.FlowSpec, execopnode.OpChains, []execinfra.LocalProcessor, bool) error,
+	getSaveFlowsFunc func() SaveFlowsFunc,
 	associateNodeWithComponents func(exec.Node, execComponents),
 	addTopLevelQueryStats func(stats *topLevelQueryStats),
 ) error {
-	distributePostquery := getPlanDistribution(
+	postqueryDistribution, distSQLProhibitedErr := getPlanDistribution(
 		ctx, planner.Descriptors().HasUncommittedTypes(),
-		planner.SessionData().DistSQLMode, postqueryPlan,
-	).WillDistribute()
-	distribute := DistributionType(DistributionTypeNone)
-	if distributePostquery {
-		distribute = DistributionTypeAlways
+		planner.SessionData(), postqueryPlan, &planner.distSQLVisitor,
+	)
+	distribute := DistributionType(LocalDistribution)
+	if postqueryDistribution.WillDistribute() {
+		distribute = FullDistribution
 	}
 	postqueryPlanCtx := dsp.NewPlanningCtx(ctx, evalCtx, planner, planner.txn, distribute)
+	postqueryPlanCtx.distSQLProhibitedErr = distSQLProhibitedErr
 	postqueryPlanCtx.stmtType = tree.Rows
 	// Postqueries are only executed on the main query path where we skip the
 	// diagram generation.
@@ -2302,7 +2474,7 @@ func (dsp *DistSQLPlanner) planAndRunPostquery(
 	postqueryRecv := recv.clone()
 	defer postqueryRecv.Release()
 	defer addTopLevelQueryStats(&postqueryRecv.stats)
-	postqueryResultWriter := &errOnlyResultWriter{}
+	postqueryResultWriter := &droppingResultWriter{}
 	postqueryRecv.resultWriter = postqueryResultWriter
 	postqueryRecv.batchWriter = postqueryResultWriter
 	finishedSetupFn, cleanup := getFinishedSetupFn(planner)
@@ -2354,12 +2526,12 @@ func (dsp *DistSQLPlanner) planAndRunChecksInParallel(
 			observer,
 		)
 	}
-	var getSaveFlowsFunc func() func(map[base.SQLInstanceID]*execinfrapb.FlowSpec, execopnode.OpChains, []execinfra.LocalProcessor, bool) error
+	var getSaveFlowsFunc func() SaveFlowsFunc
 	if planner.instrumentation.ShouldSaveFlows() {
 		// getDefaultSaveFlowsFunc returns a concurrency-unsafe function, so we
 		// need to explicitly protect calls to it. Allocate this function only
 		// when necessary.
-		getSaveFlowsFunc = func() func(map[base.SQLInstanceID]*execinfrapb.FlowSpec, execopnode.OpChains, []execinfra.LocalProcessor, bool) error {
+		getSaveFlowsFunc = func() SaveFlowsFunc {
 			fn := getDefaultSaveFlowsFunc(ctx, planner, planComponentTypePostquery)
 			return func(flowSpec map[base.SQLInstanceID]*execinfrapb.FlowSpec, opChains execopnode.OpChains, localProcessors []execinfra.LocalProcessor, vectorized bool) error {
 				mu.Lock()

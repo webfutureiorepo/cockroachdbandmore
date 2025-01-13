@@ -1,14 +1,11 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import moment from "moment-timezone";
+
 import {
   convertStatementRawFormatToAggregatedStatistics,
   executeInternalSql,
@@ -20,10 +17,10 @@ import {
   sqlResultsAreEmpty,
   StatementRawFormat,
 } from "src/api";
-import moment from "moment-timezone";
-import { TimeScale, toRoundedDateRange } from "../timeScaleDropdown";
-import { AggregateStatistics } from "../statementsTable";
+
 import { INTERNAL_APP_NAME_PREFIX } from "../activeExecutions/activeStatementUtils";
+import { AggregateStatistics } from "../statementsTable";
+import { TimeScale, toRoundedDateRange } from "../timeScaleDropdown";
 
 export type TableIndexStatsRequest =
   cockroach.server.serverpb.TableIndexStatsRequest;
@@ -93,7 +90,7 @@ export async function getStatementsUsingIndex({
 }: StatementsUsingIndexRequest): Promise<
   SqlApiResponse<AggregateStatistics[]>
 > {
-  const args: any = [`"${table}@${index}"`];
+  const args = [`"${table}@${index}"`];
   let whereClause = "";
   if (start) {
     whereClause = `${whereClause} AND aggregated_ts >= '${start.toISOString()}'`;

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -22,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
-	"github.com/cockroachdb/errors"
 )
 
 var djangoReleaseTagRegex = regexp.MustCompile(`^(?P<major>\d+)\.(?P<minor>\d+)(\.(?P<point>\d+))?$`)
@@ -44,7 +38,7 @@ func registerDjango(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -185,9 +179,9 @@ func registerDjango(r registry.Registry) {
 			t.Status("Running django test app ", testName)
 			result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(node), fmt.Sprintf(djangoRunTestCmd, testName))
 
-			// Fatal for a roachprod or SSH error. A roachprod error is when result.Err==nil.
+			// Fatal for a roachprod or transient error. A roachprod error is when result.Err==nil.
 			// Proceed for any other (command) errors
-			if err != nil && (result.Err == nil || errors.Is(err, rperrors.ErrSSH255)) {
+			if err != nil && (result.Err == nil || rperrors.IsTransient(err)) {
 				t.Fatal(err)
 			}
 
@@ -230,7 +224,7 @@ source venv/bin/activate && cd /mnt/data1/django/tests &&
 python3 runtests.py %[1]s --settings cockroach_settings -v 2 > %[1]s.stdout
 `
 
-const cockroachDjangoSettings = `
+var cockroachDjangoSettings = fmt.Sprintf(`
 from django.test.runner import DiscoverRunner
 
 
@@ -238,16 +232,16 @@ DATABASES = {
     'default': {
         'ENGINE': 'django_cockroachdb',
         'NAME': 'django_tests',
-        'USER': 'test_admin',
-        'PASSWORD': '',
+        'USER': '%[1]s',
+        'PASSWORD': '%[2]s',
         'HOST': 'localhost',
         'PORT': {pgport:1},
     },
     'other': {
         'ENGINE': 'django_cockroachdb',
         'NAME': 'django_tests2',
-        'USER': 'root',
-        'PASSWORD': '',
+        'USER': '%[1]s',
+        'PASSWORD': '%[2]s',
         'HOST': 'localhost',
         'PORT': {pgport:1},
     },
@@ -269,4 +263,4 @@ class NonDescribingDiscoverRunner(DiscoverRunner):
         }
 
 USE_TZ = False
-`
+`, install.DefaultUser, install.DefaultPassword)

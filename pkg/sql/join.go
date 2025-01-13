@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,13 +10,14 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/errors"
 )
 
 // joinNode is a planNode whose rows are the result of a join operation.
 type joinNode struct {
 	// The data sources.
-	left  planDataSource
-	right planDataSource
+	left  planNode
+	right planNode
 
 	// pred represents the join predicate.
 	pred *joinPredicate
@@ -36,16 +32,28 @@ type joinNode struct {
 
 	// columns contains the metadata for the results of this node.
 	columns colinfo.ResultColumns
+
+	// estimatedLeftRowCount, when set, is the estimated number of rows that
+	// the left input will produce.
+	estimatedLeftRowCount uint64
+	// estimatedRightRowCount, when set, is the estimated number of rows that
+	// the right input will produce.
+	estimatedRightRowCount uint64
 }
 
 func (p *planner) makeJoinNode(
-	left planDataSource, right planDataSource, pred *joinPredicate,
+	left planNode,
+	right planNode,
+	pred *joinPredicate,
+	estimatedLeftRowCount, estimatedRightRowCount uint64,
 ) *joinNode {
 	n := &joinNode{
-		left:    left,
-		right:   right,
-		pred:    pred,
-		columns: pred.cols,
+		left:                   left,
+		right:                  right,
+		pred:                   pred,
+		columns:                pred.cols,
+		estimatedLeftRowCount:  estimatedLeftRowCount,
+		estimatedRightRowCount: estimatedRightRowCount,
 	}
 	return n
 }
@@ -66,6 +74,21 @@ func (n *joinNode) Values() tree.Datums {
 
 // Close implements the planNode interface.
 func (n *joinNode) Close(ctx context.Context) {
-	n.right.plan.Close(ctx)
-	n.left.plan.Close(ctx)
+	n.right.Close(ctx)
+	n.left.Close(ctx)
+}
+
+func (n *joinNode) InputCount() int {
+	return 2
+}
+
+func (n *joinNode) Input(i int) (planNode, error) {
+	switch i {
+	case 0:
+		return n.left, nil
+	case 1:
+		return n.right, nil
+	default:
+		return nil, errors.AssertionFailedf("input index %d is out of range", i)
+	}
 }

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ssmemstorage
 
@@ -19,10 +14,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/insights"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 var (
@@ -43,14 +36,6 @@ var (
 var timestampSize = int64(unsafe.Sizeof(time.Time{}))
 
 var _ sqlstats.Writer = &Container{}
-
-func getStatus(statementError error) insights.Statement_Status {
-	if statementError == nil {
-		return insights.Statement_Completed
-	}
-
-	return insights.Statement_Failed
-}
 
 // RecordStatement implements sqlstats.Writer interface.
 // RecordStatement saves per-statement statistics.
@@ -75,6 +60,7 @@ func (s *Container) RecordStatement(
 	// recorded we don't need to create an entry in the stmts map for it. We do
 	// still need stmtFingerprintID for transaction level metrics tracking.
 	t := sqlstats.StatsCollectionLatencyThreshold.Get(&s.st.SV)
+	// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
 	if !sqlstats.StmtStatsEnable.Get(&s.st.SV) || (t > 0 && t.Seconds() >= value.ServiceLatencySec) {
 		createIfNonExistent = false
 	}
@@ -84,7 +70,6 @@ func (s *Container) RecordStatement(
 		key.Query,
 		key.ImplicitTxn,
 		key.Database,
-		key.Failed,
 		key.PlanHash,
 		key.TransactionFingerprintID,
 		createIfNonExistent,
@@ -109,9 +94,10 @@ func (s *Container) RecordStatement(
 	defer stats.mu.Unlock()
 
 	stats.mu.data.Count++
-	if key.Failed {
+	if value.Failed {
 		stats.mu.data.SensitiveInfo.LastErr = value.StatementError.Error()
 		stats.mu.data.LastErrorCode = pgerror.GetPGCode(value.StatementError).String()
+		stats.mu.data.FailureCount++
 	}
 	// Only update MostRecentPlanDescription if we sampled a new PlanDescription.
 	if value.Plan != nil {
@@ -138,8 +124,10 @@ func (s *Container) RecordStatement(
 	stats.mu.data.RowsWritten.Record(stats.mu.data.Count, float64(value.RowsWritten))
 	stats.mu.data.LastExecTimestamp = s.getTimeNow()
 	stats.mu.data.Nodes = util.CombineUnique(stats.mu.data.Nodes, value.Nodes)
+	stats.mu.data.KVNodeIDs = util.CombineUnique(stats.mu.data.KVNodeIDs, value.KVNodeIDs)
 	if value.ExecStats != nil {
 		stats.mu.data.Regions = util.CombineUnique(stats.mu.data.Regions, value.ExecStats.Regions)
+		stats.mu.data.UsedFollowerRead = stats.mu.data.UsedFollowerRead || value.ExecStats.UsedFollowerRead
 	}
 	stats.mu.data.PlanGists = util.CombineUnique(stats.mu.data.PlanGists, []string{value.PlanGist})
 	stats.mu.data.IndexRecommendations = value.IndexRecommendations
@@ -147,9 +135,7 @@ func (s *Container) RecordStatement(
 
 	// Percentile latencies are only being sampled if the latency was above the
 	// AnomalyDetectionLatencyThreshold.
-	// The Insights detector already does a flush when detecting for anomaly latency,
-	// so there is no need to force a flush when retrieving the data during this step.
-	latencies := s.latencyInformation.GetPercentileValues(stmtFingerprintID, false)
+	latencies := s.anomalies.GetPercentileValues(stmtFingerprintID)
 	latencyInfo := appstatspb.LatencyInfo{
 		Min: value.ServiceLatencySec,
 		Max: value.ServiceLatencySec,
@@ -172,7 +158,7 @@ func (s *Container) RecordStatement(
 
 	if created {
 		// stats size + stmtKey size + hash of the statementKey
-		estimatedMemoryAllocBytes := stats.sizeUnsafe() + statementKey.size() + 8
+		estimatedMemoryAllocBytes := stats.sizeUnsafeLocked() + statementKey.size() + 8
 
 		// We also account for the memory used for s.sampledPlanMetadataCache.
 		// timestamp size + key size + hash.
@@ -193,48 +179,6 @@ func (s *Container) RecordStatement(
 		}
 	}
 
-	var autoRetryReason string
-	if value.AutoRetryReason != nil {
-		autoRetryReason = value.AutoRetryReason.Error()
-	}
-
-	var contention *time.Duration
-	var cpuSQLNanos int64
-	if value.ExecStats != nil {
-		contention = &value.ExecStats.ContentionTime
-		cpuSQLNanos = value.ExecStats.CPUTime.Nanoseconds()
-	}
-
-	var errorCode string
-	var errorMsg redact.RedactableString
-	if value.StatementError != nil {
-		errorCode = pgerror.GetPGCode(value.StatementError).String()
-		errorMsg = redact.Sprint(value.StatementError)
-	}
-
-	s.insights.ObserveStatement(value.SessionID, &insights.Statement{
-		ID:                   value.StatementID,
-		FingerprintID:        stmtFingerprintID,
-		LatencyInSeconds:     value.ServiceLatencySec,
-		Query:                value.Query,
-		Status:               getStatus(value.StatementError),
-		StartTime:            value.StartTime,
-		EndTime:              value.EndTime,
-		FullScan:             value.FullScan,
-		PlanGist:             value.PlanGist,
-		Retries:              int64(value.AutoRetryCount),
-		AutoRetryReason:      autoRetryReason,
-		RowsRead:             value.RowsRead,
-		RowsWritten:          value.RowsWritten,
-		Nodes:                value.Nodes,
-		Contention:           contention,
-		IndexRecommendations: value.IndexRecommendations,
-		Database:             value.Database,
-		CPUSQLNanos:          cpuSQLNanos,
-		ErrorCode:            errorCode,
-		ErrorMsg:             errorMsg,
-	})
-
 	return stats.ID, nil
 }
 
@@ -247,7 +191,6 @@ func (s *Container) RecordStatementExecStats(
 			key.Query,
 			key.ImplicitTxn,
 			key.Database,
-			key.Failed,
 			key.PlanHash,
 			key.TransactionFingerprintID,
 			false, /* createIfNotExists */
@@ -279,6 +222,7 @@ func (s *Container) RecordTransaction(
 ) error {
 	s.recordTransactionHighLevelStats(value.TransactionTimeSec, value.Committed, value.ImplicitTxn)
 
+	// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
 	if !sqlstats.TxnStatsEnable.Get(&s.st.SV) {
 		return nil
 	}
@@ -308,7 +252,7 @@ func (s *Container) RecordTransaction(
 	// fingerprints for this app. We also abort the operation and return an error.
 	if created {
 		estimatedMemAllocBytes :=
-			stats.sizeUnsafe() + key.Size() + 8 /* hash of transaction key */
+			stats.sizeUnsafeLocked() + key.Size() + 8 /* hash of transaction key */
 		if err := func() error {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -364,53 +308,13 @@ func (s *Container) RecordTransaction(
 		stats.mu.data.ExecStats.MVCCIteratorStats.RangeKeySkippedPoints.Record(stats.mu.data.ExecStats.Count, float64(value.ExecStats.MvccRangeKeySkippedPoints))
 	}
 
-	var retryReason string
-	if value.AutoRetryReason != nil {
-		retryReason = value.AutoRetryReason.Error()
-	}
-
-	var cpuSQLNanos int64
-	if value.ExecStats.CPUTime.Nanoseconds() >= 0 {
-		cpuSQLNanos = value.ExecStats.CPUTime.Nanoseconds()
-	}
-
-	var errorCode string
-	var errorMsg redact.RedactableString
-	if value.TxnErr != nil {
-		errorCode = pgerror.GetPGCode(value.TxnErr).String()
-		errorMsg = redact.Sprint(value.TxnErr)
-	}
-
-	status := insights.Transaction_Failed
-	if value.Committed {
-		status = insights.Transaction_Completed
-	}
-
-	s.insights.ObserveTransaction(ctx, value.SessionID, &insights.Transaction{
-		ID:              value.TransactionID,
-		FingerprintID:   key,
-		UserPriority:    value.Priority.String(),
-		ImplicitTxn:     value.ImplicitTxn,
-		Contention:      &value.ExecStats.ContentionTime,
-		StartTime:       value.StartTime,
-		EndTime:         value.EndTime,
-		User:            value.SessionData.User().Normalized(),
-		ApplicationName: value.SessionData.ApplicationName,
-		RowsRead:        value.RowsRead,
-		RowsWritten:     value.RowsWritten,
-		RetryCount:      value.RetryCount,
-		AutoRetryReason: retryReason,
-		CPUSQLNanos:     cpuSQLNanos,
-		LastErrorCode:   errorCode,
-		LastErrorMsg:    errorMsg,
-		Status:          status,
-	})
 	return nil
 }
 
 func (s *Container) recordTransactionHighLevelStats(
 	transactionTimeSec float64, committed bool, implicit bool,
 ) {
+	// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
 	if !sqlstats.TxnStatsEnable.Get(&s.st.SV) {
 		return
 	}

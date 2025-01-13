@@ -1,18 +1,12 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execinfrapb
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -20,78 +14,25 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/normalize"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
-// ivarBinder is a tree.Visitor that binds ordinal references
-// (IndexedVars represented by @1, @2, ...) to an IndexedVarContainer.
-type ivarBinder struct {
-	h   *tree.IndexedVarHelper
-	err error
-}
-
-func (v *ivarBinder) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
-	if v.err != nil {
-		return false, expr
-	}
-	if ivar, ok := expr.(*tree.IndexedVar); ok {
-		newVar, err := v.h.BindIfUnbound(ivar)
-		if err != nil {
-			v.err = err
-			return false, expr
-		}
-		return false, newVar
-	}
-	return true, expr
-}
-
-func (*ivarBinder) VisitPost(expr tree.Expr) tree.Expr { return expr }
-
-// DeserializeExpr deserializes expr, binds the indexed variables to the
-// provided IndexedVarHelper, and evaluates any constants in the expression.
-//
-// evalCtx will not be mutated.
+// DeserializeExpr deserializes expr and binds the indexed variables to the
+// provided IndexedVarHelper.
 func DeserializeExpr(
 	ctx context.Context,
-	expr string,
-	semaCtx *tree.SemaContext,
-	evalCtx *eval.Context,
-	vars *tree.IndexedVarHelper,
-) (tree.TypedExpr, error) {
-	if expr == "" {
-		return nil, nil
-	}
-
-	deserializedExpr, err := processExpression(ctx, Expression{Expr: expr}, evalCtx, semaCtx, vars)
-	if err != nil {
-		return deserializedExpr, err
-	}
-	var t transform.ExprTransformContext
-	if t.AggregateInExpr(ctx, deserializedExpr, evalCtx.SessionData().SearchPath) {
-		return nil, errors.Errorf("expression '%s' has aggregate", deserializedExpr)
-	}
-	return deserializedExpr, nil
-}
-
-// DeserializeExprWithTypes is similar to Deserialize. It can be used when the
-// types of indexed vars are available, but a tree.IndexedVarHelper is not.
-func DeserializeExprWithTypes(
-	ctx context.Context,
-	expr string,
+	expr Expression,
 	typs []*types.T,
 	semaCtx *tree.SemaContext,
 	evalCtx *eval.Context,
 ) (tree.TypedExpr, error) {
-	if expr == "" {
+	if expr.Expr == "" {
 		return nil, nil
 	}
-	var eh exprHelper
-	eh.types = typs
-	tempVars := tree.MakeIndexedVarHelper(&eh, len(typs))
-	return DeserializeExpr(ctx, expr, semaCtx, evalCtx, &tempVars)
+	eh := exprHelper{evalCtx: evalCtx, semaCtx: semaCtx, types: typs}
+	return eh.deserializeExpr(ctx, expr)
 }
 
 // RunFilter runs a filter expression and returns whether the filter passes.
@@ -99,64 +40,11 @@ func RunFilter(ctx context.Context, filter tree.TypedExpr, evalCtx *eval.Context
 	if filter == nil {
 		return true, nil
 	}
-
 	d, err := eval.Expr(ctx, evalCtx, filter)
 	if err != nil {
 		return false, err
 	}
-
 	return d == tree.DBoolTrue, nil
-}
-
-// processExpression parses the string expression inside an Expression,
-// and associates ordinal references (@1, @2, etc) with the given helper.
-//
-// evalCtx will not be mutated.
-func processExpression(
-	ctx context.Context,
-	exprSpec Expression,
-	evalCtx *eval.Context,
-	semaCtx *tree.SemaContext,
-	h *tree.IndexedVarHelper,
-) (tree.TypedExpr, error) {
-	if exprSpec.Expr == "" {
-		return nil, nil
-	}
-	expr, err := parser.ParseExprWithInt(
-		exprSpec.Expr,
-		parser.NakedIntTypeFromDefaultIntSize(evalCtx.SessionData().DefaultIntSize),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Bind IndexedVars to our eh.Vars.
-	v := ivarBinder{h: h, err: nil}
-	expr, _ = tree.WalkExpr(&v, expr)
-	if v.err != nil {
-		return nil, v.err
-	}
-
-	semaCtx.IVarContainer = h.Container()
-	// Convert to a fully typed expression.
-	typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, types.Any)
-	if err != nil {
-		// Type checking must succeed by now.
-		return nil, errors.NewAssertionErrorWithWrappedErrf(err, "%s", expr)
-	}
-
-	// Pre-evaluate constant expressions. This is necessary to avoid repeatedly
-	// re-evaluating constant values every time the expression is applied.
-	//
-	// TODO(solon): It would be preferable to enhance our expression serialization
-	// format so this wouldn't be necessary.
-	c := normalize.MakeConstantEvalVisitor(ctx, evalCtx)
-	expr, _ = tree.WalkExpr(&c, typedExpr)
-	if err := c.Err(); err != nil {
-		return nil, err
-	}
-
-	return expr.(tree.TypedExpr), nil
 }
 
 // ExprHelper implements the common logic around evaluating an expression that
@@ -289,16 +177,12 @@ func (eh *MultiExprHelper) Reset() {
 	eh.exprs = eh.exprs[:0]
 }
 
-// exprHelper is a base implementation of an expressoin helper used by both
+// exprHelper is a base implementation of an expression helper used by both
 // ExprHelper and MultiExprHelper.
 type exprHelper struct {
 	evalCtx    *eval.Context
 	semaCtx    *tree.SemaContext
 	datumAlloc *tree.DatumAlloc
-
-	// vars is used to generate IndexedVars that are "backed" by the values in
-	// row.
-	vars tree.IndexedVarHelper
 
 	types []*types.T
 	row   rowenc.EncDatumRow
@@ -313,31 +197,24 @@ func (eh *exprHelper) IndexedVarResolvedType(idx int) *types.T {
 }
 
 // IndexedVarEval is part of the eval.IndexedVarContainer interface.
-func (eh *exprHelper) IndexedVarEval(
-	ctx context.Context, idx int, e tree.ExprEvaluator,
-) (tree.Datum, error) {
+func (eh *exprHelper) IndexedVarEval(idx int) (tree.Datum, error) {
 	err := eh.row[idx].EnsureDecoded(eh.types[idx], eh.datumAlloc)
 	if err != nil {
 		return nil, err
 	}
-	return eh.row[idx].Datum.Eval(ctx, e)
-}
-
-// IndexedVarNodeFormatter is part of the tree.IndexedVarContainer interface.
-func (eh *exprHelper) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
-	n := tree.Name(fmt.Sprintf("$%d", idx))
-	return &n
+	return eh.row[idx].Datum, nil
 }
 
 // init initializes the exprHelper.
 func (eh *exprHelper) init(
 	ctx context.Context, types []*types.T, semaCtx *tree.SemaContext, evalCtx *eval.Context,
 ) error {
-	eh.evalCtx = evalCtx
-	eh.semaCtx = semaCtx
-	eh.types = types
-	eh.vars = tree.MakeIndexedVarHelper(eh, len(types))
-	eh.datumAlloc = &tree.DatumAlloc{}
+	*eh = exprHelper{
+		evalCtx:    evalCtx,
+		semaCtx:    semaCtx,
+		types:      types,
+		datumAlloc: &tree.DatumAlloc{},
+	}
 	if semaCtx.TypeResolver != nil {
 		for _, t := range types {
 			if err := typedesc.EnsureTypeIsHydrated(ctx, t, semaCtx.TypeResolver.(catalog.TypeDescriptorResolver)); err != nil {
@@ -355,10 +232,48 @@ func (eh *exprHelper) prepareExpr(ctx context.Context, expr Expression) (tree.Ty
 		return nil, nil
 	}
 	if expr.LocalExpr != nil {
-		eh.vars.Rebind(expr.LocalExpr)
 		return expr.LocalExpr, nil
 	}
-	return DeserializeExpr(ctx, expr.Expr, eh.semaCtx, eh.evalCtx, &eh.vars)
+	return eh.deserializeExpr(ctx, expr)
+}
+
+// deserializeExpr converts the given expression's string representation into a
+// tree.TypedExpr and returns it.
+func (eh *exprHelper) deserializeExpr(ctx context.Context, e Expression) (tree.TypedExpr, error) {
+	if e.Expr == "" {
+		return nil, nil
+	}
+
+	expr, err := parser.ParseExpr(e.Expr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set the iVarContainer for semaCtx so that indexed vars can be
+	// type-checked.
+	originalIVarContainer := eh.semaCtx.IVarContainer
+	eh.semaCtx.IVarContainer = eh
+	defer func() { eh.semaCtx.IVarContainer = originalIVarContainer }()
+
+	// Type-check the expression.
+	typedExpr, err := tree.TypeCheck(ctx, expr, eh.semaCtx, types.Any)
+	if err != nil {
+		// Type checking must succeed.
+		return nil, errors.NewAssertionErrorWithWrappedErrf(err, "%s", expr)
+	}
+
+	// Pre-evaluate constant expressions. This is necessary to avoid repeatedly
+	// re-evaluating constant values every time the expression is applied.
+	//
+	// TODO(solon): It would be preferable to enhance our expression
+	// serialization format so this wouldn't be necessary.
+	c := normalize.MakeConstantEvalVisitor(ctx, eh.evalCtx)
+	expr, _ = tree.WalkExpr(&c, typedExpr)
+	if err := c.Err(); err != nil {
+		return nil, err
+	}
+
+	return expr.(tree.TypedExpr), nil
 }
 
 // evalFilter is used for filter expressions; it evaluates the expression and

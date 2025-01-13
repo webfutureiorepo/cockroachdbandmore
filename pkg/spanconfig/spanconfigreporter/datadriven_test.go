@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigreporter_test
 
@@ -281,7 +276,7 @@ func (s *mockCluster) ComputeSplitKey(
 // GetSpanConfigForKey implements spanconfig.StoreReader.
 func (s *mockCluster) GetSpanConfigForKey(
 	ctx context.Context, key roachpb.RKey,
-) (roachpb.SpanConfig, error) {
+) (roachpb.SpanConfig, roachpb.Span, error) {
 	return s.store.GetSpanConfigForKey(ctx, key)
 }
 
@@ -325,5 +320,5 @@ func (s *mockCluster) getRangeDescriptor(id roachpb.RangeID) roachpb.RangeDescri
 func (s *mockCluster) applyConfig(ctx context.Context, span roachpb.Span, conf roachpb.SpanConfig) {
 	update, err := spanconfig.Addition(spanconfig.MakeTargetFromSpan(span), conf)
 	require.NoError(s.t, err)
-	s.store.Apply(ctx, false, update)
+	s.store.Apply(ctx, update)
 }

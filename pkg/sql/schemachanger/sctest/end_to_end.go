@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sctest contains tools to run end-to-end datadriven tests in both
 // ccl and non-ccl settings.
@@ -47,6 +42,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/stretchr/testify/require"
 )
@@ -135,13 +132,15 @@ func EndToEndSideEffects(t *testing.T, relTestCaseDir string, factory TestServer
 					sctestdeps.WithNamespace(sctestdeps.ReadNamespaceFromDB(t, tdb).Catalog),
 					sctestdeps.WithCurrentDatabase(sctestdeps.ReadCurrentDatabaseFromDB(t, tdb)),
 					sctestdeps.WithSessionData(sctestdeps.ReadSessionDataFromDB(t, tdb, func(
-						sd *sessiondata.SessionData,
+						sd *sessiondata.SessionData, localData sessiondatapb.LocalOnlySessionData,
 					) {
 						// For setting up a builder inside tests we will ensure that the new schema
 						// changer will allow non-fully implemented operations.
-						sd.NewSchemaChangerMode = sessiondatapb.UseNewSchemaChangerUnsafe
+						sd.NewSchemaChangerMode = sessiondatapb.UseNewSchemaChangerUnsafeAlways
+						sd.TempTablesEnabled = true
 						sd.ApplicationName = ""
 						sd.EnableUniqueWithoutIndexConstraints = true // this allows `ADD UNIQUE WITHOUT INDEX` in the testing suite.
+						sd.SerialNormalizationMode = localData.SerialNormalizationMode
 					})),
 					sctestdeps.WithTestingKnobs(&scexec.TestingKnobs{
 						BeforeStage: func(p scplan.Plan, stageIdx int) error {
@@ -276,6 +275,7 @@ func checkExplainDiagrams(
 		ActiveVersion:              clusterversion.TestingClusterVersion,
 		ExecutionPhase:             scop.StatementPhase,
 		SchemaChangerJobIDSupplier: func() jobspb.JobID { return 1 },
+		MemAcc:                     mon.NewStandaloneUnlimitedAccount(),
 	}
 	if inRollback {
 		params.InRollback = true
@@ -311,15 +311,18 @@ func execStatementWithTestDeps(
 ) (stateAfterBuildingEachStatement []scpb.CurrentState) {
 	var jobID jobspb.JobID
 	var state scpb.CurrentState
+	var logSchemaChangesFn scbuild.LogSchemaChangerEventsFn
 	var err error
+	startTime := timeutil.Now()
 
 	deps.WithTxn(func(s *sctestdeps.TestState) {
 		// Run statement phase.
 		deps.IncrementPhase()
 		deps.LogSideEffectf("# begin %s", deps.Phase())
 		for _, stmt := range stmts {
-			state, err = scbuild.Build(ctx, deps, state, stmt.AST, nil /* memAcc */)
+			state, logSchemaChangesFn, err = scbuild.Build(ctx, deps, state, stmt.AST, mon.NewStandaloneUnlimitedAccount())
 			require.NoError(t, err, "error in builder")
+			require.NoError(t, logSchemaChangesFn(ctx), "error generating event log entries")
 			stateAfterBuildingEachStatement = append(stateAfterBuildingEachStatement, state)
 			state, _, err = scrun.RunStatementPhase(ctx, s.TestingKnobs(), s, state)
 			require.NoError(t, err, "error in %s", s.Phase())
@@ -337,7 +340,7 @@ func execStatementWithTestDeps(
 		deps.IncrementPhase()
 		deps.LogSideEffectf("# begin %s", deps.Phase())
 		err = scrun.RunSchemaChangesInJob(
-			ctx, deps.TestingKnobs(), deps, jobID, job.DescriptorIDs, nil, /* rollbackCause */
+			ctx, deps.TestingKnobs(), deps, jobID, startTime, job.DescriptorIDs, nil, /* rollbackCause */
 		)
 		require.NoError(t, err, "error in mock schema change job execution")
 		deps.LogSideEffectf("# end %s", deps.Phase())

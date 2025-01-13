@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -24,6 +19,7 @@ import (
 )
 
 type refreshMaterializedViewNode struct {
+	zeroInputPlanNode
 	n    *tree.RefreshMaterializedView
 	desc *tabledesc.Mutable
 }
@@ -47,18 +43,12 @@ func (p *planner) RefreshMaterializedView(
 		}
 	}
 
-	// Only the owner or an admin (superuser) can refresh the view.
-	hasAdminRole, err := p.HasAdminRole(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	hasOwnership, err := p.HasOwnership(ctx, desc)
 	if err != nil {
 		return nil, err
 	}
 
-	if !(hasOwnership || hasAdminRole) {
+	if !hasOwnership {
 		return nil, pgerror.Newf(
 			pgcode.InsufficientPrivilege,
 			"must be owner of materialized view %s",

@@ -1,18 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file implements data structures used by index constraints generation.
 
 package constraint
 
 import (
+	"context"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -53,6 +49,7 @@ func TestSpans(t *testing.T) {
 }
 
 func TestSpansSortAndMerge(t *testing.T) {
+	ctx := context.Background()
 	keyCtx := testKeyContext(1)
 	evalCtx := keyCtx.EvalCtx
 
@@ -97,7 +94,7 @@ func TestSpansSortAndMerge(t *testing.T) {
 		for i := 1; i < spans.Count(); i++ {
 			var d Constraint
 			d.InitSingleSpan(keyCtx, spans.Get(i))
-			c.UnionWith(evalCtx, &d)
+			c.UnionWith(ctx, evalCtx, &d)
 		}
 		expected := c.Spans.String()
 

@@ -1,13 +1,8 @@
 // Copyright 2013 Google Inc. All Rights Reserved.
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This code originated in the github.com/golang/glog package.
 
@@ -42,7 +37,7 @@ import (
 // https://github.com/cockroachdb/cockroach/issues/36861#issuecomment-483589446
 func TemporarilyDisableFileGCForMainLogger() (cleanup func()) {
 	fileSink := debugLog.getFileSink()
-	if fileSink == nil || !fileSink.enabled.Get() {
+	if fileSink == nil || !fileSink.enabled.Load() {
 		return func() {}
 	}
 	oldLogLimit := atomic.LoadInt64(&fileSink.logFilesCombinedMaxSize)
@@ -58,7 +53,7 @@ type fileSink struct {
 	// This should only be written while mu is held, but can
 	// be read anytime. We maintain the invariant that
 	// enabled = true implies logDir != "".
-	enabled syncutil.AtomicBool
+	enabled atomic.Bool
 
 	// groupName is the config-specified file group name - do not use to
 	// generate file names! Use fileNamePrefix instead.
@@ -90,7 +85,11 @@ type fileSink struct {
 	// include at the start of a log file.
 	getStartLines func(time.Time) []*buffer
 
+	fatalOnLogStall func() bool
+
 	filePermissions fs.FileMode
+
+	logBytesWritten *atomic.Uint64
 
 	// mu protects the remaining elements of this structure and is
 	// used to synchronize output to this file sink..
@@ -137,6 +136,7 @@ func newFileSink(
 	fileMaxSize, combinedMaxSize int64,
 	getStartLines func(time.Time) []*buffer,
 	filePermissions fs.FileMode,
+	logBytesWritten *atomic.Uint64,
 ) *fileSink {
 	f := &fileSink{
 		groupName:               fileGroupName,
@@ -147,15 +147,16 @@ func newFileSink(
 		gcNotify:                make(chan struct{}, 1),
 		getStartLines:           getStartLines,
 		filePermissions:         filePermissions,
+		logBytesWritten:         logBytesWritten,
 	}
 	f.mu.logDir = dir
-	f.enabled.Set(dir != "")
+	f.enabled.Store(dir != "")
 	return f
 }
 
 // activeAtSeverity implements the logSink interface.
 func (l *fileSink) active() bool {
-	return l.enabled.Get()
+	return l.enabled.Load()
 }
 
 // attachHints implements the logSink interface.
@@ -177,7 +178,7 @@ func (l *fileSink) output(b []byte, opts sinkOutputOptions) error {
 		l.emergencyOutput(b)
 		return nil
 	}
-	if !l.enabled.Get() {
+	if !l.enabled.Load() {
 		// NB: we need to check filesink.enabled a second time here in
 		// case a test Scope() has disabled it asynchronously while
 		// (*loggerT).outputLogEntry() was not holding outputMu.
@@ -195,7 +196,7 @@ func (l *fileSink) output(b []byte, opts sinkOutputOptions) error {
 		return err
 	}
 
-	if opts.extraFlush || !l.bufferedWrites || logging.flushWrites.Get() {
+	if opts.extraFlush || !l.bufferedWrites || logging.flushWrites.Load() {
 		l.flushAndMaybeSyncLocked(false /*doSync*/)
 	}
 	return nil
@@ -255,14 +256,18 @@ func (l *fileSink) flushAndMaybeSyncLocked(doSync bool) {
 		// recursive back-and-forth between the copy of FATAL events to
 		// OPS and disk slowness detection here. (See the implementation
 		// of logfDepth for details.)
+		sev := severity.ERROR
+		// We default to assuming a fatal on log stall.
+		if l.fatalOnLogStall == nil || l.fatalOnLogStall() {
+			sev = severity.FATAL
+			// The write stall may prevent the process from exiting. If the process
+			// won't exit, we can at least terminate all our RPC connections first.
+			//
+			// See pkg/cli.runStart for where this function is hooked up.
+			MakeProcessUnavailable()
+		}
 
-		// The write stall may prevent the process from exiting. If the process
-		// won't exit, we can at least terminate all our RPC connections first.
-		//
-		// See pkg/cli.runStart for where this function is hooked up.
-		MakeProcessUnavailable()
-
-		Ops.Shoutf(context.Background(), severity.FATAL,
+		Ops.Shoutf(context.Background(), sev,
 			"disk stall detected: unable to sync log files within %s", maxSyncDuration,
 		)
 	})
@@ -317,6 +322,12 @@ func create(
 	// Open the file os.O_APPEND|os.O_CREATE rather than use os.Create.
 	// Append is almost always more efficient than O_RDRW on most modern file systems.
 	f, err = os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, fileMode)
+	if err == nil {
+		// os.OpenFile above applied CockroachDB's umask to the fileMode, but we want to apply the
+		// specified permissions literally. This os.Chmod call will broaden the permissions to the
+		// exact value requested.
+		err = os.Chmod(fname, fileMode)
+	}
 	return f, updatedRotation, fname, symlink, errors.Wrapf(err, "log: cannot create output file")
 }
 

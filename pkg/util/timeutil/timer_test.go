@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package timeutil
 
@@ -67,7 +62,6 @@ func TestTimerStop(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestTimerUninitializedStopNoop(t *testing.T) {
@@ -137,5 +131,20 @@ func TestTimerMakesProgressInLoop(t *testing.T) {
 		timer.Reset(timeStep)
 		<-timer.C
 		timer.Read = true
+	}
+}
+
+func BenchmarkTimer(b *testing.B) {
+	run := func() {
+		var timer Timer
+		defer timer.Stop()
+		for i := 0; i < 10; i++ {
+			timer.Reset(10 * time.Microsecond)
+			<-timer.C
+			timer.Read = true
+		}
+	}
+	for i := 0; i < b.N; i++ {
+		run()
 	}
 }

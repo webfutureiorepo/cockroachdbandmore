@@ -1,18 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttljob
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -27,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // QueryBounds stores the start and end bounds for the SELECT query that the
@@ -66,7 +61,7 @@ type SelectQueryParams struct {
 // portion of the TTL job.
 type SelectQueryBuilder struct {
 	SelectQueryParams
-	selectOpName string
+	selectOpName redact.RedactableString
 	// isFirst is true if we have not invoked a query using the builder yet.
 	isFirst bool
 	// cachedQuery is the cached query, which stays the same from the second
@@ -98,7 +93,7 @@ func MakeSelectQueryBuilder(params SelectQueryParams, cutoff time.Time) SelectQu
 
 	return SelectQueryBuilder{
 		SelectQueryParams: params,
-		selectOpName:      fmt.Sprintf("ttl select %s", params.RelationName),
+		selectOpName:      redact.Sprintf("ttl select %s", params.RelationName),
 		cachedArgs:        cachedArgs,
 		isFirst:           true,
 	}
@@ -118,13 +113,11 @@ func (b *SelectQueryBuilder) buildQuery() string {
 	)
 }
 
-var qosLevel = sessiondatapb.TTLLow
-
 func getInternalExecutorOverride(
 	qosLevel sessiondatapb.QoSLevel,
 ) sessiondata.InternalExecutorOverride {
 	return sessiondata.InternalExecutorOverride{
-		User:                   username.RootUserName(),
+		User:                   username.NodeUserName(),
 		QualityOfService:       &qosLevel,
 		OptimizerUseHistograms: true,
 	}
@@ -158,7 +151,7 @@ func (b *SelectQueryBuilder) Run(
 		ctx,
 		b.selectOpName,
 		nil, /* txn */
-		getInternalExecutorOverride(qosLevel),
+		getInternalExecutorOverride(sessiondatapb.BulkLowQoS),
 		query,
 		b.cachedArgs...,
 	)
@@ -197,7 +190,7 @@ type DeleteQueryParams struct {
 // portion of the TTL job.
 type DeleteQueryBuilder struct {
 	DeleteQueryParams
-	deleteOpName string
+	deleteOpName redact.RedactableString
 	// cachedQuery is the cached query, which stays the same as long as we are
 	// deleting up to DeleteBatchSize elements.
 	cachedQuery string
@@ -215,7 +208,7 @@ func MakeDeleteQueryBuilder(params DeleteQueryParams, cutoff time.Time) DeleteQu
 
 	return DeleteQueryBuilder{
 		DeleteQueryParams: params,
-		deleteOpName:      fmt.Sprintf("ttl delete %s", params.RelationName),
+		deleteOpName:      redact.Sprintf("ttl delete %s", params.RelationName),
 		cachedArgs:        cachedArgs,
 	}
 }
@@ -261,7 +254,7 @@ func (b *DeleteQueryBuilder) Run(
 		ctx,
 		b.deleteOpName,
 		txn.KV(),
-		getInternalExecutorOverride(qosLevel),
+		getInternalExecutorOverride(sessiondatapb.BulkLowQoS),
 		query,
 		deleteArgs...,
 	)

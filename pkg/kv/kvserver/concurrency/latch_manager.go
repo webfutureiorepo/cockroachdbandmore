@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package concurrency
 
@@ -66,8 +61,8 @@ func (m *latchManagerImpl) Poison(lg latchGuard) {
 	m.m.Poison(lg.(*spanlatch.Guard))
 }
 
-func (m *latchManagerImpl) Release(lg latchGuard) {
-	m.m.Release(lg.(*spanlatch.Guard))
+func (m *latchManagerImpl) Release(ctx context.Context, lg latchGuard) {
+	m.m.Release(ctx, lg.(*spanlatch.Guard))
 }
 
 func (m *latchManagerImpl) Metrics() LatchMetrics {

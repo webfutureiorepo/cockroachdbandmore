@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -20,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/diagnostics"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -59,42 +55,27 @@ type TestingKnobs struct {
 	// server fails to start.
 	RPCListener net.Listener
 
-	// BinaryVersionOverride overrides the binary version that the CRDB server
-	// will end up running. This value could also influence what version the
-	// cluster is bootstrapped at.
+	// ClusterVersionOverride can be used to override the version of the cluster
+	// (assuming that one has to be created).
 	//
-	// This value, when set, influences test cluster/server creation in two
-	// different ways:
+	// Normally (when this knob isn't used), the cluster is initialized at
+	// cluster.Settings.Version.LatestVersion().
 	//
-	// Case 1:
-	// ------
-	// If the test has not overridden the
-	// `cluster.Settings.Version.MinSupportedVersion`, then the cluster will be
-	// bootstrapped at `minSupportedVersion`  (if this server is the one
-	// bootstrapping the cluster). After all the servers in the test cluster have
-	// been started, `SET CLUSTER SETTING version = BinaryVersionOverride` will be
-	// run to step through the upgrades until the specified override.
+	// When ClusterVersionOverride is set, the cluster will be at this version
+	// once initialization is complete. Note that we cannot bootstrap clusters at
+	// arbitrary versions - we can only bootstrap clusters at the Latest version
+	// and at final versions of previous supported releases. The cluster will be
+	// bootstrapped at the most recent bootstrappable version that is at most
+	// ClusterVersionOverride; after all the servers in the test cluster have been
+	// started, `SET CLUSTER SETTING version = ClusterVersionOverride` will be run
+	// to step through the upgrades until the specified version.
 	//
-	// Case 2:
-	// ------
-	// If the test has overridden the
-	// `cluster.Settings.Version.MinSupportedVersion` then it is not safe for us
-	// to bootstrap at `minSupportedVersion` as it might be less than the
-	// overridden minimum supported version. Furthermore, we do not have the
-	// initial cluster data (system tables etc.) to bootstrap at the overridden
-	// minimum supported version. In this case we bootstrap at
-	// `BinaryVersionOverride` and populate the cluster with initial data
-	// corresponding to the `binaryVersion`. In other words no upgrades are
-	// *really* run and the server only thinks that it is running at
-	// `BinaryVersionOverride`. Tests that fall in this category should be audited
-	// for correctness.
-	//
-	// The version that we bootstrap at is also used when advertising this
-	// server's binary version when sending out join requests.
+	// ClusterVersionOverride is also used when advertising this server's binary
+	// version when sending out join requests.
 	//
 	// NB: When setting this, you probably also want to set
 	// DisableAutomaticVersionUpgrade.
-	BinaryVersionOverride roachpb.Version
+	ClusterVersionOverride roachpb.Version
 	// An (additional) callback invoked whenever a
 	// node is permanently removed from the cluster.
 	OnDecommissionedCallback func(id roachpb.NodeID)
@@ -103,7 +84,7 @@ type TestingKnobs struct {
 	//
 	// When supplied to a TestCluster, StickyVFSIDs will be associated auto-
 	// matically to the StoreSpecs used.
-	StickyVFSRegistry StickyVFSRegistry
+	StickyVFSRegistry fs.StickyRegistry
 	// WallClock is used to inject a custom clock for testing the server. It is
 	// typically either an hlc.HybridManualClock or hlc.ManualClock.
 	WallClock hlc.WallClock
@@ -162,21 +143,12 @@ type TestingKnobs struct {
 		UpgradeTo roachpb.Version
 	}
 
-	// As of September 2023, only `v23.1` and master support shared process tenants. `v23.2` is not
-	// cut yet so the difference between the current binary version on master and v23.1 is only in the
-	// Internal version (both are major=23 minor=1). We only trigger shared process tenant auto upgrade
-	// on changes to major/minor versions but since we can only start shared process tenants in `v23.1`,
-	// there will not be any change to major/minor versions when upgrading from `v23.1` to master and
-	// we won't be able to test this new feature. This testing knob allows `TestTenantAutoUpgrade` to
-	// auto upgrade on changes to the Internal version.
-	// // TODO(ahmad/healthy-pod): Remove this once `v23.2` is cut and update `TestTenantAutoUpgrade`
-	// to reflect the changes.
-	AllowTenantAutoUpgradeOnInternalVersionChanges bool
+	// TenantAutoUpgradeLoopFrequency indicates how often the tenant
+	// auto upgrade loop will check if the tenant can be auto-upgraded.
+	TenantAutoUpgradeLoopFrequency time.Duration
 
-	// If non-nil, AutoConfigProfileStartupWaitTime is used when
-	// waiting for any active configuration environments to
-	// complete their tasks.
-	AutoConfigProfileStartupWaitTime *time.Duration
+	// EnvironmentSampleInterval overrides base.DefaultMetricsSampleInterval when used to construct sampleEnvironmentCfg.
+	EnvironmentSampleInterval time.Duration
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.

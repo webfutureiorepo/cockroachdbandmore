@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserverbase
 
@@ -16,7 +11,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 )
 
 // StoresIterator is able to iterate over all stores on a given node.
@@ -35,13 +29,14 @@ type Store interface {
 		queue string,
 		rangeID roachpb.RangeID,
 		skipShouldQueue bool,
-	) (tracingpb.Recording, error)
+	) error
 
 	// SetQueueActive disables/enables the named queue.
 	SetQueueActive(active bool, queue string) error
 
 	// GetReplicaMutexForTesting returns the mutex of the replica with the given
 	// range ID, or nil if no replica was found. This is used for testing.
+	// Returns a syncutil.RWMutex rather than ReplicaMutex to avoid import cycles.
 	GetReplicaMutexForTesting(rangeID roachpb.RangeID) *syncutil.RWMutex
 }
 

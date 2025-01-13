@@ -42,8 +42,6 @@ exports_files([
 # gazelle:resolve go github.com/grpc-ecosystem/grpc-gateway/internal @com_github_grpc_ecosystem_grpc_gateway//internal
 # gazelle:resolve proto proto errorspb/errors.proto @com_github_cockroachdb_errors//errorspb:errorspb_proto
 # gazelle:resolve proto go errorspb/errors.proto @com_github_cockroachdb_errors//errorspb
-# gazelle:resolve proto proto raft/v3/raftpb/raft.proto @io_etcd_go_raft_v3//raftpb:raftpb_proto
-# gazelle:resolve proto go raft/v3/raftpb/raft.proto @io_etcd_go_raft_v3//raftpb
 # gazelle:resolve proto proto gogoproto/gogo.proto @com_github_gogo_protobuf//gogoproto:gogo_proto
 # gazelle:resolve proto go gogoproto/gogo.proto @com_github_gogo_protobuf//gogoproto
 # gazelle:resolve proto proto google/api/annotations.proto @go_googleapis//google/api:annotations_proto
@@ -102,6 +100,7 @@ exports_files([
 # gazelle:exclude pkg/ui/workspaces/db-console/src/js/node_modules
 # gazelle:exclude pkg/ui/workspaces/e2e-tests/node_modules
 # gazelle:exclude pkg/ui/workspaces/eslint-plugin-crdb/node_modules
+# gazelle:exclude pkg/ui/workspaces/crdb-api-client/node_modules
 # gazelle:exclude vendor
 # gazelle:exclude .vendor.tmp.*
 # gazelle:exclude **/zcgo_flags.go
@@ -131,7 +130,6 @@ exports_files([
 # gazelle:exclude pkg/roachprod/vm/aws/embedded.go
 # gazelle:exclude pkg/**/*_string.go
 # gazelle:exclude pkg/ui/distccl/distccl_no_bazel.go
-# gazelle:exclude pkg/ui/distoss/distoss_no_bazel.go
 # gazelle:exclude pkg/util/buildutil/crdb_test_off.go
 # gazelle:exclude pkg/util/buildutil/crdb_test_on.go
 # gazelle:exclude pkg/testutils/bazelcodecover/crdb_test_off.go
@@ -153,63 +151,58 @@ nogo(
     name = "crdb_nogo",
     config = "//build/bazelutil:nogo_config.json",
     visibility = ["//visibility:public"],
-    deps = select({
-        "//build/toolchains:nogo": [
-            "@org_golang_x_tools//go/analysis/passes/asmdecl:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/assign:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/atomic:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/atomicalign:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/bools:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/buildssa:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/buildtag:go_default_library",
-            # TODO(rules_go#2396): pass raw cgo sources to cgocall and re-enable.
-            # "@org_golang_x_tools//go/analysis/passes/cgocall:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/composite:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/copylock:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/ctrlflow:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/deepequalerrors:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/errorsas:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/findcall:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/httpresponse:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/ifaceassert:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/inspect:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/loopclosure:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/lostcancel:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/nilfunc:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/nilness:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/pkgfact:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/printf:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/shift:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/sortslice:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/stdmethods:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/stringintconv:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/structtag:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/testinggoroutine:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/tests:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/unmarshal:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/unreachable:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_default_library",
-            "@org_golang_x_tools//go/analysis/passes/unusedresult:go_default_library",
-            "//pkg/testutils/lint/passes/deferunlockcheck",
-            "//pkg/testutils/lint/passes/descriptormarshal",
-            "//pkg/testutils/lint/passes/errcheck",
-            "//pkg/testutils/lint/passes/errcmp",
-            "//pkg/testutils/lint/passes/errwrap",
-            "//pkg/testutils/lint/passes/fmtsafe",
-            "//pkg/testutils/lint/passes/grpcclientconnclose",
-            "//pkg/testutils/lint/passes/grpcstatuswithdetails",
-            "//pkg/testutils/lint/passes/hash",
-            "//pkg/testutils/lint/passes/leaktestcall",
-            "//pkg/testutils/lint/passes/loopvarcapture",
-            "//pkg/testutils/lint/passes/nilness",
-            "//pkg/testutils/lint/passes/nocopy",
-            "//pkg/testutils/lint/passes/redactcheck",
-            "//pkg/testutils/lint/passes/returncheck",
-            "//pkg/testutils/lint/passes/returnerrcheck",
-            "//pkg/testutils/lint/passes/shadow",
-            "//pkg/testutils/lint/passes/timer",
-            "//pkg/testutils/lint/passes/unconvert",
-        ] + STATICCHECK_CHECKS,
-        "//conditions:default": [],
-    }),
+    deps = [
+        "@org_golang_x_tools//go/analysis/passes/asmdecl:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/assign:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/atomic:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/atomicalign:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/bools:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/buildssa:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/buildtag:go_default_library",
+        # TODO(rules_go#2396): pass raw cgo sources to cgocall and re-enable.
+        # "@org_golang_x_tools//go/analysis/passes/cgocall:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/composite:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/copylock:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/ctrlflow:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/deepequalerrors:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/errorsas:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/findcall:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/httpresponse:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/ifaceassert:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/inspect:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/lostcancel:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/nilfunc:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/nilness:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/pkgfact:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/printf:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/shift:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/sortslice:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/stdmethods:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/stringintconv:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/structtag:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/testinggoroutine:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/tests:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/unmarshal:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/unreachable:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_default_library",
+        "@org_golang_x_tools//go/analysis/passes/unusedresult:go_default_library",
+        "//pkg/testutils/lint/passes/deferunlockcheck",
+        "//pkg/testutils/lint/passes/descriptormarshal",
+        "//pkg/testutils/lint/passes/errcheck",
+        "//pkg/testutils/lint/passes/errcmp",
+        "//pkg/testutils/lint/passes/errwrap",
+        "//pkg/testutils/lint/passes/fmtsafe",
+        "//pkg/testutils/lint/passes/grpcclientconnclose",
+        "//pkg/testutils/lint/passes/grpcstatuswithdetails",
+        "//pkg/testutils/lint/passes/hash",
+        "//pkg/testutils/lint/passes/leaktestcall",
+        "//pkg/testutils/lint/passes/nilness",
+        "//pkg/testutils/lint/passes/nocopy",
+        "//pkg/testutils/lint/passes/redactcheck",
+        "//pkg/testutils/lint/passes/returncheck",
+        "//pkg/testutils/lint/passes/returnerrcheck",
+        "//pkg/testutils/lint/passes/shadow",
+        "//pkg/testutils/lint/passes/timer",
+        "//pkg/testutils/lint/passes/unconvert",
+    ],
 )

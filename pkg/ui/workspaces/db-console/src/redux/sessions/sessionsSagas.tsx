@@ -1,23 +1,20 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { Action } from "redux";
+import { all, call, put, takeEvery } from "redux-saga/effects";
 
 import { PayloadAction } from "src/interfaces/action";
-import { all, call, put, takeEvery } from "redux-saga/effects";
-import { terminateQuery, terminateSession } from "src/util/api";
-import { invalidateSessions, refreshSessions } from "src/redux/apiReducers";
+import { cockroach } from "src/js/protos";
 import {
   terminateQueryAlertLocalSetting,
   terminateSessionAlertLocalSetting,
 } from "src/redux/alerts";
-import { cockroach } from "src/js/protos";
-import { Action } from "redux";
+import { invalidateSessions, refreshSessions } from "src/redux/apiReducers";
+import { terminateQuery, terminateSession } from "src/util/api";
+
 import ICancelSessionRequest = cockroach.server.serverpb.ICancelSessionRequest;
 import CancelSessionRequest = cockroach.server.serverpb.CancelSessionRequest;
 import ICancelQueryRequest = cockroach.server.serverpb.ICancelQueryRequest;

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cloud
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	io_prometheus_client "github.com/prometheus/client_model/go"
@@ -26,24 +22,30 @@ var NilMetrics = (*Metrics)(nil)
 // providers.
 type Metrics struct {
 	// Readers counts the cloud storage readers opened.
-	Readers *metric.Counter
-	// ReadBytes counts the bytes read from cloud storage.
-	ReadBytes *metric.Counter
+	CreatedReaders *metric.Counter
+	// OpenReaders is the number of currently open cloud readers.
+	OpenReaders *metric.Gauge
+
 	// Writers counts the cloud storage writers opened.
-	Writers *metric.Counter
-	// WriteBytes counts the bytes written to cloud storage.
-	WriteBytes *metric.Counter
+	CreatedWriters *metric.Counter
+	// OpenReaders is the number of currently open cloud writers.
+	OpenWriters *metric.Gauge
+
 	// Listings counts the listing calls made to cloud storage.
 	Listings *metric.Counter
 	// ListingResults counts the listing results from cloud storage.
 	ListingResults *metric.Counter
+
 	// ConnsOpened, ConnsReused and TLSHandhakes track connection http info for cloud
 	// storage when collecting this info is enabled.
 	ConnsOpened, ConnsReused, TLSHandhakes *metric.Counter
+
+	// NetMetrics tracks connection level metrics.
+	NetMetrics *cidr.NetMetrics
 }
 
 // MakeMetrics returns a new instance of Metrics.
-func MakeMetrics() metric.Struct {
+func MakeMetrics(cidrLookup *cidr.Lookup) metric.Struct {
 	cloudReaders := metric.Metadata{
 		Name:        "cloud.readers_opened",
 		Help:        "Readers opened by all cloud operations",
@@ -107,16 +109,31 @@ func MakeMetrics() metric.Struct {
 		Unit:        metric.Unit_COUNT,
 		MetricType:  io_prometheus_client.MetricType_COUNTER,
 	}
+	cloudOpenReaders := metric.Metadata{
+		Name:        "cloud.open_readers",
+		Help:        "Currently open readers for cloud IO",
+		Measurement: "Readers",
+		Unit:        metric.Unit_COUNT,
+		MetricType:  io_prometheus_client.MetricType_GAUGE,
+	}
+	cloudOpenWriters := metric.Metadata{
+		Name:        "cloud.open_writers",
+		Help:        "Currently open writers for cloud IO",
+		Measurement: "Writers",
+		Unit:        metric.Unit_COUNT,
+		MetricType:  io_prometheus_client.MetricType_GAUGE,
+	}
 	return &Metrics{
-		Readers:        metric.NewCounter(cloudReaders),
-		ReadBytes:      metric.NewCounter(cloudReadBytes),
-		Writers:        metric.NewCounter(cloudWriters),
-		WriteBytes:     metric.NewCounter(cloudWriteBytes),
+		CreatedReaders: metric.NewCounter(cloudReaders),
+		OpenReaders:    metric.NewGauge(cloudOpenReaders),
+		CreatedWriters: metric.NewCounter(cloudWriters),
+		OpenWriters:    metric.NewGauge(cloudOpenWriters),
 		Listings:       metric.NewCounter(listings),
 		ListingResults: metric.NewCounter(listingResults),
 		ConnsOpened:    metric.NewCounter(connsOpened),
 		ConnsReused:    metric.NewCounter(connsReused),
 		TLSHandhakes:   metric.NewCounter(tlsHandhakes),
+		NetMetrics:     cidrLookup.MakeNetMetrics(cloudWriteBytes, cloudReadBytes, "cloud", "bucket", "client"),
 	}
 }
 
@@ -132,10 +149,11 @@ func (m *Metrics) Reader(
 	if m == nil {
 		return r
 	}
-	m.Readers.Inc(1)
+	m.CreatedReaders.Inc(1)
+	m.OpenReaders.Inc(1)
 	return &metricsReader{
-		inner: r,
-		m:     m,
+		ReadCloserCtx: r,
+		m:             m,
 	}
 }
 
@@ -144,45 +162,41 @@ func (m *Metrics) Writer(_ context.Context, _ ExternalStorage, w io.WriteCloser)
 	if m == nil {
 		return w
 	}
-	m.Writers.Inc(1)
+	m.CreatedWriters.Inc(1)
+	m.OpenWriters.Inc(1)
 	return &metricsWriter{
-		w: w,
-		m: m,
+		WriteCloser: w,
+		m:           m,
 	}
 }
 
 type metricsReader struct {
-	inner ioctx.ReadCloserCtx
-	m     *Metrics
-}
-
-// Read implements the ioctx.ReadCloserCtx interface.
-func (mr *metricsReader) Read(ctx context.Context, p []byte) (int, error) {
-	n, err := mr.inner.Read(ctx, p)
-	mr.m.ReadBytes.Inc(int64(n))
-	return n, err
+	ioctx.ReadCloserCtx
+	m      *Metrics
+	closed bool
 }
 
 // Close implements the ioctx.ReadCloserCtx interface.
 func (mr *metricsReader) Close(ctx context.Context) error {
-	return mr.inner.Close(ctx)
+	if !mr.closed {
+		mr.m.OpenReaders.Dec(1)
+		mr.closed = true
+	}
+
+	return mr.ReadCloserCtx.Close(ctx)
 }
 
 type metricsWriter struct {
-	w io.WriteCloser
-	m *Metrics
-}
-
-// Write implements the WriteCloser interface.
-func (mw *metricsWriter) Write(p []byte) (int, error) {
-	n, err := mw.w.Write(p)
-	mw.m.WriteBytes.Inc(int64(n))
-	return n, err
+	io.WriteCloser
+	m      *Metrics
+	closed bool
 }
 
 // Close implements the WriteCloser interface.
 func (mw *metricsWriter) Close() error {
-	return mw.w.Close()
+	if !mw.closed {
+		mw.m.OpenWriters.Dec(1)
+		mw.closed = true
+	}
+	return mw.WriteCloser.Close()
 }
-
-var _ io.WriteCloser = &metricsWriter{}

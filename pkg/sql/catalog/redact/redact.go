@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package redact contains utilities to redact sensitive fields from
 // descriptors.
@@ -87,7 +82,7 @@ func redactTableDescriptor(d *descpb.TableDescriptor) (errs []error) {
 	if scs := d.DeclarativeSchemaChangerState; scs != nil {
 		for i := range scs.RelevantStatements {
 			stmt := &scs.RelevantStatements[i]
-			stmt.Statement.Statement = stmt.Statement.RedactedStatement
+			stmt.Statement.Statement = stmt.Statement.RedactedStatement.StripMarkers()
 		}
 		for i := range scs.Targets {
 			t := &scs.Targets[i]
@@ -168,6 +163,8 @@ func redactElement(element scpb.Element) error {
 		if e.ComputeExpr != nil {
 			return redactExpr(&e.ComputeExpr.Expr)
 		}
+	case *scpb.ColumnComputeExpression:
+		return redactExpr(&e.Expression.Expr)
 	case *scpb.FunctionBody:
 		return redactFunctionBodyStr(e.Lang.Lang, &e.Body)
 	}
@@ -224,7 +221,7 @@ func redactFunctionDescriptor(desc *descpb.FunctionDescriptor) (errs []error) {
 	if scs := desc.DeclarativeSchemaChangerState; scs != nil {
 		for i := range scs.RelevantStatements {
 			stmt := &scs.RelevantStatements[i]
-			stmt.Statement.Statement = stmt.Statement.RedactedStatement
+			stmt.Statement.Statement = stmt.Statement.RedactedStatement.StripMarkers()
 		}
 		for i := range scs.Targets {
 			t := &scs.Targets[i]

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -106,13 +101,57 @@ func TestTransportMoveToFront(t *testing.T) {
 	require.Equal(t, 1, gt.nextReplicaIdx)
 }
 
+func TestTransportReset(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	rd1 := roachpb.ReplicaDescriptor{NodeID: 1, StoreID: 1, ReplicaID: 1}
+	rd2 := roachpb.ReplicaDescriptor{NodeID: 2, StoreID: 2, ReplicaID: 2}
+	rd3 := roachpb.ReplicaDescriptor{NodeID: 3, StoreID: 3, ReplicaID: 3}
+	gt := grpcTransport{replicas: []roachpb.ReplicaDescriptor{rd1, rd2, rd3}}
+
+	// Reset should be a noop when positioned at start.
+	require.Equal(t, rd1, gt.NextReplica())
+	gt.Reset()
+	require.Equal(t, rd1, gt.NextReplica())
+
+	// Reset should move back to front when in the middle.
+	gt.SkipReplica()
+	require.Equal(t, rd2, gt.NextReplica())
+	gt.Reset()
+	require.Equal(t, rd1, gt.NextReplica())
+
+	// Reset should move back to front when exhausted.
+	gt.SkipReplica()
+	gt.SkipReplica()
+	gt.SkipReplica()
+	require.True(t, gt.IsExhausted())
+	gt.Reset()
+	require.False(t, gt.IsExhausted())
+	require.Equal(t, rd1, gt.NextReplica())
+
+	// MoveToFront will reorder replicas by moving the replica to the next index.
+	// Reset moves to the start of the modified ordering.
+	gt.SkipReplica()
+	gt.SkipReplica()
+	require.True(t, gt.MoveToFront(rd1))
+	gt.Reset()
+	require.Equal(t, rd2, gt.NextReplica())
+	gt.SkipReplica()
+	require.Equal(t, rd1, gt.NextReplica())
+	gt.SkipReplica()
+	require.Equal(t, rd3, gt.NextReplica())
+	gt.SkipReplica()
+	require.True(t, gt.IsExhausted())
+}
+
 // TestSpanImport tests that the gRPC transport ingests trace information that
 // came from gRPC responses (via tracingpb.RecordedSpan on the batch responses).
 func TestSpanImport(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	metrics := makeDistSenderMetrics()
+	metrics := MakeDistSenderMetrics(roachpb.Locality{})
 	gt := grpcTransport{
 		opts: SendOptions{
 			metrics: &metrics,
@@ -146,7 +185,7 @@ func TestResponseVerifyFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	metrics := makeDistSenderMetrics()
+	metrics := MakeDistSenderMetrics(roachpb.Locality{})
 	gt := grpcTransport{
 		opts: SendOptions{
 			metrics: &metrics,
@@ -216,18 +255,17 @@ func (m *mockInternalClient) Batch(
 	return br, nil
 }
 
+func (m *mockInternalClient) BatchStream(
+	ctx context.Context, opts ...grpc.CallOption,
+) (kvpb.Internal_BatchStreamClient, error) {
+	return nil, fmt.Errorf("unsupported BatchStream call")
+}
+
 // RangeLookup implements the kvpb.InternalClient interface.
 func (m *mockInternalClient) RangeLookup(
 	ctx context.Context, rl *kvpb.RangeLookupRequest, _ ...grpc.CallOption,
 ) (*kvpb.RangeLookupResponse, error) {
 	return nil, fmt.Errorf("unsupported RangeLookup call")
-}
-
-// RangeFeed is part of the kvpb.InternalClient interface.
-func (m *mockInternalClient) RangeFeed(
-	ctx context.Context, in *kvpb.RangeFeedRequest, opts ...grpc.CallOption,
-) (kvpb.Internal_RangeFeedClient, error) {
-	return nil, fmt.Errorf("unsupported RangeFeed call")
 }
 
 func (m *mockInternalClient) MuxRangeFeed(

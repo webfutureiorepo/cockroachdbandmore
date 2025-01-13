@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package slstorage_test
 
@@ -21,36 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/stretchr/testify/require"
 )
-
-func FuzzSessionIDEncoding(f *testing.F) {
-	defer leaktest.AfterTest(f)()
-	defer log.Scope(f).Close(f)
-
-	f.Add(string(""))
-	f.Add(string(uuid.FastMakeV4().GetBytes()))
-
-	session, err := slstorage.MakeSessionID(enum.One, uuid.FastMakeV4())
-	require.NoError(f, err)
-	f.Add(string(session))
-
-	f.Fuzz(func(t *testing.T, randomSession string) {
-		session := sqlliveness.SessionID(randomSession)
-		region, id, err := slstorage.UnsafeDecodeSessionID(session)
-		if err == nil {
-			if len([]byte(randomSession)) == 16 {
-				// A 16 bytes session is always valid, because it is the legacy uuid encoding.
-				require.Equal(t, []byte(randomSession), id)
-			} else {
-				// If the session is a valid encoding, then re-encoding the
-				// decoded pieces should produce an identical session.
-				require.Len(t, id, 16)
-				reEncoded, err := slstorage.MakeSessionID(region, uuid.FromBytesOrNil(id))
-				require.NoError(t, err)
-				require.Equal(t, session, reEncoded)
-			}
-		}
-	})
-}
 
 func TestMakeSessionIDValidation(t *testing.T) {
 	defer leaktest.AfterTest(t)()

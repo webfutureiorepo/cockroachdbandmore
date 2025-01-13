@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package parquet
 
@@ -69,7 +64,7 @@ func getBenchmarkTypes() []*types.T {
 	for _, typ := range randgen.SeedTypes {
 		switch typ.Family() {
 		case types.AnyFamily, types.TSQueryFamily, types.TSVectorFamily,
-			types.VoidFamily:
+			types.VoidFamily, types.PGVectorFamily:
 		case types.TupleFamily:
 			// Replace Any Tuple with Tuple of Ints with size 5.
 			typs = append(typs, types.MakeTuple([]*types.T{

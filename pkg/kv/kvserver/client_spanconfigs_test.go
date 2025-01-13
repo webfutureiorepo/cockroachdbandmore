@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -55,7 +50,7 @@ func TestSpanConfigUpdateAppliedToReplica(t *testing.T) {
 				DisableGCQueue:    true,
 			},
 			SpanConfig: &spanconfig.TestingKnobs{
-				StoreKVSubscriberOverride: mockSubscriber,
+				StoreKVSubscriberOverride: func(spanconfig.KVSubscriber) spanconfig.KVSubscriber { return mockSubscriber },
 			},
 		},
 	}
@@ -74,7 +69,6 @@ func TestSpanConfigUpdateAppliedToReplica(t *testing.T) {
 	require.NoError(t, err)
 	deleted, added := spanConfigStore.Apply(
 		ctx,
-		false, /* dryrun */
 		add,
 	)
 	require.Empty(t, deleted)
@@ -120,7 +114,7 @@ func TestFallbackSpanConfigOverride(t *testing.T) {
 				DisableGCQueue:    true,
 			},
 			SpanConfig: &spanconfig.TestingKnobs{
-				StoreKVSubscriberOverride: mockSubscriber,
+				StoreKVSubscriberOverride: func(spanconfig.KVSubscriber) spanconfig.KVSubscriber { return mockSubscriber },
 			},
 		},
 	}
@@ -181,7 +175,7 @@ func (m *mockSpanConfigSubscriber) ComputeSplitKey(
 
 func (m *mockSpanConfigSubscriber) GetSpanConfigForKey(
 	ctx context.Context, key roachpb.RKey,
-) (roachpb.SpanConfig, error) {
+) (roachpb.SpanConfig, roachpb.Span, error) {
 	return m.Store.GetSpanConfigForKey(ctx, key)
 }
 

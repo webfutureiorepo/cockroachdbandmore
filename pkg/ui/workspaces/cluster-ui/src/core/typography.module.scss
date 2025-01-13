@@ -1,3 +1,8 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
 @mixin font-face($name) {
   @font-face {
     font-family: $name;
@@ -111,6 +116,14 @@ $spacing-xx-large: 48px;
   font-size: $font-size--medium;
   line-height: $line-height--medium;
   font-weight: $font-weight--light;
+}
+
+@mixin text--caption {
+  font-family: $font-family--base;
+  font-size: $font-size--small;
+  line-height: $line-height--small;
+  font-weight: $font-weight--light;
+  letter-spacing: $letter-spacing--medium;
 }
 
 @mixin text--body-strong {

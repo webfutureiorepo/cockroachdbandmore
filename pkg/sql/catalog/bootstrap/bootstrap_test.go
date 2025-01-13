@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bootstrap
 
@@ -17,7 +12,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -104,11 +98,11 @@ func TestRoundTripInitialValuesStringRepresentation(t *testing.T) {
 		roundTripInitialValuesStringRepresentation(t, 0 /* tenantID */)
 	})
 	t.Run("tenant", func(t *testing.T) {
-		const dummyTenantID = 54321
+		const dummyTenantID = 109
 		roundTripInitialValuesStringRepresentation(t, dummyTenantID)
 	})
 	t.Run("tenants", func(t *testing.T) {
-		const dummyTenantID1, dummyTenantID2 = 54321, 12345
+		const dummyTenantID1, dummyTenantID2 = 109, 255
 		require.Equal(t,
 			InitialValuesToString(makeMetadataSchema(dummyTenantID1)),
 			InitialValuesToString(makeMetadataSchema(dummyTenantID2)),
@@ -139,31 +133,4 @@ func makeMetadataSchema(tenantID uint64) MetadataSchema {
 		codec = keys.MakeSQLCodec(roachpb.MustMakeTenantID(tenantID))
 	}
 	return MakeMetadataSchema(codec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef())
-}
-
-// TestSystemDatabaseSchemaBootstrapVersionBumped serves as a reminder to bump
-// systemschema.SystemDatabaseSchemaBootstrapVersion whenever a new upgrade
-// creates or modifies the schema of system tables. We unfortunately cannot
-// programmatically determine if an upgrade should bump the version so by
-// adding a test failure when the initial values change, the programmer and
-// code reviewers are reminded to manually check whether the version should
-// be bumped.
-func TestSystemDatabaseSchemaBootstrapVersionBumped(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	// If you need to update this value (i.e. failed this test), check whether
-	// you need to bump systemschema.SystemDatabaseSchemaBootstrapVersion too.
-	const prevSystemHash = "a91452d35e2d34a35a5822ac5d35589f19d80a7926d617a4fca1347b438c5999"
-	_, curSystemHash := GetAndHashInitialValuesToString(0 /* tenantID */)
-
-	if prevSystemHash != curSystemHash {
-		t.Fatalf(
-			`Check whether you need to bump systemschema.SystemDatabaseSchemaBootstrapVersion
-and then update prevSystemHash to %q.
-The current value of SystemDatabaseSchemaBootstrapVersion is %s.`,
-			curSystemHash,
-			systemschema.SystemDatabaseSchemaBootstrapVersion,
-		)
-	}
 }

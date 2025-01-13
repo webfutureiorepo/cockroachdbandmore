@@ -1,31 +1,34 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useEffect, useState } from "react";
+import { InlineAlert } from "@cockroachlabs/ui-components";
 import classNames from "classnames/bind";
 import moment, { Moment } from "moment-timezone";
+import React, { useEffect, useState } from "react";
 import { useHistory } from "react-router-dom";
-import {
-  ISortedTablePagination,
-  SortSetting,
-} from "src/sortedtable/sortedtable";
-import { Loading } from "src/loading/loading";
-import { PageConfig, PageConfigItem } from "src/pageConfig/pageConfig";
-import { Search } from "src/search/search";
+
 import {
   ActiveStatement,
   ActiveStatementFilters,
   ExecutionStatus,
 } from "src/activeExecutions";
+import RefreshControl from "src/activeExecutions/refreshControl/refreshControl";
+import { Loading } from "src/loading/loading";
+import { PageConfig, PageConfigItem } from "src/pageConfig/pageConfig";
+import { Pagination } from "src/pagination";
 import { Filter } from "src/queryFilter";
+import { getActiveStatementFiltersFromURL } from "src/queryFilter/utils";
+import { Search } from "src/search/search";
+import {
+  ISortedTablePagination,
+  SortSetting,
+} from "src/sortedtable/sortedtable";
 import LoadingError from "src/sqlActivity/errorComponent";
+import { queryByName, syncHistory } from "src/util/query";
+
+import { ActiveStatementsSection } from "../activeExecutions/activeStatementsSection";
 import {
   ACTIVE_STATEMENT_SEARCH_PARAM,
   getAppsFromActiveExecutions,
@@ -36,15 +39,9 @@ import {
   defaultFilters,
   getFullFiltersAsStringRecord,
 } from "../queryFilter";
-import { ActiveStatementsSection } from "../activeExecutions/activeStatementsSection";
-import { queryByName, syncHistory } from "src/util/query";
 import { getTableSortFromURL } from "../sortedtable/getTableSortFromURL";
-import { getActiveStatementFiltersFromURL } from "src/queryFilter/utils";
-import { Pagination } from "src/pagination";
-import { InlineAlert } from "@cockroachlabs/ui-components";
 
 import styles from "./statementsPage.module.scss";
-import RefreshControl from "src/activeExecutions/refreshControl/refreshControl";
 
 const cx = classNames.bind(styles);
 const PAGE_SIZE = 20;
@@ -219,6 +216,7 @@ export const ActiveStatementsView: React.FC<ActiveStatementsViewProps> = ({
   const onSubmitToggleAutoRefresh = () => {
     // Refresh immediately when toggling auto-refresh on.
     if (!isAutoRefreshEnabled) {
+      setDisplayRefreshAlert(false);
       refreshLiveWorkload();
     }
     onAutoRefreshToggle(!isAutoRefreshEnabled);

@@ -1,25 +1,24 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import moment from "moment-timezone";
+
+import {
+  InsightNameEnum,
+  StmtFailureCodesStr,
+  TxnInsightDetails,
+} from "../insights";
+import { maybeError } from "../util";
+
+import { getTxnInsightsContentionDetailsApi } from "./contentionApi";
 import {
   executeInternalSql,
   isMaxSizeError,
   sqlApiErrorMessage,
   SqlApiResponse,
 } from "./sqlApi";
-import {
-  InsightNameEnum,
-  StmtFailureCodesStr,
-  TxnInsightDetails,
-} from "../insights";
 import {
   formatStmtInsights,
   stmtInsightsByTxnExecutionQuery,
@@ -31,7 +30,6 @@ import {
   TxnInsightsResponseRow,
 } from "./txnInsightsApi";
 import { makeInsightsSqlRequest } from "./txnInsightsUtils";
-import { getTxnInsightsContentionDetailsApi } from "./contentionApi";
 
 export type TxnInsightDetailsRequest = {
   txnExecutionID: string;
@@ -106,7 +104,7 @@ export async function getTxnInsightDetailsApi(
         );
       }
     } catch (e) {
-      errors.txnDetailsErr = e;
+      errors.txnDetailsErr = maybeError(e);
     }
   }
 
@@ -133,12 +131,12 @@ export async function getTxnInsightDetailsApi(
         txnInsightDetails.statements = formatStmtInsights(stmts);
       }
     } catch (e) {
-      errors.statementsErr = e;
+      errors.statementsErr = maybeError(e);
     }
   }
 
   const highContention = txnInsightDetails.txnDetails?.insights?.some(
-    insight => insight.name === InsightNameEnum.highContention,
+    insight => insight.name === InsightNameEnum.HIGH_CONTENTION,
   );
 
   const isRetrySerializableFailure =
@@ -155,7 +153,7 @@ export async function getTxnInsightDetailsApi(
         contentionInfo?.blockingContentionDetails;
     }
   } catch (e) {
-    errors.contentionErr = e;
+    errors.contentionErr = maybeError(e);
   }
 
   return {

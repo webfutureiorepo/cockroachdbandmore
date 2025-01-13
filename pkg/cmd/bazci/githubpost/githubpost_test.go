@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package githubpost
 
@@ -18,7 +13,7 @@ import (
 	"testing"
 
 	bazelutil "github.com/cockroachdb/cockroach/pkg/build/util"
-	"github.com/cockroachdb/cockroach/pkg/cmd/internal/issues"
+	"github.com/cockroachdb/cockroach/pkg/cmd/bazci/githubpost/issues"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,7 +101,7 @@ func TestListFailuresFromJSON(t *testing.T) {
 				testName:   "TestStopperWithCancelConcurrent",
 				title:      "util/stop: TestStopperWithCancelConcurrent failed",
 				message:    "this is just a testing issue",
-				mention:    []string{"@cockroachdb/kv"},
+				mention:    []string{"@cockroachdb/kv-triage"},
 				labels:     []string{"C-test-failure", "release-blocker", "T-kv"},
 				hasProject: true,
 			}},
@@ -122,7 +117,7 @@ func TestListFailuresFromJSON(t *testing.T) {
 				testName:   "TestStopperWithCancelConcurrent",
 				title:      "util/stop: TestStopperWithCancelConcurrent failed",
 				message:    "this is just a testing issue",
-				mention:    []string{"@cockroachdb/kv"},
+				mention:    []string{"@cockroachdb/kv-triage"},
 				labels:     []string{"T-kv"},
 				hasProject: true,
 			}},
@@ -136,7 +131,7 @@ func TestListFailuresFromJSON(t *testing.T) {
 				testName:   "TestReplicateQueueRebalance",
 				title:      "kv/kvserver: TestReplicateQueueRebalance failed",
 				message:    "replicate_queue_test.go:88: condition failed to evaluate within 45s: not balanced: [10 1 10 1 8]",
-				mention:    []string{"@cockroachdb/kv"},
+				mention:    []string{"@cockroachdb/kv-triage"},
 				labels:     []string{"C-test-failure", "release-blocker", "T-kv"},
 				hasProject: true,
 			}},
@@ -150,7 +145,7 @@ func TestListFailuresFromJSON(t *testing.T) {
 				testName:   "TestGossipHandlesReplacedNode",
 				title:      "kv/kvserver: TestGossipHandlesReplacedNode failed",
 				message:    "F180711 20:13:15.826193 83 storage/replica.go:1877  [n?,s1,r1/1:/M{in-ax}] on-disk and in-memory state diverged:",
-				mention:    []string{"@cockroachdb/kv"},
+				mention:    []string{"@cockroachdb/kv-triage"},
 				labels:     []string{"C-test-failure", "release-blocker", "T-kv"},
 				hasProject: true,
 			}},
@@ -197,7 +192,7 @@ func TestListFailuresFromJSON(t *testing.T) {
 					testName:   "TestTxnCoordSenderPipelining",
 					title:      "kv/kvclient/kvcoord: TestTxnCoordSenderPipelining failed",
 					message:    `injected failure`,
-					mention:    []string{"@cockroachdb/kv"},
+					mention:    []string{"@cockroachdb/kv-triage"},
 					labels:     []string{"C-test-failure", "release-blocker", "T-kv"},
 					hasProject: true,
 				},
@@ -211,7 +206,7 @@ TestTxnCoordSenderPipelining - 1.00s
 Slow passing tests:
 TestAnchorKey - 1.01s
 `,
-					mention:    []string{"@cockroachdb/kv"},
+					mention:    []string{"@cockroachdb/kv-triage"},
 					labels:     []string{"C-test-failure", "release-blocker", "T-kv"},
 					hasProject: true,
 				},
@@ -419,7 +414,6 @@ func TestListFailuresFromTestXML(t *testing.T) {
 		fileName  string
 		expPkg    string
 		expIssues []issue
-		formatter Formatter
 	}{
 		{
 			fileName: "basic.xml",
@@ -434,7 +428,6 @@ func TestListFailuresFromTestXML(t *testing.T) {
     --- FAIL: TestJSONErrors/frues (0.00s)`,
 				mention: []string{"@cockroachdb/unowned"},
 			}},
-			formatter: DefaultFormatter,
 		},
 	}
 
@@ -486,7 +479,6 @@ func TestPostGeneralFailure(t *testing.T) {
 	testCases := []struct {
 		fileName  string
 		expIssues []issue
-		formatter Formatter
 	}{
 		{
 			fileName: "failed-build-output.txt",
@@ -495,7 +487,6 @@ func TestPostGeneralFailure(t *testing.T) {
 				mention: []string{"@cockroachdb/unowned"},
 				labels:  []string{"C-test-failure", "release-blocker", "T-testeng"},
 			}},
-			formatter: DefaultFormatter,
 		},
 	}
 

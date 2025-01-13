@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storageccl
 
@@ -20,9 +17,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 // RemoteSSTs lets external SSTables get iterated directly in some cases,
@@ -78,6 +77,7 @@ func newMemPebbleSSTReader(
 ) (storage.SimpleMVCCIterator, error) {
 
 	inMemorySSTs := make([][]byte, 0, len(storeFiles))
+	memAcc := mon.NewStandaloneUnlimitedAccount()
 
 	for _, sf := range storeFiles {
 		f, _, err := getFileWithRetry(ctx, sf.FilePath, sf.Store)
@@ -90,7 +90,7 @@ func newMemPebbleSSTReader(
 			return nil, err
 		}
 		if encryption != nil {
-			content, err = DecryptFile(ctx, content, encryption.Key, nil /* mm */)
+			content, err = DecryptFile(ctx, content, encryption.Key, memAcc)
 			if err != nil {
 				return nil, err
 			}
@@ -123,14 +123,19 @@ func ExternalSSTReader(
 		return newMemPebbleSSTReader(ctx, storeFiles, encryption, iterOpts)
 	}
 	remoteCacheSize := remoteSSTSuffixCacheSize.Get(&storeFiles[0].Store.Settings().SV)
-	readerLevels := make([][]sstable.ReadableFile, 0, len(storeFiles))
+	openedReadersByLevel := make([][]sstable.ReadableFile, 0, len(storeFiles))
+
+	// Cleanup any files we've opened if we fail with an error.
+	defer func() {
+		for _, l := range openedReadersByLevel {
+			for _, r := range l {
+				_ = r.Close()
+			}
+		}
+	}()
 
 	for _, sf := range storeFiles {
-		// prevent capturing the loop variables by reference when defining openAt below.
-		filePath := sf.FilePath
-		store := sf.Store
-
-		f, sz, err := getFileWithRetry(ctx, filePath, store)
+		f, sz, err := getFileWithRetry(ctx, sf.FilePath, sf.Store)
 		if err != nil {
 			return nil, err
 		}
@@ -140,7 +145,7 @@ func ExternalSSTReader(
 			sz:   sizeStat(sz),
 			body: f,
 			openAt: func(offset int64) (ioctx.ReadCloserCtx, error) {
-				reader, _, err := store.ReadFile(ctx, filePath, cloud.ReadOptions{
+				reader, _, err := sf.Store.ReadFile(ctx, sf.FilePath, cloud.ReadOptions{
 					Offset:     offset,
 					NoFileSize: true,
 				})
@@ -166,8 +171,11 @@ func ExternalSSTReader(
 			}
 			reader = raw
 		}
-		readerLevels = append(readerLevels, []sstable.ReadableFile{reader})
+		openedReadersByLevel = append(openedReadersByLevel, []sstable.ReadableFile{reader})
 	}
+
+	readerLevels := openedReadersByLevel
+	openedReadersByLevel = nil
 	return storage.NewSSTIterator(readerLevels, iterOpts)
 }
 
@@ -210,7 +218,7 @@ func (r *sstReader) Close() error {
 }
 
 // Stat returns the size of the file.
-func (r *sstReader) Stat() (os.FileInfo, error) {
+func (r *sstReader) Stat() (vfs.FileInfo, error) {
 	return r.sz, nil
 }
 
@@ -294,9 +302,10 @@ func (r *sstReader) ReadAt(p []byte, offset int64) (int, error) {
 
 type sizeStat int64
 
-func (s sizeStat) Size() int64      { return int64(s) }
-func (sizeStat) IsDir() bool        { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) ModTime() time.Time { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) Mode() os.FileMode  { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) Name() string       { panic(errors.AssertionFailedf("unimplemented")) }
-func (sizeStat) Sys() interface{}   { panic(errors.AssertionFailedf("unimplemented")) }
+func (s sizeStat) Size() int64          { return int64(s) }
+func (sizeStat) IsDir() bool            { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) ModTime() time.Time     { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) Mode() os.FileMode      { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) Name() string           { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) Sys() interface{}       { panic(errors.AssertionFailedf("unimplemented")) }
+func (sizeStat) DeviceID() vfs.DeviceID { panic(errors.AssertionFailedf("unimplemented")) }

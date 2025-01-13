@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package indexrec
 
@@ -116,6 +111,11 @@ func (hi *hypotheticalIndex) IsInverted() bool {
 	return hi.inverted
 }
 
+// IsVector is part of the cat.Index interface.
+func (hi *hypotheticalIndex) IsVector() bool {
+	return false
+}
+
 // GetInvisibility is part of the cat.Index interface.
 func (hi *hypotheticalIndex) GetInvisibility() float64 {
 	// A hypotheticalIndex should not be invisible because there is no motivation
@@ -148,10 +148,10 @@ func (hi *hypotheticalIndex) LaxKeyColumnCount() int {
 	return hi.KeyColumnCount()
 }
 
-// NonInvertedPrefixColumnCount is part of the cat.Index interface.
-func (hi *hypotheticalIndex) NonInvertedPrefixColumnCount() int {
-	if !hi.IsInverted() {
-		panic(errors.AssertionFailedf("non-inverted indexes do not have inverted prefix columns"))
+// PrefixColumnCount is part of the cat.Index interface.
+func (hi *hypotheticalIndex) PrefixColumnCount() int {
+	if !hi.IsInverted() && !hi.IsVector() {
+		panic(errors.AssertionFailedf("only inverted and vector indexes have prefix columns"))
 	}
 	return len(hi.cols) - 1
 }
@@ -177,6 +177,11 @@ func (hi *hypotheticalIndex) InvertedColumn() cat.IndexColumn {
 		panic(errors.AssertionFailedf("non-inverted indexes do not have inverted columns"))
 	}
 	return hi.cols[len(hi.cols)-1]
+}
+
+// VectorColumn is part of the cat.Index interface.
+func (hi *hypotheticalIndex) VectorColumn() cat.IndexColumn {
+	panic(errors.AssertionFailedf("hypothetical indexes do not have vector columns"))
 }
 
 // Predicate is part of the cat.Index interface.

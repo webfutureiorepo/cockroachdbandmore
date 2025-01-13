@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -83,7 +78,7 @@ func NewConstOp(
 		}
 		// {{end}}
 	}
-	return nil, errors.Errorf("unsupported const type %s", t.Name())
+	return nil, errors.AssertionFailedf("unsupported const type %s", t.Name())
 }
 
 // {{range .}}
@@ -106,7 +101,7 @@ func (c const_TYPEOp) Next() coldata.Batch {
 	vec := batch.ColVec(c.outputIdx)
 	col := vec.TemplateType()
 	c.allocator.PerformOperation(
-		[]coldata.Vec{vec},
+		[]*coldata.Vec{vec},
 		func() {
 			// Shallow copy col to work around Go issue
 			// https://github.com/golang/go/issues/39756 which prevents bound check

@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 
+# Copyright 2021 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -exuo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname "${0}"))))"
 
+# N.B. export variables like `root` s.t. they can be used by scripts called below.
+set -a
 source "$dir/teamcity-support.sh"
+set +a
 
 if [[ ! -f ~/.ssh/id_rsa.pub ]]; then
   ssh-keygen -q -C "roachtest-weekly-bazel $(date)" -N "" -f ~/.ssh/id_rsa
@@ -15,6 +24,7 @@ if [[ ${FIPS_ENABLED:-0} == 1 ]]; then
   arch=amd64-fips
 fi
 $root/build/teamcity/cockroach/nightlies/roachtest_compile_bits.sh $arch
+$root/build/teamcity/cockroach/nightlies/roachtest_compile_bits.sh arm64
 
 artifacts=/artifacts
 source $root/build/teamcity/util/roachtest_util.sh
@@ -25,18 +35,18 @@ source $root/build/teamcity/util/roachtest_util.sh
 # kill with SIGINT which will allow roachtest to fail tests and
 # cleanup.
 #
-# NB(2): We specify --zones below so that nodes are created in us-central1-b
-# by default. This reserves us-east1-b (the roachprod default zone) for use
-# by manually created clusters.
-#
-# NB(3): If you make changes here, you should probably make the same change in
-# build/teamcity-weekly-roachtest.sh
 timeout -s INT $((7800*60)) build/teamcity-roachtest-invoke.sh \
   --suite weekly \
+  --cloud="${CLOUD}" \
   --cluster-id "${TC_BUILD_ID}" \
-  --zones "us-central1-b,us-west1-b,europe-west2-b" \
   --artifacts=/artifacts \
   --artifacts-literal="${LITERAL_ARTIFACTS_DIR:-}" \
-  --parallelism 5 \
+  --parallelism="${PARALLELISM}" \
+  --cpu-quota="${CPUQUOTA}" \
   --metamorphic-encryption-probability=0.5 \
-  --slack-token="${SLACK_TOKEN}"
+  --metamorphic-arm64-probability="${ARM_PROBABILITY:-0.5}" \
+  --use-spot="${USE_SPOT:-auto}" \
+  --slack-token="${SLACK_TOKEN}" \
+  --side-eye-token="${SIDE_EYE_API_TOKEN}" \
+  --export-openmetrics="${EXPORT_OPENMETRICS:-false}" \
+  ${TESTS:-}

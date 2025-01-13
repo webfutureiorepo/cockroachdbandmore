@@ -1,19 +1,19 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"os"
+	"slices"
 	"testing"
 
+	"github.com/cockroachdb/apd/v3"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdcevent"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
@@ -35,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/slices"
 )
 
 // TestParquetRows tests that the parquetWriter correctly writes datums. It does
@@ -61,12 +60,48 @@ func TestParquetRows(t *testing.T) {
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	sqlDB.Exec(t, "SET CLUSTER SETTING kv.rangefeed.enabled = true")
 
+	newDecimal := func(s string) *tree.DDecimal {
+		d, _, _ := apd.NewFromString(s)
+		return &tree.DDecimal{Decimal: *d}
+	}
+
 	for _, tc := range []struct {
 		testName          string
 		createTable       string
 		stmts             []string
 		expectedDatumRows [][]tree.Datum
 	}{
+		{
+			testName: "decimal",
+			createTable: `
+				CREATE TABLE foo (
+				i INT PRIMARY KEY,
+				d DECIMAL(18,9)
+				)
+				`,
+			stmts: []string{
+				`INSERT INTO foo VALUES (0, 0)`,
+				`DELETE FROM foo WHERE d = 0.0`,
+				`INSERT INTO foo VALUES (1, 1.000000000)`,
+				`UPDATE foo SET d = 2.000000000 WHERE d = 1.000000000`,
+				`INSERT INTO foo VALUES (2, 3.14)`,
+				`INSERT INTO foo VALUES (3, 1.234567890123456789)`,
+				`INSERT INTO foo VALUES (4, '-Inf'::DECIMAL)`,
+				`INSERT INTO foo VALUES (5, 'Inf'::DECIMAL)`,
+				`INSERT INTO foo VALUES (6, 'NaN'::DECIMAL)`,
+			},
+			expectedDatumRows: [][]tree.Datum{
+				{tree.NewDInt(0), newDecimal("0.000000000"), parquetEventTypeDatumStringMap[parquetEventInsert]},
+				{tree.NewDInt(0), tree.DNull, parquetEventTypeDatumStringMap[parquetEventDelete]},
+				{tree.NewDInt(1), newDecimal("1.000000000"), parquetEventTypeDatumStringMap[parquetEventInsert]},
+				{tree.NewDInt(1), newDecimal("2.000000000"), parquetEventTypeDatumStringMap[parquetEventUpdate]},
+				{tree.NewDInt(2), newDecimal("3.140000000"), parquetEventTypeDatumStringMap[parquetEventInsert]},
+				{tree.NewDInt(3), newDecimal("1.234567890"), parquetEventTypeDatumStringMap[parquetEventInsert]},
+				{tree.NewDInt(4), tree.DNegInfDecimal, parquetEventTypeDatumStringMap[parquetEventInsert]},
+				{tree.NewDInt(5), tree.DPosInfDecimal, parquetEventTypeDatumStringMap[parquetEventInsert]},
+				{tree.NewDInt(6), tree.DNaNDecimal, parquetEventTypeDatumStringMap[parquetEventInsert]},
+			},
+		},
 		{
 			testName: "mixed",
 			createTable: `
@@ -185,7 +220,7 @@ func TestParquetRows(t *testing.T) {
 					writer, err = newParquetWriterFromRow(updatedRow, f, encodingOpts, parquet.WithMaxRowGroupLength(maxRowGroupSize),
 						parquet.WithCompressionCodec(parquet.CompressionGZIP))
 					if err != nil {
-						t.Fatalf(err.Error())
+						t.Fatal(err)
 					}
 					numCols = len(updatedRow.ResultColumns()) + 1
 				}
@@ -204,9 +239,6 @@ func TestParquetRows(t *testing.T) {
 			err = writer.close()
 			require.NoError(t, err)
 
-			// We inserted 18 updates, but may get dupes from rangefeeds.
-			require.GreaterOrEqual(t, numRows, 18)
-
 			meta, readDatums, err := parquet.ReadFile(f.Name())
 			require.NoError(t, err)
 			require.Equal(t, meta.NumRows, numRows)
@@ -214,12 +246,13 @@ func TestParquetRows(t *testing.T) {
 			// NB: Rangefeeds have per-key ordering, so the rows in the parquet
 			// file may not match the order we insert them. To accommodate for
 			// this, sort the expected and actual datums by the primary key.
-			slices.SortStableFunc(datums, func(a []tree.Datum, b []tree.Datum) bool {
-				return a[0].Compare(&eval.Context{}, b[0]) == -1
-			})
-			slices.SortStableFunc(readDatums, func(a []tree.Datum, b []tree.Datum) bool {
-				return a[0].Compare(&eval.Context{}, b[0]) == -1
-			})
+			sortFn := func(a []tree.Datum, b []tree.Datum) int {
+				cmp, err := a[0].Compare(ctx, &eval.Context{}, b[0])
+				require.NoError(t, err)
+				return cmp
+			}
+			slices.SortStableFunc(datums, sortFn)
+			slices.SortStableFunc(readDatums, sortFn)
 			for r := 0; r < numRows; r++ {
 				t.Logf("comparing row expected: %s to actual: %s\n", datums[r], readDatums[r])
 				for c := 0; c < numCols; c++ {
@@ -270,6 +303,71 @@ func TestParquetResolvedTimestamps(t *testing.T) {
 					nextResolved, firstResolved)
 			}
 			return nil
+		})
+	}
+
+	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
+}
+
+func TestParquetDuplicateColumns(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(s.DB)
+		sqlDB.Exec(t, `CREATE TABLE t (id INT8 PRIMARY KEY)`)
+		sqlDB.Exec(t, `INSERT INTO t VALUES (1)`)
+		foo := feed(t, f, `CREATE CHANGEFEED WITH format=parquet,initial_scan='only' AS SELECT id FROM t`)
+		defer closeFeed(t, foo)
+
+		// Test that this should not fail with this error:
+		// `Number of datums in parquet output row doesn't match number of distinct
+		// columns, Expected: %d, Recieved: %d`.
+		assertPayloads(t, foo, []string{
+			`t: [1]->{"id": 1}`,
+		})
+	}
+
+	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
+}
+
+func TestParquetSpecifiedDuplicateQueryColumns(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(s.DB)
+		sqlDB.Exec(t, `CREATE TABLE t (id INT8 PRIMARY KEY, a INT8)`)
+		sqlDB.Exec(t, `INSERT INTO t VALUES (1, 9)`)
+		foo := feed(t, f, `CREATE CHANGEFEED WITH format=parquet,initial_scan='only' AS SELECT a, a, id, id FROM t`)
+		defer closeFeed(t, foo)
+
+		// Test that this should not fail with this error:
+		// `Number of datums in parquet output row doesn't match number of distinct
+		// columns, Expected: %d, Recieved: %d`.
+		assertPayloads(t, foo, []string{
+			`t: [1]->{"a": 9, "a_1": 9, "id": 1, "id_1": 1}`,
+		})
+	}
+
+	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
+}
+
+func TestParquetNoUserDefinedPrimaryKey(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(s.DB)
+		sqlDB.Exec(t, `CREATE TABLE t (id INT8)`)
+		var rowId int
+		sqlDB.QueryRow(t, `INSERT INTO t VALUES (0) RETURNING rowid`).Scan(&rowId)
+		foo := feed(t, f, `CREATE CHANGEFEED WITH format=parquet,initial_scan='only' AS SELECT id FROM t`)
+		defer closeFeed(t, foo)
+
+		// The parquet output always includes the primary key.
+		assertPayloads(t, foo, []string{
+			fmt.Sprintf(`t: [%d]->{"id": 0}`, rowId),
 		})
 	}
 

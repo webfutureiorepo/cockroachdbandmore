@@ -41,15 +41,11 @@ go_test(
     name = "tenantcostserver_test",
     srcs = [
         "main_test.go",
+        "metrics_test.go",
         "server_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":tenantcostserver"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
-    tags = ["ccl_test"],
     deps = [
         "//pkg/base",
         "//pkg/kv",
@@ -74,6 +70,7 @@ go_test(
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_datadriven//:datadriven",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_stretchr_testify//require",
         "@in_gopkg_yaml_v2//:yaml_v2",
     ],
 )

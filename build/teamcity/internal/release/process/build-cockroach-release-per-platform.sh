@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2023 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euxo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname $(dirname "${0}")))))"
@@ -42,13 +48,33 @@ tc_start_block "Make and publish release artifacts"
 # Using publish-provisional-artifacts here is funky. We're directly publishing
 # the official binaries, not provisional ones. Legacy naming. To clean up...
 BAZEL_SUPPORT_EXTRA_DOCKER_ARGS="-e TC_BUILDTYPE_ID -e TC_BUILD_BRANCH=$version -e gcs_credentials -e gcs_bucket=$gcs_bucket -e platform=$platform" run_bazel << 'EOF'
-bazel build --config ci //pkg/cmd/publish-provisional-artifacts
-BAZEL_BIN=$(bazel info bazel-bin --config ci)
+bazel build //pkg/cmd/publish-provisional-artifacts
+BAZEL_BIN=$(bazel info bazel-bin)
 export google_credentials="$gcs_credentials"
 source "build/teamcity-support.sh"  # For log_into_gcloud
 log_into_gcloud
 export GOOGLE_APPLICATION_CREDENTIALS="$PWD/.google-credentials.json"
-$BAZEL_BIN/pkg/cmd/publish-provisional-artifacts/publish-provisional-artifacts_/publish-provisional-artifacts -provisional -release --gcs-bucket="$gcs_bucket" --output-directory=artifacts --platform=$platform
+
+cat licenses/THIRD-PARTY-NOTICES.txt > /tmp/THIRD-PARTY-NOTICES.txt.tmp
+echo "================================================================================" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp 
+echo "Additional licenses" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp 
+echo >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+echo "================================================================================" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp 
+for f in $(cd licenses && ls -1 * | grep -v THIRD-PARTY-NOTICES.txt | sort ); do
+  echo >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo "------------------------------------------------------------------------" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo "Notices from $f" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo "------------------------------------------------------------------------" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  echo >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+  cat "licenses/$f" >> /tmp/THIRD-PARTY-NOTICES.txt.tmp
+done
+
+tr -d '\r' < /tmp/THIRD-PARTY-NOTICES.txt.tmp > /tmp/THIRD-PARTY-NOTICES.txt
+
+$BAZEL_BIN/pkg/cmd/publish-provisional-artifacts/publish-provisional-artifacts_/publish-provisional-artifacts -provisional -release --gcs-bucket="$gcs_bucket" --output-directory=artifacts --platform=$platform --third-party-notices-file=/tmp/THIRD-PARTY-NOTICES.txt
 EOF
 tc_end_block "Make and publish release artifacts"
 
@@ -68,7 +94,7 @@ if [[ $platform == "linux-amd64" || $platform == "linux-arm64" || $platform == "
     --ungzip \
     --ignore-zeros \
     --strip-components=1
-  cp --recursive licenses "build/deploy-${platform}"
+  cp LICENSE licenses/THIRD-PARTY-NOTICES.txt "build/deploy-${platform}"
   # Move the libs where Dockerfile expects them to be
   mv build/deploy-${platform}/lib/* build/deploy-${platform}/
   rmdir build/deploy-${platform}/lib

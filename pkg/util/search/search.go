@@ -1,19 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package search
 
 import "github.com/cockroachdb/errors"
 
-// A Predicate is a funcation that returns whether a given search value "passes"
-// or not. It assumes that that within the search domain of [min, max) provided
+// A Predicate is a function that returns whether a given search value "passes"
+// or not. It assumes that within the search domain of [min, max) provided
 // to a Searcher, f(i) == true implies f(i-1) == true and f(i) == false implies
 // f(i+1) == false. A Predicate can be called multiple times, so it should be
 // a pure function.

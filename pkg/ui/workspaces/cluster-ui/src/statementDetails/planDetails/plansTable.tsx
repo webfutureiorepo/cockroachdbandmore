@@ -1,17 +1,18 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { ReactNode } from "react";
-import { ColumnDescriptor, SortedTable } from "src/sortedtable";
-import { Tooltip } from "@cockroachlabs/ui-components";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { Tooltip } from "@cockroachlabs/ui-components";
+import classNames from "classnames/bind";
+import React, { ReactNode } from "react";
+import { Link } from "react-router-dom";
+
+import { ColumnDescriptor, SortedTable } from "src/sortedtable";
+
+import { Anchor } from "../../anchor";
+import { Timestamp, Timezone } from "../../timestamp";
 import {
   Duration,
   formatNumberForDisplay,
@@ -24,13 +25,9 @@ import {
   Count,
   intersperse,
   EncodeDatabaseTableIndexUri,
-  EncodeDatabaseTableUri,
 } from "../../util";
-import { Anchor } from "../../anchor";
-import classNames from "classnames/bind";
+
 import styles from "./plansTable.module.scss";
-import { Link } from "react-router-dom";
-import { Timestamp, Timezone } from "../../timestamp";
 
 export type PlanHashStats =
   cockroach.server.serverpb.StatementDetailsResponse.ICollectedStatementGroupedByPlanHash;
@@ -306,13 +303,7 @@ export function formatIndexes(indexes: string[], database: string): ReactNode {
     return (
       <span key={table}>
         {newLine}
-        <Link
-          className={cx("bold-link")}
-          to={EncodeDatabaseTableUri(database, table)}
-        >
-          {table}
-        </Link>
-        : {indexesList}
+        {table}: {indexesList}
       </span>
     );
   });

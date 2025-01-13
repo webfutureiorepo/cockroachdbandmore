@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package state
 
@@ -137,8 +132,7 @@ func NewCapacityOverride() CapacityOverride {
 		QueriesPerSecond: capacityOverrideSentinel,
 		WritesPerSecond:  capacityOverrideSentinel,
 		CPUPerSecond:     capacityOverrideSentinel,
-		L0Sublevels:      capacityOverrideSentinel,
-		IOThreshold: admissionpb.IOThreshold{
+		IOThresholdMax: admissionpb.IOThreshold{
 			L0NumSubLevels:           capacityOverrideSentinel,
 			L0NumSubLevelsThreshold:  capacityOverrideSentinel,
 			L0NumFiles:               capacityOverrideSentinel,
@@ -152,7 +146,7 @@ func NewCapacityOverride() CapacityOverride {
 func (co CapacityOverride) String() string {
 	return fmt.Sprintf(
 		"capacity=%d, available=%d, used=%d, logical_bytes=%d, range_count=%d, lease_count=%d, "+
-			"queries_per_sec=%.2f, writes_per_sec=%.2f, cpu_per_sec=%.2f, l0_sublevels=%d, io_threhold=%v",
+			"queries_per_sec=%.2f, writes_per_sec=%.2f, cpu_per_sec=%.2f, io_threshold_max=%v",
 		co.Capacity,
 		co.Available,
 		co.Used,
@@ -162,8 +156,7 @@ func (co CapacityOverride) String() string {
 		co.QueriesPerSecond,
 		co.WritesPerSecond,
 		co.CPUPerSecond,
-		co.L0Sublevels,
-		co.IOThreshold,
+		co.IOThresholdMax,
 	)
 }
 
@@ -198,26 +191,23 @@ func mergeOverride(
 	if override.CPUPerSecond != capacityOverrideSentinel {
 		ret.CPUPerSecond = override.CPUPerSecond
 	}
-	if override.L0Sublevels != capacityOverrideSentinel {
-		ret.L0Sublevels = override.L0Sublevels
+	if override.IOThresholdMax.L0NumFiles != capacityOverrideSentinel {
+		ret.IOThresholdMax.L0NumFiles = override.IOThresholdMax.L0NumFiles
 	}
-	if override.IOThreshold.L0NumFiles != capacityOverrideSentinel {
-		ret.IOThreshold.L0NumFiles = override.IOThreshold.L0NumFiles
-	}
-	if override.IOThreshold.L0NumFilesThreshold != capacityOverrideSentinel {
-		ret.IOThreshold.L0NumFilesThreshold = override.IOThreshold.L0NumFilesThreshold
+	if override.IOThresholdMax.L0NumFilesThreshold != capacityOverrideSentinel {
+		ret.IOThresholdMax.L0NumFilesThreshold = override.IOThresholdMax.L0NumFilesThreshold
 	}
 	if override.IOThreshold.L0NumSubLevels != capacityOverrideSentinel {
-		ret.IOThreshold.L0NumSubLevels = override.IOThreshold.L0NumSubLevels
+		ret.IOThresholdMax.L0NumSubLevels = override.IOThresholdMax.L0NumSubLevels
 	}
-	if override.IOThreshold.L0NumSubLevelsThreshold != capacityOverrideSentinel {
-		ret.IOThreshold.L0NumSubLevelsThreshold = override.IOThreshold.L0NumSubLevelsThreshold
+	if override.IOThresholdMax.L0NumSubLevelsThreshold != capacityOverrideSentinel {
+		ret.IOThresholdMax.L0NumSubLevelsThreshold = override.IOThresholdMax.L0NumSubLevelsThreshold
 	}
-	if override.IOThreshold.L0Size != capacityOverrideSentinel {
-		ret.IOThreshold.L0Size = override.IOThreshold.L0Size
+	if override.IOThresholdMax.L0Size != capacityOverrideSentinel {
+		ret.IOThresholdMax.L0Size = override.IOThresholdMax.L0Size
 	}
-	if override.IOThreshold.L0MinimumSizePerSubLevel != capacityOverrideSentinel {
-		ret.IOThreshold.L0MinimumSizePerSubLevel = override.IOThreshold.L0MinimumSizePerSubLevel
+	if override.IOThresholdMax.L0MinimumSizePerSubLevel != capacityOverrideSentinel {
+		ret.IOThresholdMax.L0MinimumSizePerSubLevel = override.IOThresholdMax.L0MinimumSizePerSubLevel
 	}
 	return ret
 }

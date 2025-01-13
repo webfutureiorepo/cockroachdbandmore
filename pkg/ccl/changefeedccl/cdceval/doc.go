@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdceval
 
@@ -115,7 +112,7 @@ functions along with the number of arguments and the return type of the overload
    SELECT p.proname, p.pronargs, t.typname
    FROM pg_proc p, pg_type t
    WHERE p.provolatile='s' and p.prorettype = t.oid and
-         p.proiswindow=false and p.proisagg=false and p.proretset=false
+         p.prokind='f' and p.proretset=false
    ORDER BY proname
 
                             proname                            | pronargs |   typname

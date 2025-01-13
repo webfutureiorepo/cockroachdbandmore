@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package oidcccl
 
@@ -14,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/errors"
@@ -38,6 +36,7 @@ const (
 	OIDCGenerateClusterSSOTokenUseTokenSettingName = baseOIDCSettingName + "generate_cluster_sso_token.use_token"
 	OIDCGenerateClusterSSOTokenSQLHostSettingName  = baseOIDCSettingName + "generate_cluster_sso_token.sql_host"
 	OIDCGenerateClusterSSOTokenSQLPortSettingName  = baseOIDCSettingName + "generate_cluster_sso_token.sql_port"
+	oidcAuthClientTimeoutSettingName               = baseOIDCSettingName + "client.timeout"
 )
 
 // OIDCEnabled enables or disabled OIDC login for the DB Console.
@@ -70,6 +69,18 @@ var OIDCClientSecret = settings.RegisterStringSetting(
 	settings.WithPublic,
 	settings.WithReportable(false),
 	settings.Sensitive,
+)
+
+// OIDCAuthClientTimeout is the client timeout for all the external calls made
+// during OIDC authentication (e.g. authorization code flow, etc.).
+var OIDCAuthClientTimeout = settings.RegisterDurationSetting(
+	settings.ApplicationLevel,
+	oidcAuthClientTimeoutSettingName,
+	"sets the client timeout for external calls made during OIDC authentication "+
+		"(e.g. authorization code flow, etc.)",
+	15*time.Second,
+	settings.NonNegativeDuration,
+	settings.WithPublic,
 )
 
 type redirectURLConf struct {
@@ -292,9 +303,9 @@ var OIDCGenerateClusterSSOTokenUseToken = settings.RegisterEnumSetting(
 	OIDCGenerateClusterSSOTokenUseTokenSettingName,
 	"selects which OIDC callback token to use for cluster SSO",
 	"id_token",
-	map[int64]string{
-		int64(useIdToken):     "id_token",
-		int64(useAccessToken): "access_token",
+	map[tokenToUse]string{
+		useIdToken:     "id_token",
+		useAccessToken: "access_token",
 	},
 )
 

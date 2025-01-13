@@ -1,14 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import Long from "long";
+import moment from "moment-timezone";
+
 import { fetchData } from "src/api/fetchData";
 import {
   FixFingerprintHexValue,
@@ -17,8 +15,6 @@ import {
   propsToQueryString,
   stringToTimestamp,
 } from "src/util";
-import Long from "long";
-import moment from "moment-timezone";
 
 import { AggregateStatistics } from "../statementsTable";
 const STATEMENTS_PATH = "_status/combinedstmts";
@@ -166,6 +162,7 @@ type Statistics = {
   latencyInfo: LatencyInfo;
   maxRetries: Long;
   nodes: Long[];
+  kvNodeIds: number[];
   numRows: NumericStat;
   ovhLat: NumericStat;
   parseLat: NumericStat;
@@ -175,6 +172,7 @@ type Statistics = {
   rowsWritten: NumericStat;
   runLat: NumericStat;
   svcLat: NumericStat;
+  regions: string[];
 };
 
 type ExecStats = {
@@ -249,6 +247,7 @@ export function convertStatementRawFormatToAggregatedStatistics(
       },
       max_retries: s.statistics.statistics.maxRetries,
       nodes: s.statistics.statistics.nodes,
+      kv_node_ids: s.statistics.statistics.kvNodeIds,
       num_rows: s.statistics.statistics.numRows,
       overhead_lat: s.statistics.statistics.ovhLat,
       parse_lat: s.statistics.statistics.parseLat,
@@ -259,6 +258,7 @@ export function convertStatementRawFormatToAggregatedStatistics(
       run_lat: s.statistics.statistics.runLat,
       service_lat: s.statistics.statistics.svcLat,
       sql_type: s.metadata.stmtType,
+      regions: s.statistics.statistics.regions,
     },
   };
 }

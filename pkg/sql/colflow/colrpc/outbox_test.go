@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colrpc
 
@@ -34,6 +29,10 @@ func TestOutboxCatchesPanics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	ctx := context.Background()
+
+	// Use the release-build panic-catching behavior instead of the
+	// crdb_test-build behavior.
+	defer colexecerror.ProductionBehaviorForTests()()
 
 	var (
 		input    = colexecop.NewBatchBuffer()
@@ -142,6 +141,10 @@ func TestOutboxDrainsMetadataSources(t *testing.T) {
 	// This is similar to TestOutboxCatchesPanics, but focuses on verifying that
 	// the Outbox drains its metadata sources even after an error.
 	t.Run("AfterOutboxError", func(t *testing.T) {
+		// Use the release-build panic-catching behavior instead of the
+		// crdb_test-build behavior.
+		defer colexecerror.ProductionBehaviorForTests()()
+
 		// This test, similar to TestOutboxCatchesPanics, relies on the fact that
 		// a BatchBuffer panics when there are no batches to return.
 		require.Panics(t, func() { input.Next() })

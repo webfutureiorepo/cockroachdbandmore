@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -18,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/gc"
@@ -34,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -302,8 +295,8 @@ func makeMVCCGCQueueScore(
 	canAdvanceGCThreshold bool,
 ) mvccGCQueueScore {
 	repl.mu.RLock()
-	ms := *repl.mu.state.Stats
-	hint := *repl.mu.state.GCHint
+	ms := *repl.shMu.state.Stats
+	hint := *repl.shMu.state.GCHint
 	repl.mu.RUnlock()
 
 	if repl.store.cfg.TestingKnobs.DisableLastProcessedCheck {
@@ -600,7 +593,7 @@ func (r *replicaGCer) template() kvpb.GCRequest {
 
 func (r *replicaGCer) send(ctx context.Context, req kvpb.GCRequest) error {
 	n := atomic.AddInt32(&r.count, 1)
-	log.Eventf(ctx, "sending batch %d (%d keys)", n, len(req.Keys))
+	log.Eventf(ctx, "sending batch %d (%d keys, %d rangekeys)", n, len(req.Keys), len(req.RangeKeys))
 
 	ba := &kvpb.BatchRequest{}
 	// Technically not needed since we're talking directly to the Replica.
@@ -742,10 +735,7 @@ func (mgcq *mvccGCQueue) process(
 	maxLocksPerCleanupBatch := gc.MaxLocksPerCleanupBatch.Get(&repl.store.ClusterSettings().SV)
 	maxLocksKeyBytesPerCleanupBatch := gc.MaxLockKeyBytesPerCleanupBatch.Get(&repl.store.ClusterSettings().SV)
 	txnCleanupThreshold := gc.TxnCleanupThreshold.Get(&repl.store.ClusterSettings().SV)
-	var clearRangeMinKeys int64 = 0
-	if repl.store.ClusterSettings().Version.IsActive(ctx, clusterversion.V23_1) {
-		clearRangeMinKeys = gc.ClearRangeMinKeys.Get(&repl.store.ClusterSettings().SV)
-	}
+	clearRangeMinKeys := gc.ClearRangeMinKeys.Get(&repl.store.ClusterSettings().SV)
 
 	info, err := gc.Run(ctx, desc, snap, gcTimestamp, newThreshold,
 		gc.RunOptions{
@@ -851,6 +841,7 @@ func updateStoreMetricsWithGCInfo(metrics *StoreMetrics, info gc.Info) {
 	metrics.GCTransactionSpanGCCommitted.Inc(int64(info.TransactionSpanGCCommitted))
 	metrics.GCTransactionSpanGCStaging.Inc(int64(info.TransactionSpanGCStaging))
 	metrics.GCTransactionSpanGCPending.Inc(int64(info.TransactionSpanGCPending))
+	metrics.GCTransactionSpanGCPrepared.Inc(int64(info.TransactionSpanGCPrepared))
 	metrics.GCAbortSpanScanned.Inc(int64(info.AbortSpanTotal))
 	metrics.GCAbortSpanConsidered.Inc(int64(info.AbortSpanConsidered))
 	metrics.GCAbortSpanGCNum.Inc(int64(info.AbortSpanGCNum))
@@ -949,7 +940,7 @@ func (*mvccGCQueue) updateChan() <-chan time.Time {
 }
 
 func gcAdmissionHeader(st *cluster.Settings) kvpb.AdmissionHeader {
-	pri := admissionpb.WorkPriority(gc.AdmissionPriority.Get(&st.SV))
+	pri := gc.AdmissionPriority.Get(&st.SV)
 	return kvpb.AdmissionHeader{
 		// TODO(irfansharif): GC could be expected to be BulkNormalPri, so
 		// that it does not impact user-facing traffic when resources (e.g.
