@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
@@ -102,7 +97,7 @@ func overlapsBuiltinFunc(
 	if err != nil {
 		return nil, err
 	}
-	return evalOverlaps(evalCtx, s1, e1, s2, e2)
+	return evalOverlaps(ctx, evalCtx, s1, e1, s2, e2)
 }
 
 // evalOverlaps checks if two intervals overlap, return a bool
@@ -117,9 +112,14 @@ func overlapsBuiltinFunc(
 // `s` represents `interval start`, `e` represents `interval end`.
 // `1/2` represents interval 1/2.
 func evalOverlaps(
-	evalCtx *eval.Context, s1 tree.Datum, e1 tree.Datum, s2 tree.Datum, e2 tree.Datum,
+	ctx context.Context,
+	evalCtx *eval.Context,
+	s1 tree.Datum,
+	e1 tree.Datum,
+	s2 tree.Datum,
+	e2 tree.Datum,
 ) (tree.Datum, error) {
-	compS1E1, err := s1.CompareError(evalCtx, e1)
+	compS1E1, err := s1.Compare(ctx, evalCtx, e1)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func evalOverlaps(
 		s1, e1 = e1, s1
 	}
 
-	compS2E2, err := s2.CompareError(evalCtx, e2)
+	compS2E2, err := s2.Compare(ctx, evalCtx, e2)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func evalOverlaps(
 		s2, e2 = e2, s2
 	}
 
-	compS1S2, err := s1.CompareError(evalCtx, s2)
+	compS1S2, err := s1.Compare(ctx, evalCtx, s2)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ func evalOverlaps(
 
 	// Case s1 > s2.
 	case 1:
-		compS1E2, err := s1.CompareError(evalCtx, e2)
+		compS1E2, err := s1.Compare(ctx, evalCtx, e2)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +156,7 @@ func evalOverlaps(
 
 	// Case s1 < s2.
 	case -1:
-		compS2E1, err := s2.CompareError(evalCtx, e1)
+		compS2E1, err := s2.Compare(ctx, evalCtx, e1)
 		if err != nil {
 			return nil, err
 		}

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexectestutils
 
@@ -33,21 +28,13 @@ type MockTypeContext struct {
 var _ eval.IndexedVarContainer = &MockTypeContext{}
 
 // IndexedVarEval implements the eval.IndexedVarContainer interface.
-func (p *MockTypeContext) IndexedVarEval(
-	ctx context.Context, idx int, e tree.ExprEvaluator,
-) (tree.Datum, error) {
-	return tree.DNull.Eval(ctx, e)
+func (p *MockTypeContext) IndexedVarEval(idx int) (tree.Datum, error) {
+	return tree.DNull, nil
 }
 
 // IndexedVarResolvedType implements the tree.IndexedVarContainer interface.
 func (p *MockTypeContext) IndexedVarResolvedType(idx int) *types.T {
 	return p.Typs[idx]
-}
-
-// IndexedVarNodeFormatter implements the tree.IndexedVarContainer interface.
-func (p *MockTypeContext) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
-	n := tree.Name(fmt.Sprintf("$%d", idx))
-	return &n
 }
 
 // CreateTestProjectingOperator creates a projecting operator that performs
@@ -72,7 +59,7 @@ func CreateTestProjectingOperator(
 		return nil, err
 	}
 	p := &MockTypeContext{Typs: inputTypes}
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	semaCtx.IVarContainer = p
 	typedExpr, err := tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
 	if err != nil {

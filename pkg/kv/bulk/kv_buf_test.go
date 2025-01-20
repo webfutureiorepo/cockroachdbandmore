@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bulk
 
@@ -56,10 +51,11 @@ func TestKvBuf(t *testing.T) {
 	src, totalSize := makeTestData(50000)
 
 	ctx := context.Background()
-	noneMonitor := mon.NewMonitorWithLimit("none", mon.MemoryResource, 0, nil, nil, 0, 0, nil)
+	noneMonitor := mon.NewMonitor(mon.Options{Name: mon.MakeMonitorName("none")})
 	noneMonitor.StartNoReserved(ctx, nil /* pool */)
-	none := noneMonitor.MakeBoundAccount()
-	lots := mon.NewUnlimitedMonitor(ctx, "lots", mon.MemoryResource, nil, nil, 0, nil).MakeBoundAccount()
+	none := noneMonitor.MakeEarmarkedBoundAccount()
+	lots := mon.NewUnlimitedMonitor(ctx, mon.Options{Name: mon.MakeMonitorName("lots")}).
+		MakeEarmarkedBoundAccount()
 
 	// Write everything to our buf.
 	b := kvBuf{}

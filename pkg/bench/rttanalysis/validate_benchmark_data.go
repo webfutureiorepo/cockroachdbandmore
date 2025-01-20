@@ -1,21 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rttanalysis
 
 import (
+	"cmp"
 	"encoding/csv"
 	"flag"
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,8 +20,8 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/system"
@@ -62,7 +59,7 @@ var (
 // RunBenchmarkExpectationTests runs tests to validate or rewrite the contents
 // of the benchmark expectations file.
 func runBenchmarkExpectationTests(t *testing.T, r *Registry) {
-	if util.IsMetamorphicBuild() {
+	if metamorphic.IsMetamorphicBuild() {
 		execTestSubprocess(t)
 		return
 	}
@@ -185,7 +182,7 @@ func execTestSubprocess(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, util.DisableMetamorphicEnvVar+"=t")
+	cmd.Env = append(cmd.Env, metamorphic.DisableMetamorphicEnvVar+"=t")
 	t.Log(cmd.Args)
 	if err := cmd.Run(); err != nil {
 		t.FailNow()
@@ -221,8 +218,8 @@ func (s *resultSet) toSlice() (res []benchmarkResult) {
 }
 
 func resultsToExpectations(t *testing.T, results []benchmarkResult) benchmarkExpectations {
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].name < results[j].name
+	slices.SortFunc(results, func(a, b benchmarkResult) int {
+		return cmp.Compare(a.name, b.name)
 	})
 	var res benchmarkExpectations
 	var cur benchmarkExpectation

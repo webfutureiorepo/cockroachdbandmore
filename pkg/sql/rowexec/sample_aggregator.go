@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -15,12 +10,14 @@ import (
 	"math"
 	"time"
 
-	"github.com/axiomhq/hyperloglog"
+	hllNew "github.com/axiomhq/hyperloglog"
+	hllOld "github.com/axiomhq/hyperloglog/000"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -37,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -98,9 +96,6 @@ func newSampleAggregator(
 		if len(s.Columns) == 0 {
 			return nil, errors.Errorf("no columns")
 		}
-		if _, ok := supportedSketchTypes[s.SketchType]; !ok {
-			return nil, errors.Errorf("unsupported sketch type %s", s.SketchType)
-		}
 		if s.GenerateHistogram && s.HistogramMaxBuckets == 0 {
 			return nil, errors.Errorf("histogram max buckets not specified")
 		}
@@ -108,6 +103,7 @@ func newSampleAggregator(
 			return nil, errors.Errorf("histograms require one column")
 		}
 	}
+	useNewHLL := execversion.FromContext(ctx) >= execversion.V25_1
 
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will disable histogram collection if this limit is not
@@ -148,9 +144,13 @@ func newSampleAggregator(
 	for i := range spec.Sketches {
 		s.sketches[i] = sketchInfo{
 			spec:     spec.Sketches[i],
-			sketch:   hyperloglog.New14(),
 			numNulls: 0,
 			numRows:  0,
+		}
+		if useNewHLL {
+			s.sketches[i].sketchNew = hllNew.New14()
+		} else {
+			s.sketches[i].sketchOld = hllOld.New14()
 		}
 		if spec.Sketches[i].GenerateHistogram {
 			sampleCols.Add(int(spec.Sketches[i].Columns[0]))
@@ -173,9 +173,13 @@ func newSampleAggregator(
 		s.invSr[col] = &sr
 		s.invSketch[col] = &sketchInfo{
 			spec:     spec.InvertedSketches[i],
-			sketch:   hyperloglog.New14(),
 			numNulls: 0,
 			numRows:  0,
+		}
+		if useNewHLL {
+			s.invSketch[col].sketchNew = hllNew.New14()
+		} else {
+			s.invSketch[col].sketchOld = hllOld.New14()
 		}
 	}
 
@@ -193,10 +197,6 @@ func newSampleAggregator(
 	return s, nil
 }
 
-func (s *sampleAggregator) pushTrailingMeta(ctx context.Context, output execinfra.RowReceiver) {
-	execinfra.SendTraceData(ctx, s.FlowCtx, output)
-}
-
 // Run is part of the Processor interface.
 func (s *sampleAggregator) Run(ctx context.Context, output execinfra.RowReceiver) {
 	ctx = s.StartInternal(ctx, sampleAggregatorProcName)
@@ -204,13 +204,19 @@ func (s *sampleAggregator) Run(ctx context.Context, output execinfra.RowReceiver
 
 	earlyExit, err := s.mainLoop(ctx, output)
 	if err != nil {
-		execinfra.DrainAndClose(ctx, output, err, s.pushTrailingMeta, s.input)
+		execinfra.DrainAndClose(ctx, s.FlowCtx, s.input, output, err)
 	} else if !earlyExit {
-		s.pushTrailingMeta(ctx, output)
+		execinfra.SendTraceData(ctx, s.FlowCtx, output)
 		s.input.ConsumerClosed()
 		output.ProducerDone()
 	}
 	s.MoveToDraining(nil /* err */)
+}
+
+// Close is part of the execinfra.Processor interface.
+func (s *sampleAggregator) Close(context.Context) {
+	s.input.ConsumerClosed()
+	s.close()
 }
 
 func (s *sampleAggregator) close() {
@@ -262,7 +268,16 @@ func (s *sampleAggregator) mainLoop(
 					// not been paused or canceled.
 					var fractionCompleted float32
 					if s.spec.RowsExpected > 0 {
-						fractionCompleted = float32(float64(rowsProcessed) / float64(s.spec.RowsExpected))
+						// Compute the fraction of rows processed so far for the current
+						// index.
+						fractionCompleted = min(float32(float64(rowsProcessed)/float64(s.spec.RowsExpected)), 1.0)
+
+						if s.spec.NumIndexes > 0 {
+							// Adjust the fraction to account for the indexes that have already
+							// been processed.
+							fractionCompleted = (float32(s.spec.CurIndex) + fractionCompleted) / float32(s.spec.NumIndexes)
+						}
+
 						const maxProgress = 0.99
 						if fractionCompleted > maxProgress {
 							// Since the total number of rows expected is just an estimate,
@@ -284,7 +299,7 @@ func (s *sampleAggregator) mainLoop(
 						sr.Disable()
 					}
 				}
-			} else if !emitHelper(ctx, output, &s.OutputHelper, nil /* row */, meta, s.pushTrailingMeta, s.input) {
+			} else if !emitHelper(ctx, s.FlowCtx, s.input, output, &s.OutputHelper, nil /* row */, meta) {
 				// No cleanup required; emitHelper() took care of it.
 				return true, nil
 			}
@@ -344,10 +359,12 @@ func (s *sampleAggregator) mainLoop(
 			return false, err
 		}
 	}
-	// Report progress one last time so we don't write results if the job was
-	// canceled.
-	if err = progFn(1.0); err != nil {
-		return false, err
+	// Report progress one last time if this is the last index being scanned, so
+	// we don't write results if the job was canceled.
+	if s.spec.CurIndex+1 == s.spec.NumIndexes || s.spec.NumIndexes == 0 {
+		if err = progFn(1.0); err != nil {
+			return false, err
+		}
 	}
 	return false, s.writeResults(ctx)
 }
@@ -355,8 +372,6 @@ func (s *sampleAggregator) mainLoop(
 func (s *sampleAggregator) processSketchRow(
 	sketch *sketchInfo, row rowenc.EncDatumRow, da *tree.DatumAlloc,
 ) error {
-	var tmpSketch hyperloglog.Sketch
-
 	numRows, err := row[s.numRowsCol].GetInt()
 	if err != nil {
 		return err
@@ -383,11 +398,22 @@ func (s *sampleAggregator) processSketchRow(
 	if d == tree.DNull {
 		return errors.AssertionFailedf("NULL sketch data")
 	}
-	if err := tmpSketch.UnmarshalBinary([]byte(*d.(*tree.DBytes))); err != nil {
-		return err
-	}
-	if err := sketch.sketch.Merge(&tmpSketch); err != nil {
-		return errors.NewAssertionErrorWithWrappedErrf(err, "merging sketch data")
+	if sketch.sketchNew != nil {
+		var tmpSketch hllNew.Sketch
+		if err := tmpSketch.UnmarshalBinary([]byte(*d.(*tree.DBytes))); err != nil {
+			return err
+		}
+		if err := sketch.sketchNew.Merge(&tmpSketch); err != nil {
+			return errors.NewAssertionErrorWithWrappedErrf(err, "merging sketch data")
+		}
+	} else {
+		var tmpSketch hllOld.Sketch
+		if err := tmpSketch.UnmarshalBinary([]byte(*d.(*tree.DBytes))); err != nil {
+			return err
+		}
+		if err := sketch.sketchOld.Merge(&tmpSketch); err != nil {
+			return errors.NewAssertionErrorWithWrappedErrf(err, "merging sketch data")
+		}
 	}
 	return nil
 }
@@ -413,7 +439,7 @@ func (s *sampleAggregator) sampleRow(
 	ctx context.Context, sr *stats.SampleReservoir, sampleRow rowenc.EncDatumRow, rank uint64,
 ) error {
 	prevCapacity := sr.Cap()
-	if err := sr.SampleRow(ctx, s.EvalCtx, sampleRow, rank); err != nil {
+	if err := sr.SampleRow(ctx, s.FlowCtx.EvalCtx, sampleRow, rank); err != nil {
 		if code := pgerror.GetPGCode(err); code != pgcode.OutOfMemory {
 			return err
 		}
@@ -435,7 +461,7 @@ func (s *sampleAggregator) sampleRow(
 func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	// Turn off tracing so these writes don't affect the results of EXPLAIN
 	// ANALYZE.
-	if span := tracing.SpanFromContext(ctx); span != nil && span.IsVerbose() {
+	if span := tracing.SpanFromContext(ctx); span != nil && span.RecordingType() != tracingpb.RecordingOff {
 		// TODO(rytaft): this also hides writes in this function from SQL session
 		// traces.
 		ctx = tracing.ContextWithSpan(ctx, nil)
@@ -462,7 +488,9 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 					if err != nil {
 						return err
 					}
-					lowerBound, err = eval.Expr(ctx, s.EvalCtx, lbTypedExpr)
+					// Lower bounds are serialized datums, so evaluating the
+					// expression shouldn't modify the eval context.
+					lowerBound, err = eval.Expr(ctx, s.FlowCtx.EvalCtx, lbTypedExpr)
 					if err != nil {
 						return err
 					}
@@ -470,7 +498,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 
 				h, err := s.generateHistogram(
 					ctx,
-					s.EvalCtx,
+					s.FlowCtx.EvalCtx,
 					&s.sr,
 					colIdx,
 					typ,
@@ -501,7 +529,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 				// inverted keys.
 				h, err := s.generateHistogram(
 					ctx,
-					s.EvalCtx,
+					s.FlowCtx.EvalCtx,
 					invSr,
 					0, /* colIdx */
 					types.Bytes,
@@ -603,7 +631,12 @@ func (s *sampleAggregator) getAvgSize(si *sketchInfo) int64 {
 // getDistinctCount returns the number of distinct values in the given sketch,
 // optionally including null values.
 func (s *sampleAggregator) getDistinctCount(si *sketchInfo, includeNulls bool) int64 {
-	distinctCount := int64(si.sketch.Estimate())
+	var distinctCount int64
+	if si.sketchNew != nil {
+		distinctCount = int64(si.sketchNew.Estimate())
+	} else {
+		distinctCount = int64(si.sketchOld.Estimate())
+	}
 	if si.numNulls > 0 && !includeNulls {
 		// Nulls are included in the estimate, so reduce the count by 1 if nulls are
 		// not requested.

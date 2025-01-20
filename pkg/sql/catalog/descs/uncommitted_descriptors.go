@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package descs
 
@@ -153,17 +148,17 @@ func (ud *uncommittedDescriptors) upsert(
 	// Perform some sanity checks to ensure the version counters are correct.
 	if original == nil {
 		if !mut.IsNew() {
-			return errors.New("non-new descriptor does not exist in storage yet")
+			return errors.AssertionFailedf("non-new descriptor does not exist in storage yet")
 		}
 		if mut.GetVersion() != 1 {
 			return errors.New("new descriptor version should be 1")
 		}
 	} else {
 		if mut.IsNew() {
-			return errors.New("new descriptor already exists in storage")
+			return errors.AssertionFailedf("new descriptor already exists in storage")
 		}
 		if mut.GetVersion() != original.GetVersion()+1 {
-			return errors.Newf("expected uncommitted version %d, instead got %d",
+			return errors.AssertionFailedf("expected uncommitted version %d, instead got %d",
 				original.GetVersion()+1, mut.GetVersion())
 		}
 	}

@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -12,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"time"
 
@@ -21,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -82,6 +81,7 @@ func makePubsubSinkClient(
 	unordered bool,
 	withTableNameAttribute bool,
 	knobs *TestingKnobs,
+	m metricsRecorder,
 ) (SinkClient, error) {
 	if u.Scheme != GcpScheme {
 		return nil, errors.Errorf("unknown scheme: %s", u.Scheme)
@@ -105,7 +105,7 @@ func makePubsubSinkClient(
 			changefeedbase.OptEnvelope, encodingOpts.Envelope)
 	}
 
-	pubsubURL := sinkURL{URL: u, q: u.Query()}
+	pubsubURL := &changefeedbase.SinkURL{URL: u}
 
 	projectID := pubsubURL.Host
 	if projectID == "" {
@@ -118,7 +118,7 @@ func makePubsubSinkClient(
 	// In unit tests the publisherClient gets set immediately after initializing
 	// the sink object via knobs.WrapSink.
 	if knobs == nil || !knobs.PubsubClientSkipClientCreation {
-		publisherClient, err = makePublisherClient(ctx, pubsubURL, unordered)
+		publisherClient, err = makePublisherClient(ctx, pubsubURL, unordered, m.netMetrics())
 		if err != nil {
 			return nil, err
 		}
@@ -155,6 +155,10 @@ func (sc *pubsubSinkClient) FlushResolvedPayload(
 			return sc.Flush(ctx, pl)
 		})
 	})
+}
+
+func (sc *pubsubSinkClient) CheckConnection(ctx context.Context) error {
+	return nil
 }
 
 func (sc *pubsubSinkClient) maybeCreateTopic(topic string) error {
@@ -292,10 +296,10 @@ func (pe *pubsubSinkClient) Close() error {
 }
 
 func makePublisherClient(
-	ctx context.Context, url sinkURL, unordered bool,
+	ctx context.Context, url *changefeedbase.SinkURL, unordered bool, nm *cidr.NetMetrics,
 ) (*pubsub.PublisherClient, error) {
 	const regionParam = "region"
-	region := url.consumeParam(regionParam)
+	region := url.ConsumeParam(regionParam)
 	var endpoint string
 	if region == "" {
 		if unordered {
@@ -314,7 +318,12 @@ func makePublisherClient(
 		return nil, err
 	}
 
-	opts := []option.ClientOption{creds, option.WithEndpoint(endpoint)}
+	// Set up the network metrics for tracking bytes in/out.
+	dialContext := nm.Wrap((&net.Dialer{}).DialContext, "pubsub")
+	dial := func(ctx context.Context, target string) (net.Conn, error) {
+		return dialContext(ctx, "tcp", target)
+	}
+	opts := []option.ClientOption{creds, option.WithEndpoint(endpoint), option.WithGRPCDialOption(grpc.WithContextDialer(dial))}
 
 	// See https://pkg.go.dev/cloud.google.com/go/pubsub#hdr-Emulator for emulator information.
 	if addr, _ := envutil.ExternalEnvString("PUBSUB_EMULATOR_HOST", 1); addr != "" {
@@ -343,7 +352,9 @@ func gcpEndpointForRegion(region string) string {
 
 // TODO: unify gcp credentials code with gcp cloud storage credentials code
 // getGCPCredentials returns gcp credentials parsed out from url
-func getGCPCredentials(ctx context.Context, u sinkURL) (option.ClientOption, error) {
+func getGCPCredentials(
+	ctx context.Context, u *changefeedbase.SinkURL,
+) (option.ClientOption, error) {
 	const authParam = "AUTH"
 	const assumeRoleParam = "ASSUME_ROLE"
 	const authSpecified = "specified"
@@ -353,8 +364,8 @@ func getGCPCredentials(ctx context.Context, u sinkURL) (option.ClientOption, err
 	var credsJSON []byte
 	var creds *google.Credentials
 	var err error
-	authOption := u.consumeParam(authParam)
-	assumeRoleOption := u.consumeParam(assumeRoleParam)
+	authOption := u.ConsumeParam(authParam)
+	assumeRoleOption := u.ConsumeParam(assumeRoleParam)
 	authScope := gcpScope
 	if assumeRoleOption != "" {
 		// If we need to assume a role, the credentials need to have the scope to
@@ -374,10 +385,10 @@ func getGCPCredentials(ctx context.Context, u sinkURL) (option.ClientOption, err
 	case authDefault:
 		fallthrough
 	default:
-		if u.q.Get(credentialsParam) == "" {
+		if u.PeekParam(credentialsParam) == "" {
 			return nil, errors.New("missing credentials parameter")
 		}
-		err := u.decodeBase64(credentialsParam, &credsJSON)
+		err := u.DecodeBase64(credentialsParam, &credsJSON)
 		if err != nil {
 			return nil, errors.Wrap(err, "decoding credentials json")
 		}
@@ -424,6 +435,8 @@ func makePubsubSink(
 	settings *cluster.Settings,
 	knobs *TestingKnobs,
 ) (Sink, error) {
+	m := mb(requiresResourceAccounting)
+
 	batchCfg, retryOpts, err := getSinkConfigFromJson(jsonConfig, sinkJSONConfig{
 		// GCPubsub library defaults
 		Flush: sinkBatchConfig{
@@ -436,19 +449,19 @@ func makePubsubSink(
 		return nil, err
 	}
 
-	pubsubURL := sinkURL{URL: u, q: u.Query()}
+	pubsubURL := &changefeedbase.SinkURL{URL: u}
 	var includeTableNameAttribute bool
-	_, err = pubsubURL.consumeBool(changefeedbase.SinkParamTableNameAttribute, &includeTableNameAttribute)
+	_, err = pubsubURL.ConsumeBool(changefeedbase.SinkParamTableNameAttribute, &includeTableNameAttribute)
 	if err != nil {
 		return nil, err
 	}
 	sinkClient, err := makePubsubSinkClient(ctx, u, encodingOpts, targets, batchCfg, unordered,
-		includeTableNameAttribute, knobs)
+		includeTableNameAttribute, knobs, m)
 	if err != nil {
 		return nil, err
 	}
 
-	pubsubTopicName := pubsubURL.consumeParam(changefeedbase.SinkParamTopicName)
+	pubsubTopicName := pubsubURL.ConsumeParam(changefeedbase.SinkParamTopicName)
 	topicNamer, err := MakeTopicNamer(targets, WithSingleName(pubsubTopicName))
 	if err != nil {
 		return nil, err
@@ -464,7 +477,7 @@ func makePubsubSink(
 		topicNamer,
 		pacerFactory,
 		source,
-		mb(requiresResourceAccounting),
+		m,
 		settings,
 	), nil
 }

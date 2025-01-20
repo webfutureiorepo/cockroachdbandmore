@@ -1,14 +1,9 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import assign from "lodash/assign";
 
 /**
  * nextState is a utility function that allows type-safe replacement of fields
@@ -39,5 +34,5 @@ export default function nextState<T extends Object>(
   lastState: T,
   changes: Partial<T>,
 ): T {
-  return _.assign({}, lastState, changes);
+  return assign({}, lastState, changes);
 }

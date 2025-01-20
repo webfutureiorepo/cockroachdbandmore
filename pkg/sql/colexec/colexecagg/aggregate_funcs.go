@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecagg
 
@@ -25,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/errors"
 )
@@ -90,7 +84,7 @@ type AggregateFunc interface {
 	// SetOutput sets the output vector to write the results of aggregation
 	// into. If the output vector changes, it is up to the caller to make sure
 	// that results already written to the old vector are propagated further.
-	SetOutput(vec coldata.Vec)
+	SetOutput(vec *coldata.Vec)
 
 	// CurrentOutputIndex returns the current index in the output vector that
 	// the aggregate function is writing to. All indices < the index returned
@@ -104,7 +98,7 @@ type AggregateFunc interface {
 	// Note: the implementations should be careful to account for their memory
 	// usage.
 	// Note: endIdx is assumed to be greater than zero.
-	Compute(vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int)
+	Compute(vecs []*coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int)
 
 	// Flush flushes the result of aggregation on the last group. It should be
 	// called once after input batches have been Compute()'d. outputIdx is only
@@ -130,7 +124,7 @@ type orderedAggregateFuncBase struct {
 	curIdx    int
 	allocator *colmem.Allocator
 	// vec is the output vector of this function.
-	vec coldata.Vec
+	vec *coldata.Vec
 	// nulls is the nulls vector of the output vector of this function.
 	nulls *coldata.Nulls
 	// isFirstGroup tracks whether the new group (indicated by 'true' in
@@ -143,7 +137,7 @@ func (o *orderedAggregateFuncBase) Init(groups []bool) {
 	o.Reset()
 }
 
-func (o *orderedAggregateFuncBase) SetOutput(vec coldata.Vec) {
+func (o *orderedAggregateFuncBase) SetOutput(vec *coldata.Vec) {
 	o.vec = vec
 	o.nulls = vec.Nulls()
 }
@@ -171,14 +165,14 @@ func (o *orderedAggregateFuncBase) Reset() {
 type unorderedAggregateFuncBase struct {
 	allocator *colmem.Allocator
 	// vec is the output vector of this function.
-	vec coldata.Vec
+	vec *coldata.Vec
 	// nulls is the nulls vector of the output vector of this function.
 	nulls *coldata.Nulls
 }
 
 func (h *unorderedAggregateFuncBase) Init(_ []bool) {}
 
-func (h *unorderedAggregateFuncBase) SetOutput(vec coldata.Vec) {
+func (h *unorderedAggregateFuncBase) SetOutput(vec *coldata.Vec) {
 	h.vec = vec
 	h.nulls = vec.Nulls()
 }
@@ -203,8 +197,8 @@ type aggregateFuncAlloc interface {
 	// newAggFunc returns the aggregate function from the pool with all
 	// necessary fields initialized.
 	newAggFunc() AggregateFunc
-	// incAllocSize increments allocSize of this allocator by one.
-	incAllocSize()
+	// increaseAllocSize increments allocSize of this allocator by delta.
+	increaseAllocSize(delta int64)
 }
 
 // AggregateFuncsAlloc is a utility struct that pools allocations of multiple
@@ -215,8 +209,11 @@ type aggregateFuncAlloc interface {
 type AggregateFuncsAlloc struct {
 	allocator *colmem.Allocator
 	// allocSize determines the number of objects allocated when the previous
-	// allocations have been used up.
+	// allocations have been used up. This number will grow exponentially until
+	// it reaches maxAllocSize.
 	allocSize int64
+	// maxAllocSize determines the maximum allocSize value.
+	maxAllocSize int64
 	// returnFuncs is the pool for the slice to be returned in
 	// makeAggregateFuncs.
 	returnFuncs []AggregateFunc
@@ -249,9 +246,16 @@ func NewAggregateFuncsAlloc(
 	ctx context.Context,
 	args *NewAggregatorArgs,
 	aggregations []execinfrapb.AggregatorSpec_Aggregation,
-	allocSize int64,
+	initialAllocSize int64,
+	maxAllocSize int64,
 	aggKind AggKind,
 ) (*AggregateFuncsAlloc, *colconv.VecToDatumConverter, colexecop.Closers, error) {
+	if initialAllocSize > maxAllocSize {
+		return nil, nil, nil, errors.AssertionFailedf(
+			"initialAllocSize %d must be no greater than maxAllocSize %d", initialAllocSize, maxAllocSize,
+		)
+	}
+	allocSize := initialAllocSize
 	funcAllocs := make([]aggregateFuncAlloc, len(aggregations))
 	var toClose colexecop.Closers
 	var vecIdxsToConvert []int
@@ -506,31 +510,15 @@ func NewAggregateFuncsAlloc(
 			if !freshAllocator {
 				// If we're reusing the same allocator as for one of the
 				// previous aggregate functions, we want to increment the alloc
-				// size (unless we're doing the hash aggregation). This is the
-				// case since we have allocSize = 1, so for all usages of this
-				// allocator (except for the first one) we want to bump
-				// funcAllocs[i].allocSize by 1.
-				// TODO(yuzefovich): if we ever make allocSize configurable,
-				// this logic should probably be changed (like if we make the
-				// alloc size 1 for hash aggregation, then we'd need to bump it
-				// with every reuse).
-				switch aggKind {
-				case OrderedAggKind, WindowAggKind:
-					if buildutil.CrdbTestBuild {
-						if allocSize != 1 {
-							colexecerror.InternalError(errors.AssertionFailedf(
-								"expected alloc size of 1, found %d", allocSize,
-							))
-						}
-					}
-					funcAllocs[i].incAllocSize()
-				}
+				// size accordingly.
+				funcAllocs[i].increaseAllocSize(initialAllocSize)
 			}
 		}
 	}
 	return &AggregateFuncsAlloc{
 		allocator:     args.Allocator,
 		allocSize:     allocSize,
+		maxAllocSize:  maxAllocSize,
 		aggFuncAllocs: funcAllocs,
 	}, inputArgsConverter, toClose, nil
 }
@@ -550,6 +538,28 @@ func (a *AggregateFuncsAlloc) MakeAggregateFuncs() []AggregateFunc {
 		// of 'allocSize x number of funcs in schema' length. Every
 		// aggFuncAlloc will allocate allocSize of objects on the newAggFunc
 		// call below.
+		//
+		// But first check whether we need to grow allocSize.
+		if a.returnFuncs != nil {
+			// We're doing the very first allocation when returnFuncs is nil, so
+			// we don't change the allocSize then.
+			if a.allocSize < a.maxAllocSize {
+				// We need to grow the alloc size of both this alloc object and
+				// all aggAlloc objects.
+				newAllocSize := a.allocSize * 2
+				if newAllocSize > a.maxAllocSize {
+					newAllocSize = a.maxAllocSize
+				}
+				delta := newAllocSize - a.allocSize
+				a.allocSize = newAllocSize
+				// Note that the same agg alloc object can be present multiple
+				// times in the aggFuncAllocs slice, and we do want to increase
+				// its alloc size every time we see it.
+				for _, alloc := range a.aggFuncAllocs {
+					alloc.increaseAllocSize(delta)
+				}
+			}
+		}
 		a.allocator.AdjustMemoryUsage(aggregateFuncSliceOverhead + sizeOfAggregateFunc*int64(len(a.aggFuncAllocs))*a.allocSize)
 		a.returnFuncs = make([]AggregateFunc, len(a.aggFuncAllocs)*int(a.allocSize))
 	}
@@ -566,8 +576,8 @@ type aggAllocBase struct {
 	allocSize int64
 }
 
-func (a *aggAllocBase) incAllocSize() {
-	a.allocSize++
+func (a *aggAllocBase) increaseAllocSize(delta int64) {
+	a.allocSize += delta
 }
 
 // ProcessAggregations processes all aggregate functions specified in
@@ -589,9 +599,10 @@ func ProcessAggregations(
 	constructors = make([]execagg.AggregateConstructor, len(aggregations))
 	constArguments = make([]tree.Datums, len(aggregations))
 	outputTypes = make([]*types.T, len(aggregations))
+	pAlloc := execagg.MakeParamTypesAllocator(aggregations)
 	for i, aggFn := range aggregations {
 		constructors[i], constArguments[i], outputTypes[i], err = execagg.GetAggregateConstructor(
-			ctx, evalCtx, semaCtx, &aggFn, inputTypes,
+			ctx, evalCtx, semaCtx, &aggFn, inputTypes, &pAlloc,
 		)
 		if err != nil {
 			return

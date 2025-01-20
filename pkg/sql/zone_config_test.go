@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -211,7 +206,6 @@ func TestGetZoneConfig(t *testing.T) {
 	verifyZoneConfigs([]testCase{
 		{0, nil, "", defaultZoneConfig},
 		{1, nil, "", defaultZoneConfig},
-		{keys.DeprecatedMaxSystemConfigDescID + 1, nil, "", defaultZoneConfig},
 		{db1, nil, "", defaultZoneConfig},
 		{db2, nil, "", defaultZoneConfig},
 		{tb11, nil, "", defaultZoneConfig},
@@ -295,7 +289,6 @@ func TestGetZoneConfig(t *testing.T) {
 	verifyZoneConfigs([]testCase{
 		{0, nil, "", defaultZoneConfig},
 		{1, nil, "", defaultZoneConfig},
-		{keys.DeprecatedMaxSystemConfigDescID + 1, nil, "", defaultZoneConfig},
 		{db1, nil, "", db1Cfg},
 		{db2, nil, "", defaultZoneConfig},
 		{tb11, nil, "", tb11Cfg},
@@ -448,7 +441,6 @@ func TestCascadingZoneConfig(t *testing.T) {
 	verifyZoneConfigs([]testCase{
 		{0, nil, "", defaultZoneConfig},
 		{1, nil, "", defaultZoneConfig},
-		{keys.DeprecatedMaxSystemConfigDescID + 1, nil, "", defaultZoneConfig},
 		{db1, nil, "", defaultZoneConfig},
 		{db2, nil, "", defaultZoneConfig},
 		{tb11, nil, "", defaultZoneConfig},
@@ -577,7 +569,6 @@ func TestCascadingZoneConfig(t *testing.T) {
 	verifyZoneConfigs([]testCase{
 		{0, nil, "", defaultZoneConfig},
 		{1, nil, "", defaultZoneConfig},
-		{keys.DeprecatedMaxSystemConfigDescID + 1, nil, "", defaultZoneConfig},
 		{db1, nil, "", expectedDb1Cfg},
 		{db2, nil, "", defaultZoneConfig},
 		{tb11, nil, "", expectedTb11Cfg},

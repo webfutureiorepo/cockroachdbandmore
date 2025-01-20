@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execstats_test
 
@@ -34,7 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/optional"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/stretchr/testify/assert"
+	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,7 +55,7 @@ func TestTraceAnalyzer(t *testing.T) {
 			UseDatabase: "test",
 			Knobs: base.TestingKnobs{
 				SQLExecutor: &sql.ExecutorTestingKnobs{
-					TestingSaveFlows: func(stmt string) func(map[base.SQLInstanceID]*execinfrapb.FlowSpec, execopnode.OpChains, []execinfra.LocalProcessor, bool) error {
+					TestingSaveFlows: func(stmt string) sql.SaveFlowsFunc {
 						if stmt != testStmt {
 							return func(map[base.SQLInstanceID]*execinfrapb.FlowSpec, execopnode.OpChains, []execinfra.LocalProcessor, bool) error {
 								return nil
@@ -130,16 +125,16 @@ func TestTraceAnalyzer(t *testing.T) {
 		})
 		_, err := ie.ExecEx(
 			execCtx,
-			t.Name(),
+			redact.RedactableString(t.Name()),
 			nil, /* txn */
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			testStmt,
 		)
 		require.NoError(t, err)
 		trace := finishAndCollect()
 		analyzer := <-analyzerChan
 		require.NoError(t, analyzer.AddTrace(trace, true /* makeDeterministic */))
-		require.NoError(t, analyzer.ProcessStats())
+		analyzer.ProcessStats()
 		switch vectorizeMode {
 		case sessiondatapb.VectorizeOff:
 			rowexecTraceAnalyzer = analyzer
@@ -164,17 +159,6 @@ func TestTraceAnalyzer(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			nodeLevelStats := tc.analyzer.GetNodeLevelStats()
-			require.Equal(
-				t, numNodes-1, len(nodeLevelStats.NetworkBytesSentGroupedByNode), "expected all nodes minus the gateway node to have sent bytes",
-			)
-			require.Equal(
-				t, numNodes, len(nodeLevelStats.MaxMemoryUsageGroupedByNode), "expected all nodes to have specified maximum memory usage",
-			)
-			require.Equal(
-				t, numNodes, len(nodeLevelStats.MaxDiskUsageGroupedByNode), "expected all nodes to have specified maximum disk usage",
-			)
-
 			queryLevelStats := tc.analyzer.GetQueryLevelStats()
 
 			// The stats don't count the actual bytes, but they are a synthetic value
@@ -243,18 +227,14 @@ func TestTraceAnalyzerProcessStats(t *testing.T) {
 	expected := execstats.QueryLevelStats{
 		KVTime:         cumulativeKVTime,
 		ContentionTime: cumulativeContentionTime,
-		Regions:        []string{},
-		SqlInstanceIds: make(map[base.SQLInstanceID]struct{}),
 	}
 
-	assert.NoError(t, a.ProcessStats())
+	a.ProcessStats()
 	require.Equal(t, a.GetQueryLevelStats(), expected)
 }
 
 func TestQueryLevelStatsAccumulate(t *testing.T) {
 	aEvent := kvpb.ContentionEvent{Duration: 7 * time.Second}
-	aSQLInstanceIds := map[base.SQLInstanceID]struct{}{}
-	aSQLInstanceIds[1] = struct{}{}
 	a := execstats.QueryLevelStats{
 		NetworkBytesSent:                   1,
 		MaxMemUsage:                        2,
@@ -282,13 +262,13 @@ func TestQueryLevelStatsAccumulate(t *testing.T) {
 		MvccRangeKeyCount:                  21,
 		MvccRangeKeyContainedPoints:        22,
 		MvccRangeKeySkippedPoints:          23,
-		SqlInstanceIds:                     aSQLInstanceIds,
+		SQLInstanceIDs:                     []int32{1},
+		KVNodeIDs:                          []int32{1, 2},
 		Regions:                            []string{"east-usA"},
+		UsedFollowerRead:                   false,
 		ClientTime:                         time.Second,
 	}
 	bEvent := kvpb.ContentionEvent{Duration: 14 * time.Second}
-	bSQLInstanceIds := map[base.SQLInstanceID]struct{}{}
-	bSQLInstanceIds[2] = struct{}{}
 	b := execstats.QueryLevelStats{
 		NetworkBytesSent:                   8,
 		MaxMemUsage:                        9,
@@ -316,13 +296,12 @@ func TestQueryLevelStatsAccumulate(t *testing.T) {
 		MvccRangeKeyCount:                  28,
 		MvccRangeKeyContainedPoints:        29,
 		MvccRangeKeySkippedPoints:          30,
-		SqlInstanceIds:                     bSQLInstanceIds,
+		SQLInstanceIDs:                     []int32{2},
+		KVNodeIDs:                          []int32{1, 3},
 		Regions:                            []string{"east-usB"},
+		UsedFollowerRead:                   true,
 		ClientTime:                         2 * time.Second,
 	}
-	cSQLInstanceIds := map[base.SQLInstanceID]struct{}{}
-	cSQLInstanceIds[1] = struct{}{}
-	cSQLInstanceIds[2] = struct{}{}
 	expected := execstats.QueryLevelStats{
 		NetworkBytesSent:                   9,
 		MaxMemUsage:                        9,
@@ -350,15 +329,17 @@ func TestQueryLevelStatsAccumulate(t *testing.T) {
 		MvccRangeKeyCount:                  49,
 		MvccRangeKeyContainedPoints:        51,
 		MvccRangeKeySkippedPoints:          53,
-		SqlInstanceIds:                     cSQLInstanceIds,
+		SQLInstanceIDs:                     []int32{1, 2},
+		KVNodeIDs:                          []int32{1, 2, 3},
 		Regions:                            []string{"east-usA", "east-usB"},
+		UsedFollowerRead:                   true,
 		ClientTime:                         3 * time.Second,
 	}
 
 	aCopy := a
 	// Copy will point to the same array.
-	aCopy.SqlInstanceIds = map[base.SQLInstanceID]struct{}{}
-	cSQLInstanceIds[1] = struct{}{}
+	aCopy.SQLInstanceIDs = []int32{1}
+	aCopy.KVNodeIDs = []int32{1, 2}
 	a.Accumulate(b)
 	require.Equal(t, expected, a)
 

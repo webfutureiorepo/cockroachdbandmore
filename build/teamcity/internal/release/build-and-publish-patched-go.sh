@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euo pipefail
 
 google_credentials="$GOOGLE_EPHEMERAL_CREDENTIALS"
@@ -14,9 +20,11 @@ this_dir="$(cd "$(dirname "${0}")"; pwd)"
 toplevel="$(dirname $(dirname $(dirname $(dirname $this_dir))))"
 
 mkdir -p "${toplevel}"/artifacts
+# We use a docker image mirror to avoid pulling from 3rd party repos, which sometimes have reliability issues.
+# See https://cockroachlabs.atlassian.net/wiki/spaces/devinf/pages/3462594561/Docker+image+sync for the details.
 docker run --rm -i ${tty-} -v $this_dir/build-and-publish-patched-go:/bootstrap \
        -v "${toplevel}"/artifacts:/artifacts \
-       ubuntu:focal /bootstrap/impl.sh
+       us-east1-docker.pkg.dev/crl-docker-sync/docker-io/library/ubuntu:focal /bootstrap/impl.sh
 tc_end_block "Build Go toolchains"
 
 tc_start_block "Build FIPS Go toolchains (linux/amd64)"

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -122,8 +117,7 @@ func importBufferConfigSizes(st *cluster.Settings, isPKAdder bool) (int64, func(
 type readImportDataProcessor struct {
 	execinfra.ProcessorBase
 
-	flowCtx *execinfra.FlowCtx
-	spec    execinfrapb.ReadImportDataSpec
+	spec execinfrapb.ReadImportDataSpec
 
 	cancel context.CancelFunc
 	wg     ctxgroup.Group
@@ -148,9 +142,8 @@ func newReadImportDataProcessor(
 	post *execinfrapb.PostProcessSpec,
 ) (execinfra.Processor, error) {
 	idp := &readImportDataProcessor{
-		flowCtx: flowCtx,
-		spec:    spec,
-		progCh:  make(chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress),
+		spec:   spec,
+		progCh: make(chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress),
 	}
 	if err := idp.Init(ctx, idp, post, csvOutputTypes, flowCtx, processorID, nil, /* memMonitor */
 		execinfra.ProcStateOpts{
@@ -167,11 +160,11 @@ func newReadImportDataProcessor(
 	// Load the import job running the import in case any of the columns have a
 	// default expression which uses sequences. In this case we need to update the
 	// job progress within the import processor.
-	if idp.flowCtx.Cfg.JobRegistry != nil {
+	if idp.FlowCtx.Cfg.JobRegistry != nil {
 		idp.seqChunkProvider = &row.SeqChunkProvider{
 			JobID:    idp.spec.Progress.JobID,
-			Registry: idp.flowCtx.Cfg.JobRegistry,
-			DB:       idp.flowCtx.Cfg.DB,
+			Registry: idp.FlowCtx.Cfg.JobRegistry,
+			DB:       idp.FlowCtx.Cfg.DB,
 		}
 	}
 
@@ -188,7 +181,7 @@ func (idp *readImportDataProcessor) Start(ctx context.Context) {
 	idp.wg = ctxgroup.WithContext(grpCtx)
 	idp.wg.GoCtx(func(ctx context.Context) error {
 		defer close(idp.progCh)
-		idp.summary, idp.importErr = runImport(ctx, idp.flowCtx, &idp.spec, idp.progCh,
+		idp.summary, idp.importErr = runImport(ctx, idp.FlowCtx, &idp.spec, idp.progCh,
 			idp.seqChunkProvider)
 		return nil
 	})
@@ -240,7 +233,9 @@ func (idp *readImportDataProcessor) close() {
 		return
 	}
 
-	idp.cancel()
+	if idp.cancel != nil {
+		idp.cancel()
+	}
 	_ = idp.wg.Wait()
 
 	idp.InternalClose()
@@ -389,6 +384,16 @@ func ingestKvs(
 	// will hog memory as it tries to grow more aggressively.
 	minBufferSize, maxBufferSize := importBufferConfigSizes(flowCtx.Cfg.Settings,
 		true /* isPKAdder */)
+
+	var bulkAdderImportEpoch uint32
+	for _, v := range spec.Tables {
+		if bulkAdderImportEpoch == 0 {
+			bulkAdderImportEpoch = v.Desc.ImportEpoch
+		} else if bulkAdderImportEpoch != v.Desc.ImportEpoch {
+			return nil, errors.AssertionFailedf("inconsistent import epoch on multi-table import")
+		}
+	}
+
 	pkIndexAdder, err := flowCtx.Cfg.BulkAdder(ctx, flowCtx.Cfg.DB.KV(), writeTS, kvserverbase.BulkAdderOptions{
 		Name:                     pkAdderName,
 		DisallowShadowingBelow:   writeTS,
@@ -397,6 +402,7 @@ func ingestKvs(
 		MaxBufferSize:            maxBufferSize,
 		InitialSplitsIfUnordered: int(spec.InitialSplits),
 		WriteAtBatchTimestamp:    true,
+		ImportEpoch:              bulkAdderImportEpoch,
 	})
 	if err != nil {
 		return nil, err
@@ -413,6 +419,7 @@ func ingestKvs(
 		MaxBufferSize:            maxBufferSize,
 		InitialSplitsIfUnordered: int(spec.InitialSplits),
 		WriteAtBatchTimestamp:    true,
+		ImportEpoch:              bulkAdderImportEpoch,
 	})
 	if err != nil {
 		return nil, err

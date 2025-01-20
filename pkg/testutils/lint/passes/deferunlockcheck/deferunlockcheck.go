@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package deferunlockcheck
 
@@ -16,7 +11,6 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/cockroachdb/cockroach/pkg/testutils/lint/passes/loopvarcapture"
 	"github.com/cockroachdb/cockroach/pkg/testutils/lint/passes/passesutil"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -40,7 +34,15 @@ var Analyzer = &analysis.Analyzer{
 	Run:      run,
 }
 
-var mutexFunctions = []loopvarcapture.Function{
+// Function defines the location of a function (package-level or
+// method on a type).
+type Function struct {
+	Pkg  string
+	Type string // empty for package-level functions
+	Name string
+}
+
+var mutexFunctions = []Function{
 	{Pkg: "github.com/cockroachdb/cockroach/pkg/util/syncutil", Type: "Mutex", Name: "Lock"},
 	{Pkg: "github.com/cockroachdb/cockroach/pkg/util/syncutil", Type: "Mutex", Name: "Unlock"},
 	{Pkg: "github.com/cockroachdb/cockroach/pkg/util/syncutil", Type: "RWMutex", Name: "Lock"},
@@ -240,7 +242,7 @@ func (lt *LockTracker) addLock(call *ast.CallExpr, isRead bool) {
 
 // maybeReportUnlock tries to find a matching lock for a given unlock by
 // iterating backwards in the locks slice. If one is found, it checks if the
-// distance between is greater than maxLineDistance and also has no nlint
+// distance between is greater than maxLineDistance and also has no nolint
 // comment and reports on that if both are true.
 func (lt *LockTracker) maybeReportUnlock(call *ast.CallExpr, isRead bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)

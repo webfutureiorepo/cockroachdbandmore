@@ -8,15 +8,9 @@ go_test(
         "//c-deps:libgeos",  # keep
         "//pkg/ccl/logictestccl:testdata",  # keep
     ],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "large"},
-    }),
-    shard_count = 16,
-    tags = [
-        "ccl_test",
-        "cpu:4",
-    ],
+    exec_properties = {"test.Pool": "large"},
+    shard_count = 17,
+    tags = ["cpu:4"],
     deps = [
         "//pkg/base",
         "//pkg/build/bazel",

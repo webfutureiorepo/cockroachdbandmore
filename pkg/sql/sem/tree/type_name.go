@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
@@ -42,34 +37,13 @@ func (t *TypeName) Type() string {
 
 // Format implements the NodeFormatter interface.
 func (t *TypeName) Format(ctx *FmtCtx) {
-	ctx.FormatNode(&t.ObjectNamePrefix)
-	if t.ExplicitSchema || ctx.alwaysFormatTablePrefix() {
-		ctx.WriteByte('.')
-	}
-	ctx.FormatNode(&t.ObjectName)
-}
-
-// String implements the Stringer interface.
-func (t *TypeName) String() string {
-	return AsString(t)
+	t.objName.Format(ctx)
 }
 
 // SQLString implements the ResolvableTypeReference interface.
 func (t *TypeName) SQLString() string {
 	// FmtBareIdentifiers prevents the TypeName string from being wrapped in quotations.
 	return AsStringWithFlags(t, FmtBareIdentifiers)
-}
-
-// FQString renders the type name in full, not omitting the prefix
-// schema and catalog names. Suitable for logging, etc.
-func (t *TypeName) FQString() string {
-	ctx := NewFmtCtx(FmtSimple)
-	ctx.FormatNode(&t.CatalogName)
-	ctx.WriteByte('.')
-	ctx.FormatNode(&t.SchemaName)
-	ctx.WriteByte('.')
-	ctx.FormatNode(&t.ObjectName)
-	return ctx.CloseAndGetString()
 }
 
 func (t *TypeName) objectName() {}
@@ -103,12 +77,9 @@ func MakeTypeNameWithPrefix(prefix ObjectNamePrefix, typ string) TypeName {
 
 // MakeQualifiedTypeName creates a fully qualified type name.
 func MakeQualifiedTypeName(db, schema, typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{
-		ExplicitCatalog: true,
-		CatalogName:     Name(db),
-		ExplicitSchema:  true,
-		SchemaName:      Name(schema),
-	}, typ)
+	return TypeName{
+		objName: makeQualifiedObjName(Name(db), Name(schema), Name(typ)),
+	}
 }
 
 // NewQualifiedTypeName returns a fully qualified type name.
@@ -174,11 +145,11 @@ func ResolveType(
 
 // We need to inject the logic for formatting types into the types package.
 func init() {
-	types.FormatTypeName = func(name types.UserDefinedTypeName) string {
+	types.FormatTypeName = func(name types.UserDefinedTypeName, explicitCatalog bool) string {
 		n := MakeTypeNameWithPrefix(ObjectNamePrefix{
 			CatalogName:     Name(name.Catalog),
 			SchemaName:      Name(name.Schema),
-			ExplicitCatalog: name.Catalog != "",
+			ExplicitCatalog: explicitCatalog && name.Catalog != "",
 			ExplicitSchema:  name.ExplicitSchema,
 		}, name.Name)
 		return AsString(&n)
@@ -199,7 +170,13 @@ func (ctx *FmtCtx) FormatTypeReference(ref ResolvableTypeReference) {
 				return
 			}
 		}
-		ctx.WriteString(t.SQLString())
+		// If needed, get the full name of the type for use as a type reference.
+		// We may need the three-part name to properly detect cross-database access.
+		if ctx.HasFlags(FmtAlwaysQualifyUserDefinedTypeNames) {
+			ctx.WriteString(t.SQLStringFullyQualified())
+		} else {
+			ctx.WriteString(t.SQLString())
+		}
 
 	case *OIDTypeReference:
 		if ctx.indexedTypeFormatter != nil {

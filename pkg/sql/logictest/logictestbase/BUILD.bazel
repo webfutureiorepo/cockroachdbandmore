@@ -10,6 +10,7 @@ go_library(
         "//pkg/build",
         "//pkg/clusterversion",
         "//pkg/roachpb",
+        "//pkg/sql/sem/tree",
     ],
 )
 
@@ -17,9 +18,5 @@ go_test(
     name = "logictestbase_test",
     srcs = ["logictestbase_test.go"],
     embed = [":logictestbase"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = ["//pkg/clusterversion"],
 )

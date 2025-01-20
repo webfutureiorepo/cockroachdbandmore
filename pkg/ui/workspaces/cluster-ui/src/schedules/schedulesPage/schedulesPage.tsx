@@ -1,18 +1,16 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { InlineAlert } from "@cockroachlabs/ui-components";
+import classNames from "classnames/bind";
 import moment from "moment-timezone";
 import React, { useEffect } from "react";
 import { Helmet } from "react-helmet";
 import { RouteComponentProps } from "react-router-dom";
+
 import { Schedules } from "src/api/schedulesApi";
+import { commonStyles } from "src/common";
 import { Delayed } from "src/delayed";
 import { Dropdown } from "src/dropdown";
 import { Loading } from "src/loading";
@@ -20,13 +18,10 @@ import { PageConfig, PageConfigItem } from "src/pageConfig";
 import { SortSetting } from "src/sortedtable";
 import { syncHistory } from "src/util";
 
-import { ScheduleTable } from "./scheduleTable";
-
-import { commonStyles } from "src/common";
 import styles from "../schedules.module.scss";
-import classNames from "classnames/bind";
 
 import { statusOptions, showOptions } from "./scheduleOptions";
+import { ScheduleTable } from "./scheduleTable";
 
 const cx = classNames.bind(styles);
 

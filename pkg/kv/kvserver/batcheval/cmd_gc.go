@@ -1,18 +1,13 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -120,8 +115,8 @@ func mergeAdjacentSpans(spans []roachpb.Span) []roachpb.Span {
 	if len(spans) == 0 {
 		return nil
 	}
-	sort.Slice(spans, func(i, j int) bool {
-		return spans[i].Key.Compare(spans[j].Key) < 0
+	slices.SortFunc(spans, func(a, b roachpb.Span) int {
+		return a.Key.Compare(b.Key)
 	})
 	j := 0
 	for i := 1; i < len(spans); i++ {

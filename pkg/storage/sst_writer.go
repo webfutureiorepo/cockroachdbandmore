@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -15,15 +10,29 @@ import (
 	"context"
 	"io"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage"
 	"github.com/cockroachdb/pebble/rangekey"
 	"github.com/cockroachdb/pebble/sstable"
 )
+
+// IngestionValueBlocksEnabled controls whether older versions of MVCC keys in
+// the same ingested sstable will have their values written to value blocks.
+// This configuration ability was motivated by a case of > 130GB sstables,
+// caused by snapshot ingestion. Writing value blocks requires in-memory
+// buffering of compressed value blocks, which caused OOMs in the above case.
+var IngestionValueBlocksEnabled = settings.RegisterBoolSetting(
+	settings.ApplicationLevel,
+	"storage.ingestion.value_blocks.enabled",
+	"set to true to enable writing of value blocks in ingestion sstables",
+	metamorphic.ConstantWithTestBool(
+		"storage.ingestion.value_blocks.enabled", true),
+	settings.WithPublic)
 
 // SSTWriter writes SSTables.
 type SSTWriter struct {
@@ -32,8 +41,7 @@ type SSTWriter struct {
 	DataSize int64
 	scratch  []byte
 
-	Meta              *sstable.WriterMetadata
-	supportsRangeKeys bool // TODO(erikgrinaker): remove after 22.2
+	Meta *sstable.WriterMetadata
 }
 
 var _ Writer = &SSTWriter{}
@@ -69,20 +77,28 @@ func (*noopFinishAbort) Finish() error {
 func (*noopFinishAbort) Abort() {}
 
 // MakeIngestionWriterOptions returns writer options suitable for writing SSTs
-// that will subsequently be ingested (e.g. with AddSSTable).
+// that will subsequently be ingested (e.g. with AddSSTable). These options are
+// also used when constructing sstables for backups (because these sstables may
+// ultimately be ingested during online restore).
 func MakeIngestionWriterOptions(ctx context.Context, cs *cluster.Settings) sstable.WriterOptions {
-	// By default, take a conservative approach and assume we don't have newer
-	// table features available. Upgrade to an appropriate version only if the
-	// cluster supports it.
-	format := sstable.TableFormatPebblev2
-	if ValueBlocksEnabled.Get(&cs.SV) {
-		format = sstable.TableFormatPebblev3
+	// All supported versions understand TableFormatPebblev4. If columnar blocks
+	// are enabled and the active cluster version is at least 24.3, use
+	// TableFormatPebblev5.
+	format := sstable.TableFormatPebblev4
+	if ColumnarBlocksEnabled.Get(&cs.SV) {
+		format = sstable.TableFormatPebblev5
 	}
-	if cs.Version.IsActive(ctx, clusterversion.V23_2_EnablePebbleFormatVirtualSSTables) {
-		format = sstable.TableFormatPebblev4
-	}
+
 	opts := DefaultPebbleOptions().MakeWriterOptions(0, format)
+	// By default, compress with the algorithm used for storage in a Pebble store.
+	// There are other, more specific, use cases that may call for a different
+	// algorithm, which can be set by overriding the default (see
+	// MakeIngestionSSTWriterWithOverrides).
+	opts.Compression = getCompressionAlgorithm(ctx, cs, CompressionAlgorithmStorage)
 	opts.MergerName = "nullptr"
+	if !IngestionValueBlocksEnabled.Get(&cs.SV) {
+		opts.DisableValueBlocks = true
+	}
 	return opts
 }
 
@@ -97,18 +113,26 @@ func makeSSTRewriteOptions(
 	return MakeIngestionWriterOptions(ctx, cs), sstable.TableFormatPebblev2
 }
 
-// MakeBackupSSTWriter creates a new SSTWriter tailored for backup SSTs which
-// are typically only ever iterated in their entirety.
-func MakeBackupSSTWriter(ctx context.Context, cs *cluster.Settings, f io.Writer) SSTWriter {
+// MakeTransportSSTWriter creates a new SSTWriter tailored for sstables
+// constructed exclusively for transport, which are typically only ever iterated
+// in their entirety and not durably persisted. At the time of writing, this is
+// used by export requests. During a backup, the export requests will construct
+// sstables using this writer, those sstables will be sent over the network,
+// scanned and their keys inserted into new sstables (NB: constructed using
+// MakeIngestionSSTWriter) that ultimately are uploaded to object storage.
+func MakeTransportSSTWriter(ctx context.Context, cs *cluster.Settings, f io.Writer) SSTWriter {
 	// By default, take a conservative approach and assume we don't have newer
 	// table features available. Upgrade to an appropriate version only if the
 	// cluster supports it.
-	format := sstable.TableFormatPebblev2
+	format := sstable.TableFormatPebblev4
+	if ColumnarBlocksEnabled.Get(&cs.SV) {
+		format = sstable.TableFormatPebblev5
+	}
 
-	// TODO(sumeer): add code to use TableFormatPebblev3 after confirming that
-	// we won't run afoul of any stale tooling that reads backup ssts.
 	opts := DefaultPebbleOptions().MakeWriterOptions(0, format)
 
+	// Don't need value blocks.
+	opts.DisableValueBlocks = true
 	// Don't need BlockPropertyCollectors for backups.
 	opts.BlockPropertyCollectors = nil
 	// Disable bloom filters since we only ever iterate backups.
@@ -117,38 +141,62 @@ func MakeBackupSSTWriter(ctx context.Context, cs *cluster.Settings, f io.Writer)
 	// block checksums and more index entries are just overhead and smaller blocks
 	// reduce compression ratio.
 	opts.BlockSize = 128 << 10
+	opts.Compression = getCompressionAlgorithm(ctx, cs, CompressionAlgorithmBackupTransport)
 	opts.MergerName = "nullptr"
 	return SSTWriter{
-		fw:                sstable.NewWriter(&noopFinishAbort{f}, opts),
-		supportsRangeKeys: opts.TableFormat >= sstable.TableFormatPebblev2,
+		fw: sstable.NewWriter(&noopFinishAbort{f}, opts),
 	}
 }
 
 // MakeIngestionSSTWriter creates a new SSTWriter tailored for ingestion SSTs.
 // These SSTs have bloom filters enabled (as set in DefaultPebbleOptions). If
 // the cluster settings permit value blocks, the SST may contain value blocks.
+// This writer is used when constructing sstables for backups too, because
+// backup sstables may ultimately be ingested during online restore.
 func MakeIngestionSSTWriter(
 	ctx context.Context, cs *cluster.Settings, w objstorage.Writable,
 ) SSTWriter {
-	return MakeIngestionSSTWriterWithValueBlockOverride(ctx, cs, w, false)
+	return MakeIngestionSSTWriterWithOverrides(ctx, cs, w)
 }
 
-// MakeIngestionSSTWriterWithValueBlockOverride creates a new SSTWriter
-// tailored for ingestion SSTs. These SSTs have bloom filters enabled (as set
-// in DefaultPebbleOptions) and format set to the highest permissible by the
-// cluster settings. Callers that expect to write huge SSTs, say 200+MB, which
-// could contain multiple versions for the same key, should set
-// disableValueBlocks to true. This is because value blocks are buffered
-// in-memory while writing the SST (see
+// SSTWriterOption augments one or more sstable.WriterOptions.
+type SSTWriterOption func(opts *sstable.WriterOptions)
+
+// WithValueBlocksDisabled disables the use of value blocks in an SSTable.
+var WithValueBlocksDisabled SSTWriterOption = func(opts *sstable.WriterOptions) {
+	opts.DisableValueBlocks = true
+}
+
+// WithCompressionFromClusterSetting sets the compression algorithm for an
+// SSTable based on the value of the given cluster setting.
+func WithCompressionFromClusterSetting(
+	ctx context.Context, cs *cluster.Settings, setting *settings.EnumSetting[compressionAlgorithm],
+) SSTWriterOption {
+	return func(opts *sstable.WriterOptions) {
+		opts.Compression = getCompressionAlgorithm(ctx, cs, setting)
+	}
+}
+
+// MakeIngestionSSTWriterWithOverrides creates a new SSTWriter tailored for
+// ingestion SSTs. Note that writer is used when constructing sstables for
+// backups, because backup sstables may ultimately be ingested during online
+// restore.
+//
+// These SSTs have bloom filters enabled (as set in DefaultPebbleOptions) and
+// format set to the highest permissible by the cluster settings. Callers that
+// expect to write huge SSTs, say 200+MB, which could contain multiple versions
+// for the same key, should pass in a WithValueBlocksDisabled option. This is
+// because value blocks are buffered in-memory while writing the SST (see
 // https://github.com/cockroachdb/cockroach/issues/117113).
-func MakeIngestionSSTWriterWithValueBlockOverride(
-	ctx context.Context, cs *cluster.Settings, w objstorage.Writable, disableValueBlocks bool,
+func MakeIngestionSSTWriterWithOverrides(
+	ctx context.Context, cs *cluster.Settings, w objstorage.Writable, overrides ...SSTWriterOption,
 ) SSTWriter {
 	opts := MakeIngestionWriterOptions(ctx, cs)
-	opts.DisableValueBlocks = disableValueBlocks
+	for _, o := range overrides {
+		o(&opts)
+	}
 	return SSTWriter{
-		fw:                sstable.NewWriter(w, opts),
-		supportsRangeKeys: opts.TableFormat >= sstable.TableFormatPebblev2,
+		fw: sstable.NewWriter(w, opts),
 	}
 }
 
@@ -162,7 +210,7 @@ func (fw *SSTWriter) Finish() error {
 		return err
 	}
 	var err error
-	fw.Meta, err = fw.fw.Metadata()
+	fw.Meta, err = fw.fw.Raw().Metadata()
 	fw.fw = nil
 	return err
 }
@@ -177,7 +225,7 @@ func (fw *SSTWriter) ClearRawRange(start, end roachpb.Key, pointKeys, rangeKeys 
 			return err
 		}
 	}
-	if rangeKeys && fw.supportsRangeKeys {
+	if rangeKeys {
 		fw.DataSize += int64(len(start)) + int64(len(end))
 		if err := fw.fw.RangeKeyDelete(fw.scratch, endRaw); err != nil {
 			return err
@@ -220,11 +268,15 @@ func (fw *SSTWriter) PutRawMVCCRangeKey(rangeKey MVCCRangeKey, value []byte) err
 
 // ClearMVCCRangeKey implements the Writer interface.
 func (fw *SSTWriter) ClearMVCCRangeKey(rangeKey MVCCRangeKey) error {
-	if !fw.supportsRangeKeys {
-		return nil // noop
-	}
 	if err := rangeKey.Validate(); err != nil {
 		return err
+	}
+	// If the range key holds an encoded timestamp as it was read from storage,
+	// write the tombstone to clear it using the same encoding of the timestamp.
+	// See #129592.
+	if len(rangeKey.EncodedTimestampSuffix) > 0 {
+		return fw.ClearEngineRangeKey(rangeKey.StartKey, rangeKey.EndKey,
+			rangeKey.EncodedTimestampSuffix)
 	}
 	return fw.ClearEngineRangeKey(rangeKey.StartKey, rangeKey.EndKey,
 		EncodeMVCCTimestampSuffix(rangeKey.Timestamp))
@@ -232,9 +284,6 @@ func (fw *SSTWriter) ClearMVCCRangeKey(rangeKey MVCCRangeKey) error {
 
 // PutEngineRangeKey implements the Writer interface.
 func (fw *SSTWriter) PutEngineRangeKey(start, end roachpb.Key, suffix, value []byte) error {
-	if !fw.supportsRangeKeys {
-		return errors.New("range keys not supported by SST writer")
-	}
 	// MVCC values don't account for the timestamp, so we don't account
 	// for the suffix here.
 	fw.DataSize += int64(len(start)) + int64(len(end)) + int64(len(value))
@@ -244,13 +293,21 @@ func (fw *SSTWriter) PutEngineRangeKey(start, end roachpb.Key, suffix, value []b
 
 // ClearEngineRangeKey implements the Writer interface.
 func (fw *SSTWriter) ClearEngineRangeKey(start, end roachpb.Key, suffix []byte) error {
-	if !fw.supportsRangeKeys {
-		return nil // noop
-	}
 	// MVCC values don't account for the timestamp, so we don't account for the
 	// suffix here.
 	fw.DataSize += int64(len(start)) + int64(len(end))
 	return fw.fw.RangeKeyUnset(EngineKey{Key: start}.Encode(), EngineKey{Key: end}.Encode(), suffix)
+}
+
+// ClearEngineRange clears point keys in the specified EngineKey range.
+func (fw *SSTWriter) ClearEngineRange(start, end EngineKey) error {
+	fw.scratch = start.EncodeToBuf(fw.scratch[:0])
+	endRaw := end.Encode()
+	fw.DataSize += int64(len(start.Key)) + int64(len(end.Key))
+	if err := fw.fw.DeleteRange(fw.scratch, endRaw); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ClearRawEncodedRange implements the InternalWriter interface.
@@ -269,9 +326,6 @@ func (fw *SSTWriter) ClearRawEncodedRange(start, end []byte) error {
 
 // PutInternalRangeKey implements the InternalWriter interface.
 func (fw *SSTWriter) PutInternalRangeKey(start, end []byte, key rangekey.Key) error {
-	if !fw.supportsRangeKeys {
-		return errors.New("range keys not supported by SST writer")
-	}
 	startEngine, ok := DecodeEngineKey(start)
 	if !ok {
 		return errors.New("cannot decode engine key")
@@ -300,7 +354,7 @@ func (fw *SSTWriter) PutInternalPointKey(key *pebble.InternalKey, value []byte) 
 		return errors.New("cannot decode engine key")
 	}
 	fw.DataSize += int64(len(ek.Key)) + int64(len(value))
-	return fw.fw.Add(*key, value)
+	return fw.fw.Raw().AddWithForceObsolete(*key, value, false /* forceObsolete */)
 }
 
 // clearRange clears all point keys in the given range by dropping a Pebble
@@ -502,6 +556,13 @@ func (fw *SSTWriter) ShouldWriteLocalTimestamps(context.Context) bool {
 // BufferedSize implements the Writer interface.
 func (fw *SSTWriter) BufferedSize() int {
 	return 0
+}
+
+// EstimatedSize returns the underlying RawWriter's estimated size. Note that
+// this size is an estimate as if the writer were to be closed at the time of
+// calling.
+func (fw *SSTWriter) EstimatedSize() uint64 {
+	return fw.fw.Raw().EstimatedSize()
 }
 
 // MemObject is an in-memory implementation of objstorage.Writable, intended

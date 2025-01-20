@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package diagutils
 
@@ -15,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/server/diagnostics/diagnosticspb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -32,6 +28,11 @@ type Server struct {
 
 		numRequests int
 		last        *RequestData
+
+		// Testing knobs. Setting these will override response from the test server.
+		respError   error
+		respCode    int
+		waitSeconds int
 	}
 }
 
@@ -81,6 +82,16 @@ func NewServer() *Server {
 			panic(err)
 		}
 		srv.mu.last = data
+
+		if srv.mu.waitSeconds > 0 {
+			time.Sleep(time.Duration(srv.mu.waitSeconds) * time.Second)
+		}
+
+		if srv.mu.respError != nil {
+			http.Error(w, srv.mu.respError.Error(), srv.mu.respCode)
+		} else if srv.mu.respCode != 0 {
+			w.WriteHeader(srv.mu.respCode)
+		}
 	}))
 
 	var err error
@@ -116,4 +127,34 @@ func (s *Server) LastRequestData() *RequestData {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mu.last
+}
+
+func (s *Server) SetRespError(e error) func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.mu.respError = e
+	return func() {
+		s.SetRespError(nil)
+	}
+}
+
+func (s *Server) SetRespCode(code int) func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.mu.respCode = code
+	return func() {
+		s.SetRespCode(0)
+	}
+}
+
+func (s *Server) SetWaitSeconds(seconds int) func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.mu.waitSeconds = seconds
+	return func() {
+		s.SetWaitSeconds(0)
+	}
 }

@@ -1,16 +1,12 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
 import (
+	"context"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
@@ -20,10 +16,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedidx"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/partition"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
+	"github.com/cockroachdb/errors"
 )
 
 // IsLocking returns true if the ScanPrivate is configured to use a row-level
@@ -106,7 +104,8 @@ func (c *CustomFuncs) GeneratePartialIndexScans(
 	// Iterate over all partial indexes.
 	var pkCols opt.ColSet
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, filters, rejectNonPartialIndexes|rejectInvertedIndexes)
+	reject := rejectNonPartialIndexes | rejectInvertedIndexes | rejectVectorIndexes
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, filters, reject)
 	iter.ForEach(func(index cat.Index, remainingFilters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
 		var sb indexScanBuilder
 		sb.Init(c, scanPrivate.Table)
@@ -320,11 +319,11 @@ func (c *CustomFuncs) MakeCombinedFiltersConstraint(
 			return nil, nil, nil, false
 		}
 
-		combinedConstraint.UnionWith(c.e.evalCtx, inBetweenConstraint)
+		combinedConstraint.UnionWith(c.e.ctx, c.e.evalCtx, inBetweenConstraint)
 
 		// Even though the partitioned constraints and the inBetween constraints
 		// were consolidated, we must make sure their Union is as well.
-		combinedConstraint.ConsolidateSpans(c.e.evalCtx, ps)
+		combinedConstraint.ConsolidateSpans(c.e.ctx, c.e.evalCtx, ps)
 		// Add all remaining filters that need to be present in the
 		// inBetween spans. Some of the remaining filters are common
 		// between them, so we must deduplicate them.
@@ -435,9 +434,10 @@ func (c *CustomFuncs) GenerateConstrainedScans(
 	optionalFilters, filterColumns :=
 		c.GetOptionalFiltersAndFilterColumns(explicitFilters, scanPrivate)
 
-	// Iterate over all non-inverted indexes.
+	// Iterate over all non-inverted, non-vector indexes.
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, explicitFilters, rejectInvertedIndexes)
+	reject := rejectInvertedIndexes | rejectVectorIndexes
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, explicitFilters, reject)
 	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
 
 		// Create a prefix sorter that describes which index partitions are
@@ -453,12 +453,37 @@ func (c *CustomFuncs) GenerateConstrainedScans(
 			return
 		}
 
+		// Make a best-effort check to avoid generating trivial constrained scans
+		// that actually scan the entire table.
+		//
+		// As a special case, omit singleton tables (statically guaranteed to have
+		// one row). This is advantageous because a full-table constrained scan for
+		// a singleton table will be performed using a Get instead of a Scan, which
+		// allows for some low-level optimizations.
+		if !grp.Relational().Cardinality.IsZeroOrOne() {
+			checkConstraintFilters := c.checkConstraintFilters(scanPrivate.Table)
+			for i := range checkConstraintFilters {
+				if !checkConstraintFilters[i].ScalarProps().TightConstraints {
+					continue
+				}
+				optionalConstraints := checkConstraintFilters[i].ScalarProps().Constraints
+				if optionalConstraints == nil {
+					continue
+				}
+				for j := 0; j < optionalConstraints.Length(); j++ {
+					if combinedConstraint.Contains(c.e.ctx, c.e.evalCtx, optionalConstraints.Constraint(j)) {
+						return
+					}
+				}
+			}
+		}
+
 		// Construct new constrained ScanPrivate.
 		newScanPrivate := *scanPrivate
 		newScanPrivate.Distribution.Regions = nil
 		newScanPrivate.Index = index.Ordinal()
 		newScanPrivate.Cols = indexCols.Intersection(scanPrivate.Cols)
-		newScanPrivate.SetConstraint(c.e.evalCtx, combinedConstraint)
+		newScanPrivate.SetConstraint(c.e.ctx, c.e.evalCtx, combinedConstraint)
 		// Record whether we were able to use partitions to constrain the scan.
 		newScanPrivate.PartitionConstrainedScan = len(partitionFilters) > 0
 
@@ -548,7 +573,7 @@ func (c *CustomFuncs) inBetweenFilters(
 
 	// Sort the partitionValues lexicographically.
 	sort.Slice(partitionValues, func(i, j int) bool {
-		return partitionValues[i].Compare(c.e.evalCtx, partitionValues[j]) < 0
+		return partitionValues[i].Compare(c.e.ctx, c.e.evalCtx, partitionValues[j]) < 0
 	})
 
 	// The beginExpr created below will not include NULL values for the first
@@ -716,7 +741,9 @@ func (c *CustomFuncs) isPrefixOf(pre []tree.Datum, other []tree.Datum) bool {
 		return false
 	}
 	for i := range pre {
-		if pre[i].Compare(c.e.evalCtx, other[i]) != 0 {
+		if cmp, err := pre[i].Compare(c.e.ctx, c.e.evalCtx, other[i]); err != nil {
+			panic(err)
+		} else if cmp != 0 {
 			return false
 		}
 	}
@@ -816,6 +843,47 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 	scanPrivate *memo.ScanPrivate,
 	filters memo.FiltersExpr,
 ) {
+	c.generateInvertedIndexScansImpl(
+		grp,
+		nil, /* input */
+		scanPrivate,
+		filters,
+		false, /* minimizeSpans */
+	)
+}
+
+// GenerateMinimalInvertedIndexScans is similar to GenerateInvertedIndexScans.
+// It differs by trying to generate an inverted index scan that spans the fewest
+// index keys, rather than generating scans that span all index keys in the
+// expression and performing set operations on them before an index-join. It
+// currently only works on JSON and array inverted indexes.
+//
+// TODO(mgartner): It may be simpler to implement these scans with constraints
+// rather than inverted spans. It may also allow more fine-grained control over
+// the remaining filters applied after the scan.
+func (c *CustomFuncs) GenerateMinimalInvertedIndexScans(
+	grp memo.RelExpr,
+	required *physical.Required,
+	input memo.RelExpr,
+	scanPrivate *memo.ScanPrivate,
+	filters memo.FiltersExpr,
+) {
+	c.generateInvertedIndexScansImpl(grp, input, scanPrivate, filters, true /* minimizeSpans */)
+}
+
+// generateInvertedIndexScansImpl is the implementation of
+// GenerateInvertedIndexScans and GenerateMinimalInvertedIndexScans.
+func (c *CustomFuncs) generateInvertedIndexScansImpl(
+	grp memo.RelExpr,
+	input memo.RelExpr,
+	scanPrivate *memo.ScanPrivate,
+	filters memo.FiltersExpr,
+	minimizeSpans bool,
+) {
+	if input == nil && minimizeSpans {
+		panic(errors.AssertionFailedf("expected non-nil input required to reduce spans"))
+	}
+
 	var pkCols opt.ColSet
 	var sb indexScanBuilder
 	sb.Init(c, scanPrivate.Table)
@@ -831,8 +899,17 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 	var iter scanIndexIter
 	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
 	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
+		invColID := scanPrivate.Table.ColumnID(index.InvertedColumn().InvertedSourceColumnOrdinal())
+		invColTypeFamily := c.e.f.Metadata().ColumnMeta(invColID).Type.Family()
+		jsonOrArray := invColTypeFamily == types.JsonFamily || invColTypeFamily == types.ArrayFamily
+
+		// Only attempt to reduce spans for JSON and array inverted indexes.
+		if minimizeSpans && !jsonOrArray {
+			return
+		}
+
 		// Check whether the filter can constrain the index.
-		spanExpr, constraint, remainingFilters, pfState, ok := invertedidx.TryFilterInvertedIndex(
+		spanExpr, con, remainingFilters, pfState, ok := invertedidx.TryFilterInvertedIndex(
 			c.e.ctx, c.e.evalCtx, c.e.f, filters, optionalFilters, scanPrivate.Table, index, tabMeta.ComputedCols,
 			c.checkCancellation,
 		)
@@ -840,6 +917,18 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 			// A span expression to constrain the inverted index could not be
 			// generated.
 			return
+		}
+		if minimizeSpans {
+			newSpanExpr, ok := reduceInvertedSpans(c.e.ctx, input, scanPrivate.Table, index, spanExpr)
+			if !ok {
+				// The span expression could not be reduced, so skip this index.
+				// An inverted index scan may still be generated for it when
+				// minimizeSpans=false.
+				return
+			}
+			spanExpr = newSpanExpr
+			// If the span was reduced, the original filters must be applied.
+			remainingFilters = filters
 		}
 		spansToRead := spanExpr.SpansToRead
 		// Override the filters with remainingFilters. If the index is a
@@ -866,7 +955,7 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 		newScanPrivate := *scanPrivate
 		newScanPrivate.Distribution.Regions = nil
 		newScanPrivate.Index = index.Ordinal()
-		newScanPrivate.SetConstraint(c.e.evalCtx, constraint)
+		newScanPrivate.SetConstraint(c.e.ctx, c.e.evalCtx, con)
 		newScanPrivate.InvertedConstraint = spansToRead
 
 		if scanPrivate.Flags.NoIndexJoin {
@@ -882,10 +971,6 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 		// produce duplicate primary keys or requires at least one UNION or
 		// INTERSECTION. In this case, we must scan both the primary key columns
 		// and the inverted key column.
-		// The reason we also check !spanExpr.Unique here is that sometimes we
-		// eliminate the UNION operator in the tree, replacing it with a non-nil
-		// FactoredUnionSpans in the SpanExpression, and that case needs to be
-		// noticed and filtered.
 		needInvertedFilter := !spanExpr.Unique || spanExpr.Operator != inverted.None
 		newScanPrivate.Cols = pkCols.Copy()
 		var invertedCol opt.ColumnID
@@ -893,28 +978,205 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 			invertedCol = scanPrivate.Table.ColumnID(index.InvertedColumn().Ordinal())
 			newScanPrivate.Cols.Add(invertedCol)
 		}
-
-		// The Scan operator always goes in a new group, since it's always nested
-		// underneath the IndexJoin. The IndexJoin may also go into its own group,
-		// if there's a remaining filter above it.
-		// TODO(mgartner): We don't always need to create an index join. The
-		// index join will be removed by EliminateIndexJoinInsideProject, but
-		// it'd be more efficient to not create the index join in the first
-		// place.
 		sb.SetScan(&newScanPrivate)
 
 		// Add an inverted filter if needed.
 		if needInvertedFilter {
-			sb.AddInvertedFilter(spanExpr, pfState, invertedCol)
+			sb.AddInvertedFilter(spanExpr, pfState, pkCols, invertedCol)
 		}
 
-		// If remaining filter exists, split it into one part that can be pushed
-		// below the IndexJoin, and one part that needs to stay above.
+		// If remaining filters exists, split them into two parts: one that can
+		// be applied above the scan, and one that requires columns not produced
+		// by the scan.
 		filters = sb.AddSelectAfterSplit(filters, pkCols)
-		sb.AddIndexJoin(scanPrivate.Cols)
+		if !scanPrivate.Cols.SubsetOf(newScanPrivate.Cols) {
+			// Add an index join if the scan does not produce all the needed
+			// columns.
+			sb.AddIndexJoin(scanPrivate.Cols)
+		}
+		// Add the remaining filters, if any.
 		sb.AddSelect(filters)
 
 		sb.Build(grp)
+	})
+}
+
+// reduceInvertedSpans attempts to reduce the spans-to-scan in the given span
+// expression by finding the lowest cardinality, conjunctive span. If the given
+// span expression cannot be reduced, ok=false is returned.
+func reduceInvertedSpans(
+	ctx context.Context,
+	grp memo.RelExpr,
+	tabID opt.TableID,
+	index cat.Index,
+	spanExpr *inverted.SpanExpression,
+) (newSpan *inverted.SpanExpression, ok bool) {
+	// Span expressions that are not unions or intersections cannot be reduced.
+	if spanExpr.Operator == inverted.None {
+		return nil, false
+	}
+
+	colID := tabID.ColumnID(index.InvertedColumn().Ordinal())
+	colStat, ok := grp.Memo().RequestColStat(grp, opt.MakeColSet(colID))
+	if !ok || colStat.Histogram == nil {
+		// Only attempt to reduce spans if we have histogram statistics.
+		// TODO(mgartner): We could blindly reduce the spans without a
+		// histogram, which will probably be better than doing nothing.
+		return nil, false
+	}
+	histogram := colStat.Histogram
+
+	var lowestCardinality float64
+	var findLowestCardinalitySpan func(span *inverted.SpanExpression)
+	findLowestCardinalitySpan = func(span *inverted.SpanExpression) {
+		switch span.Operator {
+		case inverted.SetIntersection:
+			// Recurse into each side looking for the lowest cardinality span.
+			if len(span.FactoredUnionSpans) > 0 {
+				// Check that FactoredUnionSpans is empty. A span expression
+				// with non-empty FactoredUnionSpans is equivalent to a UNION
+				// between the FactoredUnionSpans and the intersected children,
+				// so we can't reduce the span.
+				return
+			}
+			l, ok := span.Left.(*inverted.SpanExpression)
+			if !ok {
+				return
+			}
+			r, ok := span.Right.(*inverted.SpanExpression)
+			if !ok {
+				return
+			}
+			findLowestCardinalitySpan(l)
+			findLowestCardinalitySpan(r)
+		case inverted.SetUnion, inverted.None:
+			// We cannot recurse into unions because both sides must be scanned.
+			// So we consider a union a "leaf".
+			cardinality, ok := cardinalityEstimate(ctx, histogram, span)
+			if ok && (newSpan == nil || cardinality < lowestCardinality) {
+				newSpan = span
+				lowestCardinality = cardinality
+			}
+		}
+	}
+	findLowestCardinalitySpan(spanExpr)
+
+	return newSpan, newSpan != nil
+}
+
+// cardinalityEstimate returns an estimated number of rows that will be scanned
+// with spanExpr based on the given histogram.
+func cardinalityEstimate(
+	ctx context.Context, histogram *props.Histogram, spanExpr *inverted.SpanExpression,
+) (cardinality float64, ok bool) {
+	for i := range spanExpr.SpansToRead {
+		span := spanExpr.SpansToRead[i]
+		if !span.IsSingleVal() {
+			// We can currently only estimate the cardinality of single-valued
+			// spans.
+			return 0, false
+		}
+		cardinality += histogram.EqEstimate(ctx, tree.NewDEncodedKey(tree.DEncodedKey(span.Start)))
+	}
+	return cardinality, true
+}
+
+// GenerateTrigramSimilarityInvertedIndexScans generates scans on inverted
+// trigram indexes that are constrained by similarity filters (e.g.,
+// `s % 'foo'`). It is similar conceptually to GenerateInvertedIndexScans, but
+// it produces expression trees optimized specially for similarity filters. The
+// resulting expressions:
+//
+//  1. Have normal constraints instead of inverted constraints.
+//  2. Have distinct-on expressions instead of inverted filter expressions to
+//     de-duplicate tuples in the inverted index that correspond to the same
+//     logical row. This is beneficial because distinct-on expressions can
+//     produce rows before reading all rows from their input.
+//  3. Have index joins to fetch the constrained column value and apply the
+//     original filter. This is always required because the scan constraints
+//     for trigram similarity filters are never tight.
+//
+// For an expression like "s % 'foo'" the produced expression has the form:
+//
+// ` (Select
+// `   (IndexJoin
+// `     (DistinctOn
+// `       (Scan [/' fo' - /' fo'] [/'foo' - /'foo'] [/'oo' - /'oo')
+// `       (GroupingCols pkCols)
+// `      )
+// `   )
+// `   (Filters (s % 'foo'))
+// ` )
+func (c *CustomFuncs) GenerateTrigramSimilarityInvertedIndexScans(
+	grp memo.RelExpr,
+	required *physical.Required,
+	scanPrivate *memo.ScanPrivate,
+	filters memo.FiltersExpr,
+) {
+	if !c.e.evalCtx.SessionData().OptimizerUseTrigramSimilarityOptimization {
+		return
+	}
+
+	// Inverted index scans for trigram similarity filters always require an
+	// index join. So we can exit early if the NoIndexJoin hint is set.
+	if scanPrivate.Flags.NoIndexJoin {
+		return
+	}
+
+	tabMeta := c.e.mem.Metadata().TableMeta(scanPrivate.Table)
+	tabID := scanPrivate.Table
+
+	// Generate implicit filters from constraints and computed columns as
+	// optional filters to help constrain an index scan.
+	optionalFilters := c.checkConstraintFilters(tabID)
+	computedColFilters := c.ComputedColFilters(scanPrivate, filters, optionalFilters)
+	optionalFilters = append(optionalFilters, computedColFilters...)
+
+	var iter scanIndexIter
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
+	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
+		// Try to constrain the index.
+		con, remainingFilters, ok := invertedidx.TryFilterInvertedIndexBySimilarity(
+			c.e.ctx, c.e.evalCtx, c.e.f, filters, optionalFilters,
+			tabID, index, tabMeta.ComputedCols, c.checkCancellation,
+		)
+		if !ok {
+			// A span expression to constrain the inverted index could not be
+			// generated.
+			return
+		}
+
+		// There should always be remaining filters because similarity
+		// constraints are never tight.
+		filters = remainingFilters
+		if filters.IsTrue() {
+			panic(errors.AssertionFailedf("unexpected empty remaining filters"))
+		}
+
+		pkCols := c.PrimaryKeyCols(tabID)
+
+		newScanPrivate := *scanPrivate
+		newScanPrivate.Distribution.Regions = nil
+		newScanPrivate.Index = index.Ordinal()
+		newScanPrivate.SetConstraint(c.e.ctx, c.e.evalCtx, con)
+		newScanPrivate.Cols = pkCols
+
+		sel := &memo.SelectExpr{
+			Input: c.e.f.ConstructIndexJoin(
+				c.e.f.ConstructDistinctOn(
+					c.e.f.ConstructScan(&newScanPrivate),
+					memo.EmptyAggregationsExpr, &memo.GroupingPrivate{
+						GroupingCols: pkCols,
+					},
+				),
+				&memo.IndexJoinPrivate{
+					Table:   tabID,
+					Cols:    scanPrivate.Cols,
+					Locking: scanPrivate.Locking,
+				}),
+			Filters: filters,
+		}
+		c.e.mem.AddSelectToGroup(sel, grp)
 	})
 }
 
@@ -924,7 +1186,7 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 // derived, then tryConstrainIndex returns ok = false.
 func (c *CustomFuncs) tryConstrainIndex(
 	requiredFilters, optionalFilters memo.FiltersExpr, tabID opt.TableID, indexOrd int,
-) (constraint *constraint.Constraint, remainingFilters memo.FiltersExpr, ok bool) {
+) (_ *constraint.Constraint, remainingFilters memo.FiltersExpr, ok bool) {
 	// Start with fast check to rule out indexes that cannot be constrained.
 	if !c.canMaybeConstrainNonInvertedIndex(requiredFilters, tabID, indexOrd) &&
 		!c.canMaybeConstrainNonInvertedIndex(optionalFilters, tabID, indexOrd) {
@@ -932,17 +1194,12 @@ func (c *CustomFuncs) tryConstrainIndex(
 	}
 
 	ic := c.initIdxConstraintForIndex(requiredFilters, optionalFilters, tabID, indexOrd)
-	constraint = ic.Constraint()
-	if constraint.IsUnconstrained() {
+	var cons constraint.Constraint
+	ic.Constraint(&cons)
+	if cons.IsUnconstrained() {
 		return nil, nil, false
 	}
-
-	// Return 0 if no remaining filter.
-	remaining := ic.RemainingFilters()
-
-	// Make copy of constraint so that idxconstraint instance is not referenced.
-	copy := *constraint
-	return &copy, remaining, true
+	return &cons, ic.RemainingFilters(), true
 }
 
 // canMaybeConstrainNonInvertedIndex returns true if we should try to constrain
@@ -1026,7 +1283,7 @@ func (c *CustomFuncs) GenerateZigzagJoins(
 		return
 	}
 
-	fixedCols := memo.ExtractConstColumns(filters, c.e.evalCtx)
+	fixedCols := memo.ExtractConstColumns(c.e.ctx, filters, c.e.evalCtx)
 	if fixedCols.Len() < 2 {
 		// Zigzagging requires at least 2 columns to have fixed values.
 		return
@@ -1075,7 +1332,8 @@ func (c *CustomFuncs) GenerateZigzagJoins(
 	// TODO(mgartner): We should consider primary indexes when it has multiple
 	// columns and only the first is being constrained.
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, filters, rejectPrimaryIndex|rejectInvertedIndexes)
+	reject := rejectPrimaryIndex | rejectInvertedIndexes | rejectVectorIndexes
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, filters, reject)
 	iter.ForEach(func(leftIndex cat.Index, outerFilters memo.FiltersExpr, leftCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
 		leftFixed := c.indexConstrainedCols(leftIndex, scanPrivate.Table, fixedCols)
 		// Short-circuit quickly if the first column in the index is not a fixed
@@ -1085,7 +1343,7 @@ func (c *CustomFuncs) GenerateZigzagJoins(
 		}
 
 		var iter2 scanIndexIter
-		iter2.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, outerFilters, rejectPrimaryIndex|rejectInvertedIndexes)
+		iter2.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, outerFilters, reject)
 		iter2.SetOriginalFilters(filters)
 		iter2.ForEachStartingAfter(leftIndex.Ordinal(), func(rightIndex cat.Index, innerFilters memo.FiltersExpr, rightCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
 			// Check if we have zigzag hints.
@@ -1359,7 +1617,7 @@ func (c *CustomFuncs) fixedColsForZigzag(
 ) (fixedCols opt.ColList, vals memo.ScalarListExpr, typs []*types.T) {
 	for i, cnt := 0, index.ColumnCount(); i < cnt; i++ {
 		colID := tabID.IndexColumnID(index, i)
-		val := memo.ExtractValueForConstColumn(filters, c.e.evalCtx, colID)
+		val := memo.ExtractValueForConstColumn(c.e.ctx, filters, c.e.evalCtx, colID)
 		if val == nil {
 			break
 		}
@@ -1421,7 +1679,7 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 			return
 		}
 
-		if index.NonInvertedPrefixColumnCount() > 0 {
+		if index.PrefixColumnCount() > 0 {
 			// TODO(mgartner): We don't yet support using multi-column inverted
 			//  indexes with zigzag joins.
 			return
@@ -1526,7 +1784,7 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 		}
 
 		// The fixed columns include all the prefix columns and the inverted column.
-		fixedColsCount := index.NonInvertedPrefixColumnCount() + 1
+		fixedColsCount := index.PrefixColumnCount() + 1
 
 		// Get constant values and add them to FixedVals as tuples, with associated
 		// Column IDs in both {Left,Right}FixedCols.
@@ -1542,7 +1800,7 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 
 		// invertedColIdx is the position of the inverted column in the inverted
 		// index.
-		invertedColIdx := index.NonInvertedPrefixColumnCount()
+		invertedColIdx := index.PrefixColumnCount()
 		leftVals[invertedColIdx] = c.e.f.ConstructConstVal(&leftVal, leftVal.ResolvedType())
 		leftTypes[invertedColIdx] = leftVal.ResolvedType()
 		rightVals[invertedColIdx] = c.e.f.ConstructConstVal(&rightVal, rightVal.ResolvedType())

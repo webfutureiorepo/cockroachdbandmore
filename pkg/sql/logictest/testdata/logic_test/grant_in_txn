@@ -1,6 +1,10 @@
 # This tests ensures that transactions to perform grants on entities created
 # inside of a transaction do not get blocked and take a very long time.
 
+# We've seen this test fail under race due to a timeout, which is likely
+# to happen in slower builds since the transaction is a large operation.
+skip under race
+
 statement ok
 SET statement_timeout = '10s';
 
@@ -175,16 +179,16 @@ COMMIT;
 # Ensure that we can inspect information_schema.applicable_roles inside of a
 # transaction. Prior to the change which introduces this
 
-statement ok;
+statement ok
 CREATE ROLE role_foo;
 
-statement ok;
+statement ok
 CREATE ROLE role_bar;
 
 statement ok
 GRANT role_bar TO role_foo WITH ADMIN OPTION;
 
-statement ok;
+statement ok
 GRANT role_foo TO testuser WITH ADMIN OPTION;
 
 # switch to testuser
@@ -192,7 +196,7 @@ GRANT role_foo TO testuser WITH ADMIN OPTION;
 user testuser
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 query TTT colnames
 SELECT * FROM information_schema.applicable_roles ORDER BY role_name;

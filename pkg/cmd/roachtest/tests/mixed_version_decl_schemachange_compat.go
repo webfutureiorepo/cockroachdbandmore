@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -29,15 +24,14 @@ import (
 
 func registerDeclSchemaChangeCompatMixedVersions(r registry.Registry) {
 	r.Add(registry.TestSpec{
-		Name:             "schemachange/mixed-versions-compat",
-		Owner:            registry.OwnerSQLFoundations,
-		Cluster:          r.MakeClusterSpec(1),
-		CompatibleClouds: registry.AllExceptAWS,
-		Suites:           registry.Suites(registry.Nightly),
+		Name:    "schemachange/mixed-versions-compat",
+		Owner:   registry.OwnerSQLFoundations,
+		Cluster: r.MakeClusterSpec(1),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
+		Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if c.Cloud() != spec.GCE && !c.IsLocal() {
-				t.Skip("uses gs://cockroach-corpus; see https://github.com/cockroachdb/cockroach/issues/105968")
-			}
 			runDeclSchemaChangeCompatMixedVersions(ctx, t, c)
 		},
 	})

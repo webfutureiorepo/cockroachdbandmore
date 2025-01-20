@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 //go:build race
 // +build race
@@ -92,7 +87,7 @@ func (tr raceTransport) SendNext(
 // a) the server doesn't hold on to any memory, and
 // b) the server doesn't mutate the request
 func GRPCTransportFactory(nodeDialer *nodedialer.Dialer) TransportFactory {
-	return func(opts SendOptions, replicas ReplicaSlice) (Transport, error) {
+	return func(opts SendOptions, replicas ReplicaSlice) Transport {
 		if atomic.AddInt32(&running, 1) <= 1 {
 			if err := nodeDialer.Stopper().RunAsyncTask(
 				context.TODO(), "transport racer", func(ctx context.Context) {
@@ -147,10 +142,7 @@ func GRPCTransportFactory(nodeDialer *nodedialer.Dialer) TransportFactory {
 			}
 		}
 
-		t, err := grpcTransportFactoryImpl(opts, nodeDialer, replicas)
-		if err != nil {
-			return nil, err
-		}
-		return &raceTransport{Transport: t}, nil
+		t := grpcTransportFactoryImpl(opts, nodeDialer, replicas)
+		return &raceTransport{Transport: t}
 	}
 }

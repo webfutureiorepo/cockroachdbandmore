@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package storageparam defines interfaces and functions for setting and
 // resetting storage parameters.
@@ -15,7 +10,6 @@ package storageparam
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/paramparse"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -55,7 +49,7 @@ func Set(
 		return err
 	}
 	for _, sp := range params {
-		key := string(sp.Key)
+		key := sp.Key
 		if sp.Value == nil {
 			return pgerror.Newf(pgcode.InvalidParameterValue, "storage parameter %q requires a value", key)
 		}
@@ -93,14 +87,14 @@ func Set(
 // Reset sets the given storage parameters using the
 // given observer.
 func Reset(
-	ctx context.Context, evalCtx *eval.Context, params tree.NameList, paramObserver Setter,
+	ctx context.Context, evalCtx *eval.Context, params []string, paramObserver Setter,
 ) error {
 	if err := storageParamPreChecks(ctx, evalCtx, nil /* setParam */, params); err != nil {
 		return err
 	}
 	for _, p := range params {
-		telemetry.Inc(sqltelemetry.ResetTableStorageParameter(string(p)))
-		if err := paramObserver.Reset(ctx, evalCtx, string(p)); err != nil {
+		telemetry.Inc(sqltelemetry.ResetTableStorageParameter(p))
+		if err := paramObserver.Reset(ctx, evalCtx, p); err != nil {
 			return err
 		}
 	}
@@ -129,29 +123,25 @@ func SetFillFactor(ctx context.Context, evalCtx *eval.Context, key string, datum
 // storageParamPreChecks is where we specify pre-conditions for setting/resetting
 // storage parameters `param`.
 func storageParamPreChecks(
-	ctx context.Context,
-	evalCtx *eval.Context,
-	setParams tree.StorageParams,
-	resetParams tree.NameList,
+	ctx context.Context, evalCtx *eval.Context, setParams tree.StorageParams, resetParams []string,
 ) error {
 	if setParams != nil && resetParams != nil {
 		return errors.AssertionFailedf("only one of setParams and resetParams should be non-nil.")
 	}
 
-	var keys []string
+	keys := make([]string, 0, len(setParams)+len(resetParams))
+	params := make(map[string]struct{}, len(setParams))
 	for _, param := range setParams {
-		keys = append(keys, string(param.Key))
+		if _, exists := params[param.Key]; exists {
+			return pgerror.Newf(pgcode.InvalidParameterValue, "parameter %q specified more than once", param.Key)
+		}
+		params[param.Key] = struct{}{}
+		keys = append(keys, param.Key)
 	}
-	for _, param := range resetParams {
-		keys = append(keys, string(param))
-	}
+	keys = append(keys, resetParams...)
 
 	for _, key := range keys {
 		if key == `schema_locked` {
-			if !evalCtx.Settings.Version.IsActive(ctx, clusterversion.V23_1) {
-				return pgerror.Newf(pgcode.FeatureNotSupported, "cannot set/reset "+
-					"storage parameter %q until the cluster version is at least 23.1", key)
-			}
 			// We only allow setting/resetting `schema_locked` storage parameter in
 			// single-statement implicit transaction with no other storage params.
 			// This is an over-constraining but simple way to ensure that if we are

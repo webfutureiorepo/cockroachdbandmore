@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package upgradecluster provides implementations of upgrade.Cluster.
 package upgradecluster
@@ -24,6 +19,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/rangedesc"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"google.golang.org/grpc"
 )
@@ -65,38 +62,57 @@ func New(cfg ClusterConfig) *Cluster {
 }
 
 // UntilClusterStable is part of the upgrade.Cluster interface.
-func (c *Cluster) UntilClusterStable(ctx context.Context, fn func() error) error {
-	ns, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
+func (c *Cluster) UntilClusterStable(
+	ctx context.Context, retryOpts retry.Options, fn func() error,
+) error {
+	live, unavailable, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
 	if err != nil {
 		return err
 	}
 
-	for {
-		if err := fn(); err != nil {
-			return err
-		}
-		curNodes, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
-		if err != nil {
-			return err
-		}
+	for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
+		for {
+			if err := fn(); err != nil {
+				return err
+			}
 
-		if ok, diffs := ns.Identical(curNodes); !ok {
-			log.Infof(ctx, "%s, retrying", diffs)
-			ns = curNodes
-			continue
+			curLive, curUnavailable, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
+			if err != nil {
+				return err
+			}
+
+			if ok, diffs := live.Identical(curLive); !ok || curUnavailable != nil {
+				log.Infof(ctx, "waiting for cluster stability, unavailable: %v, diff: %v", curUnavailable, diffs)
+				live = curLive
+				unavailable = curUnavailable
+
+				if ok {
+					// We want to retry indefinitely when there are no unavailable nodes
+					// and only a changing (unstable) cluster node set. To that end, we
+					// only use a retry attempt when there is at least one unavailable
+					// node, otherwise the inner loop will continue indefinitely.
+					break
+				}
+			} else {
+				return nil
+			}
 		}
-		break
 	}
-	return nil
+
+	return errors.Newf(
+		"cluster not stable, nodes: %v, unavailable: %v", live, unavailable)
 }
 
 // NumNodesOrTenantPods is part of the upgrade.Cluster interface.
 func (c *Cluster) NumNodesOrServers(ctx context.Context) (int, error) {
-	ns, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
+	live, unavailable, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
 	if err != nil {
 		return 0, err
 	}
-	return len(ns), nil
+	if len(unavailable) > 0 {
+		return 0, errors.Newf("unavailable node(s): %v", unavailable)
+	}
+	return len(live), nil
 }
 
 // ForEveryNodeOrTenantPod is part of the upgrade.Cluster interface.
@@ -104,18 +120,17 @@ func (c *Cluster) ForEveryNodeOrServer(
 	ctx context.Context, op string, fn func(context.Context, serverpb.MigrationClient) error,
 ) error {
 
-	ns, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
+	live, _, err := NodesFromNodeLiveness(ctx, c.c.NodeLiveness)
 	if err != nil {
 		return err
 	}
 
 	// We'll want to rate limit outgoing RPCs (limit pulled out of thin air).
 	qp := quotapool.NewIntPool("every-node", 25)
-	log.Infof(ctx, "executing %s on nodes %s", redact.Safe(op), ns)
+	log.Infof(ctx, "executing %s on nodes %s", redact.Safe(op), live)
 	grp := ctxgroup.WithContext(ctx)
 
-	for _, node := range ns {
-		id := node.ID // copy out of the loop variable
+	for _, node := range live {
 		alloc, err := qp.Acquire(ctx, 1)
 		if err != nil {
 			return err
@@ -124,7 +139,7 @@ func (c *Cluster) ForEveryNodeOrServer(
 		grp.GoCtx(func(ctx context.Context) error {
 			defer alloc.Release()
 
-			conn, err := c.c.Dialer.Dial(ctx, id, rpc.DefaultClass)
+			conn, err := c.c.Dialer.Dial(ctx, node.ID, rpc.DefaultClass)
 			if err != nil {
 				return err
 			}

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -53,6 +48,11 @@ type replicaAppBatch struct {
 	// backing memory has already been provided and which may thus be
 	// modified directly.
 	state kvserverpb.ReplicaState
+	// truncState is this batch's view of the raft log truncation state. It is
+	// copied from under the Replica.mu when the batch is initialized, and remains
+	// constant since raftMu is being held throughout the lifetime of this batch.
+	truncState kvserverpb.RaftTruncatedState
+
 	// closedTimestampSetter maintains historical information about the
 	// advancement of the closed timestamp.
 	closedTimestampSetter closedTimestampSetterInfo
@@ -162,7 +162,9 @@ func (b *replicaAppBatch) Stage(
 	// non-trivial commands will be in their own batch, so delaying their
 	// non-trivial ReplicatedState updates until later (without ever staging
 	// them in the batch) is sufficient.
-	b.stageTrivialReplicatedEvalResult(ctx, cmd)
+	if err := b.stageTrivialReplicatedEvalResult(ctx, cmd); err != nil {
+		return nil, err
+	}
 	b.ab.numEntriesProcessed++
 	size := len(cmd.Data)
 	b.ab.numEntriesProcessedBytes += int64(size)
@@ -288,6 +290,12 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		}
 		res.AddSSTable = nil
 	}
+	if res.LinkExternalSSTable != nil {
+		// All watching rangefeeds should error until we teach clients how to
+		// process linked external ssts.
+		b.r.disconnectRangefeedSpanWithErr(res.LinkExternalSSTable.Span, kvpb.NewError(errors.New("LinkExternalSSTable not supported in rangefeeds")))
+		res.LinkExternalSSTable = nil
+	}
 
 	if res.Split != nil {
 		// Splits require a new HardState to be written to the new RHS
@@ -307,8 +315,12 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		// TODO(nvanbenschoten): It should be possible to only reject registrations
 		// that overlap with the new range of the split and keep registrations that
 		// are only interested in keys that are still on the original range running.
+		reason := kvpb.RangeFeedRetryError_REASON_RANGE_SPLIT
+		if res.Split.SplitTrigger.ManualSplit {
+			reason = kvpb.RangeFeedRetryError_REASON_MANUAL_RANGE_SPLIT
+		}
 		b.r.disconnectRangefeedWithReason(
-			kvpb.RangeFeedRetryError_REASON_RANGE_SPLIT,
+			reason,
 		)
 	}
 
@@ -394,7 +406,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		res.State.GCThreshold = nil
 	}
 
-	if res.State != nil && res.State.TruncatedState != nil {
+	if truncatedState := res.GetRaftTruncatedState(); truncatedState != nil {
 		var err error
 		// Typically one should not be checking the cluster version below raft,
 		// since it can cause state machine divergence. However, this check is
@@ -416,13 +428,14 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		apply := !looselyCoupledTruncation || res.RaftExpectedFirstIndex == 0
 		if apply {
 			if apply, err = handleTruncatedStateBelowRaftPreApply(
-				ctx, b.state.TruncatedState, res.State.TruncatedState, b.r.raftMu.stateLoader, b.batch,
+				ctx, b.truncState, truncatedState,
+				b.r.raftMu.stateLoader.StateLoader, b.batch,
 			); err != nil {
 				return errors.Wrap(err, "unable to handle truncated state")
 			}
 		} else {
 			b.r.store.raftTruncator.addPendingTruncation(
-				ctx, (*raftTruncatorReplica)(b.r), *res.State.TruncatedState, res.RaftExpectedFirstIndex,
+				ctx, (*raftTruncatorReplica)(b.r), *truncatedState, res.RaftExpectedFirstIndex,
 				res.RaftLogDelta)
 		}
 		if apply {
@@ -438,7 +451,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 			// coupled truncation mechanism in the other branch already ensures
 			// enacting truncations only after state machine synced.
 			if has, err := b.r.raftMu.sideloaded.HasAnyEntry(
-				ctx, b.state.TruncatedState.Index, res.State.TruncatedState.Index+1, // include end Index
+				ctx, b.truncState.Index, truncatedState.Index+1, // include end Index
 			); err != nil {
 				return errors.Wrap(err, "failed searching for sideloaded entries")
 			} else if has {
@@ -447,7 +460,10 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		} else {
 			// The truncated state was discarded, or we are queuing a pending
 			// truncation, so make sure we don't apply it to our in-memory state.
-			res.State.TruncatedState = nil
+			if res.State != nil {
+				res.State.TruncatedState = nil
+			}
+			res.RaftTruncatedState = nil
 			res.RaftLogDelta = 0
 			res.RaftExpectedFirstIndex = 0
 			if !looselyCoupledTruncation {
@@ -462,7 +478,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 				// TODO(sumeer): this code will be deleted when there is no
 				// !looselyCoupledTruncation code path.
 				b.r.mu.Lock()
-				b.r.mu.raftLogSizeTrusted = false
+				b.r.shMu.raftLogSizeTrusted = false
 				b.r.mu.Unlock()
 			}
 		}
@@ -532,7 +548,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 // inspect the command's ReplicatedEvalResult.
 func (b *replicaAppBatch) stageTrivialReplicatedEvalResult(
 	ctx context.Context, cmd *replicatedCmd,
-) {
+) error {
 	b.state.RaftAppliedIndex = cmd.Index()
 	b.state.RaftAppliedIndexTerm = kvpb.RaftTerm(cmd.Term)
 
@@ -554,6 +570,19 @@ func (b *replicaAppBatch) stageTrivialReplicatedEvalResult(
 	// serialize on the stats key.
 	deltaStats := res.Delta.ToStats()
 	b.state.Stats.Add(deltaStats)
+
+	if res.DoTimelyApplicationToAllReplicas && !b.changeRemovesReplica {
+		// Update in-memory and persistent state. A later command accumulated in
+		// this batch may update these again. Also, a later command may set
+		// changeRemovesReplica to true and wipe out the state in the batch. These
+		// are all safe.
+		b.state.ForceFlushIndex = roachpb.ForceFlushIndex{Index: cmd.Entry.Index}
+		if err := b.r.raftMu.stateLoader.SetForceFlushIndex(
+			ctx, b.batch, b.state.Stats, &b.state.ForceFlushIndex); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ApplyToStateMachine implements the apply.Batch interface. The method handles
@@ -610,12 +639,12 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 	// Update the replica's applied indexes, mvcc stats and closed timestamp.
 	r := b.r
 	r.mu.Lock()
-	r.mu.state.RaftAppliedIndex = b.state.RaftAppliedIndex
-	r.mu.state.RaftAppliedIndexTerm = b.state.RaftAppliedIndexTerm
-	r.mu.state.LeaseAppliedIndex = b.state.LeaseAppliedIndex
+	r.shMu.state.RaftAppliedIndex = b.state.RaftAppliedIndex
+	r.shMu.state.RaftAppliedIndexTerm = b.state.RaftAppliedIndexTerm
+	r.shMu.state.LeaseAppliedIndex = b.state.LeaseAppliedIndex
 
 	// Sanity check that the RaftClosedTimestamp doesn't go backwards.
-	existingClosed := r.mu.state.RaftClosedTimestamp
+	existingClosed := r.shMu.state.RaftClosedTimestamp
 	newClosed := b.state.RaftClosedTimestamp
 	if !newClosed.IsEmpty() && newClosed.Less(existingClosed) {
 		err := errors.AssertionFailedf(
@@ -624,10 +653,15 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 		logcrash.ReportOrPanic(ctx, &b.r.ClusterSettings().SV, "%v", err)
 	}
 	r.mu.closedTimestampSetter = b.closedTimestampSetter
+	closedTimestampUpdated := r.shMu.state.RaftClosedTimestamp.Forward(b.state.RaftClosedTimestamp)
 
-	closedTimestampUpdated := r.mu.state.RaftClosedTimestamp.Forward(b.state.RaftClosedTimestamp)
-	prevStats := *r.mu.state.Stats
-	*r.mu.state.Stats = *b.state.Stats
+	if b.state.ForceFlushIndex != r.shMu.state.ForceFlushIndex {
+		r.shMu.state.ForceFlushIndex = b.state.ForceFlushIndex
+		r.flowControlV2.ForceFlushIndexChangedLocked(ctx, b.state.ForceFlushIndex.Index)
+	}
+
+	prevStats := *r.shMu.state.Stats
+	*r.shMu.state.Stats = *b.state.Stats
 
 	// If the range is now less than its RangeMaxBytes, clear the history of its
 	// largest previous max bytes.

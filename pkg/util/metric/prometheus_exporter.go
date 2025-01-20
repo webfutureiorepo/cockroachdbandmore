@@ -1,18 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metric
 
 import (
+	"context"
 	"io"
+	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,16 +54,22 @@ func MakePrometheusExporterForSelectedMetrics(selection map[string]struct{}) Pro
 
 // find the family for the passed-in metric, or create and return it if not found.
 func (pm *PrometheusExporter) findOrCreateFamily(
-	prom PrometheusExportable,
+	prom PrometheusCompatible,
 ) *prometheusgo.MetricFamily {
 	familyName := exportedName(prom.GetName())
 	if family, ok := pm.families[familyName]; ok {
 		return family
 	}
 
+	// The Help field for metric metadata is written as a string literal
+	// which is formatted for reading in a code editor. When outputting
+	// to Prometheus and other systems, we want to remove all the
+	// newlines an only capture the first sentence for brevity.
+	left, _, _ := strings.Cut(strings.Join(strings.Fields(prom.GetHelp()), " "), ".")
+
 	family := &prometheusgo.MetricFamily{
 		Name: proto.String(familyName),
-		Help: proto.String(prom.GetHelp()),
+		Help: proto.String(left),
 		Type: prom.GetType(),
 	}
 
@@ -75,32 +79,46 @@ func (pm *PrometheusExporter) findOrCreateFamily(
 
 // ScrapeRegistry scrapes all metrics contained in the registry to the metric
 // family map, holding on only to the scraped data (which is no longer
-// connected to the registry and metrics within) when returning from the the
+// connected to the registry and metrics within) when returning from the
 // call. It creates new families as needed.
 func (pm *PrometheusExporter) ScrapeRegistry(registry *Registry, includeChildMetrics bool) {
 	labels := registry.GetLabels()
 	f := func(name string, v interface{}) {
-		prom, ok := v.(PrometheusExportable)
-		if !ok {
+		switch prom := v.(type) {
+		case PrometheusVector:
+			for _, m := range prom.ToPrometheusMetrics() {
+				m := m
+				m.Label = append(m.Label, labels...)
+				m.Label = append(m.Label, prom.GetLabels()...)
+
+				family := pm.findOrCreateFamily(prom)
+				family.Metric = append(family.Metric, m)
+			}
+
+		case PrometheusExportable:
+			m := prom.ToPrometheusMetric()
+			// Set registry and metric labels.
+			m.Label = append(labels, prom.GetLabels()...)
+
+			family := pm.findOrCreateFamily(prom)
+			family.Metric = append(family.Metric, m)
+
+			// Deal with metrics which have children which are exposed to
+			// prometheus if we should.
+			promIter, ok := v.(PrometheusIterable)
+			if !ok || !includeChildMetrics {
+				return
+			}
+			promIter.Each(m.Label, func(metric *prometheusgo.Metric) {
+				family.Metric = append(family.Metric, metric)
+			})
+
+		default:
+			log.Infof(context.Background(), "metric %s is not compatible with any prometheus metric type", name)
 			return
 		}
-		m := prom.ToPrometheusMetric()
-		// Set registry and metric labels.
-		m.Label = append(labels, prom.GetLabels()...)
-
-		family := pm.findOrCreateFamily(prom)
-		family.Metric = append(family.Metric, m)
-
-		// Deal with metrics which have children which are exposed to
-		// prometheus if we should.
-		promIter, ok := v.(PrometheusIterable)
-		if !ok || !includeChildMetrics {
-			return
-		}
-		promIter.Each(m.Label, func(metric *prometheusgo.Metric) {
-			family.Metric = append(family.Metric, metric)
-		})
 	}
+
 	if pm.selection == nil {
 		registry.Each(f)
 	} else {
@@ -114,8 +132,13 @@ func (pm *PrometheusExporter) ScrapeRegistry(registry *Registry, includeChildMet
 func (pm *PrometheusExporter) printAsText(w io.Writer, contentType expfmt.Format) error {
 	enc := expfmt.NewEncoder(w, contentType)
 	for _, family := range pm.families {
-		if err := enc.Encode(family); err != nil {
-			return err
+		// Encode expects that metrics exist in family. Filter them out since
+		// there's a possibility where the metric has been removed from the
+		// registry, but the exporter still keeps track of it.
+		if len(family.Metric) > 0 {
+			if err := enc.Encode(family); err != nil {
+				return err
+			}
 		}
 	}
 	pm.clearMetrics()
@@ -136,16 +159,17 @@ func (pm *PrometheusExporter) ScrapeAndPrintAsText(
 	return pm.printAsText(w, contentType)
 }
 
-// Verify GraphiteExporter implements Gatherer interface.
+// Verify GraphiteExporter implements the prometheus.Gatherer interface.
 var _ prometheus.Gatherer = (*PrometheusExporter)(nil)
 
-// Gather implements prometheus.Gatherer
+// Gather implements the prometheus.Gatherer interface.
 func (pm *PrometheusExporter) Gather() ([]*prometheusgo.MetricFamily, error) {
-	v := make([]*prometheusgo.MetricFamily, len(pm.families))
-	i := 0
+	v := make([]*prometheusgo.MetricFamily, 0, len(pm.families))
 	for _, family := range pm.families {
-		v[i] = family
-		i++
+		// Only return families with metrics.
+		if len(family.Metric) > 0 {
+			v = append(v, family)
+		}
 	}
 	return v, nil
 }

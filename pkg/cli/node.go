@@ -1,18 +1,14 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"reflect"
@@ -587,9 +583,11 @@ func runDecommissionNodeImpl(
 
 		anyActive := false
 		var replicaCount int64
+		statusByNodeID := map[roachpb.NodeID]serverpb.DecommissionStatusResponse_Status{}
 		for _, status := range resp.Status {
 			anyActive = anyActive || status.Membership.Active()
 			replicaCount += status.ReplicaCount
+			statusByNodeID[status.NodeID] = status
 		}
 
 		if !anyActive && replicaCount == 0 {
@@ -599,9 +597,16 @@ func runDecommissionNodeImpl(
 			for _, targetNode := range nodeIDs {
 				if targetNode == localNodeID {
 					// Skip the draining step for the node serving the request, if it is a target node.
-					log.Warningf(ctx,
-						"skipping drain step for node n%d; it is decommissioning and serving the request",
+					_, _ = fmt.Fprintf(stderr,
+						"skipping drain step for node n%d; it is decommissioning and serving the request\n",
 						localNodeID,
+					)
+					continue
+				}
+				if status, ok := statusByNodeID[targetNode]; !ok || !status.IsLive {
+					// Skip the draining step for the node serving the request, if it is a target node.
+					_, _ = fmt.Fprintf(stderr,
+						"skipping drain step for node n%d; it is not live\n", targetNode,
 					)
 					continue
 				}
@@ -610,9 +615,24 @@ func runDecommissionNodeImpl(
 					DoDrain:  true,
 					NodeId:   targetNode.String(),
 				}
-				if _, err = c.Drain(ctx, drainReq); err != nil {
+				stream, err := c.Drain(ctx, drainReq)
+				if err != nil {
 					fmt.Fprintln(stderr)
 					return errors.Wrapf(err, "while trying to drain n%d", targetNode)
+				}
+
+				// Consume responses until the stream ends (which signals drain
+				// completion).
+				for {
+					_, err := stream.Recv()
+					if err == io.EOF {
+						// Stream gracefully closed by other side.
+						break
+					}
+					if err != nil {
+						fmt.Fprintln(stderr)
+						return errors.Wrapf(err, "while trying to drain n%d", targetNode)
+					}
 				}
 			}
 
@@ -865,8 +885,8 @@ func runRecommissionNode(cmd *cobra.Command, args []string) error {
 }
 
 var drainNodeCmd = &cobra.Command{
-	Use:   "drain { --self | <node id> }",
-	Short: "drain a node without shutting it down",
+	Use:   "drain { --self | <node id> } [ --shutdown ] [ --drain-wait=timeout ] ",
+	Short: "drain a node and optionally shut it down",
 	Long: `
 Prepare a server so it becomes ready to be shut down safely.
 This causes the server to stop accepting client connections, stop
@@ -874,9 +894,10 @@ extant connections, and finally push range leases onto other
 nodes, subject to various timeout parameters configurable via
 cluster settings.
 
-After a successful drain, the server process is still running;
-use a service manager or orchestrator to terminate the process
-gracefully using e.g. a unix signal.
+After a successful drain, if the --shutdown flag is not specified,
+the server process is still running; use a service manager or
+orchestrator to terminate the process gracefully using e.g. a
+unix signal.
 
 If an argument is specified, the command affects the node
 whose ID is given. If --self is specified, the command
@@ -905,13 +926,6 @@ func runDrain(cmd *cobra.Command, args []string) (err error) {
 		targetNode = args[0]
 	}
 
-	// At the end, we'll report "ok" if there was no error.
-	defer func() {
-		if err == nil {
-			fmt.Println("ok")
-		}
-	}()
-
 	// Establish a RPC connection.
 	c, finish, err := getAdminClient(ctx, serverCfg)
 	if err != nil {
@@ -919,8 +933,22 @@ func runDrain(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer finish()
 
-	_, _, err = doDrain(ctx, c, targetNode)
-	return err
+	if _, _, err := doDrain(ctx, c, targetNode); err != nil {
+		return err
+	}
+
+	// Report "ok" if there was no error.
+	fmt.Println("drain ok")
+
+	if drainCtx.shutdown {
+		if _, err := doShutdown(ctx, c, targetNode); err != nil {
+			return err
+		}
+		// Report "ok" if there was no error.
+		fmt.Println("shutdown ok")
+	}
+
+	return nil
 }
 
 // Sub-commands for node command.

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -1020,6 +1015,8 @@ func TestHashJoiner(t *testing.T) {
 	}
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 	rng, _ := randutil.NewTestRand()
 
 	for _, tcs := range [][]*joinTestCase{getHJTestCases(), getMJTestCases()} {
@@ -1028,10 +1025,10 @@ func TestHashJoiner(t *testing.T) {
 				runHashJoinTestCase(t, tc, rng, func(sources []colexecop.Operator) (colexecop.Operator, error) {
 					spec := createSpecForHashJoiner(tc)
 					args := &colexecargs.NewColOperatorArgs{
-						Spec:                spec,
-						StreamingMemAccount: monitorRegistry.NewStreamingMemAccount(flowCtx),
-						Inputs:              colexectestutils.MakeInputs(sources),
-						MonitorRegistry:     &monitorRegistry,
+						Spec:            spec,
+						Inputs:          colexectestutils.MakeInputs(sources),
+						MonitorRegistry: &monitorRegistry,
+						CloserRegistry:  &closerRegistry,
 					}
 					args.TestingKnobs.DiskSpillingDisabled = true
 					result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
@@ -1054,15 +1051,15 @@ func BenchmarkHashJoiner(b *testing.B) {
 	// right input.
 	const leftRowsMultiple = 2
 
-	getCols := func(typ *types.T, length int, distinct bool, nullProb float64) []coldata.Vec {
-		var cols []coldata.Vec
+	getCols := func(typ *types.T, length int, distinct bool, nullProb float64) []*coldata.Vec {
+		var cols []*coldata.Vec
 		dupCount := 1
 		if distinct {
 			// When the source contains non-distinct tuples, then each tuple
 			// will have 15 duplicates.
 			dupCount = 16
 		}
-		if typ == types.Int {
+		if typ.Identical(types.Int) {
 			cols = newIntColumns(nCols, length, dupCount)
 		} else {
 			cols = newBytesColumns(nCols, length, dupCount)
@@ -1180,6 +1177,8 @@ func TestHashJoinerProjection(t *testing.T) {
 	}
 	var monitorRegistry colexecargs.MonitorRegistry
 	defer monitorRegistry.Close(ctx)
+	var closerRegistry colexecargs.CloserRegistry
+	defer closerRegistry.Close(ctx)
 
 	leftTypes := []*types.T{types.Bool, types.Int, types.Bytes}
 	rightTypes := []*types.T{types.Int, types.Float, types.Decimal}
@@ -1214,6 +1213,7 @@ func TestHashJoinerProjection(t *testing.T) {
 		Spec:            spec,
 		Inputs:          []colexecargs.OpWithMetaInfo{{Root: leftSource}, {Root: rightSource}},
 		MonitorRegistry: &monitorRegistry,
+		CloserRegistry:  &closerRegistry,
 	}
 	args.TestingKnobs.DiskSpillingDisabled = true
 	hjOp, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvnemesis
 
@@ -18,7 +13,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvnemesis/kvnemesisutil"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -111,14 +105,6 @@ func exceptDelRangeUsingTombstoneStraddlesRangeBoundary(err error) bool {
 	return errors.Is(err, errDelRangeUsingTombstoneStraddlesRangeBoundary)
 }
 
-func exceptSharedLockPromotionError(err error) bool { // true if lock promotion error
-	return errors.Is(err, &concurrency.LockPromotionError{})
-}
-
-func exceptSkipLockedReplayError(err error) bool { // true if skip locked replay error
-	return errors.Is(err, &concurrency.SkipLockedReplayError{})
-}
-
 func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 	switch o := op.GetValue().(type) {
 	case *GetOperation,
@@ -159,7 +145,7 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 		// epochs of the same transaction to avoid waiting while holding locks.
 		retryOnAbort := retry.StartWithCtx(ctx, retry.Options{
 			InitialBackoff: 1 * time.Millisecond,
-			MaxBackoff:     250 * time.Millisecond,
+			MaxBackoff:     10 * time.Second,
 		})
 		var savedTxn *kv.Txn
 		txnErr := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {

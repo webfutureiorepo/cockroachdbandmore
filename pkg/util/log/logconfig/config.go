@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logconfig
 
@@ -30,9 +25,6 @@ import (
 const DefaultFileFormat = `crdb-v2`
 
 // DefaultStderrFormat is the entry format for stderr sinks.
-// NB: The format for stderr is always set to `crdb-v2-tty`,
-// and cannot be changed. We enforce this in the validation step.
-// See: https://www.cockroachlabs.com/docs/stable/configure-logs#output-to-stderr
 const DefaultStderrFormat = `crdb-v2-tty`
 
 // DefaultFluentFormat is the entry format for fluent sinks
@@ -42,6 +34,10 @@ const DefaultFluentFormat = `json-fluent-compact`
 // DefaultHTTPFormat is the entry format for HTTP sinks
 // when not specified in a configuration.
 const DefaultHTTPFormat = `json-compact`
+
+// DefaultFilePerms is the default permissions used in file-defaults. It
+// is applied literally via os.Chmod, without considering the umask.
+const DefaultFilePerms = FilePermissions(0o640)
 
 // DefaultConfig returns a suitable default configuration when logging
 // is meant to primarily go to files.
@@ -1172,6 +1168,7 @@ type constrainedString interface {
 const (
 	BufferFmtJsonArray BufferFormat = "json-array"
 	BufferFmtNewline   BufferFormat = "newline"
+	BufferFmtNone      BufferFormat = "none"
 )
 
 // BufferFormat is a string restricted to "json-array" and "newline".

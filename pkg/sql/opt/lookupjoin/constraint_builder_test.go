@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lookupjoin_test
 
@@ -57,14 +52,15 @@ func TestLookupConstraints(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	datadriven.Walk(t, tu.TestDataPath(t), func(t *testing.T, path string) {
-		semaCtx := tree.MakeSemaContext()
+		ctx := context.Background()
+		semaCtx := tree.MakeSemaContext(nil /* resolver */)
 		evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 		evalCtx.SessionData().VariableInequalityLookupJoinEnabled = true
 
 		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
 			testCatalog := testcat.New()
 			var f norm.Factory
-			f.Init(context.Background(), &evalCtx, testCatalog)
+			f.Init(ctx, &evalCtx, testCatalog)
 			md := f.Metadata()
 
 			for _, arg := range d.CmdArgs {
@@ -144,7 +140,7 @@ func TestLookupConstraints(t *testing.T) {
 				}
 
 				var cb lookupjoin.ConstraintBuilder
-				cb.Init(&f, md, f.EvalContext(), rightTable, leftCols, rightCols)
+				cb.Init(ctx, &f, md, f.EvalContext(), rightTable, leftCols, rightCols)
 
 				lookupConstraint, _ := cb.Build(index, filters, optionalFilters,
 					memo.FiltersExpr{} /* derivedFkOnFilters */)
@@ -166,11 +162,14 @@ func TestLookupConstraints(t *testing.T) {
 					b.WriteString("input projections:\n")
 					for i := range lookupConstraint.InputProjections {
 						col := lookupConstraint.InputProjections[i].Col
+						colMeta := md.ColumnMeta(col)
 						b.WriteString("  ")
-						b.WriteString(md.ColumnMeta(col).Alias)
+						b.WriteString(colMeta.Alias)
 						b.WriteString(" = ")
 						b.WriteString(formatScalar(lookupConstraint.InputProjections[i].Element, &f, &semaCtx, &evalCtx))
-						b.WriteString("\n")
+						b.WriteString(" [type=")
+						b.WriteString(colMeta.Type.SQLString())
+						b.WriteString("]\n")
 					}
 				}
 				if len(lookupConstraint.LookupExpr) > 0 {

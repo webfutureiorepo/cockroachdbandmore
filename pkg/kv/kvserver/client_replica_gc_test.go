@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -113,10 +108,10 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 		if dir == "" {
 			t.Fatal("no sideloaded directory")
 		}
-		if err := eng.MkdirAll(dir, os.ModePerm); err != nil {
+		if err := eng.Env().MkdirAll(dir, os.ModePerm); err != nil {
 			t.Fatal(err)
 		}
-		if err := fs.WriteFile(eng, filepath.Join(dir, "i1000000.t100000"), []byte("foo")); err != nil {
+		if err := fs.WriteFile(eng.Env(), filepath.Join(dir, "i1000000.t100000"), []byte("foo"), fs.UnspecifiedWriteCategory); err != nil {
 			t.Fatal(err)
 		}
 
@@ -127,7 +122,7 @@ func TestReplicaGCQueueDropReplicaDirect(t *testing.T) {
 					repl1.RaftLock()
 					dir := repl1.SideloadedRaftMuLocked().Dir()
 					repl1.RaftUnlock()
-					_, err := eng.Stat(dir)
+					_, err := eng.Env().Stat(dir)
 					if oserror.IsNotExist(err) {
 						return nil
 					}

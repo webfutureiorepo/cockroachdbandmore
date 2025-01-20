@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -132,7 +127,7 @@ func ListLogFiles() (logFiles []logpb.FileInfo, err error) {
 		l.mu.Lock()
 		thisLogDir := l.mu.logDir
 		l.mu.Unlock()
-		if !l.enabled.Get() || thisLogDir == "" {
+		if !l.enabled.Load() || thisLogDir == "" {
 			// This file sink is detached from file storage.
 			return nil
 		}
@@ -209,7 +204,7 @@ func GetLogReader(filename string) (io.ReadCloser, error) {
 		return nil
 	})
 	// Check whether we found a sink and it has a log directory.
-	if fs == nil || !fs.enabled.Get() {
+	if fs == nil || !fs.enabled.Load() {
 		return nil, errors.Newf("no log directory found for %s", filename)
 	}
 	dir := func() string {

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ingesting
 
@@ -120,7 +115,7 @@ func getIngestingPrivilegesForTableOrSchema(
 		switch privilegeType {
 		case privilege.Schema:
 			if desc.GetName() == catconstants.PublicSchemaName {
-				updatedPrivileges = catpb.NewPublicSchemaPrivilegeDescriptor(includePublicSchemaCreatePriv)
+				updatedPrivileges = catpb.NewPublicSchemaPrivilegeDescriptor(user, includePublicSchemaCreatePriv)
 			} else {
 				updatedPrivileges = catpb.NewBasePrivilegeDescriptor(user)
 			}
@@ -133,7 +128,7 @@ func getIngestingPrivilegesForTableOrSchema(
 		// If we are not creating the database as part of this ingestion, the
 		// schemas and tables in the database should be given privileges based on
 		// the parent database's default privileges.
-		parentDB, err := descsCol.ByID(txn).Get().Database(ctx, desc.GetParentID())
+		parentDB, err := descsCol.ByIDWithoutLeased(txn).Get().Database(ctx, desc.GetParentID())
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to lookup parent DB %d", errors.Safe(desc.GetParentID()))
 		}
@@ -159,7 +154,7 @@ func getIngestingPrivilegesForTableOrSchema(
 			} else {
 				// If we are restoring into an existing schema, resolve it, and fetch
 				// its default privileges.
-				parentSchema, err := descsCol.ByID(txn).Get().Schema(ctx, desc.GetParentSchemaID())
+				parentSchema, err := descsCol.ByIDWithoutLeased(txn).Get().Schema(ctx, desc.GetParentSchemaID())
 				if err != nil {
 					return nil,
 						errors.Wrapf(err, "failed to lookup parent schema %d", errors.Safe(desc.GetParentSchemaID()))

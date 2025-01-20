@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -39,7 +34,7 @@ type savepoint struct {
 
 	// seqNum represents the write seq num at the time the savepoint was created.
 	// On rollback, it configures the txn to ignore all seqnums from this value
-	// until the most recent seqnum.
+	// (inclusive) until the most recent seqnum (inclusive).
 	seqNum enginepb.TxnSeq
 
 	// txnSpanRefresher fields.
@@ -82,6 +77,18 @@ func (tc *TxnCoordSender) CreateSavepoint(ctx context.Context) (kv.SavepointToke
 		// Return a preallocated savepoint for the common case of savepoints placed
 		// at the beginning of transactions.
 		return &initialSavepoint, nil
+	}
+
+	// If the transaction has acquired any locks, increment the write sequence on
+	// savepoint creation and assign this sequence to the savepoint. This allows
+	// us to distinguish between all operations (writes and locking reads) that
+	// happened before the savepoint and those that happened after.
+	// TODO(nvanbenschoten): once #113765 is resolved, we should make this
+	// unconditional and push it into txnSeqNumAllocator.createSavepointLocked.
+	if tc.interceptorAlloc.txnPipeliner.hasAcquiredLocks() {
+		if err := tc.interceptorAlloc.txnSeqNumAllocator.stepWriteSeqLocked(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	s := &savepoint{
@@ -136,13 +143,22 @@ func (tc *TxnCoordSender) RollbackToSavepoint(ctx context.Context, s kv.Savepoin
 		reqInt.rollbackToSavepointLocked(ctx, *sp)
 	}
 
-	// If there's been any more writes since the savepoint was created, they'll
-	// need to be ignored.
-	if sp.seqNum < tc.interceptorAlloc.txnSeqNumAllocator.writeSeq {
+	// If the transaction has acquired any locks (before or after the savepoint),
+	// ignore all seqnums from the beginning of the savepoint (inclusive) until
+	// the most recent seqnum (inclusive). Then increment the write sequence to
+	// differentiate all future operations from this ignored sequence number
+	// range.
+	// TODO(nvanbenschoten): once #113765 is resolved, we should make this
+	// unconditional and push the write sequence increment into
+	// txnSeqNumAllocator.rollbackToSavepointLocked.
+	if tc.interceptorAlloc.txnPipeliner.hasAcquiredLocks() {
 		tc.mu.txn.AddIgnoredSeqNumRange(
 			enginepb.IgnoredSeqNumRange{
-				Start: sp.seqNum + 1, End: tc.interceptorAlloc.txnSeqNumAllocator.writeSeq,
+				Start: sp.seqNum, End: tc.interceptorAlloc.txnSeqNumAllocator.writeSeq,
 			})
+		if err := tc.interceptorAlloc.txnSeqNumAllocator.stepWriteSeqLocked(ctx); err != nil {
+			return err
+		}
 	}
 
 	return nil

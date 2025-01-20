@@ -1,16 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,8 +29,8 @@ func TestGenMan(t *testing.T) {
 
 	// Ensure we have a sane number of man pages.
 	count := 0
-	err := filepath.Walk(manpath, func(path string, info os.FileInfo, err error) error {
-		if strings.HasSuffix(path, ".1") && !info.IsDir() {
+	err := filepath.WalkDir(manpath, func(path string, d fs.DirEntry, err error) error {
+		if strings.HasSuffix(path, ".1") && !d.IsDir() {
 			count++
 		}
 		return nil

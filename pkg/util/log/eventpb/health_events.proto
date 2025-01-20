@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.util.log.eventpb;
@@ -39,7 +34,7 @@ message RuntimeStats {
   // The total memory allocated by Go but not released. Expressed as bytes.
   uint64 go_total_bytes = 6 [(gogoproto.jsontag) = ",omitempty"];
   // The staleness of the Go memory statistics. Expressed in seconds.
-  float go_stats_staleness = 7 [(gogoproto.jsontag) = ",omitempty"];
+  float go_stats_staleness = 7 [(gogoproto.jsontag) = ",omitempty", deprecated=true];
   // The amount of heap fragmentation. Expressed as bytes.
   uint64 heap_fragment_bytes = 8 [(gogoproto.jsontag) = ",omitempty"];
   // The amount of heap reserved. Expressed as bytes.

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -23,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/jackc/pgx/v4"
 	"github.com/stretchr/testify/require"
@@ -144,25 +138,25 @@ func TestErrorDuringExtendedProtocolCommit(t *testing.T) {
 
 	ctx := context.Background()
 
-	var shouldErrorOnAutoCommit syncutil.AtomicBool
+	var shouldErrorOnAutoCommit atomic.Bool
 	var traceID atomic.Uint64
 	var params base.TestServerArgs
 	params.Knobs.SQLExecutor = &sql.ExecutorTestingKnobs{
 		DisableAutoCommitDuringExec: true,
 		BeforeExecute: func(ctx context.Context, stmt string, descriptors *descs.Collection) {
 			if strings.Contains(stmt, "SELECT 'cat'") {
-				shouldErrorOnAutoCommit.Set(true)
+				shouldErrorOnAutoCommit.Store(true)
 				traceID.Store(uint64(tracing.SpanFromContext(ctx).TraceID()))
 			}
 		},
 		BeforeAutoCommit: func(ctx context.Context, stmt string) error {
-			if shouldErrorOnAutoCommit.Get() {
+			if shouldErrorOnAutoCommit.Load() {
 				// Only inject the error if we're in the same trace as the one we
 				// saw when executing our test query. This is so we know that this
 				// autocommit corresponds to our test qyery rather than an internal
 				// query.
 				if traceID.Load() == uint64(tracing.SpanFromContext(ctx).TraceID()) {
-					shouldErrorOnAutoCommit.Set(false)
+					shouldErrorOnAutoCommit.Store(false)
 					return errors.New("injected error")
 				}
 			}
@@ -172,6 +166,9 @@ func TestErrorDuringExtendedProtocolCommit(t *testing.T) {
 
 	s, db, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
+	// This forces a trace span to have been set up in the BeforeExecute
+	// interceptor above.
+	s.Tracer().SetActiveSpansRegistryEnabled(true)
 
 	conn, err := db.Conn(ctx)
 	require.NoError(t, err)

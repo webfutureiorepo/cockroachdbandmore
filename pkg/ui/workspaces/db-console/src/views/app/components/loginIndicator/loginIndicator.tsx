@@ -1,29 +1,24 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 import { connect } from "react-redux";
 
+import { doLogout, LoginState, selectLoginState } from "src/redux/login";
 import { AdminUIState, AppDispatch } from "src/redux/state";
 import { trustIcon } from "src/util/trust";
+import UserMenu from "src/views/app/components/userMenu";
 import Popover from "src/views/shared/components/popover";
 import UserAvatar from "src/views/shared/components/userAvatar";
-import UserMenu from "src/views/app/components/userMenu";
-import { doLogout, LoginState, selectLoginState } from "src/redux/login";
 
 import unlockedIcon from "!!raw-loader!assets/unlocked.svg";
 import "./loginIndicator.styl";
 
 interface LoginIndicatorProps {
   loginState: LoginState;
-  handleLogout: () => null;
+  handleLogout: () => void;
 }
 
 interface LoginIndicatorState {

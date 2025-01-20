@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -217,7 +212,7 @@ func (v *vectorInserter) checkMutationInput(ctx context.Context, b coldata.Batch
 		nulls := vec.Nulls()
 		for r := 0; r < b.Length(); r++ {
 			if !bools[r] && !nulls.NullAt(r) {
-				return row.CheckFailed(ctx, v.semaCtx, v.flowCtx.EvalCtx.SessionData(), v.desc, ch)
+				return row.CheckFailed(ctx, v.flowCtx.EvalCtx, v.semaCtx, v.flowCtx.EvalCtx.SessionData(), v.desc, ch)
 			}
 		}
 		colIdx++

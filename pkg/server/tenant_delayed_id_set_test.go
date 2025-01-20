@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -56,6 +51,7 @@ func TestStartTenantWithDelayedID(t *testing.T) {
 
 	st := cluster.MakeTestingClusterSettings()
 	baseCfg := makeTestBaseConfig(st, s.Stopper().Tracer())
+	require.Equal(t, roachpb.Locality{}, baseCfg.Locality)
 	sqlCfg := makeTestSQLConfig(st, roachpb.TenantID{})
 	sqlCfg.TenantLoopbackAddr = s.AdvRPCAddr()
 
@@ -64,12 +60,17 @@ func TestStartTenantWithDelayedID(t *testing.T) {
 	listenerReady.Add(1)
 
 	var timeTenantIDSet time.Time
-	sqlCfg.DelayedSetTenantID = func(ctx context.Context) (roachpb.TenantID, error) {
+	sqlCfg.DelayedSetTenantID = func(ctx context.Context) (roachpb.TenantID, roachpb.Locality, error) {
 		// Unblock the connect code bellow, so it can try to connect.
 		listenerReady.Done()
 		// Wait until getting a go ahead with setting the tenant id.
 		tenantIDSet.Wait()
-		return serverutils.TestTenantID(), nil
+		return serverutils.TestTenantID(), roachpb.Locality{
+			Tiers: []roachpb.Tier{
+				{Key: "region", Value: "us-central1"},
+				{Key: "az", Value: "az1"},
+			},
+		}, nil
 	}
 
 	go func() {
@@ -98,13 +99,21 @@ func TestStartTenantWithDelayedID(t *testing.T) {
 	c, err := pgx.Connect(ctx, pgURL.String())
 	durationFromTenantIDSetToConnect := timeutil.Since(timeTenantIDSet)
 	require.NoError(t, err)
-	defer func() { _ = c.Close(ctx) }()
+	defer func(conn *pgx.Conn) { _ = conn.Close(ctx) }(c)
 	t.Logf("cold connect duration (from tenant id set to connect) %s", durationFromTenantIDSetToConnect)
 
 	connectStart := timeutil.Now()
 	c, err = pgx.Connect(ctx, pgURL.String())
 	warmConnectDuration := timeutil.Since(connectStart)
 	require.NoError(t, err)
-	defer func() { _ = c.Close(ctx) }()
+	defer func(conn *pgx.Conn) { _ = conn.Close(ctx) }(c)
 	t.Logf("warm connect duration %s", warmConnectDuration)
+
+	// Ensure that delayed locality is set.
+	var loc string
+	require.NoError(t, c.QueryRow(
+		ctx,
+		"SELECT locality FROM system.sql_instances WHERE locality IS NOT NULL",
+	).Scan(&loc))
+	require.Regexp(t, `"Tiers": "region=us-central1,az=az1"`, loc)
 }

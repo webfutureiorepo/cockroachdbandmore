@@ -1,16 +1,11 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecjoin
 
-import "github.com/cockroachdb/cockroach/pkg/util"
+import "github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 
 // circularGroupsBuffer is a struct designed to store the groups' slices for a
 // given column. It starts out small and will grow dynamically if necessary
@@ -47,7 +42,7 @@ type circularGroupsBuffer struct {
 
 // groupsBufferInitialSize determines the size used in initial allocations of
 // the slices of the circularGroupsBuffer.
-var groupsBufferInitialSize = util.ConstantWithMetamorphicTestRange(
+var groupsBufferInitialSize = metamorphic.ConstantWithTestRange(
 	"merge-joiner-groups-buffer",
 	8,  /* defaultValue */
 	1,  /* min */

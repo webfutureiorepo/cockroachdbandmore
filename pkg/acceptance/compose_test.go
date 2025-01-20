@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package acceptance
 
@@ -38,26 +33,27 @@ func TestCompose(t *testing.T) {
 }
 
 func testCompose(t *testing.T, path string, exitCodeFrom string) {
+	maybeSkipTest(t)
 	if bazel.BuiltWithBazel() {
 		// Copy runfiles symlink content to a temporary directory to avoid broken symlinks in docker.
 		tmpComposeDir := t.TempDir()
 		err := copyRunfiles(composeDir, tmpComposeDir)
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		path = filepath.Join(tmpComposeDir, path)
 		// If running under Bazel, export 2 environment variables that will be interpolated in docker-compose.yml files.
 		cockroachBinary, err := filepath.Abs(*cluster.CockroachBinary)
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		err = os.Setenv("COCKROACH_BINARY", cockroachBinary)
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		err = os.Setenv("CERTS_DIR", cluster.AbsCertsDir())
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 	} else {
 		path = filepath.Join(composeDir, path)
@@ -65,16 +61,21 @@ func testCompose(t *testing.T, path string, exitCodeFrom string) {
 	uid := os.Getuid()
 	err := os.Setenv("UID", strconv.Itoa(uid))
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err)
 	}
 	gid := os.Getgid()
 	err = os.Setenv("GID", strconv.Itoa(gid))
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err)
 	}
 	cmd := exec.Command(
-		"docker-compose",
-		"--no-ansi",
+		"docker",
+		"compose",
+		// NB: Using --compatibility here in order to preserve compose V1 hostnames
+		// (with underscores) instead of V2 hostnames (with -), because the
+		// hostnames are hardcoded in the Kerberos keys.
+		"--compatibility",
+		"--ansi=never",
 		"-f", path,
 		"up",
 		"--force-recreate",

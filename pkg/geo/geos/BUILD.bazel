@@ -42,7 +42,13 @@ go_library(
         "@io_bazel_rules_go//go/platform:openbsd": [
             "-ldl -lm",
         ],
+        "@io_bazel_rules_go//go/platform:osx": [
+            "-ldl -lm",
+        ],
         "@io_bazel_rules_go//go/platform:plan9": [
+            "-ldl -lm",
+        ],
+        "@io_bazel_rules_go//go/platform:qnx": [
             "-ldl -lm",
         ],
         "@io_bazel_rules_go//go/platform:solaris": [
@@ -69,10 +75,6 @@ go_test(
     srcs = ["geos_test.go"],
     data = ["//c-deps:libgeos"],
     embed = [":geos"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_stretchr_testify//require",

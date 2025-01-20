@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -105,7 +101,7 @@ func optimizePuts(
 		// We want to include maxKey in our scan. Since UpperBound is exclusive, we
 		// need to set it to the key after maxKey.
 		UpperBound:   maxKey.Next(),
-		ReadCategory: storage.BatchEvalReadCategory,
+		ReadCategory: fs.BatchEvalReadCategory,
 	})
 	if err != nil {
 		return nil, err
@@ -242,6 +238,9 @@ func evaluateBatch(
 		defer func() {
 			if ss.NumGets != 0 || ss.NumScans != 0 || ss.NumReverseScans != 0 {
 				// Only record non-empty ScanStats.
+				ss.NodeID = rec.NodeID()
+				locality := rec.GetNodeLocality()
+				ss.Region, _ = locality.Find("region")
 				sp.RecordStructured(ss)
 			}
 		}()
@@ -543,13 +542,13 @@ func canDoServersideRetry(
 	ba *kvpb.BatchRequest,
 	g *concurrency.Guard,
 	deadline hlc.Timestamp,
-) bool {
+) (*kvpb.BatchRequest, bool) {
 	if pErr == nil {
 		log.Fatalf(ctx, "canDoServersideRetry called without error")
 	}
 	if ba.Txn != nil {
 		if !ba.CanForwardReadTimestamp {
-			return false
+			return ba, false
 		}
 		if !deadline.IsEmpty() {
 			log.Fatal(ctx, "deadline passed for transactional request")
@@ -565,7 +564,7 @@ func canDoServersideRetry(
 		var ok bool
 		ok, newTimestamp = kvpb.TransactionRefreshTimestamp(pErr)
 		if !ok {
-			return false
+			return ba, false
 		}
 	} else {
 		switch tErr := pErr.GetDetail().(type) {
@@ -576,12 +575,12 @@ func canDoServersideRetry(
 			newTimestamp = tErr.RetryTimestamp()
 
 		default:
-			return false
+			return ba, false
 		}
 	}
 
 	if batcheval.IsEndTxnExceedingDeadline(newTimestamp, deadline) {
-		return false
+		return ba, false
 	}
 	return tryBumpBatchTimestamp(ctx, ba, g, newTimestamp)
 }

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // Input synchronizers are used by processors to merge incoming rows from
 // (potentially) multiple streams; see docs/RFCS/distributed_sql.md
@@ -66,6 +61,7 @@ type serialSynchronizer interface {
 type serialSynchronizerBase struct {
 	state serialSynchronizerState
 
+	ctx      context.Context
 	types    []*types.T
 	sources  []srcInfo
 	rowAlloc rowenc.EncDatumRowAlloc
@@ -79,6 +75,7 @@ func (s *serialSynchronizerBase) getSources() []srcInfo {
 
 // Start is part of the RowSource interface.
 func (s *serialSynchronizerBase) Start(ctx context.Context) {
+	s.ctx = ctx
 	for _, src := range s.sources {
 		src.src.Start(ctx)
 	}
@@ -133,7 +130,7 @@ func (s *serialOrderedSynchronizer) Len() int {
 func (s *serialOrderedSynchronizer) Less(i, j int) bool {
 	si := &s.sources[s.heap[i]]
 	sj := &s.sources[s.heap[j]]
-	cmp, err := si.row.Compare(s.types, &s.alloc, s.ordering, s.evalCtx, sj.row)
+	cmp, err := si.row.Compare(s.ctx, s.types, &s.alloc, s.ordering, s.evalCtx, sj.row)
 	if err != nil {
 		s.err = err
 		return false
@@ -271,7 +268,7 @@ func (s *serialOrderedSynchronizer) advanceRoot() error {
 	} else {
 		heap.Fix(s, 0)
 		// TODO(radu): this check may be costly, we could disable it in production
-		if cmp, err := oldRow.Compare(s.types, &s.alloc, s.ordering, s.evalCtx, src.row); err != nil {
+		if cmp, err := oldRow.Compare(s.ctx, s.types, &s.alloc, s.ordering, s.evalCtx, src.row); err != nil {
 			return err
 		} else if cmp > 0 {
 			return errors.Errorf(

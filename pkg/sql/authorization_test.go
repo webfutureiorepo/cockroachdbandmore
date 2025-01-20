@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -54,26 +49,26 @@ func TestCheckAnyPrivilegeForNodeUser(t *testing.T) {
 		// 3 databases (system, defaultdb, postgres).
 		require.Equal(t, row.String(), "(3)")
 
-		_, err = txn.ExecEx(ctx, "create-database1", txn.KV(), sessiondata.RootUserSessionDataOverride,
+		_, err = txn.ExecEx(ctx, "create-database1", txn.KV(), sessiondata.NodeUserSessionDataOverride,
 			"CREATE DATABASE test1")
 		require.NoError(t, err)
 
-		_, err = txn.ExecEx(ctx, "create-database2", txn.KV(), sessiondata.RootUserSessionDataOverride,
+		_, err = txn.ExecEx(ctx, "create-database2", txn.KV(), sessiondata.NodeUserSessionDataOverride,
 			"CREATE DATABASE test2")
 		require.NoError(t, err)
 
 		// Revoke CONNECT on all non-system databases and ensure that when querying
 		// with node, we can still see all the databases.
-		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.RootUserSessionDataOverride,
+		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.NodeUserSessionDataOverride,
 			"REVOKE CONNECT ON DATABASE test1 FROM public")
 		require.NoError(t, err)
-		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.RootUserSessionDataOverride,
+		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.NodeUserSessionDataOverride,
 			"REVOKE CONNECT ON DATABASE test2 FROM public")
 		require.NoError(t, err)
-		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.RootUserSessionDataOverride,
+		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.NodeUserSessionDataOverride,
 			"REVOKE CONNECT ON DATABASE defaultdb FROM public")
 		require.NoError(t, err)
-		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.RootUserSessionDataOverride,
+		_, err = txn.ExecEx(ctx, "revoke-privileges", txn.KV(), sessiondata.NodeUserSessionDataOverride,
 			"REVOKE CONNECT ON DATABASE postgres FROM public")
 		require.NoError(t, err)
 

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package descs_test
 
@@ -42,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -49,6 +45,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 	"github.com/stretchr/testify/require"
 )
@@ -257,6 +254,10 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 			immByIDAfter, err := descriptors.ByIDWithLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, dbID)
 			require.NoError(t, err)
 			require.Same(t, immByNameAfter, immByIDAfter)
+
+			// The name must be non-empty.
+			_, err = descriptors.ByNameWithLeased(txn.KV()).Get().Database(ctx, "")
+			require.Equal(t, sqlerrors.ErrEmptyDatabaseName, err)
 
 			return nil
 		}))
@@ -532,7 +533,7 @@ func TestCollectionPreservesPostDeserializationChanges(t *testing.T) {
 	require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
 		ctx context.Context, txn isql.Txn, col *descs.Collection,
 	) error {
-		immuts, err := col.ByID(txn.KV()).WithoutNonPublic().Get().Descs(ctx, []descpb.ID{dbID, scID, typID, tabID})
+		immuts, err := col.ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Descs(ctx, []descpb.ID{dbID, scID, typID, tabID})
 		if err != nil {
 			return err
 		}
@@ -596,8 +597,10 @@ func TestCollectionProperlyUsesMemoryMonitoring(t *testing.T) {
 	}
 
 	// Create a monitor to be used to track memory usage in a Collection.
-	monitor := mon.NewMonitor("test_monitor", mon.MemoryResource,
-		nil, nil, -1, 0, cluster.MakeTestingClusterSettings())
+	monitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test_monitor"),
+		Settings: cluster.MakeTestingClusterSettings(),
+	})
 
 	// Start the monitor with unlimited budget.
 	monitor.Start(ctx, nil, mon.NewStandaloneBudget(math.MaxInt64))
@@ -1218,6 +1221,63 @@ SELECT id
 		require.NoError(t, txn.Descriptors().AddUncommittedDescriptor(ctx, scDesc))
 		return nil
 	}))
+}
+
+func TestDescriptorErrorWrap(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	srv, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer srv.Stopper().Stop(ctx)
+	s := srv.ApplicationLayer()
+
+	tdb := sqlutils.MakeSQLRunner(sqlDB)
+	tdb.Exec(t, `CREATE DATABASE db`)
+	tdb.Exec(t, `USE db`)
+	tdb.Exec(t, `CREATE SCHEMA schema`)
+	tdb.Exec(t, `CREATE TABLE db.schema.table()`)
+
+	monitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test_monitor"),
+		Settings: cluster.MakeTestingClusterSettings(),
+	})
+	monitor.Start(ctx, nil, mon.NewStandaloneBudget(1))
+	ba := monitor.MakeBoundAccount()
+
+	execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
+	for _, tc := range []struct {
+		desc        string
+		err         error
+		isAssertion bool
+	}{
+		{"bare error", errors.New("bare error is treated as an assertion"), true},
+		{"out of memory", ba.Grow(ctx, monitor.Limit()), false},
+		{"pgcode error", sqlerrors.NewAlterColTypeInCombinationNotSupportedError(), false},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
+				ctx context.Context, txn isql.Txn, descriptors *descs.Collection,
+			) error {
+				tn := tree.MakeTableNameWithSchema("db", "schema", "table")
+				_, mut, err := descs.PrefixAndMutableTable(ctx, descriptors.MutableByName(txn.KV()), &tn)
+				if err != nil {
+					return err
+				}
+
+				require.False(t, errors.HasAssertionFailure(tc.err))
+				err = descs.DecorateDescriptorError(mut, tc.err)
+				// Ensure err is still an error
+				require.Error(t, err)
+				// Ensure descriptor info is wrapped in the error
+				require.Contains(t, err.Error(), mut.GetName())
+				// Ensure error is promoted to assertion as expected
+				require.Equal(t, tc.isAssertion, errors.HasAssertionFailure(err))
+				return nil
+			}))
+		})
+	}
+	monitor.Stop(ctx)
 }
 
 func getSchemaNames(defaultDBSchemaNames map[descpb.ID]string) []string {

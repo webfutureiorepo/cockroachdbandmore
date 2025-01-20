@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scdecomp
 
@@ -22,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
@@ -121,14 +115,6 @@ func (w *walkCtx) walkRoot() {
 	case catalog.TableDescriptor:
 		w.walkRelation(d)
 	case catalog.FunctionDescriptor:
-		if !w.clusterVersion.IsActive(clusterversion.V23_1) {
-			panic(
-				scerrors.NotImplementedErrorf(
-					nil, // n
-					"function relevant elements and rules are not supported until fully upgraded to 23.1",
-				),
-			)
-		}
 		w.walkFunction(d)
 	default:
 		panic(errors.AssertionFailedf("unexpected descriptor type %T: %+v",
@@ -160,6 +146,16 @@ func (w *walkCtx) walkDatabase(db catalog.DatabaseDescriptor) {
 		w.backRefs.Add(id)
 		return nil
 	})
+	zoneConfig, err := w.zoneConfigReader.GetZoneConfig(w.ctx, db.GetID())
+	if err != nil {
+		panic(err)
+	}
+	if zoneConfig != nil {
+		w.ev(scpb.Status_PUBLIC, &scpb.DatabaseZoneConfig{
+			DatabaseID: db.GetID(),
+			ZoneConfig: zoneConfig.ZoneConfigProto(),
+		})
+	}
 }
 
 func (w *walkCtx) walkSchema(sc catalog.SchemaDescriptor) {
@@ -224,6 +220,14 @@ func (w *walkCtx) walkType(typ catalog.TypeDescriptor) {
 		ChildObjectID: typ.GetID(),
 		SchemaID:      typ.GetParentSchemaID(),
 	})
+	{
+		if comment, ok := w.commentReader.GetTypeComment(typ.GetID()); ok {
+			w.ev(scpb.Status_PUBLIC, &scpb.TypeComment{
+				TypeID:  typ.GetID(),
+				Comment: comment,
+			})
+		}
+	}
 	for i := 0; i < typ.NumReferencingDescriptors(); i++ {
 		w.backRefs.Add(typ.GetReferencingDescriptorID(i))
 	}
@@ -271,6 +275,7 @@ func GetSequenceOptions(
 	addSequenceOption(tree.SeqOptStart, defaultOpts.Start, opts.Start)
 	addSequenceOption(tree.SeqOptVirtual, defaultOpts.Virtual, opts.Virtual)
 	addSequenceOption(tree.SeqOptCache, defaultOpts.CacheSize, opts.CacheSize)
+	addSequenceOption(tree.SeqOptCacheNode, defaultOpts.NodeCacheSize, opts.NodeCacheSize)
 	addSequenceOption(tree.SeqOptAs, defaultOpts.AsIntegerType, opts.AsIntegerType)
 	return sequenceOptions
 }
@@ -380,9 +385,16 @@ func (w *walkCtx) walkRelation(tbl catalog.TableDescriptor) {
 			w.walkIndex(tbl, idx)
 		}
 		if ttl := tbl.GetRowLevelTTL(); ttl != nil {
+			// We pull out the TTL expression so that we can build proper column
+			// dependencies with whatever column is used.
+			ttlExpr, err := w.newExpression(string(ttl.GetTTLExpr()))
+			if err != nil {
+				panic(err)
+			}
 			w.ev(scpb.Status_PUBLIC, &scpb.RowLevelTTL{
 				TableID:     tbl.GetID(),
 				RowLevelTTL: *ttl,
+				TTLExpr:     ttlExpr,
 			})
 		}
 	}
@@ -394,6 +406,14 @@ func (w *walkCtx) walkRelation(tbl catalog.TableDescriptor) {
 	}
 	for _, c := range tbl.OutboundForeignKeys() {
 		w.walkForeignKeyConstraint(tbl, c)
+	}
+	triggers := tbl.GetTriggers()
+	for i := range triggers {
+		w.walkTrigger(tbl, &triggers[i])
+	}
+	policies := tbl.GetPolicies()
+	for i := range policies {
+		w.walkPolicy(tbl, &policies[i])
 	}
 
 	_ = tbl.ForeachDependedOnBy(func(dep *descpb.TableDescriptor_Reference) error {
@@ -407,22 +427,38 @@ func (w *walkCtx) walkRelation(tbl catalog.TableDescriptor) {
 	// operations on tables. To minimize RTT impact limit
 	// this to only tables and materialized views.
 	if (tbl.IsTable() && !tbl.IsVirtualTable()) || tbl.MaterializedView() {
-		zoneCfg, err := w.zoneConfigReader.GetZoneConfig(w.ctx, tbl.GetID())
+		zoneConfig, err := w.zoneConfigReader.GetZoneConfig(w.ctx, tbl.GetID())
 		if err != nil {
 			panic(err)
 		}
-		if zoneCfg != nil {
+		if zoneConfig != nil {
+			zc := zoneConfig.ZoneConfigProto()
 			w.ev(scpb.Status_PUBLIC,
 				&scpb.TableZoneConfig{
-					TableID: tbl.GetID(),
+					TableID:    tbl.GetID(),
+					ZoneConfig: zc,
 				})
-			for _, subZoneCfg := range zoneCfg.ZoneConfigProto().Subzones {
-				w.ev(scpb.Status_PUBLIC,
-					&scpb.IndexZoneConfig{
-						TableID:       tbl.GetID(),
-						IndexID:       catid.IndexID(subZoneCfg.IndexID),
-						PartitionName: subZoneCfg.PartitionName,
-					})
+			for i, subZoneCfg := range zc.Subzones {
+				if len(subZoneCfg.PartitionName) > 0 {
+					w.ev(scpb.Status_PUBLIC,
+						&scpb.PartitionZoneConfig{
+							TableID:       tbl.GetID(),
+							IndexID:       catid.IndexID(subZoneCfg.IndexID),
+							PartitionName: subZoneCfg.PartitionName,
+							Subzone:       subZoneCfg,
+							SubzoneSpans:  zc.FilterSubzoneSpansByIdx(int32(i)),
+							OldIdxRef:     -1,
+						})
+				} else {
+					w.ev(scpb.Status_PUBLIC,
+						&scpb.IndexZoneConfig{
+							TableID:      tbl.GetID(),
+							IndexID:      catid.IndexID(subZoneCfg.IndexID),
+							Subzone:      subZoneCfg,
+							SubzoneSpans: zc.FilterSubzoneSpansByIdx(int32(i)),
+							OldIdxRef:    -1,
+						})
+				}
 			}
 		}
 	}
@@ -431,6 +467,12 @@ func (w *walkCtx) walkRelation(tbl catalog.TableDescriptor) {
 	}
 	if tbl.IsSchemaLocked() {
 		w.ev(scpb.Status_PUBLIC, &scpb.TableSchemaLocked{TableID: tbl.GetID()})
+	}
+	if tbl.TableDesc().LDRJobIDs != nil {
+		w.ev(scpb.Status_PUBLIC, &scpb.LDRJobIDs{
+			TableID: tbl.GetID(),
+			JobIDs:  tbl.TableDesc().LDRJobIDs,
+		})
 	}
 }
 
@@ -519,7 +561,16 @@ func (w *walkCtx) walkColumn(tbl catalog.TableDescriptor, col catalog.Column) {
 		if col.IsComputed() {
 			expr, err := w.newExpression(col.GetComputeExpr())
 			onErrPanic(err)
-			columnType.ComputeExpr = expr
+
+			if columnType.ElementCreationMetadata.In_24_3OrLater {
+				w.ev(scpb.Status_PUBLIC, &scpb.ColumnComputeExpression{
+					TableID:    tbl.GetID(),
+					ColumnID:   col.GetID(),
+					Expression: *expr,
+				})
+			} else {
+				columnType.ComputeExpr = expr
+			}
 		}
 		w.ev(scpb.Status_PUBLIC, columnType)
 	}
@@ -692,7 +743,7 @@ func (w *walkCtx) walkUniqueWithoutIndexConstraint(
 				c.GetName(), tbl.GetName(), tbl.GetID()))
 		}
 	}
-	if c.IsConstraintUnvalidated() && w.clusterVersion.IsActive(clusterversion.V23_1) {
+	if c.IsConstraintUnvalidated() {
 		uwi := &scpb.UniqueWithoutIndexConstraintUnvalidated{
 			TableID:      tbl.GetID(),
 			ConstraintID: c.GetConstraintID(),
@@ -729,7 +780,7 @@ func (w *walkCtx) walkCheckConstraint(tbl catalog.TableDescriptor, c catalog.Che
 		panic(errors.NewAssertionErrorWithWrappedErrf(err, "check constraint %q in table %q (%d)",
 			c.GetName(), tbl.GetName(), tbl.GetID()))
 	}
-	if c.IsConstraintUnvalidated() && w.clusterVersion.IsActive(clusterversion.V23_1) {
+	if c.IsConstraintUnvalidated() {
 		w.ev(scpb.Status_PUBLIC, &scpb.CheckConstraintUnvalidated{
 			TableID:      tbl.GetID(),
 			ConstraintID: c.GetConstraintID(),
@@ -759,10 +810,95 @@ func (w *walkCtx) walkCheckConstraint(tbl catalog.TableDescriptor, c catalog.Che
 	}
 }
 
+func (w *walkCtx) walkTrigger(tbl catalog.TableDescriptor, t *descpb.TriggerDescriptor) {
+	w.ev(scpb.Status_PUBLIC, &scpb.Trigger{
+		TableID:   tbl.GetID(),
+		TriggerID: t.ID,
+	})
+	w.ev(scpb.Status_PUBLIC, &scpb.TriggerName{
+		TableID:   tbl.GetID(),
+		TriggerID: t.ID,
+		Name:      t.Name,
+	})
+	w.ev(scpb.Status_PUBLIC, &scpb.TriggerEnabled{
+		TableID:   tbl.GetID(),
+		TriggerID: t.ID,
+		Enabled:   t.Enabled,
+	})
+	w.ev(scpb.Status_PUBLIC, &scpb.TriggerTiming{
+		TableID:    tbl.GetID(),
+		TriggerID:  t.ID,
+		ActionTime: t.ActionTime,
+		ForEachRow: t.ForEachRow,
+	})
+	events := make([]*scpb.TriggerEvent, 0, len(t.Events))
+	for _, event := range t.Events {
+		events = append(events, &scpb.TriggerEvent{
+			Type:        event.Type,
+			ColumnNames: event.ColumnNames,
+		})
+	}
+	w.ev(scpb.Status_PUBLIC, &scpb.TriggerEvents{
+		TableID:   tbl.GetID(),
+		TriggerID: t.ID,
+		Events:    events,
+	})
+	if t.NewTransitionAlias != "" || t.OldTransitionAlias != "" {
+		w.ev(scpb.Status_PUBLIC, &scpb.TriggerTransition{
+			TableID:            tbl.GetID(),
+			TriggerID:          t.ID,
+			NewTransitionAlias: t.NewTransitionAlias,
+			OldTransitionAlias: t.OldTransitionAlias,
+		})
+	}
+	if t.WhenExpr != "" {
+		w.ev(scpb.Status_PUBLIC, &scpb.TriggerWhen{
+			TableID:   tbl.GetID(),
+			TriggerID: t.ID,
+			WhenExpr:  t.WhenExpr,
+		})
+	}
+	w.ev(scpb.Status_PUBLIC, &scpb.TriggerFunctionCall{
+		TableID:   tbl.GetID(),
+		TriggerID: t.ID,
+		FuncID:    t.FuncID,
+		FuncBody:  t.FuncBody,
+		FuncArgs:  t.FuncArgs,
+	})
+	w.ev(scpb.Status_PUBLIC, &scpb.TriggerDeps{
+		TableID:         tbl.GetID(),
+		TriggerID:       t.ID,
+		UsesRelationIDs: t.DependsOn,
+		UsesTypeIDs:     t.DependsOnTypes,
+		UsesRoutineIDs:  t.DependsOnRoutines,
+	})
+}
+
+func (w *walkCtx) walkPolicy(tbl catalog.TableDescriptor, p *descpb.PolicyDescriptor) {
+	w.ev(scpb.Status_PUBLIC, &scpb.Policy{
+		TableID:  tbl.GetID(),
+		PolicyID: p.ID,
+		Type:     p.Type,
+		Command:  p.Command,
+	})
+	w.ev(scpb.Status_PUBLIC, &scpb.PolicyName{
+		TableID:  tbl.GetID(),
+		PolicyID: p.ID,
+		Name:     p.Name,
+	})
+	for _, role := range p.RoleNames {
+		w.ev(scpb.Status_PUBLIC, &scpb.PolicyRole{
+			TableID:  tbl.GetID(),
+			PolicyID: p.ID,
+			RoleName: role,
+		})
+	}
+}
+
 func (w *walkCtx) walkForeignKeyConstraint(
 	tbl catalog.TableDescriptor, c catalog.ForeignKeyConstraint,
 ) {
-	if c.IsConstraintUnvalidated() && w.clusterVersion.IsActive(clusterversion.V23_1) {
+	if c.IsConstraintUnvalidated() {
 		w.ev(scpb.Status_PUBLIC, &scpb.ForeignKeyConstraintUnvalidated{
 			TableID:                 tbl.GetID(),
 			ConstraintID:            c.GetConstraintID(),
@@ -819,11 +955,7 @@ func (w *walkCtx) walkFunction(fnDesc catalog.FunctionDescriptor) {
 			if err != nil {
 				panic(err)
 			}
-			w.ev(scpb.Status_PUBLIC, &scpb.FunctionParamDefaultExpression{
-				FunctionID: fnDesc.GetID(),
-				Ordinal:    uint32(i),
-				Expression: *expr,
-			})
+			fn.Params[i].DefaultExpr = string(expr.Expr)
 		}
 	}
 
@@ -848,13 +980,16 @@ func (w *walkCtx) walkFunction(fnDesc catalog.FunctionDescriptor) {
 		FunctionID:        fnDesc.GetID(),
 		NullInputBehavior: catpb.FunctionNullInputBehavior{NullInputBehavior: fnDesc.GetNullInputBehavior()},
 	})
+	w.ev(scpb.Status_PUBLIC, &scpb.FunctionSecurity{
+		FunctionID: fnDesc.GetID(),
+		Security:   catpb.FunctionSecurity{Security: fnDesc.GetSecurity()},
+	})
 
 	fnBody := &scpb.FunctionBody{
 		FunctionID:  fnDesc.GetID(),
 		Body:        fnDesc.GetFunctionBody(),
 		Lang:        catpb.FunctionLanguage{Lang: fnDesc.GetLanguage()},
 		UsesTypeIDs: fnDesc.GetDependsOnTypes(),
-		// TODO(chengxiong): add UsesFunctionIDs when UDF usage is allowed.
 	}
 	dedupeColIDs := func(colIDs []catid.ColumnID) []catid.ColumnID {
 		ret := catalog.MakeTableColSet()
@@ -900,8 +1035,42 @@ func (w *walkCtx) walkFunction(fnDesc catalog.FunctionDescriptor) {
 			}
 		}
 	}
+	fnBody.UsesFunctionIDs = append(fnBody.UsesFunctionIDs, fnDesc.GetDependsOnFunctions()...)
 	for _, backRef := range fnDesc.GetDependedOnBy() {
 		w.backRefs.Add(backRef.ID)
 	}
 	w.ev(scpb.Status_PUBLIC, fnBody)
+}
+
+func WalkNamedRanges(
+	ctx context.Context,
+	desc catalog.Descriptor,
+	lookupFn func(id catid.DescID) catalog.Descriptor,
+	ev ElementVisitor,
+	commentReader CommentGetter,
+	zoneConfigReader ZoneConfigGetter,
+	clusterVersion clusterversion.ClusterVersion,
+	rangeID descpb.ID,
+) {
+	w := walkCtx{
+		ctx:                  ctx,
+		desc:                 desc,
+		ev:                   ev,
+		lookupFn:             lookupFn,
+		cachedTypeIDClosures: make(map[catid.DescID]catalog.DescriptorIDSet),
+		commentReader:        commentReader,
+		zoneConfigReader:     zoneConfigReader,
+		clusterVersion:       clusterVersion,
+	}
+
+	zoneConfig, err := w.zoneConfigReader.GetZoneConfig(w.ctx, rangeID)
+	if err != nil {
+		panic(err)
+	}
+	if zoneConfig != nil {
+		w.ev(scpb.Status_PUBLIC, &scpb.NamedRangeZoneConfig{
+			RangeID:    rangeID,
+			ZoneConfig: zoneConfig.ZoneConfigProto(),
+		})
+	}
 }

@@ -44,10 +44,18 @@ set require_explicit_primary_keys=true
 statement error pq: no primary key specified for table t \(require_explicit_primary_keys = true\)
 CREATE TABLE t (x INT, y INT)
 
+# Make sure the setting does not block a table that _does_ have a PK.
+statement ok
+CREATE TABLE t (x INT PRIMARY KEY, y INT)
+
 # Regression for #45496.
 statement ok
 reset require_explicit_primary_keys;
+
+statement ok
 DROP TABLE IF EXISTS t;
+
+statement ok
 CREATE TABLE t (rowid INT, rowid_1 INT, FAMILY (rowid, rowid_1))
 
 query T rowsort
@@ -655,8 +663,8 @@ FROM (
 LEFT JOIN pg_catalog.pg_depend r ON l.table_id = r.objid;
 ----
 table_id  name               state   refobjid
-161       test_serial_b_seq  PUBLIC  160
-160       test_serial        PUBLIC  NULL
+162       test_serial_b_seq  PUBLIC  161
+161       test_serial        PUBLIC  NULL
 
 statement ok
 DROP TABLE test_serial;
@@ -688,8 +696,8 @@ FROM (
 LEFT JOIN pg_catalog.pg_depend r ON l.table_id = r.objid;
 ----
 table_id  name               state   refobjid
-163       test_serial_b_seq  PUBLIC  162
-162       test_serial        PUBLIC  NULL
+164       test_serial_b_seq  PUBLIC  163
+163       test_serial        PUBLIC  NULL
 
 statement ok
 ALTER TABLE test_serial DROP COLUMN b;
@@ -704,7 +712,7 @@ FROM (
 LEFT JOIN pg_catalog.pg_depend r ON l.table_id = r.objid;
 ----
 table_id  name         state   refobjid
-162       test_serial  PUBLIC  NULL
+163       test_serial  PUBLIC  NULL
 
 statement ok
 DROP TABLE test_serial;
@@ -731,6 +739,10 @@ CREATE TABLE t_bad_param (
   a INT PRIMARY KEY USING HASH WITH BUCKET_COUNT = 5 WITH (bucket_count=5)
 );
 
+statement error pq: hash sharded index bucket count must be in range \[2, 2048\], got NULL
+CREATE TABLE t_bad_param (
+  a INT PRIMARY KEY USING HASH WITH BUCKET_COUNT = NULL
+);
 
 statement error pq: invalid storage param "s2_max_level" on primary key
 CREATE TABLE t_bad_param (
@@ -1064,5 +1076,131 @@ CREATE TABLE public.t_115352 (
     CONSTRAINT t_115352_pkey PRIMARY KEY (rowid ASC),
     CONSTRAINT unique_i UNIQUE WITHOUT INDEX (i)
 )
+
+subtest end
+
+
+statement ok
+
+subtest 125619
+
+statement ok
+SET inject_retry_errors_enabled=true
+
+statement ok
+CREATE TABLE t_125619 (i INT8, j INT8, INDEX ((i + j)));
+
+statement ok
+ALTER TABLE t_125619 ADD CONSTRAINT uni UNIQUE ((i + j + i))
+
+statement ok
+SET inject_retry_errors_enabled=false
+
+subtest end
+
+
+# Addresses a bug where parsing nextval expressions with extra values could end
+# end up with a panic when rewriting sequence expressions.
+subtest 133399
+
+statement ok
+CREATE TABLE v_133399 (c01 INT);
+
+statement error pgcode 42804 could not find matching function overload for given arguments
+CREATE TABLE t_133399 AS (SELECT * FROM v_133399 WINDOW window_name AS (ROWS c01 BETWEEN nextval ('abc', 'abc', 'abc') AND c01 PRECEDING));
+
+subtest end
+
+subtest create_table_as_notice
+
+statement ok
+CREATE TABLE IF NOT EXISTS t1 (
+  id1 UUID NOT NULL DEFAULT gen_random_uuid(),
+  id2 UUID NOT NULL DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  val JSONB,
+  PRIMARY KEY(id1, id2)
+);
+
+# Ignore weaker isolation levels, since that will cause additional NOTICEs that we don't want to check in this test.
+skipif config weak-iso-level-configs
+query T noticetrace
+CREATE TABLE t2 AS SELECT * FROM t1;
+----
+NOTICE: CREATE TABLE ... AS does not copy over indexes, default expressions, or constraints; the new table has a hidden rowid primary key column
+
+subtest end
+
+subtest create_table_with_duplicate_storage_params
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE create_table_with_duplicate_storage_params_a (
+  a INT PRIMARY KEY,
+  b TEXT NOT NULL
+) WITH (fillfactor=10, fillfactor=15);
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE IF NOT EXISTS create_table_with_duplicate_storage_params_b (
+  a INT
+) WITH (fillfactor=10, fillfactor=20);
+
+subtest end
+
+subtest create_table_with_as_duplicate_storage_params
+
+statement ok
+CREATE TABLE create_table_with_as_duplicate_storage_params_a (a INT);
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE create_table_with_as_duplicate_storage_params_b (a) WITH (fillfactor=10, fillfactor=20) AS (SELECT * FROM create_table_with_as_duplicate_storage_params_a);
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE IF NOT EXISTS create_table_with_as_duplicate_storage_params_c (a) WITH (fillfactor=10, fillfactor=20) AS (SELECT * FROM create_table_with_as_duplicate_storage_params_a);
+
+subtest end
+
+subtest create_table_primary_key_with_duplicate_storage_params
+
+# only bucket_count is a valid storage param, so USING HASH must be added
+statement error pgcode 22023 pq: parameter "bucket_count" specified more than once
+CREATE TABLE create_table_primary_key_with_duplicate_storage_params_a (a INT PRIMARY KEY USING HASH WITH (bucket_count=10, bucket_count=20));
+
+subtest end
+
+subtest create_table_index_elem_duplicate_storage_params
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE create_table_index_elem_duplicate_storage_params_a (
+  a INT PRIMARY KEY,
+  b INT,
+  INDEX (b) WITH (fillfactor=10, fillfactor=20)
+);
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE create_table_index_elem_duplicate_storage_params_b (
+  a INT PRIMARY KEY,
+  b INT,
+  INDEX b_idx (b) WITH (fillfactor=10, fillfactor=20)
+);
+
+statement error pgcode 22023 pq: parameter "bucket_count" specified more than once
+CREATE TABLE create_table_index_elem_duplicate_storage_params_c (
+  a INT PRIMARY KEY,
+  b INT,
+  UNIQUE INDEX (b) USING HASH WITH (bucket_count=10, bucket_count=20)
+);
+
+statement error pgcode 22023 pq: parameter "fillfactor" specified more than once
+CREATE TABLE create_table_index_elem_duplicate_storage_params_d (
+  a INT PRIMARY KEY,
+  b JSONB,
+  INVERTED INDEX (b) WITH (fillfactor=10, fillfactor=20)
+);
+
+statement error pgcode 22023 pq: parameter "bucket_count" specified more than once
+CREATE TABLE create_table_index_elem_duplicate_storage_params_e (
+  a INT,
+  PRIMARY KEY (a) USING HASH WITH (bucket_count=10, bucket_count=20)
+);
 
 subtest end

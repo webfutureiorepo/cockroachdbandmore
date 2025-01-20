@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package funcdesc
 
@@ -19,6 +14,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/funcinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
@@ -164,12 +161,17 @@ func (desc *immutable) NewBuilder() catalog.DescriptorBuilder {
 }
 
 // GetReferencedDescIDs implements the catalog.Descriptor interface.
-func (desc *immutable) GetReferencedDescIDs() (catalog.DescriptorIDSet, error) {
+func (desc *immutable) GetReferencedDescIDs(
+	catalog.ValidationLevel,
+) (catalog.DescriptorIDSet, error) {
 	ret := catalog.MakeDescriptorIDSet(desc.GetID(), desc.GetParentID(), desc.GetParentSchemaID())
 	for _, id := range desc.DependsOn {
 		ret.Add(id)
 	}
 	for _, id := range desc.DependsOnTypes {
+		ret.Add(id)
+	}
+	for _, id := range desc.DependsOnFunctions {
 		ret.Add(id)
 	}
 	for _, dep := range desc.DependedOnBy {
@@ -257,6 +259,10 @@ func (desc *immutable) ValidateForwardReferences(
 	for _, typeID := range desc.DependsOnTypes {
 		vea.Report(catalog.ValidateOutboundTypeRef(typeID, vdg))
 	}
+
+	for _, functionID := range desc.DependsOnFunctions {
+		vea.Report(catalog.ValidateOutboundFunctionRef(functionID, vdg))
+	}
 }
 
 // ValidateBackReferences implements the catalog.Descriptor interface.
@@ -278,10 +284,19 @@ func (desc *immutable) ValidateBackReferences(
 		vea.Report(catalog.ValidateOutboundTypeRefBackReference(desc.GetID(), typ))
 	}
 
-	// Currently, we don't support cross function references yet.
-	// So here we assume that all inbound references are from tables.
+	// We support both table and function references, which we will determine based
+	// on the descriptor type.
 	for _, by := range desc.DependedOnBy {
-		vea.Report(desc.validateInboundTableRef(by, vdg))
+		descriptor, err := vdg.GetDescriptor(by.ID)
+		if err != nil {
+			vea.Report(err)
+		}
+		switch backRef := descriptor.(type) {
+		case catalog.TableDescriptor:
+			vea.Report(desc.validateInboundTableRef(by, backRef))
+		case catalog.FunctionDescriptor:
+			vea.Report(desc.validateInboundFunctionRef(by, backRef))
+		}
 	}
 }
 
@@ -304,13 +319,34 @@ func (desc *immutable) validateFuncExistsInSchema(scDesc catalog.SchemaDescripto
 		desc.GetName(), desc.GetID(), scDesc.GetName(), scDesc.GetID())
 }
 
-func (desc *immutable) validateInboundTableRef(
-	by descpb.FunctionDescriptor_Reference, vdg catalog.ValidationDescGetter,
+func (desc *immutable) validateInboundFunctionRef(
+	ref descpb.FunctionDescriptor_Reference, backrefFunctionDesc catalog.FunctionDescriptor,
 ) error {
-	backRefTbl, err := vdg.GetTableDescriptor(by.ID)
-	if err != nil {
-		return errors.NewAssertionErrorWithWrappedErrf(err, "invalid depended-on-by relation back reference")
+	if backrefFunctionDesc.Dropped() {
+		return errors.AssertionFailedf("depended-on-by function %q (%d) is dropped",
+			backrefFunctionDesc.GetName(), backrefFunctionDesc.GetID())
 	}
+	// Validate all other references are unset.
+	if ref.ColumnIDs != nil || ref.IndexIDs != nil ||
+		ref.ConstraintIDs != nil || ref.TriggerIDs != nil {
+		return errors.AssertionFailedf("function reference has invalid references (%v, %v %v, %v)",
+			ref.ColumnIDs, ref.IndexIDs, ref.ConstraintIDs, ref.TriggerIDs)
+	}
+	// Validate a reference exists to this function.
+	for _, refID := range backrefFunctionDesc.GetDependsOnFunctions() {
+		if refID == desc.ID {
+			return nil
+		}
+	}
+	return errors.AssertionFailedf("missing back reference to: %q (%d) inside %q (%d)",
+		desc.GetName(), desc.GetID(),
+		backrefFunctionDesc.GetName(), backrefFunctionDesc.GetID(),
+	)
+}
+
+func (desc *immutable) validateInboundTableRef(
+	by descpb.FunctionDescriptor_Reference, backRefTbl catalog.TableDescriptor,
+) error {
 	if backRefTbl.Dropped() {
 		return errors.AssertionFailedf("depended-on-by relation %q (%d) is dropped",
 			backRefTbl.GetName(), backRefTbl.GetID())
@@ -371,6 +407,24 @@ func (desc *immutable) validateInboundTableRef(
 			cstID, backRefTbl.GetName(), backRefTbl.GetID(), desc.GetName(), desc.GetID(),
 		)
 	}
+
+	for _, triggerID := range by.TriggerIDs {
+		if catalog.FindTriggerByID(backRefTbl, triggerID) == nil {
+			return errors.AssertionFailedf(
+				"depended-on-by relation %q (%d) does not have a trigger with ID %d",
+				backRefTbl.GetName(), by.ID, triggerID,
+			)
+		}
+		fnIDs := backRefTbl.GetAllReferencedFunctionIDsInTrigger(triggerID)
+		if fnIDs.Contains(desc.GetID()) {
+			foundInTable = true
+			continue
+		}
+		return errors.AssertionFailedf(
+			"trigger %d in depended-on-by relation %q (%d) does not have reference to function %q (%d)",
+			triggerID, backRefTbl.GetName(), backRefTbl.GetID(), desc.GetName(), desc.GetID(),
+		)
+	}
 	if foundInTable {
 		return nil
 	}
@@ -429,6 +483,24 @@ func (desc *immutable) ForEachUDTDependentForHydration(fn func(t *types.T) error
 		return nil
 	}
 	return iterutil.Map(fn(desc.ReturnType.Type))
+}
+
+// MaybeRequiresTypeHydration implements the catalog.Descriptor interface.
+func (desc *immutable) MaybeRequiresTypeHydration() bool {
+	if catid.IsOIDUserDefined(desc.ReturnType.Type.Oid()) {
+		return true
+	}
+	for i := range desc.Params {
+		if catid.IsOIDUserDefined(desc.Params[i].Type.Oid()) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetReplicatedPCRVersion is a part of the catalog.Descriptor
+func (desc *immutable) GetReplicatedPCRVersion() descpb.DescriptorVersion {
+	return desc.ReplicatedPCRVersion
 }
 
 // IsUncommittedVersion implements the catalog.LeasableDescriptor interface.
@@ -538,6 +610,11 @@ func (desc *Mutable) SetFuncBody(v string) {
 	desc.FunctionBody = v
 }
 
+// SetSecurity sets the Security attribute.
+func (desc *Mutable) SetSecurity(v catpb.Function_Security) {
+	desc.Security = v
+}
+
 // SetName sets the function name.
 func (desc *Mutable) SetName(n string) {
 	desc.Name = n
@@ -552,7 +629,7 @@ func (desc *Mutable) SetParentSchemaID(id descpb.ID) {
 func (desc *Mutable) AddConstraintReference(id descpb.ID, constraintID descpb.ConstraintID) error {
 	for _, dep := range desc.DependsOn {
 		if dep == id {
-			return errors.Errorf(
+			return pgerror.Newf(pgcode.InvalidFunctionDefinition,
 				"cannot add dependency from descriptor %d to function %s (%d) because there will be a dependency cycle", id, desc.GetName(), desc.GetID(),
 			)
 		}
@@ -592,11 +669,42 @@ func (desc *Mutable) RemoveConstraintReference(id descpb.ID, constraintID descpb
 	}
 }
 
+// AddFunctionReference adds back reference for a function invoking this function.
+func (desc *Mutable) AddFunctionReference(id descpb.ID) error {
+	for _, f := range desc.DependsOnFunctions {
+		if f == id {
+			return pgerror.Newf(pgcode.InvalidFunctionDefinition,
+				"cannot add dependency from descriptor %d to function %s (%d) because there will be a dependency cycle", id, desc.GetName(), desc.GetID(),
+			)
+		}
+	}
+
+	// Check if the dependency already exists.
+	for _, d := range desc.DependedOnBy {
+		if d.ID == id {
+			return nil
+		}
+	}
+	desc.DependedOnBy = append(desc.DependedOnBy, descpb.FunctionDescriptor_Reference{ID: id})
+	return nil
+}
+
+// RemoveFunctionReference removes back reference for a function invoking this function.
+func (desc *Mutable) RemoveFunctionReference(id descpb.ID) error {
+	for i := range desc.DependedOnBy {
+		if desc.DependedOnBy[i].ID == id {
+			desc.DependedOnBy = append(desc.DependedOnBy[:i], desc.DependedOnBy[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
 // AddColumnReference adds back reference to a column to the function.
 func (desc *Mutable) AddColumnReference(id descpb.ID, colID descpb.ColumnID) error {
 	for _, dep := range desc.DependsOn {
 		if dep == id {
-			return errors.Errorf(
+			return pgerror.Newf(pgcode.InvalidFunctionDefinition,
 				"cannot add dependency from descriptor %d to function %s (%d) because there will be a dependency cycle", id, desc.GetName(), desc.GetID(),
 			)
 		}
@@ -635,6 +743,52 @@ func (desc *Mutable) RemoveColumnReference(id descpb.ID, colID descpb.ColumnID) 
 	}
 }
 
+// AddTriggerReference adds back reference to a constraint to the function.
+func (desc *Mutable) AddTriggerReference(id descpb.ID, triggerID descpb.TriggerID) error {
+	for _, dep := range desc.DependsOn {
+		if dep == id {
+			return pgerror.Newf(pgcode.InvalidFunctionDefinition,
+				"cannot add dependency from descriptor %d to function %s (%d) because there will be a dependency cycle", id, desc.GetName(), desc.GetID(),
+			)
+		}
+	}
+	defer sort.Slice(desc.DependedOnBy, func(i, j int) bool {
+		return desc.DependedOnBy[i].ID < desc.DependedOnBy[j].ID
+	})
+	for i := range desc.DependedOnBy {
+		if desc.DependedOnBy[i].ID == id {
+			for _, prevID := range desc.DependedOnBy[i].TriggerIDs {
+				if prevID == triggerID {
+					return nil
+				}
+			}
+			desc.DependedOnBy[i].TriggerIDs = append(desc.DependedOnBy[i].TriggerIDs, triggerID)
+			return nil
+		}
+	}
+	desc.DependedOnBy = append(desc.DependedOnBy,
+		descpb.FunctionDescriptor_Reference{ID: id, TriggerIDs: []descpb.TriggerID{triggerID}},
+	)
+	return nil
+}
+
+// RemoveTriggerReference removes back reference to a constraint from the
+// function.
+func (desc *Mutable) RemoveTriggerReference(id descpb.ID, triggerID descpb.TriggerID) {
+	for i := range desc.DependedOnBy {
+		if desc.DependedOnBy[i].ID == id {
+			dep := &desc.DependedOnBy[i]
+			for j := range dep.TriggerIDs {
+				if dep.TriggerIDs[j] == triggerID {
+					dep.TriggerIDs = append(dep.TriggerIDs[:j], dep.TriggerIDs[j+1:]...)
+					desc.maybeRemoveTableReference(id)
+					return
+				}
+			}
+		}
+	}
+}
+
 // maybeRemoveTableReference removes a table's references from the function if
 // the column, index and constraint references are all empty. This function is
 // only used internally when removing an individual column, index or constraint
@@ -642,7 +796,8 @@ func (desc *Mutable) RemoveColumnReference(id descpb.ID, colID descpb.ColumnID) 
 func (desc *Mutable) maybeRemoveTableReference(id descpb.ID) {
 	var ret []descpb.FunctionDescriptor_Reference
 	for _, ref := range desc.DependedOnBy {
-		if ref.ID == id && len(ref.ColumnIDs) == 0 && len(ref.IndexIDs) == 0 && len(ref.ConstraintIDs) == 0 {
+		if ref.ID == id && len(ref.ColumnIDs) == 0 && len(ref.IndexIDs) == 0 &&
+			len(ref.ConstraintIDs) == 0 && len(ref.TriggerIDs) == 0 {
 			continue
 		}
 		ret = append(ret, ref)
@@ -660,18 +815,27 @@ func (desc *Mutable) RemoveReference(id descpb.ID) {
 	desc.DependedOnBy = ret
 }
 
-// ToRoutineObj converts the descriptor to a tree.RoutineObj.
-func (desc *immutable) ToRoutineObj() *tree.RoutineObj {
+// ToRoutineObj converts the descriptor to a tree.RoutineObj. Note that not all
+// fields are set.
+func (desc *immutable) ToRoutineObj() (*tree.RoutineObj, error) {
 	ret := &tree.RoutineObj{
 		FuncName: tree.MakeRoutineNameFromPrefix(tree.ObjectNamePrefix{}, tree.Name(desc.Name)),
 		Params:   make(tree.RoutineParams, len(desc.Params)),
 	}
-	for i := range desc.Params {
+	for i, p := range desc.Params {
 		ret.Params[i] = tree.RoutineParam{
-			Type: desc.Params[i].Type,
+			Type:  p.Type,
+			Class: ToTreeRoutineParamClass(p.Class),
+		}
+		if p.DefaultExpr != nil {
+			var err error
+			ret.Params[i].DefaultVal, err = parser.ParseExpr(*p.DefaultExpr)
+			if err != nil {
+				return nil, errors.NewAssertionErrorWithWrappedErrf(err, "DEFAULT expr for param %s", p.Name)
+			}
 		}
 	}
-	return ret
+	return ret, nil
 }
 
 // GetObjectType implements the Object interface.
@@ -697,29 +861,46 @@ func (desc *immutable) GetLanguage() catpb.Function_Language {
 	return desc.Lang
 }
 
+func (desc *immutable) GetSecurity() catpb.Function_Security {
+	return desc.Security
+}
+
 func (desc *immutable) ToOverload() (ret *tree.Overload, err error) {
 	routineType := tree.UDFRoutine
 	if desc.IsProcedure() {
 		routineType = tree.ProcedureRoutine
 	}
 	ret = &tree.Overload{
-		Oid:        catid.FuncIDToOID(desc.ID),
-		ReturnType: tree.FixedReturnType(desc.ReturnType.Type),
-		ReturnSet:  desc.ReturnType.ReturnSet,
-		Body:       desc.FunctionBody,
-		Type:       routineType,
-		Version:    uint64(desc.Version),
-		Language:   desc.getCreateExprLang(),
+		Oid:           catid.FuncIDToOID(desc.ID),
+		Body:          desc.FunctionBody,
+		Type:          routineType,
+		Version:       uint64(desc.Version),
+		Language:      desc.getCreateExprLang(),
+		RoutineParams: make(tree.RoutineParams, 0, len(desc.Params)),
 	}
 
-	argTypes := make(tree.ParamTypes, 0, len(desc.Params))
+	signatureTypes := make(tree.ParamTypes, 0, len(desc.Params))
 	for _, param := range desc.Params {
-		argTypes = append(
-			argTypes,
-			tree.ParamType{Name: param.Name, Typ: param.Type},
-		)
+		class := ToTreeRoutineParamClass(param.Class)
+		if tree.IsInParamClass(class) {
+			signatureTypes = append(signatureTypes, tree.ParamType{Name: param.Name, Typ: param.Type})
+		}
+		routineParam := tree.RoutineParam{
+			Name:  tree.Name(param.Name),
+			Type:  param.Type,
+			Class: class,
+		}
+		if param.DefaultExpr != nil {
+			routineParam.DefaultVal, err = parser.ParseExpr(*param.DefaultExpr)
+			if err != nil {
+				return nil, errors.NewAssertionErrorWithWrappedErrf(err, "DEFAULT expr for param %s", param.Name)
+			}
+		}
+		ret.RoutineParams = append(ret.RoutineParams, routineParam)
 	}
-	ret.Types = argTypes
+	ret.ReturnType = tree.FixedReturnType(desc.ReturnType.Type)
+	ret.ReturnsRecordType = !desc.IsProcedure() && desc.ReturnType.Type.Identical(types.AnyTuple)
+	ret.Types = signatureTypes
 	ret.Volatility, err = desc.getOverloadVolatility()
 	if err != nil {
 		return nil, err
@@ -731,6 +912,7 @@ func (desc *immutable) ToOverload() (ret *tree.Overload, err error) {
 	if desc.ReturnType.ReturnSet {
 		ret.Class = tree.GeneratorClass
 	}
+	ret.SecurityMode = desc.getCreateExprSecurity()
 
 	return ret, nil
 }
@@ -785,7 +967,7 @@ func (desc *immutable) ToCreateExpr() (ret *tree.CreateRoutine, err error) {
 		ret.Params[i] = tree.RoutineParam{
 			Name:  tree.Name(desc.Params[i].Name),
 			Type:  desc.Params[i].Type,
-			Class: toTreeNodeParamClass(desc.Params[i].Class),
+			Class: ToTreeRoutineParamClass(desc.Params[i].Class),
 		}
 		if desc.Params[i].DefaultExpr != nil {
 			ret.Params[i].DefaultVal, err = parser.ParseExpr(*desc.Params[i].DefaultExpr)
@@ -794,14 +976,15 @@ func (desc *immutable) ToCreateExpr() (ret *tree.CreateRoutine, err error) {
 			}
 		}
 	}
-	// We only store 5 function attributes at the moment. We may extend the
+	// We only store 6 function attributes at the moment. We may extend the
 	// pre-allocated capacity in the future.
-	ret.Options = make(tree.RoutineOptions, 0, 5)
+	ret.Options = make(tree.RoutineOptions, 0, 6)
 	ret.Options = append(ret.Options, desc.getCreateExprVolatility())
 	ret.Options = append(ret.Options, tree.RoutineLeakproof(desc.LeakProof))
 	ret.Options = append(ret.Options, desc.getCreateExprNullInputBehavior())
 	ret.Options = append(ret.Options, tree.RoutineBodyStr(desc.FunctionBody))
 	ret.Options = append(ret.Options, desc.getCreateExprLang())
+	ret.Options = append(ret.Options, desc.getCreateExprSecurity())
 	return ret, nil
 }
 
@@ -844,8 +1027,22 @@ func (desc *immutable) getCreateExprNullInputBehavior() tree.RoutineNullInputBeh
 	return 0
 }
 
-func toTreeNodeParamClass(class catpb.Function_Param_Class) tree.RoutineParamClass {
+func (desc *immutable) getCreateExprSecurity() tree.RoutineSecurity {
+	switch desc.Security {
+	case catpb.Function_INVOKER:
+		return tree.RoutineInvoker
+	case catpb.Function_DEFINER:
+		return tree.RoutineDefiner
+	}
+	return 0
+}
+
+// ToTreeRoutineParamClass converts the proto enum value to the corresponding
+// tree.RoutineParamClass.
+func ToTreeRoutineParamClass(class catpb.Function_Param_Class) tree.RoutineParamClass {
 	switch class {
+	case catpb.Function_Param_DEFAULT:
+		return tree.RoutineParamDefault
 	case catpb.Function_Param_IN:
 		return tree.RoutineParamIn
 	case catpb.Function_Param_OUT:

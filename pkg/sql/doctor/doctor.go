@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package doctor provides utilities for checking the consistency of cockroach
 // internal persisted metadata.
@@ -189,6 +184,10 @@ func ExamineDescriptors(
 	for _, row := range descTable {
 		id := descpb.ID(row.ID)
 		desc := descLookupFn(id)
+		// No need to validate dropped descriptors
+		if desc.Dropped() {
+			continue
+		}
 		ve := cb.ValidateWithRecover(ctx, version, desc)
 		for _, err := range ve {
 			problemsFound = true
@@ -210,7 +209,7 @@ func ExamineDescriptors(
 		err := cb.ValidateNamespaceEntry(row)
 		if err != nil {
 			problemsFound = true
-			nsReport(stdout, row, err.Error())
+			nsReport(stdout, row, "%s", err)
 		} else if verbose {
 			nsReport(stdout, row, "processed")
 		}
@@ -240,6 +239,8 @@ func ExamineJobs(
 		jobs.ValidateDescriptorReferencesInJob(j, descLookupFn, func(err error) {
 			problemsFound = true
 			fmt.Fprintf(stdout, "job %d: %s.\n", j.ID, err)
+		}, func(s string) {
+			fmt.Fprintf(stdout, "job %d: %s.\n", j.ID, s)
 		})
 	}
 	return !problemsFound, nil

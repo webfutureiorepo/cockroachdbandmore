@@ -1,18 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rspb
 
 import (
 	"bytes"
 
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
@@ -176,7 +172,7 @@ func mergeSpans[V ratchetingValue[V], S span[V], SPtr spanPtr[V, S]](a, b []S) [
 						long.setKey(shortEndKey)
 					} else {
 						// short is a point span, so start long at the next key.
-						long.setKey(append(short.key(), 0)) // Key.Next()
+						long.setKey(encoding.BytesNext(short.key())) // Key.Next()
 					}
 				}
 			}

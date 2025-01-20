@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package testcat
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -59,7 +55,19 @@ func (tc *Catalog) ResolveFunction(
 func (tc *Catalog) ResolveFunctionByOID(
 	ctx context.Context, oid oid.Oid,
 ) (*tree.RoutineName, *tree.Overload, error) {
-	return nil, nil, errors.AssertionFailedf("ResolveFunctionByOID not supported in test catalog")
+	for udfName, def := range tc.udfs {
+		for _, o := range def.Overloads {
+			if o.Oid == oid {
+				_ = udfName
+				name := tree.MakeQualifiedRoutineName("", "", def.Name)
+				return &name, o.Overload, nil
+			}
+		}
+	}
+	return nil, nil, errors.Mark(
+		pgerror.Newf(pgcode.UndefinedFunction, "unknown function with ID: %d", oid),
+		tree.ErrRoutineUndefined,
+	)
 }
 
 // CreateRoutine handles the CREATE FUNCTION statement.
@@ -82,26 +90,47 @@ func (tc *Catalog) CreateRoutine(c *tree.CreateRoutine) {
 	}
 
 	// Resolve the parameter names and types.
-	paramTypes := make(tree.ParamTypes, len(c.Params))
+	signatureTypes := make(tree.ParamTypes, 0, len(c.Params))
+	var outParamOrdinals []int32
+	var outParams tree.ParamTypes
 	var outParamTypes []*types.T
+	var outParamNames []string
+	var defaultExprs []tree.Expr
 	for i := range c.Params {
 		param := &c.Params[i]
 		typ, err := tree.ResolveType(context.Background(), param.Type, tc)
 		if err != nil {
 			panic(err)
 		}
-		paramTypes.SetAt(i, string(param.Name), typ)
+		if tree.IsInParamClass(param.Class) {
+			signatureTypes = append(signatureTypes, tree.ParamType{
+				Name: string(param.Name),
+				Typ:  typ,
+			})
+		}
+		if param.Class == tree.RoutineParamOut {
+			outParamOrdinals = append(outParamOrdinals, int32(i))
+			outParams = append(outParams, tree.ParamType{Typ: typ})
+		}
 		if param.IsOutParam() {
 			outParamTypes = append(outParamTypes, typ)
+			paramName := string(param.Name)
+			if paramName == "" {
+				paramName = fmt.Sprintf("column%d", len(outParamTypes))
+			}
+			outParamNames = append(outParamNames, paramName)
+		}
+		if param.DefaultVal != nil {
+			defaultExprs = append(defaultExprs, param.DefaultVal)
 		}
 	}
 
 	// Determine OUT parameter based return type.
 	var outParamType *types.T
-	if len(outParamTypes) == 1 {
+	if (c.IsProcedure && len(outParamTypes) > 0) || len(outParamTypes) > 1 {
+		outParamType = types.MakeLabeledTuple(outParamTypes, outParamNames)
+	} else if len(outParamTypes) == 1 {
 		outParamType = outParamTypes[0]
-	} else if len(outParamTypes) > 1 {
-		outParamType = types.MakeTuple(outParamTypes)
 	}
 	// Resolve the return type.
 	var retType *types.T
@@ -117,11 +146,12 @@ func (tc *Catalog) CreateRoutine(c *tree.CreateRoutine) {
 			panic(pgerror.Newf(pgcode.InvalidFunctionDefinition, "function result type must be %s because of OUT parameters", outParamType.Name()))
 		}
 		// Override the return types so that we do return type validation and SHOW
-		// CREATE correctly.
-		retType = outParamType
-		c.ReturnType = &tree.RoutineReturnType{
-			Type: outParamType,
+		// CREATE correctly. Make sure not to override the SetOf value if it is set.
+		if c.ReturnType == nil {
+			c.ReturnType = &tree.RoutineReturnType{}
 		}
+		c.ReturnType.Type = outParamType
+		retType = outParamType
 	} else if retType == nil {
 		if c.IsProcedure {
 			// A procedure doesn't need a return type. Use a VOID return type to avoid
@@ -145,17 +175,21 @@ func (tc *Catalog) CreateRoutine(c *tree.CreateRoutine) {
 	if c.IsProcedure {
 		routineType = tree.ProcedureRoutine
 	}
-	tc.currUDFOid++
 	overload := &tree.Overload{
-		Oid:               tc.currUDFOid,
-		Types:             paramTypes,
+		Oid:               catid.TypeIDToOID(catid.DescID(tc.nextStableID())),
+		Types:             signatureTypes,
 		ReturnType:        tree.FixedReturnType(retType),
 		Body:              body,
 		Volatility:        v,
 		CalledOnNullInput: calledOnNullInput,
 		Language:          language,
 		Type:              routineType,
+		RoutineParams:     c.Params,
+		OutParamOrdinals:  outParamOrdinals,
+		OutParamTypes:     outParams,
+		DefaultExprs:      defaultExprs,
 	}
+	overload.ReturnsRecordType = !c.IsProcedure && retType.Identical(types.AnyTuple)
 	if c.ReturnType != nil && c.ReturnType.SetOf {
 		overload.Class = tree.GeneratorClass
 	}
@@ -169,7 +203,7 @@ func (tc *Catalog) CreateRoutine(c *tree.CreateRoutine) {
 	tc.udfs[name] = def
 }
 
-// RevokedExecution revokes execution of the function with the given OID.
+// RevokeExecution revokes execution of the function with the given OID.
 func (tc *Catalog) RevokeExecution(oid oid.Oid) {
 	tc.revokedUDFOids.Add(int(oid))
 }
@@ -249,7 +283,7 @@ func collectFuncOptions(
 	return body, v, calledOnNullInput, language
 }
 
-// formatFunction nicely formats a function definition creating in the opt test
+// formatFunction nicely formats a function definition created in the opt test
 // catalog using a treeprinter for debugging and testing.
 func formatFunction(fn *tree.ResolvedFunctionDefinition) string {
 	if len(fn.Overloads) != 1 {
@@ -262,8 +296,9 @@ func formatFunction(fn *tree.ResolvedFunctionDefinition) string {
 		nullStr = ", called-on-null-input=false"
 	}
 	child := tp.Childf(
-		"FUNCTION %s%s [%s%s]",
-		fn.Name, o.Signature(false /* simplify */), o.Volatility, nullStr,
+		"FUNCTION %s%s [%s%s]", fn.Name,
+		o.SignatureWithDefaults(false /* simplify */, true /* includeDefaults */),
+		o.Volatility, nullStr,
 	)
 	child.Child(o.Body)
 	return tp.String()

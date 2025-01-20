@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -144,35 +139,37 @@ func (mb *mutationBuilder) buildFKChecksAndCascadesForDelete() {
 		//    there are any "orphaned" rows in the child table.
 		if a := h.fk.DeleteReferenceAction(); a != tree.Restrict && a != tree.NoAction {
 			telemetry.Inc(sqltelemetry.ForeignKeyCascadesUseCounter)
-			var builder memo.CascadeBuilder
-			switch a {
-			case tree.Cascade:
-				// Try the fast builder first; if it cannot be used, use the regular builder.
-				var ok bool
-				builder, ok = tryNewOnDeleteFastCascadeBuilder(
-					mb.b.ctx, mb.md, mb.b.catalog, h.fk, i, mb.tab, h.otherTab, mb.outScope,
-				)
-				if !ok {
-					mb.ensureWithID()
-					builder = newOnDeleteCascadeBuilder(mb.tab, i, h.otherTab)
-				}
-			case tree.SetNull, tree.SetDefault:
-				mb.ensureWithID()
-				builder = newOnDeleteSetBuilder(mb.tab, i, h.otherTab, a)
-			default:
-				panic(errors.AssertionFailedf("unhandled action type %s", a))
-			}
-
 			cols := make(opt.ColList, len(h.tabOrdinals))
 			for i, tabOrd := range h.tabOrdinals {
 				cols[i] = mb.fetchColIDs[tabOrd]
 			}
+			var builder memo.PostQueryBuilder
+			var triggerEventType tree.TriggerEventType
+			switch a {
+			case tree.Cascade:
+				// Try the fast builder first; if it cannot be used, use the regular builder.
+				var ok bool
+				builder, ok = mb.tryNewOnDeleteFastCascadeBuilder(h.fk, i, h.otherTab)
+				if !ok {
+					mb.ensureWithID()
+					builder = mb.newOnDeleteCascadeBuilder(i, h.otherTab, cols)
+				}
+				triggerEventType = tree.TriggerEventDelete
+			case tree.SetNull, tree.SetDefault:
+				mb.ensureWithID()
+				builder = mb.newOnDeleteSetBuilder(i, h.otherTab, a, cols)
+				triggerEventType = tree.TriggerEventUpdate
+			default:
+				panic(errors.AssertionFailedf("unhandled action type %s", a))
+			}
+			hasBeforeTriggers := cat.HasRowLevelTriggers(
+				h.otherTab, tree.TriggerActionTimeBefore, triggerEventType,
+			)
 			mb.cascades = append(mb.cascades, memo.FKCascade{
-				FKConstraint: h.fk,
-				Builder:      builder,
-				WithID:       mb.withID,
-				OldValues:    cols,
-				NewValues:    nil,
+				FKConstraint:      h.fk,
+				HasBeforeTriggers: hasBeforeTriggers,
+				Builder:           builder,
+				WithID:            mb.withID,
 			})
 			continue
 		}
@@ -300,26 +297,26 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 		if a := h.fk.UpdateReferenceAction(); a != tree.Restrict && a != tree.NoAction {
 			telemetry.Inc(sqltelemetry.ForeignKeyCascadesUseCounter)
 			mb.ensureWithID()
-			builder := newOnUpdateCascadeBuilder(mb.tab, i, h.otherTab, a)
-
 			oldCols := make(opt.ColList, len(h.tabOrdinals))
 			newCols := make(opt.ColList, len(h.tabOrdinals))
-			for i, tabOrd := range h.tabOrdinals {
+			for j, tabOrd := range h.tabOrdinals {
 				fetchColID := mb.fetchColIDs[tabOrd]
 				updateColID := mb.updateColIDs[tabOrd]
 				if updateColID == 0 {
 					updateColID = fetchColID
 				}
-
-				oldCols[i] = fetchColID
-				newCols[i] = updateColID
+				oldCols[j] = fetchColID
+				newCols[j] = updateColID
 			}
+			hasBeforeTriggers := cat.HasRowLevelTriggers(
+				h.otherTab, tree.TriggerActionTimeBefore, tree.TriggerEventUpdate,
+			)
+			builder := mb.newOnUpdateCascadeBuilder(i, h.otherTab, a, oldCols, newCols)
 			mb.cascades = append(mb.cascades, memo.FKCascade{
-				FKConstraint: h.fk,
-				Builder:      builder,
-				WithID:       mb.withID,
-				OldValues:    oldCols,
-				NewValues:    newCols,
+				FKConstraint:      h.fk,
+				HasBeforeTriggers: hasBeforeTriggers,
+				Builder:           builder,
+				WithID:            mb.withID,
 			})
 			continue
 		}
@@ -419,11 +416,9 @@ func (mb *mutationBuilder) buildFKChecksForUpsert() {
 		if a := h.fk.UpdateReferenceAction(); a != tree.Restrict && a != tree.NoAction {
 			telemetry.Inc(sqltelemetry.ForeignKeyCascadesUseCounter)
 			mb.ensureWithID()
-			builder := newOnUpdateCascadeBuilder(mb.tab, i, h.otherTab, a)
-
 			oldCols := make(opt.ColList, len(h.tabOrdinals))
 			newCols := make(opt.ColList, len(h.tabOrdinals))
-			for i, tabOrd := range h.tabOrdinals {
+			for j, tabOrd := range h.tabOrdinals {
 				fetchColID := mb.fetchColIDs[tabOrd]
 				// Here we don't need to use the upsertColIDs because the rows that
 				// correspond to inserts will be ignored in the cascade.
@@ -432,15 +427,18 @@ func (mb *mutationBuilder) buildFKChecksForUpsert() {
 					updateColID = fetchColID
 				}
 
-				oldCols[i] = fetchColID
-				newCols[i] = updateColID
+				oldCols[j] = fetchColID
+				newCols[j] = updateColID
 			}
+			hasBeforeTriggers := cat.HasRowLevelTriggers(
+				h.otherTab, tree.TriggerActionTimeBefore, tree.TriggerEventUpdate,
+			)
+			builder := mb.newOnUpdateCascadeBuilder(i, h.otherTab, a, oldCols, newCols)
 			mb.cascades = append(mb.cascades, memo.FKCascade{
-				FKConstraint: h.fk,
-				Builder:      builder,
-				WithID:       mb.withID,
-				OldValues:    oldCols,
-				NewValues:    newCols,
+				FKConstraint:      h.fk,
+				HasBeforeTriggers: hasBeforeTriggers,
+				Builder:           builder,
+				WithID:            mb.withID,
 			})
 			continue
 		}
@@ -659,10 +657,15 @@ func (h *fkCheckHelper) buildOtherTableScan(parent bool) (outScope *scope, tabMe
 		}
 	}
 	otherTabMeta := h.mb.b.addTable(h.otherTab, tree.NewUnqualifiedTableName(h.otherTab.Name()))
+	indexFlags := &tree.IndexFlags{IgnoreForeignKeys: true}
+	if h.mb.b.evalCtx.SessionData().AvoidFullTableScansInMutations {
+		indexFlags.AvoidFullScan = true
+	}
+
 	return h.mb.b.buildScan(
 		otherTabMeta,
 		h.otherTabOrdinals,
-		&tree.IndexFlags{IgnoreForeignKeys: true},
+		indexFlags,
 		locking,
 		h.mb.b.allocScope(),
 		true, /* disableNotVisibleIndex */

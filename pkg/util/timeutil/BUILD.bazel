@@ -23,6 +23,7 @@ go_library(
         "//pkg/util/syncutil",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_errors//errorspb",
+        "@com_github_cockroachdb_redact//:redact",
         "@com_github_gogo_protobuf//proto",
     ],
 )
@@ -41,10 +42,6 @@ go_test(
         "timer_test.go",
     ],
     embed = [":timeutil"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/util/leaktest",
         "//pkg/util/log",
@@ -67,7 +64,7 @@ genrule(
       --zoneinfo=$(location @go_sdk//:lib/time/zoneinfo.zip) \
       --crlfmt=$(location @com_github_cockroachdb_crlfmt//:crlfmt)
        """,
-    exec_tools = [
+    tools = [
         "//pkg/util/timeutil/gen",
         "@com_github_cockroachdb_crlfmt//:crlfmt",
     ],

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcapabilities
 
@@ -41,6 +36,9 @@ type Reader interface {
 // signals other than just the tenant capability state. For example, request
 // usage pattern over a timespan.
 type Authorizer interface {
+	// HasCrossTenantRead returns true if a tenant can read other tenant spans.
+	HasCrossTenantRead(ctx context.Context, tenID roachpb.TenantID) bool
+
 	// HasCapabilityForBatch returns an error if a tenant, referenced by its ID,
 	// is not allowed to execute the supplied batch request given the capabilities
 	// it possesses.
@@ -80,6 +78,10 @@ type Authorizer interface {
 	// HasProcessDebugCapability returns an error if a tenant, referenced by its ID,
 	// is not allowed to debug the running process.
 	HasProcessDebugCapability(ctx context.Context, tenID roachpb.TenantID) error
+
+	// HasTSDBAllMetricsCapability returns an error if a tenant, referenced by its ID,
+	// is not allowed to query all metrics from the host.
+	HasTSDBAllMetricsCapability(ctx context.Context, tenID roachpb.TenantID) error
 }
 
 // Entry ties together a tenantID with its capabilities.

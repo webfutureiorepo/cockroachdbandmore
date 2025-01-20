@@ -9,14 +9,11 @@ go_test(
         "//pkg/ccl/logictestccl:testdata",  # keep
     ],
     exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "large"},
+        "//build/toolchains:is_heavy": {"test.Pool": "heavy"},
+        "//conditions:default": {"test.Pool": "large"},
     }),
     shard_count = 4,
-    tags = [
-        "ccl_test",
-        "cpu:4",
-    ],
+    tags = ["cpu:4"],
     deps = [
         "//pkg/base",
         "//pkg/build/bazel",

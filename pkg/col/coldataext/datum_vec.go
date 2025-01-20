@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package coldataext
 
@@ -56,11 +51,9 @@ func newDatumVec(t *types.T, n int, evalCtx *eval.Context) coldata.DatumVec {
 // Note that the method is named differently from "Compare" so that we do not
 // overload tree.Datum.Compare method.
 func CompareDatum(d, dVec, other interface{}) int {
-	// Note that it's not strictly necessary to use CompareError here instead of
-	// just Compare since pkg/sql/sem/eval is in the allow-list of paths that
-	// colexecerror catches panics from. Still, it seems nicer to be explicit
-	// about this.
-	res, err := d.(tree.Datum).CompareError(dVec.(*datumVec).evalCtx, convertToDatum(other))
+	// TODO(yuzefovich): use proper context after the execversion change lands
+	// (#119114).
+	res, err := d.(tree.Datum).Compare(context.TODO(), dVec.(*datumVec).evalCtx, convertToDatum(other))
 	if err != nil {
 		colexecerror.InternalError(err)
 	}
@@ -149,11 +142,12 @@ func (dv *datumVec) Cap() int {
 }
 
 // MarshalAt implements coldata.DatumVec interface.
-func (dv *datumVec) MarshalAt(appendTo []byte, i int) ([]byte, error) {
+func (dv *datumVec) MarshalAt(appendTo []byte, i int) (_ []byte, err error) {
 	dv.maybeSetDNull(i)
-	return valueside.Encode(
-		appendTo, valueside.NoColumnID, dv.data[i], dv.scratch,
+	appendTo, dv.scratch, err = valueside.EncodeWithScratch(
+		appendTo, valueside.NoColumnID, dv.data[i], dv.scratch[:0],
 	)
+	return appendTo, err
 }
 
 // UnmarshalTo implements coldata.DatumVec interface.
@@ -238,4 +232,9 @@ func convertToDatum(v coldata.Datum) tree.Datum {
 // SetEvalCtx implements coldata.DatumVec interface.
 func (dv *datumVec) SetEvalCtx(evalCtx interface{}) {
 	dv.evalCtx = evalCtx.(*eval.Context)
+}
+
+// SetType implements coldata.DatumVec interface.
+func (dv *datumVec) SetType(t interface{}) {
+	dv.t = t.(*types.T)
 }

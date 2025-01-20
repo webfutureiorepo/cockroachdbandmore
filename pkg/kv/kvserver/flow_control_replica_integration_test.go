@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowcontrolpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
@@ -28,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/datadriven"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 // TestFlowControlReplicaIntegration tests the kvflowcontrol replica integration
@@ -52,7 +47,7 @@ import (
 //     follows: progress=(replid@match:<state>:<active>:<paused>,...).
 //     <state> is one of {probe,replicate,snapshot}, <active> is
 //     {active,!inactive}, and <paused> is {paused,!paused}. The latter controls
-//     MsgAppFlowPaused in the raft library, not the CRDB-level follower
+//     MsgAppProbesPaused in the raft library, not the CRDB-level follower
 //     pausing.
 //
 //     B. For the raft transport, we can specify the set of replica IDs we're
@@ -169,12 +164,12 @@ func TestFlowControlReplicaIntegration(t *testing.T) {
 									paused := parts[3] == "paused"
 
 									progress[replID] = tracker.Progress{
-										Match:            uint64(index),
-										State:            state,
-										RecentActive:     active,
-										MsgAppFlowPaused: paused,
-										Inflights:        tracker.NewInflights(1, 0), // avoid NPE
-										IsLearner:        false,
+										Match:              uint64(index),
+										State:              state,
+										RecentActive:       active,
+										MsgAppProbesPaused: paused,
+										Inflights:          tracker.NewInflights(1, 0), // avoid NPE
+										IsLearner:          false,
 									}
 
 								case "descriptor", "paused", "inactive":

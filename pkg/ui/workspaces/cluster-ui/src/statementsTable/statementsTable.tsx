@@ -1,16 +1,30 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import classNames from "classnames/bind";
+import React from "react";
 
+import {
+  countBarChart,
+  bytesReadBarChart,
+  latencyBarChart,
+  contentionBarChart,
+  cpuBarChart,
+  maxMemUsageBarChart,
+  networkBytesBarChart,
+  retryBarChart,
+  workloadPctBarChart,
+} from "src/barCharts";
+import { BarChartOptions } from "src/barCharts/barChartFactory";
+import {
+  ColumnDescriptor,
+  longListWithTooltip,
+  SortedTable,
+} from "src/sortedtable";
+import { ActivateDiagnosticsModalRef } from "src/statementsDiagnostics";
 import {
   FixLong,
   longToInt,
@@ -23,37 +37,20 @@ import {
   DurationCheckSample,
 } from "src/util";
 import { DATE_FORMAT, Duration } from "src/util/format";
-import {
-  countBarChart,
-  bytesReadBarChart,
-  latencyBarChart,
-  contentionBarChart,
-  cpuBarChart,
-  maxMemUsageBarChart,
-  networkBytesBarChart,
-  retryBarChart,
-  workloadPctBarChart,
-} from "src/barCharts";
-import { ActivateDiagnosticsModalRef } from "src/statementsDiagnostics";
-import {
-  ColumnDescriptor,
-  longListWithTooltip,
-  SortedTable,
-} from "src/sortedtable";
 
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { StatementTableCell } from "./statementsTableContent";
+import { StatementDiagnosticsReport } from "../api";
 import {
   statisticsTableTitles,
   StatisticType,
 } from "../statsTableUtil/statsTableUtil";
-import { BarChartOptions } from "src/barCharts/barChartFactory";
+import { Timestamp } from "../timestamp";
+
+import styles from "./statementsTable.module.scss";
+import { StatementTableCell } from "./statementsTableContent";
 
 type ICollectedStatementStatistics =
   cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
-import styles from "./statementsTable.module.scss";
-import { StatementDiagnosticsReport } from "../api";
-import { Timestamp } from "../timestamp";
+
 const cx = classNames.bind(styles);
 
 export interface AggregateStatistics {

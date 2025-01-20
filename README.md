@@ -47,7 +47,7 @@ See our online documentation: [Quickstart with CockroachCloud](https://www.cockr
 
 ## Starting with CockroachDB
 
-1. Install CockroachDB:  [using a pre-built executable](https://www.cockroachlabs.com/docs/stable/install-cockroachdb.html) or [build it from source](https://www.cockroachlabs.com/docs/v21.1/install-cockroachdb-linux#build-from-source).
+1. Install CockroachDB:  [using a pre-built executable](https://www.cockroachlabs.com/docs/stable/install-cockroachdb.html) or [build it from source](https://cockroachlabs.atlassian.net/wiki/spaces/CRDB/pages/181338446/Getting+and+building+CockroachDB+from+source).
 2. [Start a local cluster](https://www.cockroachlabs.com/docs/stable/start-a-local-cluster.html) and connect to it via the [built-in SQL client](https://www.cockroachlabs.com/docs/stable/use-the-built-in-sql-client.html).
 3. [Learn more about CockroachDB SQL](https://www.cockroachlabs.com/docs/stable/learn-cockroachdb-sql.html).
 4. Use a PostgreSQL-compatible driver or ORM to [build an app with CockroachDB](https://www.cockroachlabs.com/docs/stable/hello-world-example-apps.html).
@@ -96,11 +96,7 @@ doc](https://github.com/cockroachdb/cockroach/blob/master/docs/design.md).
 
 ## Licensing
 
-Current CockroachDB code is released under a combination of two licenses, the [Business Source License (BSL)](https://www.cockroachlabs.com/docs/stable/licensing-faqs.html#bsl) and the [Cockroach Community License (CCL)](https://www.cockroachlabs.com/docs/stable/licensing-faqs.html#ccl).
-
-When contributing to a CockroachDB feature, you can find the relevant license in the comments at the top of each file.
-
-For more information, see the [Licensing FAQs](https://www.cockroachlabs.com/docs/stable/licensing-faqs.html).
+All versions released after November 18, 2024, including patch fixes for prior versions 23.1 onward, are published under the [CockroachDB Software License (CSL)](./LICENSE). Source code in a given file is licensed under the CSL and the copyright belongs to The Cockroach Authors unless otherwise noted in the file or in a LICENSE or README file located in the same or parent directory of the file.
 
 ## Comparison with Other Databases
 

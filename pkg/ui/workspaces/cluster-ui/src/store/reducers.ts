@@ -1,19 +1,19 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createReducer } from "@reduxjs/toolkit";
 import { combineReducers, createStore } from "redux";
+
 import {
   ClusterLocksReqState,
   reducer as clusterLocks,
 } from "./clusterLocks/clusterLocks.reducer";
+import {
+  ClusterSettingsState,
+  reducer as clusterSettings,
+} from "./clusterSettings/clusterSettings.reducer";
 import {
   DatabasesListState,
   reducer as databasesList,
@@ -27,6 +27,10 @@ import {
   TxnInsightDetailsCachedState,
 } from "./insightDetails/transactionInsightDetails";
 import {
+  reducer as statementFingerprintInsights,
+  StatementFingerprintInsightsCachedState,
+} from "./insights/statementFingerprintInsights";
+import {
   reducer as stmtInsights,
   StmtInsightsState,
 } from "./insights/statementInsights";
@@ -36,9 +40,14 @@ import {
 } from "./insights/transactionInsights";
 import { JobDetailsReducerState, reducer as job } from "./jobDetails";
 import { JobsState, reducer as jobs } from "./jobs";
+import {
+  JobProfilerExecutionDetailFilesState,
+  reducer as executionDetailFiles,
+} from "./jobs/jobProfiler.reducer";
 import { LivenessState, reducer as liveness } from "./liveness";
 import { LocalStorageState, reducer as localStorage } from "./localStorage";
 import { NodesState, reducer as nodes } from "./nodes";
+import { rootActions } from "./rootActions";
 import {
   reducer as schemaInsights,
   SchemaInsightsState,
@@ -57,31 +66,8 @@ import {
   reducer as terminateQuery,
   TerminateQueryState,
 } from "./terminateQuery";
-import { reducer as uiConfig, UIConfigState } from "./uiConfig";
-import {
-  reducer as statementFingerprintInsights,
-  StatementFingerprintInsightsCachedState,
-} from "./insights/statementFingerprintInsights";
 import { reducer as txnStats, TxnStatsState } from "./transactionStats";
-import {
-  ClusterSettingsState,
-  reducer as clusterSettings,
-} from "./clusterSettings/clusterSettings.reducer";
-import {
-  KeyedDatabaseDetailsState,
-  KeyedDatabaseDetailsSpanStatsState,
-  databaseDetailsReducer,
-  databaseDetailsSpanStatsReducer,
-} from "./databaseDetails";
-import {
-  KeyedTableDetailsState,
-  reducer as tableDetails,
-} from "./databaseTableDetails/tableDetails.reducer";
-import {
-  JobProfilerExecutionDetailFilesState,
-  reducer as executionDetailFiles,
-} from "./jobs/jobProfiler.reducer";
-import { rootActions } from "./rootActions";
+import { reducer as uiConfig, UIConfigState } from "./uiConfig";
 
 export type AdminUiState = {
   statementDiagnostics: StatementDiagnosticsState;
@@ -100,9 +86,6 @@ export type AdminUiState = {
   executionDetailFiles: JobProfilerExecutionDetailFilesState;
   clusterLocks: ClusterLocksReqState;
   databasesList: DatabasesListState;
-  databaseDetails: KeyedDatabaseDetailsState;
-  databaseDetailsSpanStats: KeyedDatabaseDetailsSpanStatsState;
-  tableDetails: KeyedTableDetailsState;
   stmtInsights: StmtInsightsState;
   txnInsightDetails: TxnInsightDetailsCachedState;
   txnInsights: TxnInsightsState;
@@ -135,9 +118,6 @@ export const reducers = combineReducers<AdminUiState>({
   executionDetailFiles,
   clusterLocks,
   databasesList,
-  databaseDetails: databaseDetailsReducer.reducer,
-  databaseDetailsSpanStats: databaseDetailsSpanStatsReducer.reducer,
-  tableDetails,
   schemaInsights,
   statementFingerprintInsights,
   clusterSettings,

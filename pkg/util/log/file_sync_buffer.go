@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -56,8 +51,12 @@ func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 // writeToFileLocked writes to the file and applies the synchronization policy.
 // Assumes that l.mu is held by the caller.
 func (l *fileSink) writeToFileLocked(data []byte) error {
-	_, err := l.mu.file.Write(data)
-	return err
+	if n, err := l.mu.file.Write(data); err != nil {
+		return err
+	} else if l.logBytesWritten != nil {
+		l.logBytesWritten.Add(uint64(n))
+	}
+	return nil
 }
 
 // ensureFileLocked ensures that l.file is set and valid.

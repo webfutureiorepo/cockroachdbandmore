@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeedcache_test
 
@@ -16,7 +11,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed/rangefeedbuffer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed/rangefeedcache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -56,11 +50,11 @@ func TestWatchAuthErr(t *testing.T) {
 		[]roachpb.Span{hostScratchSpan},
 		false, /* withPrevValue */
 		true,  /* withRowTSInInitialScan */
-		func(ctx context.Context, kv *kvpb.RangeFeedValue) rangefeedbuffer.Event {
+		func(ctx context.Context, kv *kvpb.RangeFeedValue) (*kvpb.RangeFeedValue, bool) {
 			t.Fatalf("rangefeed should fail before producing results")
-			return nil
+			return nil, false
 		},
-		func(ctx context.Context, update rangefeedcache.Update) {
+		func(ctx context.Context, update rangefeedcache.Update[*kvpb.RangeFeedValue]) {
 			t.Fatalf("rangefeed should fail before producing results")
 		},
 		&rangefeedcache.TestingKnobs{})

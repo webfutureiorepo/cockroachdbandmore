@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catkv_test
 
@@ -20,7 +15,9 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
@@ -31,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -117,7 +115,7 @@ func TestDataDriven(t *testing.T) {
 						ParentSchemaID: descpb.ID(scID),
 						Name:           name,
 					}
-					return fmt.Sprintf("%v", ccr.IsNameInCache(&ni))
+					return fmt.Sprintf("%v", ccr.IsNameInCache(ni))
 
 				case "is_desc_id_known_to_not_exist":
 					var id, maybeParentID int
@@ -208,6 +206,24 @@ func TestDataDriven(t *testing.T) {
 						return cr.GetByNames(ctx, txn, nis)
 					}
 					return h.doCatalogQuery(ctx, q)
+				case "scan_descriptors_in_span":
+					{
+						start := h.parseKeyFromArgKey("start")
+						end := h.parseKeyFromArgKey("end")
+						q := func(ctx context.Context, txn *kv.Txn, cr catkv.CatalogReader) (nstree.Catalog, error) {
+							return cr.ScanDescriptorsInSpans(ctx, txn, []roachpb.Span{{Key: start, EndKey: end}})
+						}
+						return h.doCatalogQuery(ctx, q)
+					}
+				case "scan_descriptors_in_multiple_spans":
+					{
+						first := h.parseSpanFromArgKey("first")
+						second := h.parseSpanFromArgKey("second")
+						q := func(ctx context.Context, txn *kv.Txn, cr catkv.CatalogReader) (nstree.Catalog, error) {
+							return cr.ScanDescriptorsInSpans(ctx, txn, []roachpb.Span{first, second})
+						}
+						return h.doCatalogQuery(ctx, q)
+					}
 				}
 				return fmt.Sprintf("%s: unknown command: %s", d.Pos, d.Cmd)
 			})
@@ -220,6 +236,58 @@ type testHelper struct {
 	d        *datadriven.TestData
 	execCfg  *sql.ExecutorConfig
 	ucr, ccr catkv.CatalogReader
+}
+
+func (h testHelper) parseSpanFromArgKey(argkey string) roachpb.Span {
+	arg, exists := h.d.Arg(argkey)
+	if !exists {
+		h.t.Fatalf("scan_descriptors_in_span requires '%s' arg", argkey)
+	}
+	start, end := arg.TwoVals(h.t)
+	return roachpb.Span{
+		Key:    h.parseKeyFromArgStr(start),
+		EndKey: h.parseKeyFromArgStr(end),
+	}
+}
+
+func (h testHelper) parseKeyFromArgKey(argkey string) roachpb.Key {
+	arg, exists := h.d.Arg(argkey)
+	if !exists {
+		h.t.Fatalf("scan_descriptors_in_span requires '%s' arg", argkey)
+	}
+	return h.parseKeyFromArgStr(arg.SingleVal(h.t))
+}
+
+func (h testHelper) parseKeyFromArgStr(argstr string) roachpb.Key {
+	parts := strings.Split(argstr, "/")
+	if len(parts) == 0 {
+		h.t.Fatal("cannot parse key without at least one key part")
+	} else if len(parts) > 4 {
+		h.t.Fatal("key argument has too many parts")
+	}
+
+	tableId, err := strconv.Atoi(parts[0])
+	require.NoError(h.t, err)
+	if len(parts) == 1 {
+		return h.execCfg.Codec.TablePrefix(uint32(tableId))
+	}
+
+	indexId, err := strconv.Atoi(parts[1])
+	require.NoError(h.t, err)
+
+	key := h.execCfg.Codec.IndexPrefix(uint32(tableId), uint32(indexId))
+	if len(parts) == 3 && parts[2] != "" {
+		// only supports integer and string key values
+		if encoding.PeekType([]byte(parts[2])) == encoding.Int {
+			pkey, err := strconv.Atoi(parts[1])
+			require.NoError(h.t, err)
+			return encoding.EncodeVarintAscending(key, int64(pkey))
+		} else {
+			return encoding.EncodeStringAscending(key, parts[2])
+		}
+	}
+
+	return key
 }
 
 func (h testHelper) argDesc(
@@ -250,8 +318,8 @@ type queryFunc func(ctx context.Context, txn *kv.Txn, cr catkv.CatalogReader) (n
 
 func (h testHelper) wrappedQuery(
 	ctx context.Context, label string, cr catkv.CatalogReader, unwrapped queryFunc,
-) (c nstree.Catalog, rs tracingpb.RecordedSpan) {
-	err := h.execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+) (c nstree.Catalog, rs tracingpb.RecordedSpan, err error) {
+	err = h.execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		tracer := h.execCfg.AmbientCtx.Tracer
 		vCtx, vSpan := tracer.StartSpanCtx(
 			ctx, catkv.TestingSpanOperationName, tracing.WithRecording(tracingpb.RecordingVerbose),
@@ -263,8 +331,7 @@ func (h testHelper) wrappedQuery(
 		require.True(h.t, found)
 		return err
 	})
-	require.NoErrorf(h.t, err, "%s: error running query with %s CatalogReader", h.d.Pos, label)
-	return c, rs
+	return c, rs, err
 }
 
 func (h testHelper) doCatalogQuery(ctx context.Context, fn queryFunc) string {
@@ -299,10 +366,15 @@ func (h testHelper) doCatalogQuery(ctx context.Context, fn queryFunc) string {
 	return fmt.Sprintf("%scached:\n%s", u, d)
 }
 
-func (h testHelper) marshalResult(c nstree.Catalog, rs tracingpb.RecordedSpan) string {
+func (h testHelper) marshalResult(
+	c nstree.Catalog, rs tracingpb.RecordedSpan, queryErr error,
+) string {
 	m := map[string]interface{}{
 		"catalog": h.catalogToYaml(c),
 		"trace":   h.traceToYaml(rs),
+	}
+	if queryErr != nil {
+		m["error"] = queryErr.Error()
 	}
 	bytes, err := yaml.Marshal(m)
 	require.NoError(h.t, err)
@@ -359,13 +431,26 @@ func (h testHelper) catalogToYaml(c nstree.Catalog) interface{} {
 		ids.Add(id)
 	}
 	y := make(map[string]interface{})
+
+	var systemDatabaseEntry map[string]interface{}
+	var numSystemObjects int
 	for _, id := range ids.Ordered() {
 		j := m[id]
 		jm := make(map[string]interface{})
+		if id == keys.SystemDatabaseID {
+			systemDatabaseEntry = jm
+		}
 		if j.d != nil {
 			jm["descriptor"] = j.d.DescriptorType()
 		}
 		if j.ns != nil {
+			if j.ns.ParentID == keys.SystemDatabaseID {
+				if systemDatabaseEntry != nil {
+					// Skip this entry, it will be aggregated into the systemEntry.
+					numSystemObjects++
+					continue
+				}
+			}
 			jm["namespace"] = fmt.Sprintf("(%d, %d, %q)",
 				j.ns.ParentID, j.ns.ParentSchemaID, j.ns.Name)
 		}
@@ -388,6 +473,9 @@ func (h testHelper) catalogToYaml(c nstree.Catalog) interface{} {
 			jm["comments"] = cm
 		}
 		y[fmt.Sprintf("%03d", id)] = jm
+	}
+	if systemDatabaseEntry != nil {
+		systemDatabaseEntry["num_objects"] = numSystemObjects
 	}
 	return y
 }

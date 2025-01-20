@@ -1,21 +1,18 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import {
   SnapshotPage,
   SnapshotPageStateProps,
   SortSetting,
+  api as clusterUiApi,
 } from "@cockroachlabs/cluster-ui";
-import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
+import Long from "long";
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
+
 import {
   rawTraceKey,
   refreshNodes,
@@ -27,7 +24,6 @@ import {
 import { LocalSetting } from "src/redux/localsettings";
 import { AdminUIState } from "src/redux/state";
 import { getMatchParamByName } from "src/util/query";
-import Long from "long";
 
 export const sortSetting = new LocalSetting<AdminUIState, SortSetting>(
   "sortSetting/spans",

@@ -1,19 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -21,7 +15,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -135,7 +128,7 @@ func migrateTable(
 		log.Infof(ctx, "performing operation: %s", op.name)
 		if _, err := d.InternalExecutor.ExecEx(
 			ctx,
-			fmt.Sprintf("migration-alter-table-%d", storedTableID),
+			redact.Sprintf("migration-alter-table-%d", storedTableID),
 			nil, /* txn */
 			sessiondata.NodeUserSessionDataOverride,
 			op.query); err != nil {
@@ -153,7 +146,7 @@ func readTableDescriptor(
 	if err := d.DB.DescsTxn(ctx, func(
 		ctx context.Context, txn descs.Txn,
 	) (err error) {
-		t, err = txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, tableID)
+		t, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, tableID)
 		return err
 	}); err != nil {
 		return nil, err
@@ -411,29 +404,4 @@ func onlyHasColumnFamily(
 		}
 	}
 	return true, nil
-}
-
-// bumpSystemDatabaseSchemaVersion bumps the SystemDatabaseSchemaVersion
-// field for the system database descriptor. It should be called at the end
-// of any upgrade that creates or modifies the schema of any system table.
-func bumpSystemDatabaseSchemaVersion(
-	ctx context.Context, cs clusterversion.ClusterVersion, d upgrade.TenantDeps,
-) error {
-	return d.DB.DescsTxn(ctx, func(ctx context.Context, txn descs.Txn) error {
-		systemDBDesc, err := txn.Descriptors().MutableByName(txn.KV()).Database(ctx, catconstants.SystemDatabaseName)
-		if err != nil {
-			return err
-		}
-		if sv := systemDBDesc.GetSystemDatabaseSchemaVersion(); sv != nil {
-			if cs.Version.Less(*sv) {
-				return errors.AssertionFailedf(
-					"new system schema version (%#v) is lower than previous system schema version (%#v)",
-					cs.Version,
-					*sv,
-				)
-			}
-		}
-		systemDBDesc.SystemDatabaseSchemaVersion = &cs.Version
-		return txn.Descriptors().WriteDesc(ctx, false /* kvTrace */, systemDBDesc, txn.KV())
-	})
 }

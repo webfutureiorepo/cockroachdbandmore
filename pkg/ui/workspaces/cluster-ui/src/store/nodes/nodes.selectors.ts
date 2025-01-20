@@ -1,20 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { createSelector } from "@reduxjs/toolkit";
-import _ from "lodash";
-import { AppState } from "../reducers";
+import isEmpty from "lodash/isEmpty";
+
+import { accumulateMetrics } from "src/util/proto";
+
 import { getDisplayName } from "../../nodes";
 import { livenessStatusByNodeIDSelector } from "../liveness";
-import { accumulateMetrics } from "src/util/proto";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { AppState } from "../reducers";
 type ILocality = cockroach.roachpb.ILocality;
 
 export const nodeStatusesSelector = (state: AppState) =>
@@ -30,7 +27,7 @@ export const nodeDisplayNameByIDSelector = createSelector(
   livenessStatusByNodeIDSelector,
   (nodeStatuses, livenessStatusByNodeID) => {
     const result: { [key: string]: string } = {};
-    if (!_.isEmpty(nodeStatuses)) {
+    if (!isEmpty(nodeStatuses)) {
       nodeStatuses.forEach(ns => {
         result[ns.desc.node_id] = getDisplayName(
           ns,
@@ -54,7 +51,7 @@ export const nodeRegionsByIDSelector = createSelector(
   nodeStatusesSelector,
   nodeStatuses => {
     const result: { [key: string]: string } = {};
-    if (!_.isEmpty(nodeStatuses)) {
+    if (!isEmpty(nodeStatuses)) {
       nodeStatuses.forEach(ns => {
         result[ns.desc.node_id] = getRegionFromLocality(ns.desc.locality);
       });

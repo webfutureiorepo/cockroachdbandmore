@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -20,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	dms "github.com/aws/aws-sdk-go-v2/service/databasemigrationservice"
 	dmstypes "github.com/aws/aws-sdk-go-v2/service/databasemigrationservice/types"
@@ -56,7 +52,7 @@ const (
 	// by CRL employees who have proper AWS credentials. The password can't be
 	// auto rotated due to constraints with postgres DMS source endpoint restrictions
 	// where the password can't contain %, ;, or +.
-	awsrdsSecretName     = "rds!db-074de488-6274-4b3e-ad27-d008b8ffa750"
+	awsrdsSecretName     = "rds!db-bf11a38a-4ba2-425d-b2b2-acab58357f2e"
 	awsrdsDBIdentifier   = "migrations-dms"
 	awsrdsNumInitialRows = 200000000
 )
@@ -267,8 +263,7 @@ func runAWSDMS(ctx context.Context, t test.Test, c cluster.Cluster) {
 	if err := tearDownAWSDMS(ctx, t, rdsCli, dmsCli, &dmsTasks); err != nil {
 		t.Fatal(err)
 	}
-
-	// Attempt a clean-up of old instances on shutdown.
+	//Attempt a clean-up of old instances on shutdown.
 	defer func() {
 		if t.IsDebug() {
 			t.L().Printf("not deleting old instances as --debug is set")
@@ -562,7 +557,8 @@ func setupAWSDMS(
 func setupCockroachDBCluster(ctx context.Context, t test.Test, c cluster.Cluster) func() error {
 	return func() error {
 		t.L().Printf("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.All())
+		settings := install.MakeClusterSettings(install.SecureOption(false))
+		c.Start(ctx, t.L(), option.DefaultStartOpts(), settings, c.All())
 
 		db := c.Conn(ctx, t.L(), 1)
 		for _, stmt := range []string{
@@ -766,11 +762,9 @@ func setupDMSEndpointsAndTask(
 				PostgreSQLSettings: &dmstypes.PostgreSQLSettings{
 					DatabaseName: proto.String(awsdmsCRDBDatabase),
 					Username:     proto.String(awsdmsCRDBUser),
-					// Password is a required field, but CockroachDB doesn't take passwords in
-					// --insecure mode. As such, put in some garbage.
-					Password:   proto.String("garbage"),
-					Port:       proto.Int32(26257),
-					ServerName: proto.String(externalCRDBAddr[0]),
+					Password:     proto.String(awsdmsPassword),
+					Port:         proto.Int32(26257),
+					ServerName:   proto.String(externalCRDBAddr[0]),
 				},
 			},
 			endpoint: dmsEndpoints.defaultTarget,
@@ -783,7 +777,7 @@ func setupDMSEndpointsAndTask(
 				DatabaseName:       proto.String(awsdmsDatabase),
 				Username:           rdsClusterLarge.MasterUsername,
 				Password:           proto.String(rdsPasswordLarge),
-				Port:               &rdsClusterLarge.Endpoint.Port,
+				Port:               rdsClusterLarge.Endpoint.Port,
 				ServerName:         rdsClusterLarge.Endpoint.Address,
 			},
 			endpoint: dmsEndpoints.largeSource,
@@ -1092,7 +1086,7 @@ func tearDownRDSInstances(ctx context.Context, t test.Test, rdsCli *rds.Client) 
 					&rds.DeleteDBInstanceInput{
 						DBInstanceIdentifier:   rdsInstance.DBInstanceIdentifier,
 						DeleteAutomatedBackups: proto.Bool(true),
-						SkipFinalSnapshot:      true,
+						SkipFinalSnapshot:      aws.Bool(true),
 					},
 				); err != nil {
 					return err
@@ -1119,7 +1113,7 @@ func tearDownRDSInstances(ctx context.Context, t test.Test, rdsCli *rds.Client) 
 					ctx,
 					&rds.DeleteDBClusterInput{
 						DBClusterIdentifier: rdsCluster.DBClusterIdentifier,
-						SkipFinalSnapshot:   true,
+						SkipFinalSnapshot:   aws.Bool(true),
 					},
 				); err != nil {
 					return err

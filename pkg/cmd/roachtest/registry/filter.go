@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package registry
 
@@ -15,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/errors"
 )
 
@@ -24,7 +20,7 @@ type TestFilter struct {
 	Name *regexp.Regexp
 
 	// Cloud, if set, restricts the set of tests to those compatible with this cloud.
-	Cloud string
+	Cloud spec.Cloud
 
 	// Suite, if set, restricts the set of tests to those that are part of this suite.
 	Suite string
@@ -40,7 +36,7 @@ type TestFilter struct {
 type TestFilterOption func(tf *TestFilter)
 
 // WithCloud restricts the set of tests to those compatible with this cloud.
-func WithCloud(cloud string) TestFilterOption {
+func WithCloud(cloud spec.Cloud) TestFilterOption {
 	return func(tf *TestFilter) { tf.Cloud = cloud }
 }
 
@@ -83,9 +79,6 @@ func NewTestFilter(regexps []string, options ...TestFilterOption) (*TestFilter, 
 	}
 
 	// Validate Cloud, Suite, Owner fields.
-	if tf.Cloud != "" && !AllClouds.Contains(tf.Cloud) {
-		return nil, errors.Newf("invalid cloud %q; valid clouds are %s", tf.Cloud, AllClouds)
-	}
 	if tf.Suite != "" && !AllSuites.Contains(tf.Suite) {
 		return nil, errors.Newf("invalid suite %q; valid suites are %s", tf.Suite, AllSuites)
 	}
@@ -117,7 +110,7 @@ func (filter *TestFilter) Matches(t *TestSpec) (matches bool, reason MatchFailRe
 	reason.NameMismatch = !filter.Name.MatchString(t.Name)
 	reason.OwnerMismatch = filter.Owner != "" && t.Owner != filter.Owner
 	reason.NotPartOfSuite = filter.Suite != "" && !t.Suites.Contains(filter.Suite)
-	reason.CloudNotCompatible = filter.Cloud != "" && !t.CompatibleClouds.Contains(filter.Cloud)
+	reason.CloudNotCompatible = filter.Cloud.IsSet() && !t.CompatibleClouds.Contains(filter.Cloud)
 
 	// We have a match if all fields are false.
 	return reason == MatchFailReason{}, reason
@@ -221,7 +214,7 @@ func (filter *TestFilter) FilterWithHint(tests []TestSpec) ([]TestSpec, NoMatche
 	noFilter := TestFilter{Name: regexp.MustCompile(`.`), OnlyBenchmarks: filter.OnlyBenchmarks}
 
 	// 1. Is the cloud valid?
-	if filter.Cloud != "" && !AllClouds.Contains(filter.Cloud) {
+	if filter.Cloud.IsSet() && !AllClouds.Contains(filter.Cloud) {
 		return nil, NoTestsForCloud
 	}
 
@@ -282,9 +275,9 @@ func (filter *TestFilter) FilterWithHint(tests []TestSpec) ([]TestSpec, NoMatche
 	// We want to see if the desired tests exist but are not compatible with the
 	// given cloud (which is a recent feature). We use all fields from the
 	// original filter except the cloud and see if we get matches.
-	if filter.Cloud != "" {
+	if filter.Cloud.IsSet() {
 		noCloudFilter := *filter
-		noCloudFilter.Cloud = ""
+		noCloudFilter.Cloud = spec.AnyCloud
 		if n := len(noCloudFilter.Filter(tests)); n > 0 {
 			return nil, IncompatibleCloud
 		}
@@ -314,7 +307,7 @@ func (filter *TestFilter) NoMatchesHintString(h NoMatchesHint) string {
 	case IncompatibleCloud:
 		// Get a description of the filter without the cloud.
 		noCloudFilter := *filter
-		noCloudFilter.Cloud = ""
+		noCloudFilter.Cloud = spec.AnyCloud
 		return fmt.Sprintf(
 			"no %s match criteria; %s are not compatible with cloud %q",
 			noun, noCloudFilter.String(), filter.Cloud,
@@ -341,7 +334,7 @@ func (filter *TestFilter) String() string {
 		}
 	}
 	appendIf(filter.Name.String() != ".", "match regex %q", filter.Name)
-	appendIf(filter.Cloud != "", "are compatible with cloud %q", filter.Cloud)
+	appendIf(filter.Cloud.IsSet(), "are compatible with cloud %q", filter.Cloud)
 	appendIf(filter.Suite != "", "are part of the %q suite", filter.Suite)
 	appendIf(filter.Owner != "", "have owner %q", filter.Owner)
 

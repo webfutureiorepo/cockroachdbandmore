@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -20,7 +15,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
@@ -39,7 +33,7 @@ type applyJoinNode struct {
 	joinType descpb.JoinType
 
 	// The data source with no outer columns.
-	input planDataSource
+	singleInputPlanNode
 
 	// pred represents the join predicate.
 	pred *joinPredicate
@@ -81,7 +75,7 @@ type applyJoinNode struct {
 
 func newApplyJoinNode(
 	joinType descpb.JoinType,
-	left planDataSource,
+	left planNode,
 	rightCols colinfo.ResultColumns,
 	pred *joinPredicate,
 	planRightSideFn exec.ApplyJoinPlanRightSideFn,
@@ -96,12 +90,12 @@ func newApplyJoinNode(
 	}
 
 	return &applyJoinNode{
-		joinType:        joinType,
-		input:           left,
-		pred:            pred,
-		rightTypes:      getTypesFromResultColumns(rightCols),
-		planRightSideFn: planRightSideFn,
-		columns:         pred.cols,
+		joinType:            joinType,
+		singleInputPlanNode: singleInputPlanNode{left},
+		pred:                pred,
+		rightTypes:          getTypesFromResultColumns(rightCols),
+		planRightSideFn:     planRightSideFn,
+		columns:             pred.cols,
 	}, nil
 }
 
@@ -199,7 +193,7 @@ func (a *applyJoinNode) Next(params runParams) (bool, error) {
 		}
 
 		// We need a new row on the left.
-		ok, err := a.input.plan.Next(params)
+		ok, err := a.input.Next(params)
 		if err != nil {
 			return false, err
 		}
@@ -211,7 +205,7 @@ func (a *applyJoinNode) Next(params runParams) (bool, error) {
 
 		// Extract the values of the outer columns of the other side of the apply
 		// from the latest input row.
-		leftRow := a.input.plan.Values()
+		leftRow := a.input.Values()
 		a.run.leftRow = leftRow
 		a.iterationCount++
 
@@ -255,7 +249,8 @@ func (a *applyJoinNode) runNextRightSideIteration(params runParams, leftRow tree
 	plan := p.(*planComponents)
 	rowResultWriter := NewRowResultWriter(&a.run.rightRows)
 	if err := runPlanInsidePlan(
-		ctx, params, plan, rowResultWriter, nil, /* deferredRoutineSender */
+		ctx, params, plan, rowResultWriter,
+		nil /* deferredRoutineSender */, "", /* stmtForDistSQLDiagram */
 	); err != nil {
 		return err
 	}
@@ -271,6 +266,7 @@ func runPlanInsidePlan(
 	plan *planComponents,
 	resultWriter rowResultWriter,
 	deferredRoutineSender eval.DeferredRoutineSender,
+	stmtForDistSQLDiagram string,
 ) error {
 	defer plan.close(ctx)
 	execCfg := params.ExecCfg()
@@ -300,15 +296,6 @@ func runPlanInsidePlan(
 	evalCtxFactory := plannerCopy.ExtendedEvalContextCopy
 
 	if len(plan.subqueryPlans) != 0 {
-		// We currently don't support cases when both the "inner" and the
-		// "outer" plans have subqueries due to limitations of how we're
-		// propagating the results of the subqueries.
-		// TODO(mgartner): We should be able to lift this restriction for
-		// apply-joins, similarly to how subqueries within UDFs are planned - as
-		// routines instead of subqueries.
-		if len(params.p.curPlan.subqueryPlans) != 0 {
-			return unimplemented.NewWithIssue(66447, `apply joins with subqueries in the "inner" and "outer" contexts are not supported`)
-		}
 		// Create a separate memory account for the results of the subqueries.
 		// Note that we intentionally defer the closure of the account until we
 		// return from this method (after the main query is executed).
@@ -326,30 +313,22 @@ func runPlanInsidePlan(
 		) {
 			return resultWriter.Err()
 		}
-	} else {
-		// We don't have "inner" subqueries, so the apply join can only refer to
-		// the "outer" ones.
-		plannerCopy.curPlan.subqueryPlans = params.p.curPlan.subqueryPlans
-		// During cleanup, nil out the inner subquery plans before closing the plan
-		// components. Otherwise, we may inadvertently close nodes that are needed
-		// when executing the outer query.
-		defer func() {
-			plan.subqueryPlans = nil
-		}()
 	}
 
-	distributePlan := getPlanDistribution(
+	distributePlan, distSQLProhibitedErr := getPlanDistribution(
 		ctx, plannerCopy.Descriptors().HasUncommittedTypes(),
-		plannerCopy.SessionData().DistSQLMode, plan.main,
+		plannerCopy.SessionData(), plan.main, &plannerCopy.distSQLVisitor,
 	)
-	distributeType := DistributionType(DistributionTypeNone)
+	distributeType := DistributionType(LocalDistribution)
 	if distributePlan.WillDistribute() {
-		distributeType = DistributionTypeAlways
+		distributeType = FullDistribution
 	}
 	evalCtx := evalCtxFactory()
 	planCtx := execCfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, &plannerCopy, plannerCopy.txn, distributeType)
+	planCtx.distSQLProhibitedErr = distSQLProhibitedErr
 	planCtx.stmtType = recv.stmtType
 	planCtx.mustUseLeafTxn = params.p.mustUseLeafTxn()
+	planCtx.stmtForDistSQLDiagram = stmtForDistSQLDiagram
 
 	// Wrap PlanAndRun in a function call so that we clean up immediately.
 	func() {
@@ -369,7 +348,7 @@ func runPlanInsidePlan(
 	}
 
 	plannerCopy.autoCommit = false
-	execCfg.DistSQLPlanner.PlanAndRunCascadesAndChecks(
+	execCfg.DistSQLPlanner.PlanAndRunPostQueries(
 		ctx,
 		&plannerCopy,
 		func(usedConcurrently bool) *extendedEvalContext {
@@ -393,7 +372,7 @@ func (a *applyJoinNode) Values() tree.Datums {
 }
 
 func (a *applyJoinNode) Close(ctx context.Context) {
-	a.input.plan.Close(ctx)
+	a.input.Close(ctx)
 	a.run.rightRows.Close(ctx)
 	if a.run.rightRowsIterator != nil {
 		a.run.rightRowsIterator.Close()

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstatsutil
 
@@ -46,7 +41,6 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
   "querySummary": "{{.String}}",
   "db":           "{{.String}}",
   "distsql": {{.Bool}},
-  "failed":  {{.Bool}},
   "implicitTxn": {{.Bool}},
   "vec":         {{.Bool}},
   "fullScan":    {{.Bool}}
@@ -58,6 +52,7 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
        "statistics": {
          "cnt": {{.Int64}},
          "firstAttemptCnt": {{.Int64}},
+         "failureCount":    {{.Int64}},
          "maxRetries":      {{.Int64}},
          "lastExecAt":      "{{stringifyTime .Time}}",
          "numRows": {
@@ -101,7 +96,9 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
            "sqDiff": {{.Float}}
          },
          "nodes": [{{joinInts .IntArray}}],
+         "kvNodeIds": [{{joinInt32s .Int32Array}}],
          "regions": [{{joinStrings .StringArray}}],
+         "usedFollowerRead": {{.Bool}},
          "planGists": [{{joinStrings .StringArray}}],
          "indexes": [{{joinStrings .StringArray}}],
          "latencyInfo": {
@@ -288,6 +285,8 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
            "sqDiff": {{.Float}}
          },
          "nodes": [{{joinInts .IntArray}}],
+         "kvNodeIds": [{{joinInt32s .Int32Array}}],
+         "usedFollowerRead": {{.Bool}},
          "planGists": [{{joinStrings .StringArray}}],
          "latencyInfo": {
            "min": {{.Float}},
@@ -586,7 +585,6 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
   "querySummary": "{{.String}}",
   "implicitTxn": {{.Bool}},
   "distSQLCount": {{.Int64}},
-  "failedCount": {{.Int64}},
   "vecCount": {{.Int64}},
   "fullScanCount": {{.Int64}},
   "totalCount": {{.Int64}},

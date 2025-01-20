@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -33,6 +28,7 @@ func (i *immediateVisitor) CreateSequenceDescriptor(
 		Privileges:    &catpb.PrivilegeDescriptor{Version: catpb.Version23_2}, // Populated by `UserPrivileges` elements and `Owner` element
 		Version:       1,
 		FormatVersion: descpb.InterleavedFormatVersion,
+		Temporary:     op.Temporary,
 	}).BuildCreatedMutable()
 	tabledDesc := mut.(*tabledesc.Mutable)
 	tabledDesc.State = descpb.DescriptorState_ADD
@@ -82,6 +78,7 @@ func (i *immediateVisitor) SetSequenceOptions(
 		tree.SeqOptMaxValue:  {SetFunc: setIntValue(&sc.SequenceOpts.MaxValue)},
 		tree.SeqOptStart:     {SetFunc: setIntValue(&sc.SequenceOpts.Start)},
 		tree.SeqOptCache:     {SetFunc: setIntValue(&sc.SequenceOpts.CacheSize)},
+		tree.SeqOptCacheNode: {SetFunc: setIntValue(&sc.SequenceOpts.NodeCacheSize)},
 		tree.SeqOptVirtual:   {SetFunc: setBoolValue(&sc.SequenceOpts.Virtual)},
 		tree.SeqOptAs: {SetFunc: func(Value string) error {
 			sc.SequenceOpts.AsIntegerType = Value

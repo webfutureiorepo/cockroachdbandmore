@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -44,6 +39,12 @@ const (
 	// rejectNonPartialIndexes excludes any non-partial indexes during
 	// iteration.
 	rejectNonPartialIndexes
+
+	// rejectVectorIndexes excludes any vector indexes during iteration.
+	rejectVectorIndexes
+
+	// rejectNonVectorIndexes excludes any non-vector indexes during iteration.
+	rejectNonVectorIndexes
 )
 
 // scanIndexIter is a helper struct that facilitates iteration over the indexes
@@ -242,6 +243,16 @@ func (it *scanIndexIter) ForEachStartingAfter(ord int, f enumerateIndexFunc) {
 			continue
 		}
 
+		// Skip over vector indexes if rejectVectorIndexes is set.
+		if it.hasRejectFlags(rejectVectorIndexes) && index.IsVector() {
+			continue
+		}
+
+		// Skip over non-vector indexes if rejectNonVectorIndexes is set.
+		if it.hasRejectFlags(rejectNonVectorIndexes) && !index.IsVector() {
+			continue
+		}
+
 		pred, isPartialIndex := it.tabMeta.PartialIndexPredicate(ord)
 
 		// Skip over partial indexes if rejectPartialIndexes is set.
@@ -321,7 +332,12 @@ func (it *scanIndexIter) filtersImplyPredicate(
 	pred memo.FiltersExpr,
 ) (remainingFilters memo.FiltersExpr, ok bool) {
 	// Return the remaining filters if the filters imply the predicate.
-	if remainingFilters, ok = it.im.FiltersImplyPredicate(it.filters, pred); ok {
+	var computedCols map[opt.ColumnID]opt.ScalarExpr
+	if it.e.evalCtx.SessionData().OptimizerProveImplicationWithVirtualComputedColumns {
+		computedCols = it.tabMeta.ComputedCols
+	}
+	if remainingFilters, ok =
+		it.im.FiltersImplyPredicate(it.filters, pred, computedCols); ok {
 		return remainingFilters, true
 	}
 
@@ -333,7 +349,8 @@ func (it *scanIndexIter) filtersImplyPredicate(
 	// filters-implication are a subset of the remaining filters from
 	// originalFilters-implication.
 	if it.originalFilters != nil {
-		if remainingFilters, ok = it.im.FiltersImplyPredicate(it.originalFilters, pred); ok {
+		if remainingFilters, ok =
+			it.im.FiltersImplyPredicate(it.originalFilters, pred, computedCols); ok {
 			return remainingFilters, true
 		}
 	}
@@ -344,7 +361,7 @@ func (it *scanIndexIter) filtersImplyPredicate(
 // extractConstNonCompositeColumns returns the set of columns held constant by
 // the given filters and of types that do not have composite encodings.
 func (it *scanIndexIter) extractConstNonCompositeColumns(f memo.FiltersExpr) opt.ColSet {
-	constCols := memo.ExtractConstColumns(f, it.evalCtx)
+	constCols := memo.ExtractConstColumns(it.e.ctx, f, it.evalCtx)
 	var constNonCompositeCols opt.ColSet
 	for col, ok := constCols.Next(0); ok; col, ok = constCols.Next(col + 1) {
 		ord := it.tabMeta.MetaID.ColumnOrdinal(col)
@@ -368,7 +385,7 @@ func (it *scanIndexIter) buildConstProjectionsFromPredicate(
 		ord := it.tabMeta.MetaID.ColumnOrdinal(col)
 		typ := it.tabMeta.Table.Column(ord).DatumType()
 
-		val := memo.ExtractValueForConstColumn(pred, it.evalCtx, col)
+		val := memo.ExtractValueForConstColumn(it.e.ctx, pred, it.evalCtx, col)
 		if val == nil {
 			panic(errors.AssertionFailedf("could not extract constant value for column %d", col))
 		}

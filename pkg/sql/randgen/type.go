@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package randgen
 
@@ -25,7 +20,8 @@ import (
 var (
 	// SeedTypes includes the following types that form the basis of randomly
 	// generated types:
-	//   - All scalar types, except UNKNOWN and ANY
+	//   - All scalar types, except UNKNOWN, ANY, TRIGGER, REGNAMESPACE, and
+	//     FLOAT4
 	//   - ARRAY of ANY and TUPLE of ANY, where the ANY will be replaced with
 	//     one of the legal array element types in RandType
 	//   - OIDVECTOR and INT2VECTOR types
@@ -44,8 +40,11 @@ func init() {
 			// Temporarily don't include this.
 			// TODO(msirek): Remove this exclusion once
 			// https://github.com/cockroachdb/cockroach/issues/55791 is fixed.
-		case oid.T_unknown, oid.T_anyelement:
+		case oid.T_unknown, oid.T_anyelement, oid.T_trigger:
 			// Don't include these.
+		case oid.T_float4:
+			// Don't include FLOAT4 due to known bugs that cause test failures.
+			// See #73743 and #48613.
 		case oid.T_anyarray, oid.T_oidvector, oid.T_int2vector:
 			// Include these.
 			SeedTypes = append(SeedTypes, typ)
@@ -173,18 +172,18 @@ func IsLegalColumnType(typ *types.T) bool {
 		return false
 	}
 	ctx := context.Background()
-	version := clustersettings.MakeTestingClusterSettings().Version
-	return colinfo.ValidateColumnDefType(ctx, version, typ) == nil
+	st := clustersettings.MakeTestingClusterSettings()
+	return colinfo.ValidateColumnDefType(ctx, st, typ) == nil
 }
 
 // RandArrayType generates a random array type.
 func RandArrayType(rng *rand.Rand) *types.T {
 	ctx := context.Background()
-	version := clustersettings.MakeTestingClusterSettings().Version
+	st := clustersettings.MakeTestingClusterSettings()
 	for {
 		typ := RandColumnType(rng)
 		resTyp := types.MakeArray(typ)
-		if err := colinfo.ValidateColumnDefType(ctx, version, resTyp); err == nil {
+		if err := colinfo.ValidateColumnDefType(ctx, st, resTyp); err == nil {
 			return resTyp
 		}
 	}
@@ -203,7 +202,7 @@ func RandColumnTypes(rng *rand.Rand, numCols int) []*types.T {
 // RandSortingType returns a column type which can be key-encoded.
 func RandSortingType(rng *rand.Rand) *types.T {
 	typ := RandType(rng)
-	for colinfo.MustBeValueEncoded(typ) || typ == types.Void {
+	for colinfo.MustBeValueEncoded(typ) || typ.Family() == types.VoidFamily {
 		typ = RandType(rng)
 	}
 	return typ
@@ -222,65 +221,4 @@ func RandSortingTypes(rng *rand.Rand, numCols int) []*types.T {
 // RandCollationLocale returns a random element of collationLocales.
 func RandCollationLocale(rng *rand.Rand) *string {
 	return &collationLocales[rng.Intn(len(collationLocales))]
-}
-
-// RandEncodableType wraps RandType in order to workaround #36736, which fails
-// when name[] (or other type using DTypeWrapper) is encoded.
-//
-// TODO(andyk): Remove this workaround once #36736 is resolved. Also, RandDatum
-// really should be extended to create DTypeWrapper datums with alternate OIDs
-// like oid.T_varchar for better testing.
-func RandEncodableType(rng *rand.Rand) *types.T {
-	var isEncodableType func(t *types.T) bool
-	isEncodableType = func(t *types.T) bool {
-		switch t.Family() {
-		case types.ArrayFamily:
-			// Due to #36736, any type returned by RandType that gets turned into
-			// a DTypeWrapper random datum will not work. Currently, that's just
-			// types.Name.
-			if t.ArrayContents().Oid() == oid.T_name {
-				return false
-			}
-			return isEncodableType(t.ArrayContents())
-
-		case types.TupleFamily:
-			for i := range t.TupleContents() {
-				if !isEncodableType(t.TupleContents()[i]) {
-					return false
-				}
-			}
-
-		case types.VoidFamily:
-			return false
-
-		}
-		return true
-	}
-
-	for {
-		typ := RandType(rng)
-		if isEncodableType(typ) {
-			return typ
-		}
-	}
-}
-
-// RandEncodableColumnTypes works around #36736, which fails when name[] (or
-// other type using DTypeWrapper) is encoded.
-//
-// TODO(andyk): Remove this workaround once #36736 is resolved. Replace calls to
-// it with calls to RandColumnTypes.
-func RandEncodableColumnTypes(rng *rand.Rand, numCols int) []*types.T {
-	ctx := context.Background()
-	version := clustersettings.MakeTestingClusterSettings().Version
-	types := make([]*types.T, numCols)
-	for i := range types {
-		for {
-			types[i] = RandEncodableType(rng)
-			if err := colinfo.ValidateColumnDefType(ctx, version, types[i]); err == nil {
-				break
-			}
-		}
-	}
-	return types
 }

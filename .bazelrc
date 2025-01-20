@@ -9,7 +9,13 @@
 # Note that .bazelrc.user should be in your checkout (next to this file), not
 # your home directory.
 
-build --enable_platform_specific_config
+# Ignore warnings about using a source directory as an input file. This is
+# evidently a bug in rules_js that they haven't fixed yet. It seems it's
+# "mostly" fixed except for packages that have patches or lifecycle hooks.
+# Unfortunately that's many of the packages we use, so builds will be very
+# noisy without this. See aspect-build/rules_js#1408. When the upstream issue
+# is fixed, this should be removed.
+startup --host_jvm_args=-DBAZEL_TRACK_SOURCE_DIRECTORIES=1
 
 # Define a set up flag aliases, so people can use `--cross` instead of the
 # longer `//build/toolchains:cross_flag`.
@@ -20,26 +26,25 @@ build --flag_alias=cross=//build/toolchains:cross_flag
 build --flag_alias=dev=//build/toolchains:dev_flag
 build --flag_alias=force_build_cdeps=//build/toolchains:force_build_cdeps_flag
 build --flag_alias=heavy=//build/toolchains:heavy_flag
-build --flag_alias=lintonbuild=//build/toolchains:nogo_flag
-build --flag_alias=nolintonbuild=//build/toolchains:nonogo_explicit_flag
 
 build:crdb_test_off --crdb_test_off
 build:cross --cross
 build:dev --dev
 build:force_build_cdeps --force_build_cdeps
 build:heavy --heavy
-build:lintonbuild --lintonbuild
-build:nolintonbuild --nolintonbuild
+build:lintonbuild --run_validations
+build:nolintonbuild --norun_validations
 # Note: nonogo is classically the name of the nolintonbuild configuration.
-build:nonogo --nolintonbuild
+build:nonogo --config nolintonbuild
 build:test --crdb_test
 
 # Basic settings.
+common --noenable_bzlmod
+build --enable_platform_specific_config
 build --define gotags=bazel,gss
 build --experimental_proto_descriptor_sets_include_source_info
 build --incompatible_strict_action_env --incompatible_enable_cc_toolchain_resolution
 build --symlink_prefix=_bazel/
-build:dev --strip=never
 common --experimental_allow_tags_propagation
 test --config=test --experimental_ui_max_stdouterr_bytes=10485760
 build --ui_event_filters=-DEBUG
@@ -56,16 +61,15 @@ test:race --heavy
 
 # CI uses a custom timeout for enormous targets.
 test:use_ci_timeouts --test_timeout=60,300,900,900
+
 # CI should always run with `--config=ci`.
-build:cibase --lintonbuild
 # Set `-test.v` in Go tests.
 # Ref: https://github.com/bazelbuild/rules_go/pull/2456
-test:cibase --test_env=GO_TEST_WRAP_TESTV=1
+test:ci --test_env=GO_TEST_WRAP_TESTV=1
 # Dump all output for failed tests to the build log.
 test:ci --test_output=errors
 # Put all tmp artifacts in /artifacts/tmp.
 test:ci --test_tmpdir=/artifacts/tmp
-build:ci --config=cibase
 
 build:cross --stamp
 
@@ -83,7 +87,7 @@ build:crosslinuxfips '--workspace_status_command=./build/bazelutil/stamp.sh x86_
 build:crosslinuxfips --config=crosslinuxfipsbase
 build:crosslinuxfipsbase --platforms=//build/toolchains:cross_linux
 build:crosslinuxfipsbase --config=cross
-build:crosslinuxfipsbase --@io_bazel_rules_go//go/toolchain:sdk_version=1.21.5fips
+build:crosslinuxfipsbase --@io_bazel_rules_go//go/toolchain:sdk_version=1.22.8fips
 build:crosswindows '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-w64-mingw32'
 build:crosswindows --config=crosswindowsbase
 build:crosswindowsbase --platforms=//build/toolchains:cross_windows
@@ -113,11 +117,7 @@ build:macos --host_action_env=PATH=/opt/homebrew/bin:/opt/local/bin:/usr/local/b
 build:macos --linkopt="-Xlinker"
 build:macos --linkopt="-no_warn_duplicate_libraries"
 
-# --config=simplestamp configures the build to stamp the build with inferred
-# information about the configuration.
-# All `dev` builds will use this configuration; all `cross` builds will use a
-# more precise --workspace_status_command option.
-build:simplestamp --stamp --workspace_status_command=./build/bazelutil/stamp.sh
+build:pgo --@io_bazel_rules_go//go/config:pgoprofile=@pgo_profile//:profile.pprof
 
 build:engflowbase --define=EXECUTOR=remote
 build:engflowbase --disk_cache=
@@ -126,12 +126,13 @@ build:engflowbase --experimental_inmemory_jdeps_files
 build:engflowbase --remote_timeout=600
 build:engflowbase --nolegacy_important_outputs
 build:engflowbase --grpc_keepalive_time=30s
-build:engflowbase --experimental_remote_cache_compression=true
+build:engflowbase --remote_cache_compression=true
 build:engflowbase --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build:engflowbase --extra_execution_platforms=//build/toolchains:cross_linux
 build:engflowbase --remote_upload_local_results=false
 build:engflowbase --remote_download_toplevel
-build:engflowbase --config=cibase
+build:engflowbase --test_env=GO_TEST_WRAP_TESTV=1
+build:engflowbase --config=lintonbuild
 test:engflowbase --test_env=REMOTE_EXEC=1
 test:engflowbase --test_env=GOTRACEBACK=all
 build:engflow --config=engflowbase

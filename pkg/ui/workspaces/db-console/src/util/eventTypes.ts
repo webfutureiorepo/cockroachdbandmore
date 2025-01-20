@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // NOTE: This file is kept in sync manually with sql/event_log.go
 
@@ -137,6 +132,14 @@ export const UNSAFE_DELETE_NAMESPACE_ENTRY = "unsafe_delete_namespace_entry";
 export const UNSAFE_UPSERT_DESCRIPTOR = "unsafe_upsert_descriptor";
 // Recorded when crdb_internal.unsafe_upsert_namespace_entry is executed.
 export const UNSAFE_UPSERT_NAMESPACE_ENTRY = "unsafe_upsert_namespace_entry";
+// Recorded when a disk slowness event is detected on a store.
+export const DISK_SLOWNESS_DETECTED = "disk_slowness_detected";
+// Recorded when a disk slowness event is no longer detected on a store
+// after having been detected and reported previously.
+export const DISK_SLOWNESS_CLEARED = "disk_slowness_cleared";
+// Recorded when a disk is running low on available space (recorded
+// periodically).
+export const LOW_DISK_SPACE = "low_disk_space";
 
 // Node Event Types
 export const nodeEvents = [
@@ -145,6 +148,9 @@ export const nodeEvents = [
   NODE_DECOMMISSIONING,
   NODE_DECOMMISSIONED,
   NODE_RECOMMISSIONED,
+  DISK_SLOWNESS_DETECTED,
+  DISK_SLOWNESS_CLEARED,
+  LOW_DISK_SPACE,
 ];
 export const databaseEvents = [CREATE_DATABASE, DROP_DATABASE];
 export const tableEvents = [

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.sql.schemachanger.scpb;
@@ -107,7 +102,7 @@ message TargetState {
 
 message Statement {
   string statement = 1;
-  string redacted_statement = 2;
+  string redacted_statement = 2 [(gogoproto.casttype) = "github.com/cockroachdb/redact.RedactableString"];
   string statement_tag = 3;
 }
 

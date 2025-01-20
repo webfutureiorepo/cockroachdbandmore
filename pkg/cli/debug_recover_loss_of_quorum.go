@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -17,17 +12,19 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/loqrecovery"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/loqrecovery/loqrecoverypb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/strutil"
@@ -296,7 +293,8 @@ See debug recover command help for more details on how to use this command.
 }
 
 var debugRecoverCollectInfoOpts struct {
-	Stores base.StoreSpecList
+	Stores         base.StoreSpecList
+	maxConcurrency int
 }
 
 func runDebugDeadReplicaCollect(cmd *cobra.Command, args []string) error {
@@ -315,7 +313,8 @@ func runDebugDeadReplicaCollect(cmd *cobra.Command, args []string) error {
 			return errors.Wrapf(err, "failed to get admin connection to cluster")
 		}
 		defer finish()
-		replicaInfo, stats, err = loqrecovery.CollectRemoteReplicaInfo(ctx, c)
+		replicaInfo, stats, err = loqrecovery.CollectRemoteReplicaInfo(ctx, c,
+			debugRecoverCollectInfoOpts.maxConcurrency, stderr /* logOutput */)
 		if err != nil {
 			return errors.WithHint(errors.Wrap(err,
 				"failed to retrieve replica info from cluster"),
@@ -324,7 +323,7 @@ func runDebugDeadReplicaCollect(cmd *cobra.Command, args []string) error {
 	} else {
 		var stores []storage.Engine
 		for _, storeSpec := range debugRecoverCollectInfoOpts.Stores.Specs {
-			db, err := OpenEngine(storeSpec.Path, stopper, storage.MustExist, storage.ReadOnly)
+			db, err := OpenEngine(storeSpec.Path, stopper, fs.ReadOnly, storage.MustExist)
 			if err != nil {
 				return errors.WithHint(errors.Wrapf(err,
 					"failed to open store at path %q", storeSpec.Path),
@@ -401,6 +400,7 @@ var debugRecoverPlanOpts struct {
 	deadNodeIDs    []int
 	confirmAction  confirmActionFlag
 	force          bool
+	maxConcurrency int
 }
 
 var planSpecificFlags = map[string]struct{}{
@@ -431,7 +431,8 @@ func runDebugPlanReplicaRemoval(cmd *cobra.Command, args []string) error {
 			return errors.Wrapf(err, "failed to get admin connection to cluster")
 		}
 		defer finish()
-		replicas, stats, err = loqrecovery.CollectRemoteReplicaInfo(ctx, c)
+		replicas, stats, err = loqrecovery.CollectRemoteReplicaInfo(ctx, c,
+			debugRecoverPlanOpts.maxConcurrency, stderr /* logOutput */)
 		if err != nil {
 			return errors.Wrapf(err, "failed to retrieve replica info from cluster")
 		}
@@ -571,29 +572,20 @@ Discarded live replicas: %d
 		return errors.Wrap(err, "failed to write recovery plan")
 	}
 
-	v := clusterversion.ClusterVersion{
-		Version: plan.Version,
-	}
-	if v.IsActive(clusterversion.V23_1) {
-		// No args means we collected connection info from cluster and need to
-		// preserve flags for subsequent invocation.
-		remoteArgs := getCLIClusterFlags(len(args) == 0, cmd, func(flag string) bool {
-			_, filter := planSpecificFlags[flag]
-			return filter
-		})
+	// No args means we collected connection info from cluster and need to
+	// preserve flags for subsequent invocation.
+	remoteArgs := getCLIClusterFlags(len(args) == 0, cmd, func(flag string) bool {
+		_, filter := planSpecificFlags[flag]
+		return filter
+	})
 
-		_, _ = fmt.Fprintf(stderr, `Plan created.
+	_, _ = fmt.Fprintf(stderr, `Plan created.
 To stage recovery application in half-online mode invoke:
 
 cockroach debug recover apply-plan %s %s
 
 Alternatively distribute plan to below nodes and invoke 'debug recover apply-plan --store=<store-dir> %s' on:
 `, remoteArgs, planFile, planFile)
-	} else {
-		_, _ = fmt.Fprintf(stderr, `Plan created.
-To complete recovery, distribute plan to below nodes and invoke 'debug recover apply-plan --store=<store-dir> %s' on:
-`, planFile)
-	}
 	for _, node := range report.UpdatedNodes {
 		_, _ = fmt.Fprintf(stderr, "- node n%d, store(s) %s\n", node.NodeID,
 			strutil.JoinIDs("s", node.StoreIDs))
@@ -642,6 +634,7 @@ var debugRecoverExecuteOpts struct {
 	Stores                base.StoreSpecList
 	confirmAction         confirmActionFlag
 	ignoreInternalVersion bool
+	maxConcurrency        int
 }
 
 // runDebugExecuteRecoverPlan is using the following pattern when performing command
@@ -669,7 +662,7 @@ func runDebugExecuteRecoverPlan(cmd *cobra.Command, args []string) error {
 
 	if len(debugRecoverExecuteOpts.Stores.Specs) == 0 {
 		return stageRecoveryOntoCluster(ctx, cmd, planFile, nodeUpdates,
-			debugRecoverExecuteOpts.ignoreInternalVersion)
+			debugRecoverExecuteOpts.ignoreInternalVersion, debugRecoverExecuteOpts.maxConcurrency)
 	}
 	return applyRecoveryToLocalStore(ctx, nodeUpdates, debugRecoverExecuteOpts.ignoreInternalVersion)
 }
@@ -680,6 +673,7 @@ func stageRecoveryOntoCluster(
 	planFile string,
 	plan loqrecoverypb.ReplicaUpdatePlan,
 	ignoreInternalVersion bool,
+	maxConcurrency int,
 ) error {
 	c, finish, err := getAdminClient(ctx, serverCfg)
 	if err != nil {
@@ -692,7 +686,9 @@ func stageRecoveryOntoCluster(
 		nodeID roachpb.NodeID
 		planID string
 	}
-	vr, err := c.RecoveryVerify(ctx, &serverpb.RecoveryVerifyRequest{})
+	vr, err := c.RecoveryVerify(ctx, &serverpb.RecoveryVerifyRequest{
+		MaxConcurrency: int32(maxConcurrency),
+	})
 	if err != nil {
 		return errors.Wrap(err, "failed to retrieve loss of quorum recovery status from cluster")
 	}
@@ -753,7 +749,11 @@ func stageRecoveryOntoCluster(
 		// We don't want to combine removing old plan and adding new one since it
 		// could produce cluster with multiple plans at the same time which could
 		// make situation worse.
-		res, err := c.RecoveryStagePlan(ctx, &serverpb.RecoveryStagePlanRequest{AllNodes: true, ForcePlan: true})
+		res, err := c.RecoveryStagePlan(ctx, &serverpb.RecoveryStagePlanRequest{
+			AllNodes:       true,
+			ForcePlan:      true,
+			MaxConcurrency: int32(maxConcurrency),
+		})
 		if err := maybeWrapStagingError("failed removing existing loss of quorum replica recovery plan from cluster", res, err); err != nil {
 			return err
 		}
@@ -762,6 +762,7 @@ func stageRecoveryOntoCluster(
 		Plan:                      &plan,
 		AllNodes:                  true,
 		ForceLocalInternalVersion: ignoreInternalVersion,
+		MaxConcurrency:            int32(maxConcurrency),
 	})
 	if err := maybeWrapStagingError("failed to stage loss of quorum recovery plan on cluster",
 		sr, err); err != nil {
@@ -811,7 +812,7 @@ func applyRecoveryToLocalStore(
 	batches := make(map[roachpb.StoreID]storage.Batch)
 	stores := make([]storage.Engine, len(debugRecoverExecuteOpts.Stores.Specs))
 	for i, storeSpec := range debugRecoverExecuteOpts.Stores.Specs {
-		store, err := OpenEngine(storeSpec.Path, stopper, storage.MustExist)
+		store, err := OpenEngine(storeSpec.Path, stopper, fs.ReadWrite, storage.MustExist)
 		if err != nil {
 			return errors.Wrapf(err, "failed to open store at path %q. ensure that store path is "+
 				"correct and that it is not used by another process", storeSpec.Path)
@@ -918,6 +919,10 @@ See debug recover command help for more details on how to use this command.
 	RunE: runDebugVerify,
 }
 
+var debugRecoverVerifyOpts struct {
+	maxConcurrency int
+}
+
 func runDebugVerify(cmd *cobra.Command, args []string) error {
 	// We must have cancellable context here to obtain grpc client connection.
 	ctx, cancel := context.WithCancel(cmd.Context())
@@ -951,6 +956,7 @@ func runDebugVerify(cmd *cobra.Command, args []string) error {
 	req := serverpb.RecoveryVerifyRequest{
 		DecommissionedNodeIDs: updatePlan.DecommissionedNodeIDs,
 		MaxReportedRanges:     20,
+		MaxConcurrency:        int32(debugRecoverVerifyOpts.maxConcurrency),
 	}
 	// Maybe switch to non-nullable?
 	if !updatePlan.PlanID.Equal(uuid.UUID{}) {
@@ -1090,7 +1096,7 @@ func diffPlanWithNodeStatus(
 		for k := range nodesWithPlan {
 			missing = append(missing, k)
 		}
-		sort.Sort(roachpb.NodeIDSlice(missing))
+		slices.Sort(missing)
 		for _, id := range missing {
 			result.appendError(fmt.Sprintf(" failed to find node n%d where plan must be staged", id))
 		}
@@ -1154,14 +1160,23 @@ func getCLIClusterFlags(fromCfg bool, cmd *cobra.Command, filter func(flag strin
 	return buf.String()
 }
 
+// debugRecoverDefaultMaxConcurrency is the default concurrency that will be
+// used when fanning out RPCs to nodes in the cluster while servicing a debug
+// recover command.
+var debugRecoverDefaultMaxConcurrency = 2 * runtime.GOMAXPROCS(0)
+
 // setDebugRecoverContextDefaults resets values of command line flags to
 // their default values to ensure tests don't interfere with each other.
 func setDebugRecoverContextDefaults() {
 	debugRecoverCollectInfoOpts.Stores.Specs = nil
+	debugRecoverCollectInfoOpts.maxConcurrency = debugRecoverDefaultMaxConcurrency
 	debugRecoverPlanOpts.outputFileName = ""
 	debugRecoverPlanOpts.confirmAction = prompt
 	debugRecoverPlanOpts.deadStoreIDs = nil
-	debugRecoverPlanOpts.deadStoreIDs = nil
+	debugRecoverPlanOpts.deadNodeIDs = nil
+	debugRecoverPlanOpts.maxConcurrency = debugRecoverDefaultMaxConcurrency
 	debugRecoverExecuteOpts.Stores.Specs = nil
 	debugRecoverExecuteOpts.confirmAction = prompt
+	debugRecoverExecuteOpts.maxConcurrency = debugRecoverDefaultMaxConcurrency
+	debugRecoverVerifyOpts.maxConcurrency = debugRecoverDefaultMaxConcurrency
 }

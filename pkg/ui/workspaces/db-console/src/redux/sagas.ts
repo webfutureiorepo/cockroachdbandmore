@@ -1,25 +1,21 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { all, fork } from "redux-saga/effects";
 
-import { queryMetricsSaga } from "./metrics";
-import { localSettingsSaga } from "./localsettings";
-import { customAnalyticsSaga } from "./customAnalytics";
-import { statementsSaga } from "./statements";
+import { timeScaleSaga } from "src/redux/timeScale";
+
 import { analyticsSaga } from "./analyticsSagas";
+import { customAnalyticsSaga } from "./customAnalytics";
+import { indexUsageStatsSaga } from "./indexUsageStats";
+import { jobsSaga } from "./jobs/jobsSagas";
+import { localSettingsSaga } from "./localsettings";
+import { queryMetricsSaga } from "./metrics";
 import { sessionsSaga } from "./sessions";
 import { sqlStatsSaga } from "./sqlStats";
-import { indexUsageStatsSaga } from "./indexUsageStats";
-import { timeScaleSaga } from "src/redux/timeScale";
-import { jobsSaga } from "./jobs/jobsSagas";
+import { statementsSaga } from "./statements";
 
 export default function* rootSaga() {
   yield all([

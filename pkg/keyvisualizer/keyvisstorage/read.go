@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package keyvisstorage
 
@@ -16,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -31,7 +25,7 @@ func MostRecentSampleTime(ctx context.Context, ie *sql.InternalExecutor) (time.T
 		ctx,
 		"query-samples",
 		nil,
-		sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT max(sample_time) FROM system.span_stats_samples",
 	)
 
@@ -60,7 +54,7 @@ func ReadSamples(
 		ctx,
 		"query-samples",
 		nil,
-		sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT * FROM system.span_stats_samples",
 	)
 	if err != nil {
@@ -81,7 +75,7 @@ func ReadSamples(
 		ctx,
 		"query-samples",
 		nil,
-		sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT * FROM system.span_stats_buckets",
 	)
 	if err != nil {
@@ -120,7 +114,7 @@ func ReadKeys(ctx context.Context, ie *sql.InternalExecutor) (map[string]roachpb
 		ctx,
 		"query-unique-keys",
 		nil,
-		sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT * FROM system.span_stats_unique_keys",
 	)
 

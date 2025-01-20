@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -51,6 +46,16 @@ var MergeQueueInterval = settings.RegisterDurationSetting(
 	"how long the merge queue waits between processing replicas",
 	5*time.Second,
 	settings.NonNegativeDuration,
+)
+
+// SkipMergeQueueForExternalBytes is a setting that controls whether
+// replicas with external bytes should be processed by the merge
+// queue.
+var SkipMergeQueueForExternalBytes = settings.RegisterBoolSetting(
+	settings.SystemOnly,
+	"kv.range_merge.skip_external_bytes.enabled",
+	"skip the merge queue for external bytes",
+	true,
 )
 
 // mergeQueue manages a queue of ranges slated to be merged with their right-
@@ -114,17 +119,18 @@ func newMergeQueue(store *Store, db *kv.DB) *mergeQueue {
 			// hard to determine ahead of time. An alternative would be to calculate
 			// the timeout with a function that additionally considers the replication
 			// factor.
-			processTimeoutFunc:   makeRateLimitedTimeoutFunc(rebalanceSnapshotRate),
-			needsLease:           true,
-			needsSpanConfigs:     true,
-			acceptsUnsplitRanges: false,
-			successes:            store.metrics.MergeQueueSuccesses,
-			failures:             store.metrics.MergeQueueFailures,
-			storeFailures:        store.metrics.StoreFailures,
-			pending:              store.metrics.MergeQueuePending,
-			processingNanos:      store.metrics.MergeQueueProcessingNanos,
-			purgatory:            store.metrics.MergeQueuePurgatory,
-			disabledConfig:       kvserverbase.MergeQueueEnabled,
+			processTimeoutFunc:                  makeRateLimitedTimeoutFunc(rebalanceSnapshotRate),
+			needsLease:                          true,
+			needsSpanConfigs:                    true,
+			acceptsUnsplitRanges:                false,
+			successes:                           store.metrics.MergeQueueSuccesses,
+			failures:                            store.metrics.MergeQueueFailures,
+			storeFailures:                       store.metrics.StoreFailures,
+			pending:                             store.metrics.MergeQueuePending,
+			processingNanos:                     store.metrics.MergeQueueProcessingNanos,
+			purgatory:                           store.metrics.MergeQueuePurgatory,
+			disabledConfig:                      kvserverbase.MergeQueueEnabled,
+			skipIfReplicaHasExternalFilesConfig: SkipMergeQueueForExternalBytes,
 		},
 	)
 	return mq

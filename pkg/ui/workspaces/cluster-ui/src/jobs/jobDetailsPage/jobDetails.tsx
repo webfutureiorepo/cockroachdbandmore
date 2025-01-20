@@ -1,44 +1,40 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-import React, { useContext } from "react";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { ArrowLeft } from "@cockroachlabs/icons";
 import { Col, Row, Tabs } from "antd";
-import "antd/lib/col/style";
-import "antd/lib/row/style";
-import "antd/lib/tabs/style";
+import classNames from "classnames/bind";
 import Long from "long";
+import moment from "moment-timezone";
+import React, { useContext } from "react";
 import Helmet from "react-helmet";
 import { RouteComponentProps } from "react-router-dom";
+
 import { JobRequest, JobResponse } from "src/api/jobsApi";
 import { Button } from "src/button";
-import { Loading } from "src/loading";
-import { SqlBox, SqlBoxSize } from "src/sql";
-import { SummaryCard, SummaryCardItem } from "src/summaryCard";
-import {
-  TimestampToMoment,
-  idAttr,
-  getMatchParamByName,
-  DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT_24_TZ,
-} from "src/util";
-
+import { commonStyles } from "src/common";
+import { CockroachCloudContext } from "src/contexts";
+import { EmptyTable } from "src/empty";
+import jobStyles from "src/jobs/jobs.module.scss";
 import { HighwaterTimestamp } from "src/jobs/util/highwaterTimestamp";
 import { JobStatusCell } from "src/jobs/util/jobStatusCell";
-import { isTerminalState } from "../util/jobOptions";
-
-import { commonStyles } from "src/common";
+import { Loading } from "src/loading";
+import { SortedTable } from "src/sortedtable";
+import { SqlBox, SqlBoxSize } from "src/sql";
+import { UIConfigState } from "src/store";
+import { SummaryCard, SummaryCardItem } from "src/summaryCard";
 import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
-import jobStyles from "src/jobs/jobs.module.scss";
+import { Text, TextTypes } from "src/text";
+import {
+  DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT_24_TZ,
+  DATE_WITH_SECONDS_FORMAT,
+  TimestampToMoment,
+  getMatchParamByName,
+  idAttr,
+} from "src/util";
 
-import classNames from "classnames/bind";
-import { Timestamp } from "../../timestamp";
 import {
   GetJobProfilerExecutionDetailRequest,
   GetJobProfilerExecutionDetailResponse,
@@ -46,11 +42,12 @@ import {
   ListJobProfilerExecutionDetailsResponse,
   RequestState,
 } from "../../api";
-import moment from "moment-timezone";
-import { CockroachCloudContext } from "src/contexts";
+import { Timestamp } from "../../timestamp";
+import { isTerminalState } from "../util/jobOptions";
+
 import { JobProfilerView } from "./jobProfilerView";
-import long from "long";
-import { UIConfigState } from "src/store";
+
+type JobMessage = JobResponse["messages"][number];
 
 const { TabPane } = Tabs;
 
@@ -78,7 +75,7 @@ export interface JobDetailsDispatchProps {
   refreshExecutionDetailFiles: (
     req: ListJobProfilerExecutionDetailsRequest,
   ) => void;
-  onRequestExecutionDetails: (jobID: long) => void;
+  onRequestExecutionDetails: (jobID: Long) => void;
   refreshUserSQLRoles: () => void;
 }
 
@@ -88,7 +85,7 @@ export interface JobDetailsState {
 
 export type JobDetailsProps = JobDetailsStateProps &
   JobDetailsDispatchProps &
-  RouteComponentProps<unknown>;
+  RouteComponentProps;
 
 export class JobDetails extends React.Component<
   JobDetailsProps,
@@ -155,18 +152,48 @@ export class JobDetails extends React.Component<
     );
   };
 
-  renderOverviewTabContent = (
-    hasNextRun: boolean,
-    nextRun: moment.Moment,
-    job: JobResponse,
-  ): React.ReactElement => {
+  renderOverviewTabContent = (job: JobResponse): React.ReactElement => {
     if (!job) {
       return null;
     }
 
+    const messageColumns = [
+      {
+        name: "timestamp",
+        title: "When",
+        hideTitleUnderline: true,
+        cell: (x: JobMessage) => (
+          <Timestamp
+            time={TimestampToMoment(x.timestamp, null)}
+            format={DATE_WITH_SECONDS_FORMAT}
+          />
+        ),
+      },
+      {
+        name: "kind",
+        title: "Kind",
+        hideTitleUnderline: true,
+        cell: (x: JobMessage) => x.kind,
+      },
+      {
+        name: "message",
+        title: "Message",
+        hideTitleUnderline: true,
+        cell: (x: JobMessage) => (
+          <p className={jobCx("message")}>{x.message}</p>
+        ),
+      },
+    ];
+
     return (
       <Row gutter={24}>
-        <Col className="gutter-row" span={24}>
+        <Col className="gutter-row" span={8}>
+          <Text
+            textType={TextTypes.Heading5}
+            className={jobCx("details-header")}
+          >
+            Details
+          </Text>
           <SummaryCard className={cardCx("summary-card")}>
             <SummaryCardItem
               label="Status"
@@ -174,19 +201,6 @@ export class JobDetails extends React.Component<
                 <JobStatusCell job={job} lineWidth={1.5} hideDuration={true} />
               }
             />
-            {hasNextRun && (
-              <>
-                <SummaryCardItem
-                  label="Next Planned Execution Time"
-                  value={
-                    <Timestamp
-                      time={nextRun}
-                      format={DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT_24_TZ}
-                    />
-                  }
-                />
-              </>
-            )}
             <SummaryCardItem
               label="Creation Time"
               value={
@@ -218,19 +232,6 @@ export class JobDetails extends React.Component<
                 }
               />
             )}
-            <SummaryCardItem
-              label="Last Execution Time"
-              value={
-                <Timestamp
-                  time={TimestampToMoment(job.last_run, null)}
-                  format={DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT_24_TZ}
-                />
-              }
-            />
-            <SummaryCardItem
-              label="Execution Count"
-              value={String(job.num_runs)}
-            />
             <SummaryCardItem label="User Name" value={job.username} />
             {job.highwater_timestamp && (
               <SummaryCardItem
@@ -243,6 +244,22 @@ export class JobDetails extends React.Component<
                 }
               />
             )}
+          </SummaryCard>
+        </Col>
+        <Col className="gutter-row" span={16}>
+          <Text
+            textType={TextTypes.Heading5}
+            className={jobCx("details-header")}
+          >
+            Events
+          </Text>
+          <SummaryCard className={jobCx("messages-card")}>
+            <SortedTable
+              data={job.messages}
+              columns={messageColumns}
+              tableWrapperClassName={jobCx("job-messages", "sorted-table")}
+              renderNoResult={<EmptyTable title="No messages recorded." />}
+            />
           </SummaryCard>
         </Col>
       </Row>
@@ -267,8 +284,6 @@ export class JobDetails extends React.Component<
       this.props.jobRequest.inFlight && !this.props.jobRequest.data;
     const error = this.props.jobRequest.error;
     const job = this.props.jobRequest.data;
-    const nextRun = TimestampToMoment(job?.next_run);
-    const hasNextRun = nextRun?.isAfter();
     const { currentTab } = this.state;
     return (
       <div className={jobCx("job-details")}>
@@ -300,7 +315,7 @@ export class JobDetails extends React.Component<
                     <Col className="gutter-row" span={24}>
                       <SqlBox
                         value={job?.description ?? "Job not found."}
-                        size={SqlBoxSize.custom}
+                        size={SqlBoxSize.CUSTOM}
                         format={true}
                       />
                     </Col>
@@ -313,7 +328,7 @@ export class JobDetails extends React.Component<
                   activeKey={currentTab}
                 >
                   <TabPane tab={TabKeysEnum.OVERVIEW} key="overview">
-                    {this.renderOverviewTabContent(hasNextRun, nextRun, job)}
+                    {this.renderOverviewTabContent(job)}
                   </TabPane>
                   {!useContext(CockroachCloudContext) &&
                     this.props.hasAdminRole && (

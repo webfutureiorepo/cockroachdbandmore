@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/deprecatedshowranges"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -35,7 +29,7 @@ func addPlanningErrorHints(
 		// Changes introduced in v23.1.
 		extraRangeDoc := false
 		switch {
-		case strings.Contains(resolvedSQL, "SHOW RANGES") && !deprecatedshowranges.EnableDeprecatedBehavior(ctx, st, ns):
+		case strings.Contains(resolvedSQL, "SHOW RANGES"):
 			errS := err.Error()
 
 			// The following columns are not available when using SHOW
@@ -46,8 +40,7 @@ func addPlanningErrorHints(
 				extraRangeDoc = true
 			}
 
-		case strings.Contains(resolvedSQL, "crdb_internal.ranges" /* also matches ranges_no_leases */) &&
-			!deprecatedshowranges.EnableDeprecatedBehavior(ctx, st, ns):
+		case strings.Contains(resolvedSQL, "crdb_internal.ranges" /* also matches ranges_no_leases */):
 			errS := err.Error()
 
 			// The following columns are not available when using SHOW

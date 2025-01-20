@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rspb
 
@@ -45,6 +40,13 @@ func (c *ReadSummary) Clone() *ReadSummary {
 func (c *ReadSummary) Merge(o ReadSummary) {
 	c.Local.Merge(o.Local)
 	c.Global.Merge(o.Global)
+}
+
+// Compress compresses the read summary to fit within the provided size budget.
+// It splits the budget evenly between the local and global segments.
+func (c *ReadSummary) Compress(budget int64) {
+	c.Local.Compress(budget / 2)
+	c.Global.Compress(budget / 2)
 }
 
 // AddReadSpan adds a read span to the segment. The span must be sorted after
@@ -88,7 +90,7 @@ func (c *Segment) Clone() Segment {
 // commutative and idempotent.
 func (c *Segment) Merge(o Segment) {
 	// Forward the low water mark.
-	if !c.LowWater.EqOrdering(o.LowWater) {
+	if c.LowWater != o.LowWater {
 		if c.LowWater.Less(o.LowWater) {
 			// c.LowWater < o.LowWater, filter c.ReadSpans.
 			c.ReadSpans = filterSpans(c.ReadSpans, o.LowWater)

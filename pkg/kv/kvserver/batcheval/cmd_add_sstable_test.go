@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval_test
 
@@ -144,7 +139,7 @@ func TestEvalAddSSTable(t *testing.T) {
 			sst:            kvs{pointKVWithLocalTS("a", 2, 1, "a2")},
 			expect:         kvs{pointKVWithLocalTS("a", 2, 1, "a2")},
 			expectStatsEst: true,
-			expectErrRace:  `SST contains non-empty MVCC value header for key "a"/2.000000000,0`,
+			expectErrRace:  `SST contains non-empty Local Timestamp in the MVCC value header for key "a"/2.000000000,0`,
 		},
 		"blind rejects local timestamp on range key under race only": { // unfortunately, for performance
 			sst:            kvs{rangeKVWithLocalTS("a", "d", 2, 1, "")},
@@ -183,6 +178,7 @@ func TestEvalAddSSTable(t *testing.T) {
 			expectErr: []string{
 				`unexpected timestamp 2.000000000,0 (expected 1.000000000,0) for key "c"`,
 				`key has suffix "\x00\x00\x00\x00w5\x94\x00\t", expected "\x00\x00\x00\x00;\x9a\xca\x00\t"`,
+				`has suffix 0x000000007735940009; require 0x000000003b9aca0009`,
 			},
 		},
 		"SSTTimestampToRequestTimestamp rejects incorrect SST timestamp for range keys": {
@@ -192,6 +188,7 @@ func TestEvalAddSSTable(t *testing.T) {
 			expectErr: []string{
 				`unexpected timestamp 2.000000000,0 (expected 1.000000000,0) for range key {c-d}`,
 				`key has suffix "\x00\x00\x00\x00w5\x94\x00\t", expected "\x00\x00\x00\x00;\x9a\xca\x00\t"`,
+				`has suffix 0x000000007735940009; require 0x000000003b9aca0009`,
 			},
 		},
 		"SSTTimestampToRequestTimestamp rejects incorrect 0 SST timestamp": {
@@ -201,6 +198,7 @@ func TestEvalAddSSTable(t *testing.T) {
 			expectErr: []string{
 				`unexpected timestamp 0,0 (expected 1.000000000,0) for key "c"`,
 				`key has suffix "", expected "\x00\x00\x00\x00;\x9a\xca\x00\t"`,
+				`has suffix 0x; require 0x000000003b9aca0009`,
 			},
 			expectErrRace: `SST contains inline value or intent for key "c"/0,0`,
 		},
@@ -297,7 +295,7 @@ func TestEvalAddSSTable(t *testing.T) {
 			sst:            kvs{pointKVWithLocalTS("a", 2, 1, "a2")},
 			expect:         kvs{pointKVWithLocalTS("a", 10, 1, "a2")},
 			expectStatsEst: true,
-			expectErrRace:  `SST contains non-empty MVCC value header for key "a"/2.000000000,0`,
+			expectErrRace:  `SST contains non-empty Local Timestamp in the MVCC value header for key "a"/2.000000000,0`,
 		},
 		"SSTTimestampToRequestTimestamp with DisallowConflicts causes estimated stats with range key masking": {
 			reqTS:          5,
@@ -1151,7 +1149,8 @@ func TestEvalAddSSTable(t *testing.T) {
 								kv.RangeKey.Timestamp.WallTime *= 1e9
 								v.MVCCValueHeader.LocalTimestamp.WallTime *= 1e9
 								require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(
-									ctx, b, nil, kv.RangeKey.StartKey, kv.RangeKey.EndKey, kv.RangeKey.Timestamp, v.MVCCValueHeader.LocalTimestamp, nil, nil, false, 0, nil))
+									ctx, b, nil, kv.RangeKey.StartKey, kv.RangeKey.EndKey, kv.RangeKey.Timestamp, v.MVCCValueHeader.LocalTimestamp, nil, nil, false,
+									0, 0, nil))
 							default:
 								t.Fatalf("unknown KV type %T", kv)
 							}
@@ -1250,7 +1249,7 @@ func TestEvalAddSSTable(t *testing.T) {
 							require.Nil(t, result.Replicated.AddSSTable)
 						} else {
 							require.NotNil(t, result.Replicated.AddSSTable)
-							require.NoError(t, fs.WriteFile(engine, "sst", result.Replicated.AddSSTable.Data))
+							require.NoError(t, fs.WriteFile(engine.Env(), "sst", result.Replicated.AddSSTable.Data, fs.UnspecifiedWriteCategory))
 							require.NoError(t, engine.IngestLocalFiles(ctx, []string{"sst"}))
 						}
 
@@ -1265,6 +1264,7 @@ func TestEvalAddSSTable(t *testing.T) {
 								require.NoError(t, err)
 								v.LocalTimestamp.WallTime *= 1e9
 								kv.RangeKey.Timestamp.WallTime *= 1e9
+								kv.RangeKey.EncodedTimestampSuffix = storage.EncodeMVCCTimestampSuffix(kv.RangeKey.Timestamp)
 								vBytes, err := storage.EncodeMVCCValue(v)
 								require.NoError(t, err)
 								expect = append(expect, storage.MVCCRangeKeyValue{RangeKey: kv.RangeKey, Value: vBytes})
@@ -1578,7 +1578,7 @@ func runTestDBAddSSTable(
 		value.InitChecksum([]byte("foo"))
 
 		var sstFile bytes.Buffer
-		w := storage.MakeBackupSSTWriter(ctx, cs, &sstFile)
+		w := storage.MakeTransportSSTWriter(ctx, cs, &sstFile)
 		defer w.Close()
 		require.NoError(t, w.Put(key, value.RawBytes))
 		require.NoError(t, w.Finish())
@@ -1668,7 +1668,7 @@ func TestAddSSTableMVCCStats(t *testing.T) {
 	_, err := batcheval.EvalAddSSTable(ctx, engine, cArgs, &resp)
 	require.NoError(t, err)
 
-	require.NoError(t, fs.WriteFile(engine, "sst", sst))
+	require.NoError(t, fs.WriteFile(engine.Env(), "sst", sst, fs.UnspecifiedWriteCategory))
 	require.NoError(t, engine.IngestLocalFiles(ctx, []string{"sst"}))
 
 	statsEvaled := statsBefore

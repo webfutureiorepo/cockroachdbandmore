@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package invertedidx
 
@@ -59,7 +54,13 @@ func (t *tsqueryFilterPlanner) extractInvertedFilterConditionFromLeaf(
 		return inverted.NonInvertedColExpression{}, expr, nil
 	}
 	d := memo.ExtractConstDatum(constantVal)
-	if d.ResolvedType() != types.TSQuery {
+	if d == tree.DNull {
+		// ... @@ NULL or NULL @@ ... results in no rows, but it'd be tricky to
+		// encode that with a span expression, so we simply skip inverted index
+		// acceleration in this case (which should be pretty rare).
+		return inverted.NonInvertedColExpression{}, expr, nil
+	}
+	if !d.ResolvedType().Identical(types.TSQuery) {
 		panic(errors.AssertionFailedf(
 			"trying to apply tsvector inverted index to unsupported type %s", d.ResolvedType().SQLStringForError(),
 		))

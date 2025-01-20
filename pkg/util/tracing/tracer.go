@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tracing
 
@@ -14,7 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime/debug"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,10 +18,11 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ring"
@@ -154,6 +150,26 @@ var ZipkinCollector = settings.RegisterStringSetting(
 	settings.WithPublic,
 )
 
+var forceVerboseSpanRegexp = settings.RegisterStringSetting(
+	settings.ApplicationLevel,
+	"trace.span.force_verbose_regexp",
+	"a regular expression representing trace span operation names that should be "+
+		"forced into a verbose recording mode. If a span is created whose operation name matches "+
+		"the provided regular expression, the span and all of its children are forced into a verbose "+
+		"recording mode, meaning that the spans will capture all structured logs and events recorded "+
+		"during the lifetime of the span(s). NOTE: the verbose recording mode is known to cause non-trivial "+
+		"amounts of overhead. Using this setting could have a negative impact on cluster latency.",
+	"", /*defaultValue*/
+	settings.WithValidateString(func(_ *settings.Values, s string) error {
+		if s == "" {
+			return nil
+		}
+		_, err := regexp.Compile(s)
+		return err
+	}),
+	settings.WithVisibility(settings.Reserved),
+)
+
 // EnableActiveSpansRegistry controls Tracers configured as
 // WithTracingMode(TracingModeFromEnv) (which is the default). When enabled,
 // spans are allocated and registered with the active spans registry until
@@ -163,7 +179,7 @@ var EnableActiveSpansRegistry = settings.RegisterBoolSetting(
 	settings.ApplicationLevel,
 	"trace.span_registry.enabled",
 	"if set, ongoing traces can be seen at https://<ui>/#/debug/tracez",
-	envutil.EnvOrDefaultBool("COCKROACH_REAL_SPANS", true),
+	envutil.EnvOrDefaultBool("COCKROACH_REAL_SPANS", false),
 	settings.WithPublic)
 
 var periodicSnapshotInterval = settings.RegisterDurationSetting(
@@ -247,7 +263,7 @@ func (s SpanReusePercentOpt) apply(opt *tracerOptions) {
 // explicitly configured with a reuse probability. Tests vary this away from the
 // default of 100% in order to make the use-after-Finish detection reliable (see
 // panicOnUseAfterFinish).
-var spanReusePercent = util.ConstantWithMetamorphicTestRange(
+var spanReusePercent = metamorphic.ConstantWithTestRange(
 	"span-reuse-rate",
 	100, /* defaultValue - always reuse spans. This turns to 0 if reuseSpans is not set. */
 	0,   /* metamorphic min */
@@ -296,6 +312,8 @@ type Tracer struct {
 	// enabled, span creation is generally a no-op unless a recording span is
 	// explicitly requested.
 	_activeSpansRegistryEnabled int32 // accessed atomically
+
+	opNameRegexp atomic.Pointer[regexp.Regexp]
 
 	// activeSpans is a map that references all non-Finish'ed local root spans,
 	// i.e. those for which no WithParent(<non-nil>) option was supplied.
@@ -358,7 +376,7 @@ type Tracer struct {
 
 	// stack is populated in NewTracer and is printed in assertions related to
 	// mixing tracers.
-	stack string
+	stack debugutil.SafeStack
 	// closed is set on Close().
 	_closed int32 // accessed atomically
 }
@@ -594,7 +612,7 @@ func NewTracer() *Tracer {
 	}
 
 	t := &Tracer{
-		stack:               string(debug.Stack()),
+		stack:               debugutil.Stack(),
 		activeSpansRegistry: makeSpanRegistry(),
 		// These might be overridden in NewTracerWithOpt.
 		panicOnUseAfterFinish: panicOnUseAfterFinish,
@@ -635,7 +653,6 @@ func NewTracerWithOpt(ctx context.Context, opts ...TracerOption) *Tracer {
 	for _, opt := range opts {
 		opt.apply(&o)
 	}
-
 	t := NewTracer()
 	if o.useAfterFinishOpt != nil {
 		t.panicOnUseAfterFinish = o.useAfterFinishOpt.panicOnUseAfterFinish
@@ -645,9 +662,14 @@ func NewTracerWithOpt(ctx context.Context, opts ...TracerOption) *Tracer {
 		t.spanReusePercent = *o.spanReusePercent
 	}
 	t.testing = o.knobs
-	t.SetActiveSpansRegistryEnabled(o.tracingDefault != TracingModeOnDemand)
+	t.SetActiveSpansRegistryEnabled(o.tracingDefault == TracingModeActiveSpansRegistry)
 	if o.sv != nil {
 		t.configure(ctx, o.sv, o.tracingDefault)
+		forceVerboseSpanRegexp.SetOnChange(o.sv, func(ctx context.Context) {
+			if err := t.setVerboseOpNameRegexp(forceVerboseSpanRegexp.Get(o.sv)); err != nil {
+				fmt.Fprintf(os.Stderr, "error compiling verbose span operation name regexp: %s\n", err)
+			}
+		})
 	}
 	return t
 }
@@ -744,6 +766,19 @@ func WithUseAfterFinishOpt(panicOnUseAfterFinish, debugUseAfterFinish bool) Trac
 		panicOnUseAfterFinish: panicOnUseAfterFinish,
 		debugUseAfterFinish:   debugUseAfterFinish,
 	}
+}
+
+func (t *Tracer) setVerboseOpNameRegexp(s string) error {
+	if s == "" {
+		t.opNameRegexp.Store(nil)
+		return nil
+	}
+	compiled, err := regexp.Compile(s)
+	if err != nil {
+		return err
+	}
+	t.opNameRegexp.Store(compiled)
+	return nil
 }
 
 // configure sets up the Tracer according to the cluster settings (and keeps
@@ -1036,14 +1071,14 @@ func (t *Tracer) StartSpanCtx(
 	// NB: apply takes and returns a value to avoid forcing
 	// `opts` on the heap here.
 	var opts spanOptions
-	for _, o := range os {
-		if o == nil {
+	for i := range os {
+		if os[i] == nil {
 			continue
 		}
-		opts = o.apply(opts)
+		opts = os[i].apply(opts)
 	}
 
-	return t.startSpanGeneric(ctx, operationName, opts)
+	return t.startSpanFast(ctx, operationName, &opts)
 }
 
 // AlwaysTrace returns true if operations should be traced regardless of the
@@ -1056,11 +1091,56 @@ func (t *Tracer) AlwaysTrace() bool {
 	return t.useNetTrace() || otelTracer != nil
 }
 
+func (t *Tracer) forceOpNameVerbose(opName string) bool {
+	if r := t.opNameRegexp.Load(); r != nil {
+		return r.MatchString(opName)
+	}
+	return false
+}
+
+// startSpanFast implements a fast path for the common case of tracing
+// being disabled on the current span and its parent. We make only the
+// checks necessary to ensure that recording is disabled and wrap the
+// context in a `noopSpan`.
+func (t *Tracer) startSpanFast(
+	ctx context.Context, opName string, opts *spanOptions,
+) (context.Context, *Span) {
+	if opts.RefType != childOfRef && opts.RefType != followsFromRef {
+		panic(errors.AssertionFailedf("unexpected RefType %v", opts.RefType))
+	}
+
+	// This is a fast path for the common case where there's no parent
+	// span. This contains duplicated logic from
+	// `(*spanOptions).recordingType()`. Specifically, we are aiming to
+	// avoid creating local copies of `opts.Parent` and
+	// `opts.RemoteParent` hence conditional logic is being inlined and
+	// checked locally. This logic should only change if
+	// `recordingType()` is being modified.
+	if opts.Parent.Span == nil && opts.RemoteParent.Empty() {
+		var recordingType tracingpb.RecordingType
+
+		if opts.recordingTypeExplicit {
+			recordingType = opts.recordingTypeOpt
+		}
+
+		if recordingType < opts.minRecordingTypeOpt {
+			recordingType = opts.minRecordingTypeOpt
+		}
+
+		shouldBeNoopSpan := !(t.AlwaysTrace() || opts.ForceRealSpan || recordingType != tracingpb.RecordingOff)
+		forceVerbose := t.forceOpNameVerbose(opName)
+		if shouldBeNoopSpan && !forceVerbose && !opts.Sterile {
+			return maybeWrapCtx(ctx, t.noopSpan)
+		}
+	}
+	return t.startSpanGeneric(ctx, opName, opts)
+}
+
 // startSpanGeneric is the implementation of StartSpanCtx and StartSpan. In
 // the latter case, ctx == noCtx and the returned Context is the supplied one;
 // otherwise the returned Context embeds the returned Span.
 func (t *Tracer) startSpanGeneric(
-	ctx context.Context, opName string, opts spanOptions,
+	ctx context.Context, opName string, opts *spanOptions,
 ) (context.Context, *Span) {
 	if opts.RefType != childOfRef && opts.RefType != followsFromRef {
 		panic(errors.AssertionFailedf("unexpected RefType %v", opts.RefType))
@@ -1107,7 +1187,12 @@ child operation: %s, tracer created at:
 	// Are we tracing everything, or have a parent, or want a real span, or were
 	// asked for a recording? Then we create a real trace span. In all other
 	// cases, a noop span will do.
-	if !(t.AlwaysTrace() || opts.parentTraceID() != 0 || opts.ForceRealSpan || opts.recordingType() != tracingpb.RecordingOff) {
+	shouldBeNoopSpan := !(t.AlwaysTrace() || opts.parentTraceID() != 0 || opts.ForceRealSpan || opts.recordingType() != tracingpb.RecordingOff)
+	// Finally, we should check to see if this opName is configured to always be forced to the
+	// tracingpb.RecordingVerbose RecordingType. If it is, we'll want to create a real trace
+	// span.
+	forceVerbose := t.forceOpNameVerbose(opName)
+	if shouldBeNoopSpan && !forceVerbose {
 		if !opts.Sterile {
 			return maybeWrapCtx(ctx, t.noopSpan)
 		}
@@ -1172,7 +1257,13 @@ child operation: %s, tracer created at:
 		startTime, opts.LogTags, opts.EventListeners, opts.SpanKind,
 		otelSpan, netTr, opts.Sterile)
 
-	s.i.crdb.SetRecordingType(opts.recordingType())
+	var recType tracingpb.RecordingType
+	if forceVerbose {
+		recType = tracingpb.RecordingVerbose
+	} else {
+		recType = opts.recordingType()
+	}
+	s.i.crdb.SetRecordingType(recType)
 	s.i.crdb.parentSpanID = opts.parentSpanID()
 
 	var localRoot bool
@@ -1530,19 +1621,24 @@ func EnsureForkSpan(ctx context.Context, tr *Tracer, opName string) (context.Con
 	return tr.StartSpanCtx(ctx, opName, opts...)
 }
 
-// ChildSpan creates a child span of the current one, if any. Recordings from
-// child spans are automatically propagated to the parent span, and the tags are
-// inherited from the context's log tags automatically. Also see `ForkSpan`,
-// for the other kind of derived span relation.
+// ChildSpan creates a child span of the current one, if any, via the WithParent
+// option. Recordings from child spans are automatically propagated to the
+// parent span, and the tags are inherited from the context's log tags
+// automatically. Also see `ForkSpan`, for the other kind of derived span
+// relation.
 //
 // A context wrapping the newly created span is returned, along with the span
 // itself. If non-nil, the caller is responsible for eventually Finish()ing it.
-func ChildSpan(ctx context.Context, opName string) (context.Context, *Span) {
+func ChildSpan(ctx context.Context, opName string, os ...SpanOption) (context.Context, *Span) {
 	sp := SpanFromContext(ctx)
 	if sp == nil {
 		return ctx, nil
 	}
-	return sp.Tracer().StartSpanCtx(ctx, opName, WithParent(sp))
+	if len(os) == 0 {
+		return sp.Tracer().StartSpanCtx(ctx, opName, WithParent(sp))
+	}
+	os = append(os[:len(os):len(os)], WithParent(sp))
+	return sp.Tracer().StartSpanCtx(ctx, opName, os...)
 }
 
 // EnsureChildSpan looks at the supplied Context. If it contains a Span, returns

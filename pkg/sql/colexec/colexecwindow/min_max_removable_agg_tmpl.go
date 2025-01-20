@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -175,7 +170,7 @@ func (a *_AGG_TYPEAggregator) processBatch(batch coldata.Batch, startIdx, endIdx
 	outVec := batch.ColVec(a.outputColIdx)
 	outNulls := outVec.Nulls()
 	outCol := outVec.TemplateType()
-	a.allocator.PerformOperation([]coldata.Vec{outVec}, func() {
+	a.allocator.PerformOperation([]*coldata.Vec{outVec}, func() {
 		// {{if not .IsBytesLike}}
 		_, _ = outCol.Get(startIdx), outCol.Get(endIdx-1)
 		// {{end}}

@@ -544,7 +544,7 @@ ALTER DATABASE system PRIMARY REGION "ap-southeast-2"
 # are in the system tenant. Hence the lack of error code checking and the
 # regex matching both possible outcomes.
 skipif config multiregion-9node-3region-3azs-tenant
-statement error user testuser may not modify the system database|modifying the regions of system database is not supported
+statement error (user testuser may not modify the system database|modifying the regions of system database is not supported)
 ALTER DATABASE system PRIMARY REGION "ap-southeast-2"
 
 user root
@@ -1508,7 +1508,7 @@ SELECT create_statement from [SHOW CREATE TABLE t_as]
 create_statement
 CREATE TABLE public.t_as (
   i INT8 NULL,
-  crdb_region "mr-create-table-as".public.crdb_internal_region NULL,
+  crdb_region public.crdb_internal_region NULL,
   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
   CONSTRAINT t_as_pkey PRIMARY KEY (rowid ASC)
 ) LOCALITY REGIONAL BY TABLE IN PRIMARY REGION
@@ -1535,7 +1535,7 @@ SELECT create_statement from [SHOW CREATE TABLE t_as]
 create_statement
 CREATE TABLE public.t_as (
   i INT8 NULL,
-  crdb_region "mr-create-table-as".public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::"mr-create-table-as".public.crdb_internal_region,
+  crdb_region public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::public.crdb_internal_region,
   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
   CONSTRAINT t_as_pkey PRIMARY KEY (rowid ASC)
 ) LOCALITY REGIONAL BY ROW AS crdb_region
@@ -1578,7 +1578,7 @@ SELECT create_statement from [SHOW CREATE TABLE t_as]
 create_statement
 CREATE TABLE public.t_as (
   i INT8 NOT NULL,
-  crdb_region "mr-create-table-as".public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::"mr-create-table-as".public.crdb_internal_region,
+  crdb_region public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::public.crdb_internal_region,
   CONSTRAINT t_as_pkey PRIMARY KEY (i ASC)
 ) LOCALITY REGIONAL BY ROW AS crdb_region
 
@@ -1588,7 +1588,7 @@ SELECT create_statement from [SHOW CREATE TABLE t]
 create_statement
 CREATE TABLE public.t (
   i INT8 NOT NULL,
-  crdb_region "mr-create-table-as".public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::"mr-create-table-as".public.crdb_internal_region,
+  crdb_region public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::public.crdb_internal_region,
   CONSTRAINT t_pkey PRIMARY KEY (i ASC)
 ) LOCALITY REGIONAL BY ROW
 
@@ -1601,3 +1601,48 @@ statement ok
 SET sql_safe_updates = false;
 DROP DATABASE "mr-create-table-as";
 SET sql_safe_updates = true
+
+# Checks that DROP REGION works when index expressions exist on tables,
+# which will create public inaccessible columns (#126549).
+subtest drop_region_126549
+
+statement ok
+CREATE DATABASE  drop_region_126549 PRIMARY REGION "ca-central-1" REGIONS "ap-southeast-2", "us-east-1";
+CREATE TABLE drop_region_126549.t1 (n string PRIMARY KEY, INDEX((lower(n)))) LOCALITY REGIONAL BY ROW;
+
+statement ok
+ALTER DATABASE drop_region_126549 DROP REGION "us-east-1";
+
+subtest alter_type_mr
+
+statement ok
+USE region_test_db;
+
+statement ok
+CREATE TABLE chgme (C1 INT) LOCALITY REGIONAL BY ROW;
+
+statement ok
+INSERT INTO chgme VALUES (0),(1);
+
+let $sql_safe_updates_state
+SELECT value FROM information_schema.session_variables where variable='sql_safe_updates';
+
+statement ok
+SET sql_safe_updates = false;
+
+statement ok
+ALTER TABLE chgme ALTER COLUMN C1 SET DATA TYPE TEXT;
+
+statement ok
+SET sql_safe_updates = $sql_safe_updates_state;
+
+query T
+SELECT * FROM chgme ORDER BY C1;
+----
+0
+1
+
+statement ok
+DROP TABLE chgme;
+
+subtest end

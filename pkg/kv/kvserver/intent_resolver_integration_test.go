@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -16,7 +11,6 @@ import (
 	"encoding/binary"
 	"math"
 	"math/rand"
-	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -202,11 +197,11 @@ func TestReliableIntentCleanup(t *testing.T) {
 		// abortHeartbeats is used to abort txn heartbeats, returning
 		// TransactionAbortedError. Key is txn anchor key, value is a chan
 		// struct{} that will be closed when the next heartbeat aborts.
-		var abortHeartbeats sync.Map
+		var abortHeartbeats syncutil.Map[string, chan struct{}]
 
 		abortHeartbeat := func(t *testing.T, txnKey roachpb.Key) <-chan struct{} {
 			abortedC := make(chan struct{})
-			abortHeartbeats.Store(string(txnKey), abortedC)
+			abortHeartbeats.Store(string(txnKey), &abortedC)
 			t.Cleanup(func() {
 				abortHeartbeats.Delete(string(txnKey))
 			})
@@ -217,11 +212,11 @@ func TestReliableIntentCleanup(t *testing.T) {
 		// a txn anchor key, and the value is a chan chan<- struct{} that, when
 		// the Put is ready, will be used to send an unblock channel. The
 		// unblock channel can be closed to unblock the Put.
-		var blockPuts sync.Map
+		var blockPuts syncutil.Map[string, chan chan<- struct{}]
 
 		blockPut := func(t *testing.T, txnKey roachpb.Key) <-chan chan<- struct{} {
 			readyC := make(chan chan<- struct{})
-			blockPuts.Store(string(txnKey), readyC)
+			blockPuts.Store(string(txnKey), &readyC)
 			t.Cleanup(func() {
 				blockPuts.Delete(string(txnKey))
 			})
@@ -233,11 +228,11 @@ func TestReliableIntentCleanup(t *testing.T) {
 		// chan<- struct{} that, when the Put is ready, will be used to send an
 		// unblock channel. The unblock channel can be closed to unblock the
 		// Put.
-		var blockPutEvals sync.Map
+		var blockPutEvals syncutil.Map[string, chan chan<- struct{}]
 
 		blockPutEval := func(t *testing.T, txnKey roachpb.Key) <-chan chan<- struct{} {
 			readyC := make(chan chan<- struct{})
-			blockPutEvals.Store(string(txnKey), readyC)
+			blockPutEvals.Store(string(txnKey), &readyC)
 			t.Cleanup(func() {
 				blockPutEvals.Delete(string(txnKey))
 			})
@@ -249,7 +244,7 @@ func TestReliableIntentCleanup(t *testing.T) {
 			// close the aborted channel and return an error response.
 			if _, ok := ba.GetArg(kvpb.HeartbeatTxn); ok && ba.Txn != nil {
 				if abortedC, ok := abortHeartbeats.LoadAndDelete(string(ba.Txn.Key)); ok {
-					close(abortedC.(chan struct{}))
+					close(*abortedC)
 					return kvpb.NewError(kvpb.NewTransactionAbortedError(
 						kvpb.ABORT_REASON_NEW_LEASE_PREVENTS_TXN))
 				}
@@ -264,7 +259,7 @@ func TestReliableIntentCleanup(t *testing.T) {
 			if put, ok := args.Req.(*kvpb.PutRequest); ok && args.Hdr.Txn != nil {
 				if bytes.HasPrefix(put.Key, prefix) {
 					if ch, ok := blockPutEvals.LoadAndDelete(string(args.Hdr.Txn.Key)); ok {
-						readyC := ch.(chan chan<- struct{})
+						readyC := *ch
 						unblockC := make(chan struct{})
 						readyC <- unblockC
 						close(readyC)
@@ -282,7 +277,7 @@ func TestReliableIntentCleanup(t *testing.T) {
 			if arg, ok := ba.GetArg(kvpb.Put); ok && ba.Txn != nil {
 				if bytes.HasPrefix(arg.(*kvpb.PutRequest).Key, prefix) {
 					if ch, ok := blockPuts.LoadAndDelete(string(ba.Txn.Key)); ok {
-						readyC := ch.(chan chan<- struct{})
+						readyC := *ch
 						unblockC := make(chan struct{})
 						readyC <- unblockC
 						close(readyC)

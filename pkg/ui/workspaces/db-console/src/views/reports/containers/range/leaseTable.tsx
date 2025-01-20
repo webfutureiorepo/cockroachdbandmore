@@ -1,14 +1,13 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import head from "lodash/head";
+import isEmpty from "lodash/isEmpty";
+import isNil from "lodash/isNil";
+import map from "lodash/map";
+import reverse from "lodash/reverse";
 import React from "react";
 
 import * as protos from "src/js/protos";
@@ -21,8 +20,8 @@ interface LeaseTableProps {
 }
 
 export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
-  renderLeaseCell(value: string, title: string = "") {
-    if (_.isEmpty(title)) {
+  renderLeaseCell(value: string, title = "") {
+    if (isEmpty(title)) {
       return (
         <td className="lease-table__cell" title={value}>
           {value}
@@ -37,7 +36,7 @@ export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
   }
 
   renderLeaseTimestampCell(timestamp: protos.cockroach.util.hlc.ITimestamp) {
-    if (_.isNil(timestamp)) {
+    if (isNil(timestamp)) {
       return this.renderLeaseCell("<no value>");
     }
 
@@ -59,7 +58,7 @@ export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
         {Print.ReplicaID(rangeID, RangeInfo.GetLocalReplica(info))})
       </h2>
     );
-    if (_.isEmpty(info.lease_history)) {
+    if (isEmpty(info.lease_history)) {
       return (
         <div>
           {header}
@@ -68,8 +67,8 @@ export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
       );
     }
 
-    const isEpoch = Lease.IsEpoch(_.head(info.lease_history));
-    const leaseHistory = _.reverse(info.lease_history);
+    const isEpoch = Lease.IsEpoch(head(info.lease_history));
+    const leaseHistory = reverse(info.lease_history);
     return (
       <div>
         {header}
@@ -105,7 +104,7 @@ export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
                 Acquisition Type
               </th>
             </tr>
-            {_.map(leaseHistory, (lease, key) => {
+            {map(leaseHistory, (lease, key) => {
               let prevProposedTimestamp: protos.cockroach.util.hlc.ITimestamp =
                 null;
               let prevStart: protos.cockroach.util.hlc.ITimestamp = null;

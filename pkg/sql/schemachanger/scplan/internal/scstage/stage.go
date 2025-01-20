@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scstage
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/internal/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // A Stage is a sequence of ops to be executed "together" as part of a schema
@@ -46,6 +42,20 @@ type Stage struct {
 	// relation to the other stages in the same phase. Note that Ordinal starts
 	// counting at 1. This is because this data is mainly useful for debugging.
 	Ordinal, StagesInPhase int
+}
+
+var _ redact.SafeFormatter = Stage{}
+
+func (s Stage) SafeFormat(p redact.SafePrinter, _ rune) {
+	p.Printf("%s stage %d of %d with ",
+		s.Phase, s.Ordinal, s.StagesInPhase)
+	if n := len(s.Ops()); n > 1 {
+		p.Printf("%d %s ops", n, s.Type())
+	} else if n == 1 {
+		p.Printf("1 %s op", s.Type())
+	} else {
+		p.Printf("no ops")
+	}
 }
 
 // Type returns the type of the operations in this stage.

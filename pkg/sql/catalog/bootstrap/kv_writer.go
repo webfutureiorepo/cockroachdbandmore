@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bootstrap
 
@@ -69,7 +64,7 @@ func (w KVWriter) RecordToKeyValues(values ...tree.Datum) (ret []roachpb.KeyValu
 	// Encode the secondary index rows.
 	for _, idx := range w.tableDesc.PublicNonPrimaryIndexes() {
 		indexEntries, err := rowenc.EncodeSecondaryIndex(
-			w.codec, w.tableDesc, idx, w.colIDtoRowIndex, values, true, /* includeEmpty */
+			context.Background(), w.codec, w.tableDesc, idx, w.colIDtoRowIndex, values, true, /* includeEmpty */
 		)
 		if err != nil {
 			return nil, errors.NewAssertionErrorWithWrappedErrf(
@@ -102,7 +97,7 @@ func (w KVWriter) Insert(
 		if kvTrace {
 			log.VEventf(ctx, 2, "CPut %s -> %s", kv.Key, kv.Value)
 		}
-		b.CPutAllowingIfNotExists(kv.Key, &kv.Value, nil /* expValue */)
+		b.CPut(kv.Key, &kv.Value, nil /* expValue */)
 	}
 	return nil
 }

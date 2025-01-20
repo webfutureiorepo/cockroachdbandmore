@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colinfo
 
@@ -295,33 +290,42 @@ func init() {
 var TenantColumns = ResultColumns{
 	{Name: "id", Typ: types.Int},
 	{Name: "name", Typ: types.String},
+}
+
+// TenantColumnsNoReplication appear in all SHOW VIRTUAL CLUSTER queries, except
+// for SHOW VIRTUAL CLUSTER ... WITH REPLICATION STATUS.
+var TenantColumnsNoReplication = ResultColumns{
 	{Name: "data_state", Typ: types.String},
 	{Name: "service_mode", Typ: types.String},
 }
 
-// TenantColumnsWithReplication is appended to TenantColumns for
-// SHOW VIRTUAL CLUSTER ... WITH REPLICATION STATUS queries.
+// TenantColumnsWithReplication is appended to TenantColumns for SHOW VIRTUAL
+// CLUSTER ... WITH REPLICATION STATUS queries.
 var TenantColumnsWithReplication = ResultColumns{
+	{Name: "ingestion_job_id", Typ: types.Int},
 	{Name: "source_tenant_name", Typ: types.String},
 	{Name: "source_cluster_uri", Typ: types.String},
-	{Name: "replication_job_id", Typ: types.Int},
-	// The latest fully replicated time.
-	{Name: "replicated_time", Typ: types.TimestampTZ},
 	// The protected timestamp on the destination cluster, meaning we cannot
 	// cutover to before this time.
 	{Name: "retained_time", Typ: types.TimestampTZ},
-	{Name: "cutover_time", Typ: types.Decimal},
+	// The latest fully replicated time.
+	{Name: "replicated_time", Typ: types.TimestampTZ},
+	{Name: "replication_lag", Typ: types.Interval},
+	{Name: "failover_time", Typ: types.Decimal},
+	{Name: "status", Typ: types.String},
 }
 
-// TenantColumnsWithPriorReplication is appended to TenantColumns for
-// SHOW VIRTUAL CLUSTER ... WITH PRIOR REPLICATION DETAILS queries.
+// TenantColumnsWithPriorReplication is appended to TenantColumns and
+// TenantColumnsNoReplication for SHOW VIRTUAL CLUSTER ... WITH PRIOR
+// REPLICATION DETAILS queries.
 var TenantColumnsWithPriorReplication = ResultColumns{
 	{Name: "source_id", Typ: types.String},
 	{Name: "activation_time", Typ: types.Decimal},
 }
 
-// TenantColumnsWithCapabilities is appended to TenantColumns for
-// SHOW VIRTUAL CLUSTER ... WITH CAPABILITIES queries.
+// TenantColumnsWithCapabilities is appended to TenantColumns and
+// TenantColumnsNoReplication for SHOW VIRTUAL CLUSTER ... WITH CAPABILITIES
+// queries.
 var TenantColumnsWithCapabilities = ResultColumns{
 	{Name: "capability_name", Typ: types.String},
 	{Name: "capability_value", Typ: types.String},
@@ -348,16 +352,18 @@ var Ranges = append(
 	// The following columns are computed by RangesExtraRenders below.
 	ResultColumn{Name: "lease_holder", Typ: types.Int},
 	ResultColumn{Name: "range_size", Typ: types.Int},
+	ResultColumn{Name: "errors", Typ: types.String},
 )
 
 // RangesExtraRenders describes the extra projections in
 // crdb_internal.ranges not included in crdb_internal.ranges_no_leases.
 const RangesExtraRenders = `
-	crdb_internal.lease_holder(start_key) AS lease_holder,
-	(crdb_internal.range_stats(start_key)->>'key_bytes')::INT +
-	(crdb_internal.range_stats(start_key)->>'val_bytes')::INT +
-	coalesce((crdb_internal.range_stats(start_key)->>'range_key_bytes')::INT, 0) +
-	coalesce((crdb_internal.range_stats(start_key)->>'range_val_bytes')::INT, 0) AS range_size
+	(crdb_internal.lease_holder_with_errors(start_key)->>'Leaseholder')::INT AS lease_holder,
+	(crdb_internal.range_stats_with_errors(start_key)->'RangeStats'->>'key_bytes')::INT +
+	(crdb_internal.range_stats_with_errors(start_key)->'RangeStats'->>'val_bytes')::INT +
+	coalesce((crdb_internal.range_stats_with_errors(start_key)->'RangeStats'->>'range_key_bytes')::INT, 0) +
+	coalesce((crdb_internal.range_stats_with_errors(start_key)->'RangeStats'->>'range_val_bytes')::INT, 0) AS range_size,
+	concat(crdb_internal.lease_holder_with_errors(start_key)->>'Error', ' ', crdb_internal.range_stats_with_errors(start_key)->>'Error') AS errors
 `
 
 // IdentifySystemColumns is the schema for IDENTIFY_SYSTEM.

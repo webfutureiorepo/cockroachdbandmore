@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGossipFirstRange(t *testing.T) {
@@ -146,6 +142,8 @@ func TestGossipHandlesReplacedNode(t *testing.T) {
 
 	// As of Nov 2018 it takes 3.6s.
 	skip.UnderShort(t)
+	skip.UnderDeadlock(t)
+	skip.UnderRace(t)
 	ctx := context.Background()
 
 	// Shorten the raft tick interval and election timeout to make range leases
@@ -186,8 +184,11 @@ func TestGossipHandlesReplacedNode(t *testing.T) {
 	// beginning of the test, and to make sure they aren't closed on server
 	// shutdown. Then we can pass the listeners to the second invocation. Alas,
 	// this requires some refactoring that remains out of scope for now.
-	if err := tc.AddAndStartServerE(newServerArgs); err != nil && !testutils.IsError(err, `address already in use`) {
-		t.Fatal(err)
+	err := tc.AddAndStartServerE(newServerArgs)
+	if testutils.IsError(err, `address already in use`) {
+		skip.WithIssue(t, 114036, "could not start server due to port reuse:", err)
+	} else {
+		require.NoError(t, err)
 	}
 
 	tc.WaitForNStores(t, tc.NumServers(), tc.Server(1).GossipI().(*gossip.Gossip))

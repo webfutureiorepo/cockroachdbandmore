@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cloud
 
@@ -80,20 +75,24 @@ func registerLimiterSettings(providerType cloudpb.ExternalStorageProvider) {
 			rate: settings.RegisterByteSizeSetting(settings.ApplicationLevel, readRateName,
 				"limit on number of bytes per second per node across operations writing to the designated cloud storage provider if non-zero",
 				0,
+				settings.WithPublic,
 			),
 			burst: settings.RegisterByteSizeSetting(settings.ApplicationLevel, readBurstName,
 				"burst limit on number of bytes per second per node across operations writing to the designated cloud storage provider if non-zero",
 				0,
+				settings.WithPublic,
 			),
 		},
 		write: rateAndBurstSettings{
 			rate: settings.RegisterByteSizeSetting(settings.ApplicationLevel, writeRateName,
 				"limit on number of bytes per second per node across operations writing to the designated cloud storage provider if non-zero",
 				0,
+				settings.WithPublic,
 			),
 			burst: settings.RegisterByteSizeSetting(settings.ApplicationLevel, writeBurstName,
 				"burst limit on number of bytes per second per node across operations writing to the designated cloud storage provider if non-zero",
 				0,
+				settings.WithPublic,
 			),
 		},
 	}
@@ -160,9 +159,7 @@ func registerExternalStorageProviderImpls(
 			earlyBootConfParsers[scheme] = provider.EarlyBootParseFn
 		}
 
-		for param := range provider.RedactedParams {
-			redactedQueryParams[param] = struct{}{}
-		}
+		RegisterRedactedParams(provider.RedactedParams)
 	}
 
 	if _, ok := implementations[providerType]; ok {
@@ -246,14 +243,14 @@ func MakeExternalStorage(
 	}
 	args := ExternalStorageContext{
 		EarlyBootExternalStorageContext: EarlyBootExternalStorageContext{
-			IOConf:   conf,
-			Settings: settings,
-			Options:  opts,
-			Limiters: limiters,
+			IOConf:          conf,
+			Settings:        settings,
+			Options:         opts,
+			Limiters:        limiters,
+			MetricsRecorder: cloudMetrics,
 		},
 		BlobClientFactory: blobClientFactory,
 		DB:                db,
-		MetricsRecorder:   cloudMetrics,
 	}
 
 	return makeExternalStorage[ExternalStorageContext](ctx, dest, conf, limiters, metrics, settings, args, getImpl, opts...)
@@ -613,5 +610,11 @@ func ReplaceProviderForTesting(
 		if oldEaryParser != nil {
 			earlyBootConfParsers[scheme] = oldEaryParser
 		}
+	}
+}
+
+func RegisterRedactedParams(params map[string]struct{}) {
+	for param := range params {
+		redactedQueryParams[param] = struct{}{}
 	}
 }

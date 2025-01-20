@@ -1,21 +1,16 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachpb
 
 import (
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 // ReplicaSet is a set of replicas, usually the nodes/stores on which
@@ -273,14 +268,6 @@ func (d ReplicaSet) FilterToDescriptors(
 	return out
 }
 
-// AsProto returns the protobuf representation of these replicas, suitable for
-// setting the InternalReplicas field of a RangeDescriptor. When possible the
-// SetReplicas method of RangeDescriptor should be used instead, this is only
-// here for the convenience of tests.
-func (d ReplicaSet) AsProto() []ReplicaDescriptor {
-	return d.wrapped
-}
-
 // DeepCopy returns a copy of this set of replicas. Modifications to the
 // returned set will not affect this one and vice-versa.
 func (d ReplicaSet) DeepCopy() ReplicaSet {
@@ -338,7 +325,7 @@ func (d ReplicaSet) ConfState() raftpb.ConfState {
 	// config is not joint. If it is joint, slot the voters into the right
 	// category.
 	for _, rep := range d.wrapped {
-		id := uint64(rep.ReplicaID)
+		id := raftpb.PeerID(rep.ReplicaID)
 		switch rep.Type {
 		case VOTER_FULL:
 			cs.Voters = append(cs.Voters, id)
@@ -567,6 +554,14 @@ func CheckCanReceiveLease(
 	repDesc, ok := replDescs.GetReplicaDescriptorByID(wouldbeLeaseholder.ReplicaID)
 	if !ok {
 		return ErrReplicaNotFound
+	}
+	if repDesc.StoreID != wouldbeLeaseholder.StoreID {
+		return errors.AssertionFailedf("store ID mismatch: %d != %d",
+			repDesc.StoreID, wouldbeLeaseholder.StoreID)
+	}
+	if repDesc.NodeID != wouldbeLeaseholder.NodeID {
+		return errors.AssertionFailedf("node ID mismatch: %d != %d",
+			repDesc.NodeID, wouldbeLeaseholder.NodeID)
 	}
 	if !(repDesc.IsVoterNewConfig() ||
 		(repDesc.IsVoterOldConfig() && replDescs.containsVoterIncoming() && wasLastLeaseholder)) {

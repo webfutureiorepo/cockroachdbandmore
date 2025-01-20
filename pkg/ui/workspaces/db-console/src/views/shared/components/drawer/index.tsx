@@ -1,20 +1,13 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { Drawer, Button, Divider } from "antd";
-import "antd/lib/drawer/style";
-import "antd/lib/button/style";
-import "antd/lib/divider/style";
-import { Link } from "react-router-dom";
 import classNames from "classnames/bind";
+import React from "react";
+import { Link } from "react-router-dom";
+
 import styles from "./drawer.module.styl";
 
 const cx = classNames.bind(styles);
@@ -61,9 +54,8 @@ export const DrawerComponent = ({
     placement="bottom"
     closable={false}
     onClose={onClose}
-    visible={visible}
-    className={cx("drawer--preset-black")}
-    // getContainer={false}
+    open={visible}
+    rootClassName={cx("drawer--preset-black")}
     {...props}
   >
     {children}

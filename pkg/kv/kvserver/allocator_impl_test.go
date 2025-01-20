@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -19,6 +14,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/allocatorimpl"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/storepool"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/load"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/gossiputil"
@@ -26,8 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 const firstRangeID = roachpb.RangeID(1)
@@ -298,23 +294,19 @@ func TestAllocatorRebalanceTarget(t *testing.T) {
 		{NodeID: 5, StoreID: 5, ReplicaID: 5},
 	}
 	repl := &Replica{RangeID: firstRangeID}
-
-	repl.mu.Lock()
-	repl.mu.state.Stats = &enginepb.MVCCStats{}
-	repl.mu.Unlock()
-
+	repl.shMu.state.Stats = &enginepb.MVCCStats{}
 	repl.loadStats = load.NewReplicaLoad(clock, nil)
 
 	var rangeUsageInfo allocator.RangeUsageInfo
 
 	status := &raft.Status{
-		Progress: make(map[uint64]tracker.Progress),
+		Progress: make(map[raftpb.PeerID]tracker.Progress),
 	}
 	status.Lead = 1
-	status.RaftState = raft.StateLeader
+	status.RaftState = raftpb.StateLeader
 	status.Commit = 10
 	for _, replica := range replicas {
-		status.Progress[uint64(replica.ReplicaID)] = tracker.Progress{
+		status.Progress[raftpb.PeerID(replica.ReplicaID)] = tracker.Progress{
 			Match: 10,
 			State: tracker.StateReplicate,
 		}

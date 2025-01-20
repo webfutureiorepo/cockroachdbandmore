@@ -1,33 +1,30 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import Long from "long";
+import moment from "moment-timezone";
 import { expectSaga } from "redux-saga-test-plan";
+import * as matchers from "redux-saga-test-plan/matchers";
 import {
   EffectProviders,
   StaticProvider,
   throwError,
 } from "redux-saga-test-plan/providers";
-import * as matchers from "redux-saga-test-plan/matchers";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 
-import { getCombinedStatements } from "src/api/statementsApi";
 import { resetSQLStats } from "src/api/sqlStatsApi";
+import { getCombinedStatements } from "src/api/statementsApi";
+
+import { actions as sqlDetailsStatsActions } from "../statementDetails/statementDetails.reducer";
+
+import { actions, reducer, SQLStatsState } from "./sqlStats.reducer";
 import {
   refreshSQLStatsSaga,
   requestSQLStatsSaga,
   resetSQLStatsSaga,
 } from "./sqlStats.sagas";
-import { actions, reducer, SQLStatsState } from "./sqlStats.reducer";
-import { actions as sqlDetailsStatsActions } from "../statementDetails/statementDetails.reducer";
-import Long from "long";
-import moment from "moment-timezone";
 
 const lastUpdated = moment();
 

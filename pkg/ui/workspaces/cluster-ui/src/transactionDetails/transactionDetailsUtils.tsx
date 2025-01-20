@@ -1,14 +1,16 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { createSelector } from "@reduxjs/toolkit";
+import { Location } from "history";
+import cloneDeep from "lodash/cloneDeep";
+import { match } from "react-router";
+
+import { SqlStatsResponse } from "../api";
+import { statementFingerprintIdsToText } from "../transactionsPage/utils";
 import {
   addExecStats,
   aggregateNumericStats,
@@ -17,12 +19,6 @@ import {
   txnFingerprintIdAttr,
   unset,
 } from "../util";
-import { SqlStatsResponse } from "../api";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { match } from "react-router";
-import { Location } from "history";
-import { statementFingerprintIdsToText } from "../transactionsPage/utils";
-import { cloneDeep } from "lodash";
 
 type Transaction =
   cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package parquet
 
@@ -23,11 +18,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 	"github.com/stretchr/testify/require"
 )
+
+// includeParquestReaderMetadata configures the parquet writer to write metadata
+// required for reading parquet files in tests.
+var includeParquestReaderMetadata = buildutil.CrdbTestBuild ||
+	envutil.EnvOrDefaultBool("COCKROACH_CHANGEFEED_TESTING_INCLUDE_PARQUET_READER_METADATA",
+		false)
 
 // ReadFileAndVerifyDatums asserts that a parquet file's metadata matches the
 // metadata from the writer and its data matches writtenDatums.
@@ -423,6 +426,8 @@ func ValidateDatum(t *testing.T, expected tree.Datum, actual tree.Datum) {
 		require.Equal(t, expected.(*tree.DEnum).LogicalRep, actual.(*tree.DEnum).LogicalRep)
 	case types.CollatedStringFamily:
 		require.Equal(t, expected.(*tree.DCollatedString).Contents, actual.(*tree.DCollatedString).Contents)
+	case types.OidFamily:
+		require.Equal(t, expected.(*tree.DOid).Oid, actual.(*tree.DOid).Oid)
 	default:
 		require.Equal(t, expected, actual)
 	}

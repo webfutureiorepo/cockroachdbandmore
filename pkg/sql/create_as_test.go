@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -64,7 +59,8 @@ func TestCreateAsVTable(t *testing.T) {
 						}
 						// Filter out vector columns to prevent error in CTAS:
 						// "VECTOR column types are unsupported".
-						if colDef.Type == types.Int2Vector || colDef.Type == types.OidVector {
+						if colDef.Type.(*types.T).Identical(types.Int2Vector) ||
+							colDef.Type.(*types.T).Identical(types.OidVector) {
 							continue
 						}
 						ctasColumns = append(ctasColumns, colDef.Name.String())
@@ -386,7 +382,7 @@ func TestFormat(t *testing.T) {
 			// "updating view reference" job.
 			query := fmt.Sprintf(
 				`SELECT description
-FROM [SHOW JOBS]
+FROM [SHOW JOBS SELECT id FROM system.jobs]
 WHERE job_type IN ('SCHEMA CHANGE', 'NEW SCHEMA CHANGE')
 AND description LIKE 'CREATE%%%s%%'`,
 				name,

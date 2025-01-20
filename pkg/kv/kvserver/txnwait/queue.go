@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package txnwait
 
@@ -107,8 +102,32 @@ func CanPushWithPriority(
 	pusherPri, pusheePri = normalize(pusherPri), normalize(pusheePri)
 	switch pushType {
 	case kvpb.PUSH_ABORT:
+		// If the pushee transaction is prepared, never let a PUSH_ABORT through.
+		// A prepared transaction must be guaranteed to succeed if it decides to
+		// commit.
+		if pusheeStatus == roachpb.PREPARED {
+			return false
+		}
+
+		// Otherwise, let the ABORT through if the pusher has a higher priority.
 		return pusherPri > pusheePri
 	case kvpb.PUSH_TIMESTAMP:
+		// If the pushee transaction is prepared, never let a PUSH_TIMESTAMP through
+		// either. Even for isolation levels which tolerate write skew, this could
+		// prevent the transaction from committing due to schema-imposed commit
+		// deadlines. A prepared transaction must be guaranteed to succeed if it
+		// decides to commit.
+		// TODO(nvanbenschoten): if we did want to allow prepared transactions at
+		// weak isolation levels to be pushed, we would need to do something about
+		// commit deadlines. Instead of leasing schema objects and placing deadlines
+		// on the transactions that use those leases, we would probably need to lock
+		// schema objects (for share) and continue to hold those locks while a
+		// transaction is prepared. This would prevent schema changes that would
+		// invalidate the prepared transactions. See #137549.
+		if pusheeStatus == roachpb.PREPARED {
+			return false
+		}
+
 		// If the pushee transaction is STAGING, only let the PUSH_TIMESTAMP through
 		// to disrupt the transaction commit if the pusher has a higher priority. If
 		// the priorities are equal, the PUSH_TIMESTAMP should wait for the commit
@@ -146,6 +165,10 @@ func isPushed(req *kvpb.PushTxnRequest, txn *roachpb.Transaction) bool {
 // TxnExpiration computes the timestamp after which the transaction will be
 // considered expired.
 func TxnExpiration(txn *roachpb.Transaction) hlc.Timestamp {
+	if txn.Status == roachpb.PREPARED {
+		// Prepared transactions have no expiration.
+		return hlc.MaxTimestamp
+	}
 	return txn.LastActive().Add(TxnLivenessThreshold.Load(), 0)
 }
 
@@ -263,8 +286,9 @@ type TestingKnobs struct {
 //
 // Queue is thread safe.
 type Queue struct {
-	cfg Config
-	mu  struct {
+	cfg   Config
+	every log.EveryN // dictates logging for transaction aborts resulting from deadlock detection
+	mu    struct {
 		syncutil.RWMutex
 		txns    map[uuid.UUID]*pendingTxn
 		queries map[uuid.UUID]*waitingQueries
@@ -273,7 +297,10 @@ type Queue struct {
 
 // NewQueue instantiates a new Queue.
 func NewQueue(cfg Config) *Queue {
-	return &Queue{cfg: cfg}
+	return &Queue{
+		cfg:   cfg,
+		every: log.Every(1 * time.Second),
+	}
 }
 
 // Enable allows transactions to be enqueued and waiting pushers
@@ -544,7 +571,7 @@ func (q *Queue) MaybeWaitForPush(
 
 	pusherStr := "non-txn"
 	if req.PusherTxn.ID != (uuid.UUID{}) {
-		pusherStr = req.PusherTxn.ID.Short()
+		pusherStr = req.PusherTxn.ID.Short().String()
 	}
 	log.VEventf(
 		ctx,
@@ -600,7 +627,7 @@ func (q *Queue) waitForPush(
 	defer func() { metrics.PusherWaitTime.RecordValue(timeutil.Since(tBegin).Nanoseconds()) }()
 
 	slowTimerThreshold := time.Minute
-	slowTimer := timeutil.NewTimer()
+	var slowTimer timeutil.Timer
 	defer slowTimer.Stop()
 	slowTimer.Reset(slowTimerThreshold)
 
@@ -730,7 +757,7 @@ func (q *Queue) waitForPush(
 			_, haveDependency := push.mu.dependents[req.PusheeTxn.ID]
 			dependents := make([]string, 0, len(push.mu.dependents))
 			for id := range push.mu.dependents {
-				dependents = append(dependents, id.Short())
+				dependents = append(dependents, id.Short().String())
 			}
 			log.VEventf(
 				ctx,
@@ -754,9 +781,15 @@ func (q *Queue) waitForPush(
 				// Break the deadlock if the pusher has higher priority.
 				p1, p2 := pusheePriority, pusherPriority
 				if p1 < p2 || (p1 == p2 && bytes.Compare(req.PusheeTxn.ID.GetBytes(), req.PusherTxn.ID.GetBytes()) < 0) {
+					// NB: It's useful to have logs indicating the transactions involved
+					// in a deadlock, but we don't want these to be too spammy.
+					level := log.Level(1)
+					if q.every.ShouldLog() {
+						level = 0 // will behave like a log.Infof
+					}
 					log.VEventf(
 						ctx,
-						1,
+						level,
 						"%s breaking deadlock by force push of %s; dependencies=%s",
 						req.PusherTxn.ID.Short(),
 						req.PusheeTxn.ID.Short(),
@@ -995,13 +1028,7 @@ func (q *Queue) queryTxnStatus(
 	}
 	br := b.RawResponse()
 	resp := br.Responses[0].GetInner().(*kvpb.QueryTxnResponse)
-	// ID can be nil if no HeartbeatTxn has been sent yet and we're talking to a
-	// 2.1 node.
-	// TODO(nvanbenschoten): Remove this in 2.3.
-	if updatedTxn := &resp.QueriedTxn; updatedTxn.ID != (uuid.UUID{}) {
-		return updatedTxn, resp.WaitingTxns, nil
-	}
-	return nil, nil, nil
+	return &resp.QueriedTxn, resp.WaitingTxns, nil
 }
 
 // forcePushAbort upgrades the PushTxn request to a "forced" push abort, which

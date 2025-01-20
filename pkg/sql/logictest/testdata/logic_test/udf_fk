@@ -1,5 +1,3 @@
-# LogicTest: !local-mixed-23.1
-
 # Disable fast path for some test runs.
 let $enable_insert_fast_path
 SELECT random() < 0.5
@@ -436,7 +434,7 @@ statement ok
 DROP TABLE grandchild_cascade;
 
 statement ok
-DROP TABLE child_cascade;
+DROP TABLE child_cascade CASCADE;
 
 statement ok
 CREATE TABLE child_cascade (

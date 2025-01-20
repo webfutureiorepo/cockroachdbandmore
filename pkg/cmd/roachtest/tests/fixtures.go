@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -18,6 +13,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
@@ -60,14 +56,14 @@ func registerFixtures(r registry.Registry) {
 		}
 		makeVersionFixtureAndFatal(ctx, t, c, fixtureVersion)
 	}
-	spec := registry.TestSpec{
+
+	r.Add(registry.TestSpec{
 		Name:             "generate-fixtures",
 		Timeout:          30 * time.Minute,
-		CompatibleClouds: registry.AllExceptAWS,
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
 		Suites:           registry.Suites(registry.Fixtures),
-		Owner:            registry.OwnerDevInf,
+		Owner:            registry.OwnerTestEng,
 		Cluster:          r.MakeClusterSpec(4),
 		Run:              runFixtures,
-	}
-	r.Add(spec)
+	})
 }

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package props
 
@@ -58,6 +53,12 @@ type Statistics struct {
 	// For expressions with Cardinality.Max = 0, RowCount will be 0. For
 	// expressions with Cardinality.Max > 0, RowCount will be >= epsilon.
 	RowCount float64
+
+	// VirtualCols is the set of virtual computed columns produced by our input
+	// that we have statistics on. Any of these could appear in ColStats. This set
+	// is maintained separately from OutputCols to allow lookup of statistics on
+	// virtual columns for expressions that synthesize virtual columns.
+	VirtualCols opt.ColSet
 
 	// ColStats is a collection of statistics that pertain to columns in an
 	// expression or table. It is keyed by a set of one or more columns over which
@@ -113,6 +114,7 @@ func (s *Statistics) RowCountIfAvailable() float64 {
 func (s *Statistics) CopyFrom(other *Statistics) {
 	s.Available = other.Available
 	s.RowCount = other.RowCount
+	s.VirtualCols = other.VirtualCols.Copy()
 	s.ColStats.CopyFrom(&other.ColStats)
 	s.Selectivity = other.Selectivity
 }
@@ -185,6 +187,9 @@ func (s *Statistics) stringImpl(includeHistograms bool) string {
 				}
 			}
 		}
+	}
+	if !s.VirtualCols.Empty() {
+		fmt.Fprintf(&buf, "\nvirtcolstats: %v", s.VirtualCols)
 	}
 
 	return buf.String()

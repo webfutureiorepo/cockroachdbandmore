@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package physicalplan_test
 
@@ -18,6 +13,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -94,7 +90,7 @@ func TestSpanResolverUsesCaches(t *testing.T) {
 	lr := physicalplan.NewSpanResolver(
 		s3.ClusterSettings(),
 		s3.DistSenderI().(*kvcoord.DistSender),
-		s3.NodeDescStoreI().(kvcoord.NodeDescStore),
+		s3.NodeDescStoreI().(kvclient.NodeDescStore),
 		s3.DistSQLPlanningNodeID(),
 		s3.Locality(),
 		s3.Clock(),
@@ -202,7 +198,7 @@ func TestSpanResolver(t *testing.T) {
 	lr := physicalplan.NewSpanResolver(
 		s.ClusterSettings(),
 		s.DistSenderI().(*kvcoord.DistSender),
-		s.NodeDescStoreI().(kvcoord.NodeDescStore),
+		s.NodeDescStoreI().(kvclient.NodeDescStore),
 		s.DistSQLPlanningNodeID(),
 		s.Locality(),
 		s.Clock(),
@@ -303,7 +299,7 @@ func TestMixedDirections(t *testing.T) {
 	lr := physicalplan.NewSpanResolver(
 		s.ClusterSettings(),
 		s.DistSenderI().(*kvcoord.DistSender),
-		s.NodeDescStoreI().(kvcoord.NodeDescStore),
+		s.NodeDescStoreI().(kvclient.NodeDescStore),
 		s.DistSQLPlanningNodeID(),
 		s.Locality(),
 		s.Clock(),

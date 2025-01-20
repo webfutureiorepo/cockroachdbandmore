@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -134,5 +129,7 @@ func (m *txnMetricRecorder) closeLocked() {
 		// Note that successful read-only txn are also counted as committed, even
 		// though they never had a txn record.
 		m.metrics.Commits.Inc(1)
+	case roachpb.PREPARED:
+		m.metrics.Prepares.Inc(1)
 	}
 }

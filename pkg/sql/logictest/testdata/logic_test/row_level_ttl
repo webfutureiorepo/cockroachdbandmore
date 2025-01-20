@@ -56,11 +56,15 @@ subtest end
 
 subtest ttl_automatic_column_notice
 
+# Weak isolation levels emit extra notices, so skip them.
+skipif config weak-iso-level-configs
 query T noticetrace
 CREATE TABLE tbl_ttl_automatic_column (id INT PRIMARY KEY) WITH (ttl_automatic_column = 'on')
 ----
 NOTICE: ttl_automatic_column is no longer used. Setting ttl_expire_after automatically creates a TTL column. Resetting ttl_expire_after removes the automatically created column.
 
+# Weak isolation levels emit extra notices, so skip them.
+skipif config weak-iso-level-configs
 query T noticetrace
 ALTER TABLE tbl_ttl_automatic_column RESET (ttl_automatic_column)
 ----
@@ -70,11 +74,15 @@ subtest end
 
 subtest ttl_range_concurrency_notice
 
+# Weak isolation levels emit extra notices, so skip them.
+skipif config weak-iso-level-configs
 query T noticetrace
 CREATE TABLE tbl_ttl_range_concurrency (id INT PRIMARY KEY) WITH (ttl_range_concurrency = 2)
 ----
 NOTICE: ttl_range_concurrency is no longer configurable.
 
+# Weak isolation levels emit extra notices, so skip them.
+skipif config weak-iso-level-configs
 query T noticetrace
 ALTER TABLE tbl_ttl_range_concurrency RESET (ttl_range_concurrency)
 ----
@@ -132,10 +140,10 @@ SELECT 'crdb_internal_functions_tbl'::regclass::oid
 
 user testuser
 
-statement error insufficient privilege
+statement error user testuser does not have REPAIRCLUSTER system privilege
 SELECT crdb_internal.repair_ttl_table_scheduled_job($crdb_internal_functions_tbl_oid)
 
-statement error insufficient privilege
+statement error user testuser does not have REPAIRCLUSTER system privilege
 SELECT crdb_internal.validate_ttl_scheduled_jobs()
 
 user root
@@ -225,7 +233,8 @@ CREATE TABLE tbl_reloptions (
   ttl_delete_rate_limit = 40,
   ttl_pause = true,
   ttl_row_stats_poll_interval = '1 minute',
-  ttl_label_metrics = true
+  ttl_label_metrics = true,
+  ttl_disable_changefeed_replication = true
 )
 
 query T rowsort
@@ -240,6 +249,7 @@ ttl_delete_rate_limit=40
 ttl_pause=true
 ttl_row_stats_poll_interval='1m0s'
 ttl_label_metrics=true
+ttl_disable_changefeed_replication=true
 
 subtest end
 
@@ -278,7 +288,7 @@ statement error cannot modify TTL settings while another schema change on the ta
 ALTER TABLE tbl_existing_ttl_concurrent_schema_change RESET (ttl), RESET (ttl_expire_after)
 
 statement error cannot modify TTL settings while another schema change on the table is being processed
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE tbl_existing_ttl_concurrent_schema_change RESET (ttl);
 ALTER TABLE tbl_existing_ttl_concurrent_schema_change SET (ttl_select_batch_size = 200)
 
@@ -286,7 +296,7 @@ statement ok
 ROLLBACK
 
 statement error cannot perform other schema changes in the same transaction as a TTL mutation
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE tbl_existing_ttl_concurrent_schema_change RESET (ttl);
 CREATE INDEX tbl_idx ON tbl_existing_ttl_concurrent_schema_change (id)
 
@@ -306,7 +316,7 @@ statement error cannot modify TTL settings while another schema change on the ta
 ALTER TABLE tbl_add_ttl_concurrent_schema_change SET (ttl_expire_after = '10 minutes'), SET (ttl_select_batch_size = 200)
 
 statement error cannot modify TTL settings while another schema change on the table is being processed
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE tbl_add_ttl_concurrent_schema_change SET (ttl_expire_after = '10 minutes');
 ALTER TABLE tbl_add_ttl_concurrent_schema_change RESET (ttl_select_batch_size)
 
@@ -314,7 +324,7 @@ statement ok
 ROLLBACK
 
 statement error cannot modify TTL settings while another schema change on the table is being processed
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 CREATE INDEX tbl_idx ON tbl_add_ttl_concurrent_schema_change (id);
 ALTER TABLE tbl_add_ttl_concurrent_schema_change SET (ttl_expire_after = '10 minutes');
 
@@ -322,7 +332,7 @@ statement ok
 ROLLBACK
 
 statement error cannot perform other schema changes in the same transaction as a TTL mutation
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 ALTER TABLE tbl_add_ttl_concurrent_schema_change SET (ttl_expire_after = '10 minutes');
 CREATE INDEX tbl_idx ON tbl_add_ttl_concurrent_schema_change (id)
 
@@ -543,6 +553,8 @@ WHERE label IN ('row-level-ttl: $label_suffix', 'row-level-ttl: $label_suffix2')
 
 statement ok
 USE test;
+
+statement ok
 DROP DATABASE drop_me CASCADE
 
 query I
@@ -765,7 +777,8 @@ CREATE TABLE tbl_set_ttl_params (
   ttl_delete_rate_limit = 40,
   ttl_pause = true,
   ttl_row_stats_poll_interval = '1 minute',
-  ttl_label_metrics = true
+  ttl_label_metrics = true,
+  ttl_disable_changefeed_replication = true
 )
 
 query T
@@ -775,7 +788,7 @@ CREATE TABLE public.tbl_set_ttl_params (
   id INT8 NOT NULL,
   crdb_internal_expiration TIMESTAMPTZ NOT VISIBLE NOT NULL DEFAULT current_timestamp():::TIMESTAMPTZ + '00:10:00':::INTERVAL ON UPDATE current_timestamp():::TIMESTAMPTZ + '00:10:00':::INTERVAL,
   CONSTRAINT tbl_set_ttl_params_pkey PRIMARY KEY (id ASC)
-) WITH (ttl = 'on', ttl_expire_after = '00:10:00':::INTERVAL, ttl_select_batch_size = 10, ttl_delete_batch_size = 20, ttl_select_rate_limit = 30, ttl_delete_rate_limit = 40, ttl_pause = true, ttl_row_stats_poll_interval = '1m0s', ttl_label_metrics = true)
+) WITH (ttl = 'on', ttl_expire_after = '00:10:00':::INTERVAL, ttl_select_batch_size = 10, ttl_delete_batch_size = 20, ttl_select_rate_limit = 30, ttl_delete_rate_limit = 40, ttl_pause = true, ttl_row_stats_poll_interval = '1m0s', ttl_label_metrics = true, ttl_disable_changefeed_replication = true)
 
 statement ok
 ALTER TABLE tbl_set_ttl_params SET (ttl_select_batch_size = 110, ttl_delete_batch_size = 120, ttl_select_rate_limit = 130, ttl_delete_rate_limit = 140, ttl_row_stats_poll_interval = '2m0s')
@@ -787,7 +800,7 @@ CREATE TABLE public.tbl_set_ttl_params (
   id INT8 NOT NULL,
   crdb_internal_expiration TIMESTAMPTZ NOT VISIBLE NOT NULL DEFAULT current_timestamp():::TIMESTAMPTZ + '00:10:00':::INTERVAL ON UPDATE current_timestamp():::TIMESTAMPTZ + '00:10:00':::INTERVAL,
   CONSTRAINT tbl_set_ttl_params_pkey PRIMARY KEY (id ASC)
-) WITH (ttl = 'on', ttl_expire_after = '00:10:00':::INTERVAL, ttl_select_batch_size = 110, ttl_delete_batch_size = 120, ttl_select_rate_limit = 130, ttl_delete_rate_limit = 140, ttl_pause = true, ttl_row_stats_poll_interval = '2m0s', ttl_label_metrics = true)
+) WITH (ttl = 'on', ttl_expire_after = '00:10:00':::INTERVAL, ttl_select_batch_size = 110, ttl_delete_batch_size = 120, ttl_select_rate_limit = 130, ttl_delete_rate_limit = 140, ttl_pause = true, ttl_row_stats_poll_interval = '2m0s', ttl_label_metrics = true, ttl_disable_changefeed_replication = true)
 
 statement ok
 ALTER TABLE tbl_set_ttl_params RESET (
@@ -796,7 +809,9 @@ ALTER TABLE tbl_set_ttl_params RESET (
   ttl_select_rate_limit,
   ttl_delete_rate_limit,
   ttl_pause,
-  ttl_row_stats_poll_interval
+  ttl_row_stats_poll_interval,
+  ttl_label_metrics,
+  ttl_disable_changefeed_replication
 )
 
 query T
@@ -806,7 +821,7 @@ CREATE TABLE public.tbl_set_ttl_params (
   id INT8 NOT NULL,
   crdb_internal_expiration TIMESTAMPTZ NOT VISIBLE NOT NULL DEFAULT current_timestamp():::TIMESTAMPTZ + '00:10:00':::INTERVAL ON UPDATE current_timestamp():::TIMESTAMPTZ + '00:10:00':::INTERVAL,
   CONSTRAINT tbl_set_ttl_params_pkey PRIMARY KEY (id ASC)
-) WITH (ttl = 'on', ttl_expire_after = '00:10:00':::INTERVAL, ttl_label_metrics = true)
+) WITH (ttl = 'on', ttl_expire_after = '00:10:00':::INTERVAL)
 
 subtest end
 
@@ -888,20 +903,14 @@ ALTER TABLE tbl_alter_table_ttl_expiration_expression DROP COLUMN expire_at
 statement ok
 SET use_declarative_schema_changer = 'off'
 
-statement error column "expire_at" is referenced by row-level TTL expiration expression "expire_at"
+statement error cannot drop column "expire_at" referenced by row-level TTL expiration expression "expire_at"\nHINT: use ALTER TABLE .*
 ALTER TABLE tbl_alter_table_ttl_expiration_expression DROP COLUMN expire_at
 
 statement ok
 SET use_declarative_schema_changer = 'on'
 
-statement ok
-SET enable_experimental_alter_column_type_general = 'on'
-
-statement error column "expire_at" is referenced by row-level TTL expiration expression "expire_at"
+statement error cannot alter type of column "expire_at" referenced by row-level TTL expiration expression "expire_at"\nHINT: use ALTER TABLE .*
 ALTER TABLE tbl_alter_table_ttl_expiration_expression ALTER expire_at TYPE TIMESTAMP USING (expire_at AT TIME ZONE 'UTC')
-
-statement ok
-SET enable_experimental_alter_column_type_general = 'off'
 
 query T
 SELECT create_statement FROM [SHOW CREATE TABLE tbl_alter_table_ttl_expiration_expression]
@@ -1110,11 +1119,6 @@ subtest end
 
 subtest desc_pk_with_ttl
 
-onlyif config local-mixed-23.1
-statement error non-ascending ordering on PRIMARY KEYs are not supported
-CREATE TABLE tbl_desc_pk_with_ttl (id INT, id2 INT, PRIMARY KEY (id, id2 DESC)) WITH (ttl_expire_after = '10 minutes')
-
-skipif config local-mixed-23.1
 statement ok
 CREATE TABLE tbl_desc_pk_with_ttl (id INT, id2 INT, PRIMARY KEY (id, id2 DESC)) WITH (ttl_expire_after = '10 minutes')
 
@@ -1125,11 +1129,6 @@ subtest desc_pk_without_ttl_add_ttl
 statement ok
 CREATE TABLE tbl_desc_pk_without_ttl_add_ttl (id INT, id2 INT, PRIMARY KEY (id, id2 DESC))
 
-onlyif config local-mixed-23.1
-statement error non-ascending ordering on PRIMARY KEYs are not supported
-ALTER TABLE tbl_desc_pk_without_ttl_add_ttl SET (ttl_expire_after = '10 minutes')
-
-skipif config local-mixed-23.1
 statement ok
 ALTER TABLE tbl_desc_pk_without_ttl_add_ttl SET (ttl_expire_after = '10 minutes')
 
@@ -1140,11 +1139,6 @@ subtest asc_pk_alter_desc_pk
 statement ok
 CREATE TABLE tbl_asc_pk_alter_desc_pk (id INT, id2 INT, PRIMARY KEY (id, id2)) WITH (ttl_expire_after = '10 minutes')
 
-onlyif config local-mixed-23.1
-statement error non-ascending ordering on PRIMARY KEYs are not supported
-ALTER TABLE tbl_asc_pk_alter_desc_pk ALTER PRIMARY KEY USING COLUMNS (id, id2 DESC)
-
-skipif config local-mixed-23.1
 statement ok
 ALTER TABLE tbl_asc_pk_alter_desc_pk ALTER PRIMARY KEY USING COLUMNS (id, id2 DESC)
 
@@ -1323,5 +1317,107 @@ SELECT schedule_status, recurrence, owner FROM [SHOW SCHEDULES]
 WHERE label = 'row-level-ttl: $label_suffix'
 ----
 ACTIVE  @daily  root
+
+subtest end
+
+# Subtest set_fk_on_table_with_ttl creates inbound foreign key dependency
+# on table with TTL enabled and confirms that a notice regarding implications
+# on performance of TTL job deletions is raised as appropriate.
+# Weak isolation levels emit extra notices, so skip them for the purpose
+# of this subtest.
+subtest set_fk_on_table_with_ttl
+statement ok
+CREATE TABLE tbl_with_ttl (
+  id INT PRIMARY KEY,
+  expire_at TIMESTAMPTZ,
+  FAMILY (id, expire_at)
+) WITH (
+  ttl_expiration_expression = 'expire_at'
+)
+
+skipif config weak-iso-level-configs
+query T noticetrace
+CREATE TABLE tbl_with_dep(
+  id1 INT PRIMARY KEY,
+  id INT REFERENCES tbl_with_ttl(id) ON DELETE CASCADE
+)
+----
+NOTICE: Table tbl_with_ttl has row level TTL enabled. This will make TTL deletion jobs more expensive as dependent rows will need to be updated as well. To improve performance of the TTL job, consider reducing the value of ttl_delete_batch_size.
+
+# Create a table with a dependency on tbl_with_ttl but with the default action of no update on delete
+# and confirm no notice is raised.
+skipif config weak-iso-level-configs
+query T noticetrace
+CREATE TABLE tbl_with_dep_2(
+  id1 INT PRIMARY KEY,
+  id INT REFERENCES tbl_with_ttl(id)
+)
+----
+
+# Alter a table with dependency on tbl_with_ttl and confirm notice is raised.
+statement ok
+CREATE TABLE tbl_to_alter (
+    t_id SERIAL PRIMARY KEY,
+    f_id INT NOT NULL,
+    name STRING NOT NULL
+);
+
+skipif config weak-iso-level-configs
+query T noticetrace
+ALTER TABLE tbl_to_alter ADD CONSTRAINT fk_tbl_with_ttl FOREIGN KEY(f_id) REFERENCES tbl_with_ttl(id) ON DELETE CASCADE
+----
+NOTICE: Table tbl_with_ttl has row level TTL enabled. This will make TTL deletion jobs more expensive as dependent rows will need to be updated as well. To improve performance of the TTL job, consider reducing the value of ttl_delete_batch_size.
+
+# Alter a table with dependency on tbl_with_ttl with the default action of
+# no updates on deletes and confirm no notice is raised.
+statement ok
+CREATE TABLE tbl_to_alter_2 (
+    t_id SERIAL PRIMARY KEY,
+    f_id INT NOT NULL,
+    name STRING NOT NULL
+);
+
+skipif config weak-iso-level-configs
+query T noticetrace
+ALTER TABLE tbl_to_alter_2 ADD CONSTRAINT fk_tbl_with_ttl FOREIGN KEY(f_id) REFERENCES tbl_with_ttl(id)
+----
+
+# Alter a table with inbound foreign keys to enable row level TTL and confirm
+# notice is raised.
+statement ok
+CREATE TABLE tbl_to_add_ttl(
+  id INT PRIMARY KEY,
+  expire_at TIMESTAMPTZ NOT NULL DEFAULT now() + '30 days'
+)
+
+statement ok
+CREATE TABLE tbl_with_fk_default_action(
+  id1 INT PRIMARY KEY,
+  name STRING,
+  id INT REFERENCES tbl_to_add_ttl(id)
+)
+
+# Confirm no notice is raised.
+skipif config weak-iso-level-configs
+query T noticetrace
+ALTER TABLE tbl_to_add_ttl SET (ttl_expiration_expression = 'expire_at')
+----
+
+statement ok
+ALTER TABLE tbl_to_add_ttl RESET (ttl);
+
+statement ok
+CREATE TABLE tbl_with_fk(
+  id1 INT PRIMARY KEY,
+  name STRING,
+  id INT REFERENCES tbl_to_add_ttl(id) ON DELETE CASCADE
+)
+
+# Confirm notice is raised.
+skipif config weak-iso-level-configs
+query T noticetrace
+ALTER TABLE tbl_to_add_ttl SET (ttl_expiration_expression = 'expire_at')
+----
+NOTICE: Columns within table tbl_to_add_ttl are referenced as foreign keys. This will make TTL deletion jobs more expensive as dependent rows in other tables will need to be updated as well. To improve performance of the TTL job, consider reducing the value of ttl_delete_batch_size.
 
 subtest end

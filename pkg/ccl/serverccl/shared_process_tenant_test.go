@@ -1,10 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package serverccl
 
@@ -34,7 +31,10 @@ func TestSharedProcessTenantNoSpanLimit(t *testing.T) {
 	defer tc.Stopper().Stop(ctx)
 
 	db := tc.ServerConn(0)
-	_, err := db.Exec("CREATE TENANT hello; ALTER TENANT hello START SERVICE SHARED")
+	_, err := db.Exec("CREATE TENANT hello")
+	require.NoError(t, err)
+
+	_, err = db.Exec("ALTER TENANT hello START SERVICE SHARED")
 	require.NoError(t, err)
 
 	_, err = db.Exec("SET CLUSTER SETTING spanconfig.virtual_cluster.max_spans = 1000")

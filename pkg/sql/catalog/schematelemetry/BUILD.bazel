@@ -36,6 +36,7 @@ go_library(
         "//pkg/util/metric",
         "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_cockroachdb_redact//:redact",
     ],
 )
 
@@ -45,10 +46,6 @@ go_test(
         "main_test.go",
         "schema_telemetry_test.go",
     ],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         ":schematelemetry",
         "//pkg/base",

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -36,6 +31,11 @@ func (f *FloatSetting) Get(sv *Values) float64 {
 
 func (f *FloatSetting) String(sv *Values) string {
 	return EncodeFloat(f.Get(sv))
+}
+
+// DefaultString returns the default value for the setting as a string.
+func (f *FloatSetting) DefaultString() string {
+	return EncodeFloat(f.defaultValue)
 }
 
 // Encoded returns the encoded value of the current value of the setting.
@@ -72,11 +72,6 @@ func (f *FloatSetting) Default() float64 {
 	return f.defaultValue
 }
 
-// DefaultString returns the default value for the setting as a string.
-func (f *FloatSetting) DefaultString() (string, error) {
-	return f.DecodeToString(f.EncodedDefault())
-}
-
 // Defeat the linter.
 var _ = (*FloatSetting).Default
 
@@ -107,6 +102,25 @@ func (f *FloatSetting) set(ctx context.Context, sv *Values, v float64) error {
 		return err
 	}
 	sv.setInt64(ctx, f.slot, int64(math.Float64bits(v)))
+	return nil
+}
+
+func (f *FloatSetting) decodeAndSet(ctx context.Context, sv *Values, encoded string) error {
+	v, err := f.DecodeValue(encoded)
+	if err != nil {
+		return err
+	}
+	return f.set(ctx, sv, v)
+}
+
+func (f *FloatSetting) decodeAndSetDefaultOverride(
+	ctx context.Context, sv *Values, encoded string,
+) error {
+	v, err := f.DecodeValue(encoded)
+	if err != nil {
+		return err
+	}
+	sv.setDefaultOverride(f.slot, v)
 	return nil
 }
 

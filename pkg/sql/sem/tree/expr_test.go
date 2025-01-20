@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
@@ -85,7 +80,7 @@ func TestStringConcat(t *testing.T) {
 	defer evalCtx.Stop(ctx)
 	for _, typ := range append([]*types.T{types.AnyTuple}, types.Scalar...) {
 		// Strings and Bytes are handled specially.
-		if typ == types.String || typ == types.Bytes {
+		if typ.Identical(types.String) || typ.Identical(types.Bytes) {
 			continue
 		}
 		d := randgen.RandDatum(rng, typ, false /* nullOk */)

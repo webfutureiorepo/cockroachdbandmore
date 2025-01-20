@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -200,12 +195,12 @@ func TestTxnBoundReplicatedLockTableView(t *testing.T) {
 	txn2 := roachpb.MakeTransaction("txn2", keyA, isolation.Serializable, roachpb.NormalUserPriority, makeTS(100, 0), 0, 0, 0, false)
 
 	// Have txn1 acquire 2 locks with different strengths.
-	err = storage.MVCCAcquireLock(ctx, engine, &txn1, lock.Exclusive, keyA, nil, 0)
+	err = storage.MVCCAcquireLock(ctx, engine, &txn1, lock.Exclusive, keyA, nil, 0, 0)
 	require.NoError(t, err)
-	err = storage.MVCCAcquireLock(ctx, engine, &txn1, lock.Shared, keyB, nil, 0)
+	err = storage.MVCCAcquireLock(ctx, engine, &txn1, lock.Shared, keyB, nil, 0, 0)
 	require.NoError(t, err)
 
-	reader := engine.NewReadOnly(storage.StandardDurability)
+	reader := engine.NewReader(storage.StandardDurability)
 	defer reader.Close()
 
 	txn1LTView := newTxnBoundReplicatedLockTableView(reader, &txn1)

@@ -1,18 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package debugutil
 
 import (
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync/atomic"
 
 	"github.com/elastic/gosigar"
@@ -47,4 +43,22 @@ func init() {
 		}
 		return false
 	}(os.Getppid()))
+}
+
+// SafeStack is an alias for []byte that handles redaction. Use this type
+// instead of []byte when you are sure that the stack trace does not contain
+// sensitive information.
+type SafeStack []byte
+
+func (s SafeStack) SafeValue() {}
+
+// Stack wraps the output of debug.Stack() with redact.Safe() to avoid
+// unnecessary redaction.
+//
+// WARNING: Calling this function grabs system-level locks and could cause high
+// system CPU usage resulting in the Go runtime to lock up if called too
+// frequently, even if called only in error-handling pathways. Use sporadically
+// and only when necessary.
+func Stack() SafeStack {
+	return debug.Stack()
 }

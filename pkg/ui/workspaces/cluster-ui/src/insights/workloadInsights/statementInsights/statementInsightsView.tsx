@@ -1,23 +1,27 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useEffect, useState, useCallback } from "react";
+import { InlineAlert } from "@cockroachlabs/ui-components";
 import classNames from "classnames/bind";
+import moment from "moment-timezone";
+import React, { useEffect, useState, useCallback } from "react";
 import { useHistory } from "react-router-dom";
+
+import { Anchor } from "src/anchor";
+import { StmtInsightsReq } from "src/api/stmtInsightsApi";
+import { isSelectedColumn } from "src/columnsSelector/utils";
 import {
-  ISortedTablePagination,
-  SortSetting,
-} from "src/sortedtable/sortedtable";
+  filterStatementInsights,
+  StmtInsightEvent,
+  getAppsFromStatementInsights,
+  makeStatementInsightsColumns,
+  WorkloadInsightEventFilters,
+} from "src/insights";
 import { Loading } from "src/loading/loading";
 import { PageConfig, PageConfigItem } from "src/pageConfig/pageConfig";
-import { Search } from "src/search/search";
+import { Pagination } from "src/pagination";
 import {
   calculateActiveFilters,
   defaultFilters,
@@ -26,23 +30,21 @@ import {
   SelectedFilters,
 } from "src/queryFilter/filter";
 import { getWorkloadInsightEventFiltersFromURL } from "src/queryFilter/utils";
-import { Pagination } from "src/pagination";
-import { queryByName, syncHistory } from "src/util/query";
+import { Search } from "src/search/search";
 import { getTableSortFromURL } from "src/sortedtable/getTableSortFromURL";
-import { TableStatistics } from "src/tableStatistics";
-import { isSelectedColumn } from "src/columnsSelector/utils";
-
 import {
-  filterStatementInsights,
-  StmtInsightEvent,
-  getAppsFromStatementInsights,
-  makeStatementInsightsColumns,
-  WorkloadInsightEventFilters,
-} from "src/insights";
-import { EmptyInsightsTablePlaceholder } from "../util";
-import { StatementInsightsTable } from "./statementInsightsTable";
-import { InsightsError } from "../../insightsErrorComponent";
+  ISortedTablePagination,
+  SortSetting,
+} from "src/sortedtable/sortedtable";
+import sortableTableStyles from "src/sortedtable/sortedtable.module.scss";
+import styles from "src/statementsPage/statementsPage.module.scss";
+import { TableStatistics } from "src/tableStatistics";
+import { insights } from "src/util";
+import { useScheduleFunction } from "src/util/hooks";
+import { queryByName, syncHistory } from "src/util/query";
+
 import ColumnsSelector from "../../../columnsSelector/columnsSelector";
+import { commonStyles } from "../../../common";
 import { SelectOption } from "../../../multiSelectCheckbox/multiSelectCheckbox";
 import {
   defaultTimeScaleOptions,
@@ -50,22 +52,15 @@ import {
   TimeScaleDropdown,
   timeScaleRangeToObj,
 } from "../../../timeScaleDropdown";
-import { StmtInsightsReq } from "src/api/stmtInsightsApi";
-import moment from "moment-timezone";
+import { InsightsError } from "../../insightsErrorComponent";
+import { EmptyInsightsTablePlaceholder } from "../util";
 
-import styles from "src/statementsPage/statementsPage.module.scss";
-import sortableTableStyles from "src/sortedtable/sortedtable.module.scss";
-import { commonStyles } from "../../../common";
-import { useScheduleFunction } from "src/util/hooks";
-import { InlineAlert } from "@cockroachlabs/ui-components";
-import { insights } from "src/util";
-import { Anchor } from "src/anchor";
+import { StatementInsightsTable } from "./statementInsightsTable";
 
 const cx = classNames.bind(styles);
 const sortableTableCx = classNames.bind(sortableTableStyles);
 
 export type StatementInsightsViewStateProps = {
-  useObsService: boolean;
   filters: WorkloadInsightEventFilters;
   insightTypes: string[];
   isDataValid: boolean;
@@ -112,7 +107,6 @@ export const StatementInsightsView: React.FC<StatementInsightsViewProps> = ({
   selectedColumnNames,
   dropDownSelect,
   maxSizeApiReached,
-  useObsService,
 }: StatementInsightsViewProps) => {
   const [pagination, setPagination] = useState<ISortedTablePagination>({
     current: 1,
@@ -128,10 +122,9 @@ export const StatementInsightsView: React.FC<StatementInsightsViewProps> = ({
     const req = {
       start: ts.start,
       end: ts.end,
-      useObsService: useObsService,
     };
     refreshStatementInsights(req);
-  }, [refreshStatementInsights, timeScale, useObsService]);
+  }, [refreshStatementInsights, timeScale]);
 
   const shouldPoll = timeScale.key !== "Custom";
   const [refetch, clearPolling] = useScheduleFunction(

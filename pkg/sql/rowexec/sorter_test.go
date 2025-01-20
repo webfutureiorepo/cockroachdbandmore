@@ -1,19 +1,13 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -32,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 )
 
 func TestSorter(t *testing.T) {
@@ -266,7 +260,7 @@ func TestSorter(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					ctx := context.Background()
 					st := cluster.MakeTestingClusterSettings()
-					tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+					tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec, nil /* statsCollector */)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -372,6 +366,8 @@ func TestSortInvalidLimit(t *testing.T) {
 		if _, sortAll := proc.(*sortAllProcessor); !sortAll {
 			t.Fatalf("expected *sortAllProcessor, got %T", proc)
 		}
+		// Allow for the processor cleanup.
+		proc.Run(ctx, &distsqlutils.RowBuffer{})
 	})
 
 	t.Run("KZero", func(t *testing.T) {
@@ -410,7 +406,7 @@ func BenchmarkSortAll(b *testing.B) {
 		DiskMonitor: diskMonitor,
 	}
 
-	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+	rng, _ := randutil.NewTestRand()
 	spec := execinfrapb.SorterSpec{OutputOrdering: twoColOrdering}
 	post := execinfrapb.PostProcessSpec{}
 
@@ -454,7 +450,7 @@ func BenchmarkSortLimit(b *testing.B) {
 		DiskMonitor: diskMonitor,
 	}
 
-	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+	rng, _ := randutil.NewTestRand()
 	spec := execinfrapb.SorterSpec{OutputOrdering: twoColOrdering}
 
 	const numRows = 1 << 16
@@ -503,7 +499,7 @@ func BenchmarkSortChunks(b *testing.B) {
 		DiskMonitor: diskMonitor,
 	}
 
-	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+	rng, _ := randutil.NewTestRand()
 	spec := execinfrapb.SorterSpec{
 		OutputOrdering:   twoColOrdering,
 		OrderingMatchLen: 1,

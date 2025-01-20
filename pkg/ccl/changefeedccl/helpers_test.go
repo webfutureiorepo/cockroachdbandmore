@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -51,7 +48,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
@@ -100,7 +99,7 @@ func readNextMessages(
 			return nil, ctx.Err()
 		}
 		if log.V(1) {
-			log.Infof(context.Background(), "About to read a message (%d out of %d)", len(actual), numMessages)
+			log.Infof(context.Background(), "about to read a message (%d out of %d)", len(actual), numMessages)
 		}
 		m, err := f.Next()
 		if log.V(1) {
@@ -261,7 +260,7 @@ func withTimeout(
 		jobID = jobFeed.JobID()
 	}
 	return timeutil.RunWithTimeout(context.Background(),
-		fmt.Sprintf("withTimeout-%d", jobID), timeout,
+		redact.Sprintf("withTimeout-%d", jobID), timeout,
 		func(ctx context.Context) error {
 			defer stopFeedWhenDone(ctx, f)()
 			return fn(ctx)
@@ -412,6 +411,10 @@ func startTestFullServer(
 		Settings:          options.settings,
 	}
 
+	if options.debugUseAfterFinish {
+		args.Tracer = tracing.NewTracerWithOpt(context.Background(), tracing.WithUseAfterFinishOpt(true, true))
+	}
+
 	if options.argsFn != nil {
 		options.argsFn(&args)
 	}
@@ -450,7 +453,7 @@ func startTestFullServer(
 // need to be applied to each of the servers in the test cluster
 // returned from this function.
 func startTestCluster(t testing.TB) (serverutils.TestClusterInterface, *gosql.DB, func()) {
-	skip.UnderStressRace(t, "multinode setup doesn't work under testrace")
+	skip.UnderRace(t, "multinode setup doesn't work under testrace")
 	ctx := context.Background()
 	knobs := base.TestingKnobs{
 		DistSQL:          &execinfra.TestingKnobs{Changefeed: &TestingKnobs{}},
@@ -522,6 +525,10 @@ func startTestTenant(
 		Settings:      options.settings,
 	}
 
+	if options.debugUseAfterFinish {
+		tenantArgs.Tracer = tracing.NewTracerWithOpt(context.Background(), tracing.WithUseAfterFinishOpt(true, true))
+	}
+
 	tenantServer, tenantDB := serverutils.StartTenant(t, systemServer, tenantArgs)
 	// Re-run setup on the tenant as well
 	tenantRunner := sqlutils.MakeSQLRunner(tenantDB)
@@ -550,6 +557,8 @@ type feedTestOptions struct {
 	allowedSinkTypes             []string
 	disabledSinkTypes            []string
 	settings                     *cluster.Settings
+	additionalSystemPrivs        []string
+	debugUseAfterFinish          bool
 }
 
 type feedTestOption func(opts *feedTestOptions)
@@ -585,6 +594,12 @@ var feedTestOmitSinks = func(sinkTypes ...string) feedTestOption {
 	return func(opts *feedTestOptions) { opts.disabledSinkTypes = append(opts.disabledSinkTypes, sinkTypes...) }
 }
 
+var feedTestAdditionalSystemPrivs = func(privs ...string) feedTestOption {
+	return func(opts *feedTestOptions) {
+		opts.additionalSystemPrivs = append(opts.additionalSystemPrivs, privs...)
+	}
+}
+
 func (opts feedTestOptions) omitSinks(sinks ...string) feedTestOptions {
 	res := opts
 	res.disabledSinkTypes = append(opts.disabledSinkTypes, sinks...)
@@ -608,6 +623,10 @@ func withKnobsFn(fn updateKnobsFn) feedTestOption {
 
 // Silence the linter.
 var _ = withKnobsFn(nil /* fn */)
+
+var withDebugUseAfterFinish feedTestOption = func(opts *feedTestOptions) {
+	opts.debugUseAfterFinish = true
+}
 
 func newTestOptions() feedTestOptions {
 	// percentTenant is the percentage of tests that will be run against
@@ -671,9 +690,9 @@ var jobRecordPollFrequency = 3 * time.Second
 
 var jobRecordRetryOpts = retry.Options{
 	InitialBackoff: jobRecordPollFrequency,
-	Multiplier:     1,
-	MaxBackoff:     5 * time.Second,
-	MaxRetries:     30,
+	Multiplier:     2,
+	MaxBackoff:     1 * time.Minute,
+	MaxRetries:     10,
 }
 
 // waitForCheckpoint waits for the specified job to have a non-empty checkpoint
@@ -682,7 +701,7 @@ func waitForCheckpoint(t *testing.T, jf cdctest.EnterpriseTestFeed, jr *jobs.Reg
 		t.Log("waiting for checkpoint")
 		progress := loadProgress(t, jf, jr)
 		if p := progress.GetChangefeed(); p != nil && p.Checkpoint != nil && len(p.Checkpoint.Spans) > 0 {
-			t.Logf("read checkpoint %v", p.Checkpoint)
+			t.Logf("read checkpoint: %#v", p.Checkpoint)
 			return
 		}
 		if !r.Next() {
@@ -697,7 +716,7 @@ func waitForHighwater(t *testing.T, jf cdctest.EnterpriseTestFeed, jr *jobs.Regi
 		t.Log("waiting for highwater")
 		progress := loadProgress(t, jf, jr)
 		if hw := progress.GetHighWater(); hw != nil && !hw.IsEmpty() {
-			t.Logf("read highwater %s", hw)
+			t.Logf("read highwater: %s", hw)
 			return
 		}
 		if !r.Next() {
@@ -881,6 +900,7 @@ func randomSinkTypeWithOptions(options feedTestOptions) string {
 		"pubsub":       1,
 		"sinkless":     2,
 		"cloudstorage": 0,
+		"pulsar":       1,
 	}
 	if options.externalIODir != "" {
 		sinkWeights["cloudstorage"] = 3
@@ -964,7 +984,7 @@ func makeFeedFactoryWithOptions(
 	}
 	switch sinkType {
 	case "kafka":
-		f := makeKafkaFeedFactory(srvOrCluster, db)
+		f := makeKafkaFeedFactory(t, srvOrCluster, db)
 		userDB, cleanup := getInitialDBForEnterpriseFactory(t, s, db, options)
 		f.(*kafkaFeedFactory).configureUserDB(userDB)
 		return f, func() { cleanup() }
@@ -997,6 +1017,11 @@ func makeFeedFactoryWithOptions(
 		userDB, cleanup := getInitialDBForEnterpriseFactory(t, s, db, options)
 		f.(*pubsubFeedFactory).enterpriseFeedFactory.configureUserDB(userDB)
 		return f, func() { cleanup() }
+	case "pulsar":
+		f := makePulsarFeedFactory(srvOrCluster, db)
+		userDB, cleanup := getInitialDBForEnterpriseFactory(t, s, db, options)
+		f.(*pulsarFeedFactory).enterpriseFeedFactory.configureUserDB(userDB)
+		return f, func() { cleanup() }
 	case "sinkless":
 		pgURLForUserSinkless := func(u string, pass ...string) (url.URL, func()) {
 			t.Logf("pgURL %s %s", sinkType, u)
@@ -1010,9 +1035,9 @@ func makeFeedFactoryWithOptions(
 				User:   url.UserPassword(u, pass[0]),
 				Host:   s.SQLAddr(), Path: "d"}, func() {}
 		}
-		sink, cleanup := getInitialSinkForSinklessFactory(t, db, pgURLForUserSinkless)
+		sink, cleanup := getInitialSinkForSinklessFactory(t, db, pgURLForUserSinkless, options)
 		root, cleanupRoot := pgURLForUserSinkless(username.RootUser)
-		f := makeSinklessFeedFactory(s, sink, root, pgURLForUserSinkless)
+		f := makeSinklessFeedFactory(t, s, sink, root, pgURLForUserSinkless)
 		return f, func() {
 			cleanup()
 			cleanupRoot()
@@ -1035,6 +1060,7 @@ func getInitialDBForEnterpriseFactory(
 		user := "EnterpriseFeedUser"
 		password := "hunter2"
 		createUserWithDefaultPrivilege(t, rootDB, user, password, "CHANGEFEED", "SELECT")
+		grantUserAdditionalSystemPrivileges(t, rootDB, user, opts.additionalSystemPrivs)
 		pgURL := url.URL{
 			Scheme: "postgres",
 			User:   url.UserPassword(user, password),
@@ -1051,16 +1077,17 @@ func getInitialDBForEnterpriseFactory(
 }
 
 func getInitialSinkForSinklessFactory(
-	t *testing.T, db *gosql.DB, sinkForUser sinkForUser,
+	t *testing.T, db *gosql.DB, sinkForUser sinkForUser, opts feedTestOptions,
 ) (url.URL, func()) {
 	// Instead of creating sinkless changefeeds on the root connection, we may choose to create
 	// them on a test user connection. This user should have the minimum privileges to create a changefeed,
 	// which means they default to having the SELECT privilege on all tables.
 	const percentNonRoot = 1
-	if rand.Float32() < percentNonRoot {
+	if !opts.forceRootUserConnection && rand.Float32() < percentNonRoot {
 		user := "SinklessFeedUser"
 		password := "hunter2"
 		createUserWithDefaultPrivilege(t, db, user, password, "SELECT")
+		grantUserAdditionalSystemPrivileges(t, db, user, opts.additionalSystemPrivs)
 		return sinkForUser(user, password)
 	}
 	return sinkForUser(username.RootUser)
@@ -1086,6 +1113,15 @@ func createUserWithDefaultPrivilege(
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func grantUserAdditionalSystemPrivileges(
+	t *testing.T, rootDB *gosql.DB, user string, privs []string,
+) {
+	for _, priv := range privs {
+		_, err := rootDB.Exec(fmt.Sprintf(`GRANT SYSTEM %s TO %s`, priv, user))
+		require.NoError(t, err)
 	}
 }
 
@@ -1150,7 +1186,7 @@ func maybeUseExternalConnection(
 	// percentExternal is the chance of randomly running a test using an `external://` uri.
 	// Set to 1 to always do this.
 	const percentExternal = 0.5
-	if sinkType == `sinkless` || sinkType == `enterprise` || strings.Contains(flakyWhenExternalConnection, sinkType) ||
+	if sinkType == `sinkless` || sinkType == `enterprise` || sinkType == `pulsar` || strings.Contains(flakyWhenExternalConnection, sinkType) ||
 		options.forceNoExternalConnectionURI || rand.Float32() > percentExternal {
 		return factory
 	}
@@ -1241,6 +1277,7 @@ func verifyLogsWithEmittedBytesAndMessages(
 		var emittedBytes int64 = 0
 		var emittedMessages int64 = 0
 		for _, msg := range emittedBytesLogs {
+			t.Logf("read message %v", msg)
 			if msg.JobId != int64(jobID) {
 				continue
 			}
@@ -1248,9 +1285,7 @@ func verifyLogsWithEmittedBytesAndMessages(
 			emittedBytes += msg.EmittedBytes
 			emittedMessages += msg.EmittedMessages
 			require.Equal(t, interval, msg.LoggingInterval)
-			if closing {
-				require.Equal(t, true, msg.Closing)
-			}
+			require.Equal(t, closing, msg.Closing)
 		}
 		if emittedBytes == 0 || emittedMessages == 0 {
 			return errors.Newf(

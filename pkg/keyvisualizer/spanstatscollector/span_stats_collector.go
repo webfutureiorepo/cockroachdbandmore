@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanstatscollector
 
@@ -87,7 +82,8 @@ func (s *SpanStatsCollector) Start(ctx context.Context, stopper *stop.Stopper) {
 	if err := stopper.RunAsyncTask(ctx, "span-stats-collector",
 		func(ctx context.Context) {
 			s.reset()
-			t := timeutil.NewTimer()
+			var t timeutil.Timer
+			defer t.Stop()
 			for {
 				samplePeriod := keyvissettings.SampleInterval.Get(&s.settings.SV)
 				now := timeutil.Now()

@@ -1,18 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvflowhandle
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol"
@@ -161,8 +157,8 @@ func (h *Handle) deductTokensForInner(
 		return nil // unused return value in production code
 	}
 
-	if h.knobs.OverrideTokenDeduction != nil {
-		tokens = h.knobs.OverrideTokenDeduction()
+	if fn := h.knobs.OverrideTokenDeduction; fn != nil {
+		tokens = fn(tokens)
 	}
 
 	for _, c := range h.mu.connections {
@@ -263,14 +259,14 @@ func (h *Handle) connectStreamLocked(
 	connections := make([]*connectedStream, len(h.mu.connections)+1)
 	copy(connections, h.mu.connections)
 	connections[len(connections)-1] = newConnectedStream(stream)
-	sort.Slice(connections, func(i, j int) bool {
+	slices.SortFunc(connections, func(a, b *connectedStream) int {
 		// Sort connections based on store IDs (this is the order in which we
 		// invoke Controller.Admit) for predictability. If in the future we use
 		// flow tokens for raft log catchup (see I11 and [^9] in
 		// kvflowcontrol/doc.go), we may want to introduce an Admit-variant that
 		// both blocks and deducts tokens before sending catchup MsgApps. In
 		// that case, this sorting will help avoid deadlocks.
-		return connections[i].Stream().StoreID < connections[j].Stream().StoreID
+		return cmp.Compare(a.Stream().StoreID, b.Stream().StoreID)
 	})
 	// NB: We use a copy-on-write scheme when appending to the connections slice
 	// -- the read path is what's performance critical.

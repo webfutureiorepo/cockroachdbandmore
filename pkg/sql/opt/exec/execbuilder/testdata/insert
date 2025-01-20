@@ -461,22 +461,34 @@ vectorized: true
         │ render ?column?: "?column?"
         │
         └── • top-k
-            │ columns: (length, "?column?", column12)
+            │ columns: (length, "?column?", column16)
             │ estimated row count: 10 (missing stats)
-            │ order: +column12
+            │ order: +column16
             │ k: 10
             │
             └── • render
-                │ columns: (length, "?column?", column12)
+                │ columns: (length, "?column?", column16)
                 │ render length: length(k)
                 │ render ?column?: 2
-                │ render column12: k || v
+                │ render column16: k || v
                 │
                 └── • scan
                       columns: (k, v)
                       estimated row count: 1,000 (missing stats)
                       table: kv@kv_pkey
                       spans: FULL SCAN
+
+# Index hints should be a no-op for normal inserts without ON CONFLICT.
+query T
+EXPLAIN (PLAN) INSERT INTO kv@a VALUES (1,1), (2,2)
+----
+distribution: local
+vectorized: true
+·
+• insert fast path
+  into: kv(k, v)
+  auto commit
+  size: 2 columns, 2 rows
 
 # ------------------------------------------------------------------------------
 # Insert rows into table during schema changes.
@@ -614,7 +626,7 @@ vectorized: true
 └── • subquery
     │ id: @S1
     │ original sql: INSERT INTO xyz SELECT a, b, c FROM abc RETURNING z
-    │ exec mode: all rows
+    │ exec mode: discard all rows
     │
     └── • buffer
         │ columns: (z)

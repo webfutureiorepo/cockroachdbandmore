@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // cockroach-sql is an entry point for a CockroachDB binary that only
 // includes the SQL shell and does not include any server components.
@@ -87,6 +82,8 @@ func runMain() error {
 	// Configure the command-line flags.
 	clientflags.AddBaseFlags(sqlCmd, &copts, &copts.Insecure, &copts.CertsDir)
 	clientflags.AddSQLFlags(sqlCmd, &copts, cfg, true /* isShell */, false /* isDemo */)
+	// Configure the format flag
+	cliflagcfg.VarFlagDepth(1, sqlCmd.PersistentFlags(), &cfg.ExecCtx.TableDisplayFormat, cliflags.TableDisplayFormat)
 
 	// Apply the configuration defaults from environment variables.
 	// This must occur before the parameters are parsed by cobra, so

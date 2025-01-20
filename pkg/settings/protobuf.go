@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -41,6 +36,15 @@ func (s *ProtobufSetting) String(sv *Values) string {
 	json, err := s.MarshalToJSON(p)
 	if err != nil {
 		panic(errors.Wrapf(err, "marshaling %s: %+v", proto.MessageName(p), p))
+	}
+	return json
+}
+
+// DefaultString returns the default value for the setting as a string.
+func (s *ProtobufSetting) DefaultString() string {
+	json, err := s.MarshalToJSON(s.defaultValue)
+	if err != nil {
+		panic(errors.Wrapf(err, "marshaling %s: %+v", proto.MessageName(s.defaultValue), s.defaultValue))
 	}
 	return json
 }
@@ -88,11 +92,6 @@ func (s *ProtobufSetting) Default() protoutil.Message {
 	return s.defaultValue
 }
 
-// DefaultString returns the default value for the setting as a string.
-func (s *ProtobufSetting) DefaultString() (string, error) {
-	return s.DecodeToString(s.EncodedDefault())
-}
-
 // Get retrieves the protobuf value in the setting.
 func (s *ProtobufSetting) Get(sv *Values) protoutil.Message {
 	loaded := sv.getGeneric(s.slot)
@@ -115,6 +114,25 @@ func (s *ProtobufSetting) Override(ctx context.Context, sv *Values, p protoutil.
 	sv.setValueOrigin(ctx, s.slot, OriginOverride)
 	_ = s.set(ctx, sv, p)
 	sv.setDefaultOverride(s.slot, p)
+}
+
+func (s *ProtobufSetting) decodeAndSet(ctx context.Context, sv *Values, encoded string) error {
+	p, err := s.DecodeValue(encoded)
+	if err != nil {
+		return err
+	}
+	return s.set(ctx, sv, p)
+}
+
+func (s *ProtobufSetting) decodeAndSetDefaultOverride(
+	ctx context.Context, sv *Values, encoded string,
+) error {
+	p, err := s.DecodeValue(encoded)
+	if err != nil {
+		return err
+	}
+	sv.setDefaultOverride(s.slot, p)
+	return nil
 }
 
 func (s *ProtobufSetting) set(ctx context.Context, sv *Values, p protoutil.Message) error {

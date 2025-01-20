@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -36,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var zeroTS hlc.Timestamp
@@ -503,7 +501,7 @@ func TestSQLSink(t *testing.T) {
 	// TODO(herko): `makeSQLSink` does not expect "options" to be present in the URL, find out if
 	// this is a bug, or if we should add it to to `consumeParam` in the `makeSQLSink` function.
 	// See: https://github.com/cockroachdb/cockroach/issues/112863.
-	sink, err := makeSQLSink(sinkURL{URL: &pgURL}, testTableName, targets, nilMetricsRecorderBuilder)
+	sink, err := makeSQLSink(&changefeedbase.SinkURL{URL: &pgURL}, testTableName, targets, nilMetricsRecorderBuilder)
 	require.NoError(t, err)
 	require.NoError(t, sink.(*sqlSink).Dial())
 	defer func() { require.NoError(t, sink.Close()) }()
@@ -632,6 +630,22 @@ func TestSaramaConfigOptionParsing(t *testing.T) {
 		cfg, err = getSaramaConfig(opts)
 		require.NoError(t, err)
 		require.NoError(t, cfg.Validate())
+
+		saramaCfg := sarama.NewConfig()
+		opts = `{"ClientID": "clientID1"}`
+		cfg, _ = getSaramaConfig(opts)
+		err = cfg.Apply(saramaCfg)
+		require.NoError(t, err)
+		require.NoError(t, cfg.Validate())
+		require.NoError(t, saramaCfg.Validate())
+
+		opts = `{"Flush": {"Messages": 1000, "Frequency": "1s"}, "ClientID": "clientID1"}`
+		cfg, _ = getSaramaConfig(opts)
+		err = cfg.Apply(saramaCfg)
+		require.NoError(t, err)
+		require.NoError(t, cfg.Validate())
+		require.NoError(t, saramaCfg.Validate())
+		require.Equal(t, "clientID1", cfg.ClientID)
 	})
 	t.Run("validate returns error for bad flush configuration", func(t *testing.T) {
 		opts := changefeedbase.SinkSpecificJSONConfig(`{"Flush": {"Messages": 1000}}`)
@@ -644,6 +658,14 @@ func TestSaramaConfigOptionParsing(t *testing.T) {
 		cfg, err = getSaramaConfig(opts)
 		require.NoError(t, err)
 		require.Error(t, cfg.Validate())
+
+		opts = `{"Version": "0.8.2.0", "ClientID": "bad_client_id*"}`
+		saramaCfg := sarama.NewConfig()
+		cfg, _ = getSaramaConfig(opts)
+		err = cfg.Apply(saramaCfg)
+		require.NoError(t, err)
+		require.NoError(t, cfg.Validate())
+		require.Error(t, saramaCfg.Validate())
 	})
 	t.Run("apply parses valid version", func(t *testing.T) {
 		opts := changefeedbase.SinkSpecificJSONConfig(`{"version": "0.8.2.0"}`)
@@ -699,7 +721,7 @@ func TestSaramaConfigOptionParsing(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, sarama.WaitForAll, saramaCfg.Producer.RequiredAcks)
 
-		opts = changefeedbase.SinkSpecificJSONConfig(`{"RequiredAcks": "-1"}`)
+		opts = `{"RequiredAcks": "-1"}`
 
 		cfg, err = getSaramaConfig(opts)
 		require.NoError(t, err)
@@ -758,6 +780,69 @@ func TestSaramaConfigOptionParsing(t *testing.T) {
 		opts := changefeedbase.SinkSpecificJSONConfig(`{"Compression": "invalid"}`)
 		_, err := getSaramaConfig(opts)
 		require.Error(t, err)
+	})
+	t.Run("validate returns nil for valid compression codec and level", func(t *testing.T) {
+		tests := []struct {
+			give      changefeedbase.SinkSpecificJSONConfig
+			wantCodec sarama.CompressionCodec
+			wantLevel int
+		}{
+			{
+				give:      `{"Compression": "GZIP"}`,
+				wantCodec: sarama.CompressionGZIP,
+				wantLevel: sarama.CompressionLevelDefault,
+			},
+			{
+				give:      `{"CompressionLevel": 1}`,
+				wantCodec: sarama.CompressionNone,
+				wantLevel: 1,
+			},
+			{
+				give:      `{"Compression": "GZIP", "CompressionLevel": 1}`,
+				wantCodec: sarama.CompressionGZIP,
+				wantLevel: 1,
+			},
+			{
+				give:      `{"Compression": "ZSTD", "CompressionLevel": 1}`,
+				wantCodec: sarama.CompressionZSTD,
+				wantLevel: 1,
+			},
+			{
+				// The maximum supported zstd compression level is 10,
+				// so all higher values are valid and limited by it.
+				give:      `{"Compression": "ZSTD", "CompressionLevel": 11}`,
+				wantCodec: sarama.CompressionZSTD,
+				wantLevel: 11,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(string(tt.give), func(t *testing.T) {
+				cfg, err := getSaramaConfig(tt.give)
+				require.NoError(t, err)
+
+				saramaCfg := sarama.NewConfig()
+				require.NoError(t, cfg.Apply(saramaCfg))
+				require.NoError(t, saramaCfg.Validate())
+				require.Equal(t, tt.wantCodec, saramaCfg.Producer.Compression)
+				require.Equal(t, tt.wantLevel, saramaCfg.Producer.CompressionLevel)
+			})
+		}
+	})
+	t.Run("validate returns err for bad compression level", func(t *testing.T) {
+		opts := changefeedbase.SinkSpecificJSONConfig(`{"Compression": "GZIP", "CompressionLevel": "invalid"}`)
+		_, err := getSaramaConfig(opts)
+		require.ErrorContains(t, err, "field saramaConfig.CompressionLevel of type int")
+
+		// The maximum gzip compression level is gzip.BestCompression,
+		// so use gzip.BestCompression + 1.
+		opts = `{"Compression": "GZIP", "CompressionLevel": 10}`
+		cfg, err := getSaramaConfig(opts)
+		require.NoError(t, err)
+
+		saramaCfg := sarama.NewConfig()
+		require.NoError(t, cfg.Apply(saramaCfg))
+		require.ErrorContains(t, saramaCfg.Validate(), "gzip: invalid compression level: 10")
 	})
 }
 
@@ -907,10 +992,14 @@ func TestChangefeedConsistentPartitioning(t *testing.T) {
 	referencePartitions[longString2] = 592
 
 	partitioner := newChangefeedPartitioner("topic1")
+	kgoPartitioner := newKgoChangefeedPartitioner().ForTopic("topic1")
 
 	for key, expected := range referencePartitions {
 		actual, err := partitioner.Partition(&sarama.ProducerMessage{Key: sarama.ByteEncoder(key)}, 1031)
 		require.NoError(t, err)
+		require.Equal(t, expected, actual)
+
+		actual = int32(kgoPartitioner.Partition(&kgo.Record{Key: []byte(key)}, 1031))
 		require.Equal(t, expected, actual)
 	}
 

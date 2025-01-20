@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -33,9 +28,13 @@ func registerRustPostgres(r registry.Registry) {
 		t.Status("setting up cockroach")
 
 		// We hardcode port 5433 since that's the port rust-postgres expects.
-		startOpts := option.DefaultStartOptsInMemory()
+		startOpts := option.NewStartOpts(sqlClientsInMemoryDB)
 		startOpts.RoachprodOpts.SQLPort = 5433
-		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
+		// rust-postgres currently doesn't support changing the config through
+		// the environment, which means we can't pass it ssl connection details
+		// and must run the cluster in insecure mode.
+		// See: https://github.com/sfackler/rust-postgres/issues/654
+		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(install.SecureOption(false)), c.All())
 		db := c.Conn(ctx, t.L(), 1)
 		_, err := db.Exec("create user postgres with createdb createlogin createrole cancelquery")
 		if err != nil {
@@ -157,11 +156,13 @@ func registerRustPostgres(r registry.Registry) {
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             "rust-postgres",
-		Owner:            registry.OwnerSQLFoundations,
-		Cluster:          r.MakeClusterSpec(1, spec.CPU(16)),
-		Leases:           registry.MetamorphicLeases,
-		CompatibleClouds: registry.AllExceptAWS,
+		Name:    "rust-postgres",
+		Owner:   registry.OwnerSQLFoundations,
+		Cluster: r.MakeClusterSpec(1, spec.CPU(16)),
+		Leases:  registry.MetamorphicLeases,
+		// This test requires custom ports but service registration is
+		// currently only supported on GCE.
+		CompatibleClouds: registry.OnlyGCE,
 		Suites:           registry.Suites(registry.Nightly, registry.ORM),
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			runRustPostgres(ctx, t, c)

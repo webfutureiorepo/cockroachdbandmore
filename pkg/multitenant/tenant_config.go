@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multitenant
 
@@ -30,17 +25,6 @@ var DefaultTenantSelect = settings.RegisterStringSetting(
 	"name of the virtual cluster to use when SQL or HTTP clients don't specify a target cluster",
 	catconstants.SystemTenantName,
 	settings.WithName(DefaultClusterSelectSettingName),
-)
-
-// VerifyTenantService determines whether there should be an advisory
-// interlock between changes to the tenant service and changes to the
-// above cluster setting.
-var VerifyTenantService = settings.RegisterBoolSetting(
-	settings.SystemOnly,
-	"server.controller.default_tenant.check_service.enabled",
-	"verify that the service mode is coherently set with the value of "+DefaultClusterSelectSettingName,
-	true,
-	settings.WithName(DefaultClusterSelectSettingName+".check_service.enabled"),
 )
 
 // WaitForClusterStartTimeout is the amount of time the tenant

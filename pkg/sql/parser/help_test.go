@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package parser
 
@@ -42,6 +37,10 @@ func TestContextualHelp(t *testing.T) {
 		{`ALTER CHANGEFEED 123 DROP ??`, `ALTER CHANGEFEED`},
 
 		{`ALTER BACKUP foo ADD NEW_KMS=bar WITH OLD_KMS=foobar ??`, `ALTER BACKUP`},
+
+		{`ALTER JOB ??`, `ALTER JOB`},
+		{`ALTER JOB 123 OWNER ??`, `ALTER JOB`},
+		{`ALTER JOB 123 OWNER TO ??`, `ALTER JOB`},
 
 		{`ALTER TABLE IF ??`, `ALTER TABLE`},
 		{`ALTER TABLE blah ??`, `ALTER TABLE`},
@@ -163,6 +162,8 @@ func TestContextualHelp(t *testing.T) {
 		{`CANCEL SESSIONS IF EXISTS ??`, `CANCEL SESSIONS`},
 		{`CANCEL ALL ??`, `CANCEL ALL JOBS`},
 
+		{`COMMIT PREPARED 'foo' ??`, `COMMIT PREPARED`},
+
 		{`CREATE UNIQUE ??`, `CREATE`},
 		{`CREATE UNIQUE INDEX ??`, `CREATE INDEX`},
 		{`CREATE INDEX IF NOT ??`, `CREATE INDEX`},
@@ -181,6 +182,8 @@ func TestContextualHelp(t *testing.T) {
 
 		{`CREATE VIRTUAL CLUSTER ??`, `CREATE VIRTUAL CLUSTER`},
 		{`CREATE TENANT ??`, `CREATE VIRTUAL CLUSTER`},
+
+		{`CREATE LOGICAL REPLICATION STREAM ??`, `CREATE LOGICAL REPLICATION STREAM`},
 
 		{`CREATE USER blih ??`, `CREATE ROLE`},
 		{`CREATE USER blih WITH ??`, `CREATE ROLE`},
@@ -211,6 +214,9 @@ func TestContextualHelp(t *testing.T) {
 		{`CREATE SCHEMA IF ??`, `CREATE SCHEMA`},
 		{`CREATE SCHEMA IF NOT ??`, `CREATE SCHEMA`},
 		{`CREATE SCHEMA bli ??`, `CREATE SCHEMA`},
+
+		{`CHECK ??`, `CHECK`},
+		{`CHECK EXTERNAL CONNECTION ??`, `CHECK EXTERNAL CONNECTION`},
 
 		{`DELETE FROM ??`, `DELETE`},
 		{`DELETE FROM blah ??`, `DELETE`},
@@ -277,6 +283,8 @@ func TestContextualHelp(t *testing.T) {
 		{`PREPARE foo AS DELETE FROM xx ??`, `DELETE`},
 		{`PREPARE foo AS UPDATE xx SET x = y ??`, `UPDATE`},
 
+		{`PREPARE TRANSACTION 'foo' ??`, `PREPARE TRANSACTION`},
+
 		{`EXECUTE foo ??`, `EXECUTE`},
 		{`EXECUTE foo (??`, `EXECUTE`},
 
@@ -288,6 +296,8 @@ func TestContextualHelp(t *testing.T) {
 		{`DECLARE foo ??`, `DECLARE`},
 		{`DECLARE foo BINARY ??`, `DECLARE`},
 		{`DECLARE foo BINARY CURSOR ??`, `DECLARE`},
+
+		{`DO ??`, `DO`},
 
 		{`CLOSE ??`, `CLOSE`},
 
@@ -342,6 +352,8 @@ func TestContextualHelp(t *testing.T) {
 		{`REVOKE ALL ??`, `REVOKE`},
 		{`REVOKE ALL ON foo FROM ??`, `REVOKE`},
 		{`REVOKE ALL ON foo FROM bar ??`, `REVOKE`},
+
+		{`ROLLBACK PREPARED 'foo' ??`, `ROLLBACK PREPARED`},
 
 		{`SELECT * FROM ??`, `<SOURCE>`},
 		{`SELECT * FROM (??`, `<SOURCE>`}, // not <selectclause>! joins are allowed.
@@ -414,12 +426,16 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW CREATE TABLE blah ??`, `SHOW CREATE`},
 		{`SHOW CREATE VIEW blah ??`, `SHOW CREATE`},
 		{`SHOW CREATE SEQUENCE blah ??`, `SHOW CREATE`},
+		{`SHOW CREATE TRIGGER blah ??`, `SHOW CREATE`},
 
 		{`SHOW CREATE SCHEDULE blah ??`, `SHOW CREATE SCHEDULES`},
 		{`SHOW CREATE ALL SCHEDULES ??`, `SHOW CREATE SCHEDULES`},
 
 		{`SHOW CREATE EXTERNAL CONNECTION blah ??`, `SHOW CREATE EXTERNAL CONNECTIONS`},
 		{`SHOW CREATE ALL EXTERNAL CONNECTIONS ??`, `SHOW CREATE EXTERNAL CONNECTIONS`},
+
+		{`SHOW EXTERNAL CONNECTION blah ??`, `SHOW EXTERNAL CONNECTIONS`},
+		{`SHOW EXTERNAL CONNECTIONS ??`, `SHOW EXTERNAL CONNECTIONS`},
 
 		{`SHOW DATABASES ??`, `SHOW DATABASES`},
 
@@ -448,6 +464,9 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW INDEX ??`, `SHOW INDEXES`},
 		{`SHOW INDEXES FROM ??`, `SHOW INDEXES`},
 		{`SHOW INDEXES FROM blah ??`, `SHOW INDEXES`},
+
+		{`SHOW LOGICAL REPLICATION JOBS ??`, `SHOW LOGICAL REPLICATION JOBS`},
+		{`SHOW LOGICAL REPLICATION JOBS ?? WITH DETAILS`, `SHOW LOGICAL REPLICATION JOBS`},
 
 		{`SHOW PARTITIONS FROM ??`, `SHOW PARTITIONS`},
 
@@ -494,6 +513,10 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW USERS ??`, `SHOW USERS`},
 
 		{`SHOW ZONE CONFIGURATION FROM ??`, `SHOW ZONE CONFIGURATION`},
+
+		{`SHOW TRIGGERS ??`, `SHOW TRIGGERS`},
+		{`SHOW TRIGGERS FROM ??`, `SHOW TRIGGERS`},
+		{`SHOW TRIGGERS FROM blah ??`, `SHOW TRIGGERS`},
 
 		{`TRUNCATE foo ??`, `TRUNCATE`},
 		{`TRUNCATE foo, ??`, `TRUNCATE`},
@@ -561,11 +584,11 @@ func TestContextualHelp(t *testing.T) {
 		{`EXPERIMENTAL SCRUB TABLE ??`, `SCRUB TABLE`},
 		{`EXPERIMENTAL SCRUB DATABASE ??`, `SCRUB DATABASE`},
 
-		{`BACKUP foo TO 'bar' ??`, `BACKUP`},
+		{`BACKUP foo INTO 'bar' ??`, `BACKUP`},
 		{`BACKUP DATABASE ??`, `BACKUP`},
-		{`BACKUP foo TO 'bar' AS OF SYSTEM ??`, `BACKUP`},
+		{`BACKUP foo INTO 'bar' AS OF SYSTEM ??`, `BACKUP`},
 
-		{`RESTORE foo FROM 'bar' ??`, `RESTORE`},
+		{`RESTORE foo FROM LATEST IN '/bar' ??`, `RESTORE`},
 		{`RESTORE DATABASE ??`, `RESTORE`},
 
 		{`IMPORT TABLE ??`, `IMPORT`},
@@ -588,6 +611,18 @@ func TestContextualHelp(t *testing.T) {
 		{`CREATE PROCEDURE ??`, `CREATE PROCEDURE`},
 		{`ALTER PROCEDURE ??`, `ALTER PROCEDURE`},
 		{`DROP PROCEDURE ??`, `DROP PROCEDURE`},
+
+		{`CREATE TRIGGER ??`, `CREATE TRIGGER`},
+		{`CREATE TRIGGER foo ??`, `CREATE TRIGGER`},
+		{`CREATE TRIGGER foo AFTER INSERT ON bar ??`, `CREATE TRIGGER`},
+		{`DROP TRIGGER ??`, `DROP TRIGGER`},
+
+		{`CREATE POLICY ??`, `CREATE POLICY`},
+		{`CREATE POLICY p1 on ??`, `CREATE POLICY`},
+		{`ALTER POLICY ??`, `ALTER POLICY`},
+		{`ALTER POLICY p1 on t1 RENAME ??`, `ALTER POLICY`},
+		{`DROP POLICY ??`, `DROP POLICY`},
+		{`SHOW POLICIES ??`, `SHOW POLICIES`},
 	}
 
 	// The following checks that the test definition above exercises all

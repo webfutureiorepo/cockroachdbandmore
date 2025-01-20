@@ -1,16 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcapabilitiestestutils
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,21 +24,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var reqWithParamRE = regexp.MustCompile(`(\w+)(?:{(\w+)})?`)
+
 // ParseBatchRequests is a helper function to parse datadriven input that
 // declares (empty) batch requests of supported types, for a particular tenant.
 // The constructed batch request is returned. The cmds are of the following
 // form:
 //
-// cmds=(split, scan, cput)
+// cmds=(AdminSplit, Scan, ConditionalPut, EndTxn{Prepare})
 func ParseBatchRequests(t *testing.T, d *datadriven.TestData) (ba kvpb.BatchRequest) {
 	for _, cmd := range d.CmdArgs {
 		if cmd.Key == "cmds" {
 			for _, z := range cmd.Vals {
-				method, ok := kvpb.StringToMethodMap[z]
+				reqWithParam := reqWithParamRE.FindStringSubmatch(z)
+				reqStr := reqWithParam[1]
+				paramStr := reqWithParam[2]
+				method, ok := kvpb.StringToMethodMap[reqStr]
 				if !ok {
 					t.Fatalf("unsupported request type: %s", z)
 				}
 				request := kvpb.CreateRequest(method)
+				if paramStr != "" {
+					ok = false
+					switch method {
+					case kvpb.EndTxn:
+						switch paramStr {
+						case "Prepare":
+							request.(*kvpb.EndTxnRequest).Prepare = true
+							ok = true
+						}
+					}
+					if !ok {
+						t.Fatalf("unsupported %s param: %s", method, paramStr)
+					}
+				}
 				ba.Add(request)
 			}
 		}
@@ -162,7 +177,7 @@ func GetServiceState(t *testing.T, d *datadriven.TestData) mtinfopb.TenantServic
 		}
 		return serviceState
 	}
-	return mtinfopb.ServiceModeShared
+	return mtinfopb.ServiceModeExternal
 }
 
 // AlteredCapabilitiesString pretty-prints all altered capability

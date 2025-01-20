@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package constraint
 
@@ -24,7 +19,7 @@ import (
 func compare(prefixInfo partition.Prefix, span *Span, ps partition.PrefixSorter) int {
 	prefix := prefixInfo.Prefix
 	prefixLength := len(prefix)
-	spanPrefixLength := span.Prefix(ps.EvalCtx)
+	spanPrefixLength := span.Prefix(ps.Ctx, ps.EvalCtx)
 	// Longer prefixes sort before shorter ones.
 	// The span prefix is allowed to be longer than the partition prefix and still
 	// match.
@@ -34,7 +29,10 @@ func compare(prefixInfo partition.Prefix, span *Span, ps partition.PrefixSorter)
 
 	// Look for an exact match on the shared prefix.
 	for k, datum := range prefix {
-		compareResult := datum.Compare(ps.EvalCtx, span.StartKey().Value(k))
+		compareResult, err := datum.Compare(ps.Ctx, ps.EvalCtx, span.StartKey().Value(k))
+		if err != nil {
+			panic(err)
+		}
 		if compareResult != 0 {
 			return compareResult
 		}
@@ -61,7 +59,7 @@ func searchPrefixes(span *Span, ps partition.PrefixSorter, prefixSearchUpperBoun
 	if prefixSearchUpperBound < 0 {
 		prefixSearchUpperBound = math.MaxInt32
 	}
-	spanPrefix := span.Prefix(ps.EvalCtx)
+	spanPrefix := span.Prefix(ps.Ctx, ps.EvalCtx)
 	i := 0
 	// Get the first slice in the PrefixSorter
 	prefixSlice, startIndex, ok := ps.Slice(i)
@@ -79,7 +77,10 @@ func searchPrefixes(span *Span, ps partition.PrefixSorter, prefixSearchUpperBoun
 		}
 
 		for k, datum := range prefix {
-			compareResult := datum.Compare(ps.EvalCtx, span.StartKey().Value(k))
+			compareResult, err := datum.Compare(ps.Ctx, ps.EvalCtx, span.StartKey().Value(k))
+			if err != nil {
+				panic(err)
+			}
 			if compareResult != 0 {
 				return compareResult > 0
 			}

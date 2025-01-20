@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colrpc
 
@@ -124,7 +119,7 @@ func NewOutbox(
 func (o *Outbox) close(ctx context.Context) {
 	o.scratch.buf = nil
 	o.scratch.msg = nil
-	o.converter.Release(ctx)
+	o.converter.Close(ctx)
 	// Unset the input (which is a deselector operator) so that its output batch
 	// could be garbage collected. This allows us to release all memory
 	// registered with the allocator (the allocator is shared by the outbox and

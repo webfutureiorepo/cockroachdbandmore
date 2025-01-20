@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlshell
 
@@ -276,7 +271,7 @@ func (c *cliState) printCliHelp() {
 	fmt.Fprintf(c.iCtx.stdout, helpMessageFmt,
 		demoHelpStr,
 		docs.URL("sql-statements.html"),
-		docs.URL("use-the-built-in-sql-client.html"),
+		docs.URL("cockroach-sql.html"),
 	)
 	fmt.Fprintln(c.iCtx.stdout)
 }
@@ -1272,6 +1267,8 @@ func (c *cliState) doProcessFirstLine(startState, nextState cliStateEnum) cliSta
 		return startState
 
 	case "exit", "quit":
+		// When explicitly exiting, clear exitErr.
+		c.exitErr = nil
 		return cliStop
 	}
 
@@ -1417,6 +1414,8 @@ func (c *cliState) doHandleCliCmd(loopState, nextState cliStateEnum) cliStateEnu
 
 	switch cmd[0] {
 	case `\q`, `\quit`, `\exit`:
+		// When explicitly exiting, clear exitErr.
+		c.exitErr = nil
 		return cliStop
 
 	case `\`, `\?`, `\help`:

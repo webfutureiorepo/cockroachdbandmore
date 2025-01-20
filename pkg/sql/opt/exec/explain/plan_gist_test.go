@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package explain_test
 
@@ -28,7 +23,8 @@ import (
 )
 
 func makeGist(ot *opttester.OptTester, t *testing.T) explain.PlanGist {
-	f := explain.NewPlanGistFactory(exec.StubFactory{})
+	var f explain.PlanGistFactory
+	f.Init(exec.StubFactory{})
 	expr, err := ot.Optimize()
 	if err != nil {
 		t.Error(err)
@@ -37,7 +33,7 @@ func makeGist(ot *opttester.OptTester, t *testing.T) explain.PlanGist {
 	if rel, ok := expr.(memo.RelExpr); ok {
 		mem = rel.Memo()
 	}
-	_, err = ot.ExecBuild(f, mem, expr)
+	_, err = ot.ExecBuild(&f, mem, expr)
 	if err != nil {
 		t.Error(err)
 	}
@@ -51,7 +47,7 @@ func explainGist(gist string, catalog cat.Catalog) string {
 	if err != nil {
 		panic(err)
 	}
-	err = explain.Emit(context.Background(), explainPlan, ob, func(table cat.Table, index cat.Index, scanParams exec.ScanParams) string { return "" })
+	err = explain.Emit(context.Background(), &eval.Context{}, explainPlan, ob, func(table cat.Table, index cat.Index, scanParams exec.ScanParams) string { return "" }, false /* createPostQueryPlanIfMissing */)
 	if err != nil {
 		panic(err)
 	}
@@ -73,14 +69,14 @@ func plan(ot *opttester.OptTester, t *testing.T) string {
 	}
 	explainPlan, err := ot.ExecBuild(f, mem, expr)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	if explainPlan == nil {
-		t.Error("Couldn't ExecBuild memo, use a logictest instead?")
+		t.Fatal("Couldn't ExecBuild memo, use a logictest instead?")
 	}
 	flags := explain.Flags{HideValues: true, Deflake: explain.DeflakeAll, OnlyShape: true}
 	ob := explain.NewOutputBuilder(flags)
-	err = explain.Emit(context.Background(), explainPlan.(*explain.Plan), ob, func(table cat.Table, index cat.Index, scanParams exec.ScanParams) string { return "" })
+	err = explain.Emit(context.Background(), &eval.Context{}, explainPlan.(*explain.Plan), ob, func(table cat.Table, index cat.Index, scanParams exec.ScanParams) string { return "" }, false /* createPostQueryPlanIfMissing */)
 	if err != nil {
 		t.Error(err)
 	}

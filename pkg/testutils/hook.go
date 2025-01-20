@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package testutils
 
@@ -21,4 +16,13 @@ func TestingHook(ptr, val interface{}) func() {
 	orig.Set(global)
 	global.Set(reflect.ValueOf(val))
 	return func() { global.Set(orig) }
+}
+
+// HookGlobal provides a way to temporarily set a package-global variable to a
+// new value for the duration of a test. It returns a closure that restores the
+// original value.
+func HookGlobal[T any](ptr *T, val T) func() {
+	orig := *ptr
+	*ptr = val
+	return func() { *ptr = orig }
 }

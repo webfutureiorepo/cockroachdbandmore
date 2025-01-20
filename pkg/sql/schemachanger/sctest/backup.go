@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctest
 
@@ -30,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -114,11 +108,33 @@ func maybeRandomlySkip(t *testing.T) {
 
 func backupSuccess(t *testing.T, factory TestServerFactory, cs CumulativeTestCaseSpec) {
 	maybeRandomlySkip(t)
+	// Skip comparing outputs, if there are any newly created objects, since
+	// in transactional cases these may not exist within the image. We include
+	// all relations and types since those are excluded in Adding state from
+	// being restored. For functions this logic does not apply and they are always
+	// backed up.
+	skipOutputComparison := false
+	skipTags := map[string]struct{}{
+		"CREATE TABLE":    {},
+		"CREATE SEQUENCE": {},
+		"CREATE VIEW":     {},
+		"CREATE TYPE":     {},
+		"CREATE SCHEMA":   {},
+		"CREATE DATABASE": {},
+		"CREATE FUNCTION": {},
+	}
+	for _, stmt := range cs.Stmts {
+		if _, found := skipTags[stmt.AST.StatementTag()]; found && len(cs.Stmts) > 1 {
+			t.Logf("Skipping comparison of state after schema changes because new "+
+				"objects are being created, which may not be persisted %s\n", stmt.AST.String())
+			skipOutputComparison = true
+		}
+	}
 	ctx := context.Background()
 	url := fmt.Sprintf("userfile://backups.public.userfiles_$user/data_%s_%d",
 		cs.Phase, cs.StageOrdinal)
 	var dbForBackup atomic.Pointer[gosql.DB]
-	var isBackupPostBackfill syncutil.AtomicBool
+	var isBackupPostBackfill atomic.Bool
 	pe := MakePlanExplainer()
 	knobs := &scexec.TestingKnobs{
 		// Back up the database exactly once when reaching the stage prescribed
@@ -146,7 +162,7 @@ func backupSuccess(t *testing.T, factory TestServerFactory, cs CumulativeTestCas
 						// schema changer state.
 						for j := i + 1; j < stageIdx; j++ {
 							if p.Stages[j].Type() == scop.MutationType {
-								isBackupPostBackfill.Set(true)
+								isBackupPostBackfill.Store(true)
 								break OuterLoop
 							}
 						}
@@ -185,13 +201,14 @@ func backupSuccess(t *testing.T, factory TestServerFactory, cs CumulativeTestCas
 		// Determine whether the post-RESTORE schema change may perhaps
 		// be rolled back.
 		b := backupRestoreOutcome{
-			url:                url,
-			maySucceed:         true,
-			expectedOnSuccess:  after,
-			mayRollback:        false,
-			expectedOnRollback: before,
+			url:                     url,
+			maySucceed:              true,
+			expectedOnSuccess:       after,
+			skipComparisonOnSuccess: skipOutputComparison,
+			mayRollback:             false,
+			expectedOnRollback:      before,
 		}
-		if isBackupPostBackfill.Get() {
+		if isBackupPostBackfill.Load() {
 			const countRowsQ = `
 				SELECT coalesce(sum(rows), 0)
 				FROM [SHOW BACKUP FROM LATEST IN $2]
@@ -322,6 +339,7 @@ type backupRestoreOutcome struct {
 	url                                   string
 	maySucceed, mayRollback               bool
 	expectedOnSuccess, expectedOnRollback [][]string
+	skipComparisonOnSuccess               bool
 }
 
 func exerciseBackupRestore(
@@ -429,8 +447,10 @@ func exerciseBackupRestore(
 
 			// Define expectations based on outcome.
 			var expected [][]string
+			skipComparison := false
 			if hasLatestSchemaChangeSucceeded(t, tdb) {
 				expected = b.expectedOnSuccess
+				skipComparison = b.skipComparisonOnSuccess
 				if !b.maySucceed {
 					t.Fatal("post-RESTORE schema change was expected to not succeed")
 				}
@@ -445,20 +465,29 @@ func exerciseBackupRestore(
 			if rc.restoreFlavor == restoreAllTablesInDatabase {
 				// Expected table schema state must be stripped of UDF references.
 				expected = parserRoundTrip(t, expected) // deep copy
+				tmpExpected := make([][]string, 0, len(expected))
 				for i := range expected {
 					stmt, err := parser.ParseOne(expected[i][0])
 					require.NoError(t, err)
+					if _, ok := stmt.AST.(*tree.CreateRoutine); ok {
+						continue
+					}
 					if c, ok := stmt.AST.(*tree.CreateTable); ok {
 						require.NoError(t, removeDefsDependOnUDFs(c))
 					}
-					expected[i][0] = tree.AsString(stmt.AST)
+					tmpExpected = append(tmpExpected, []string{tree.AsString(stmt.AST)})
 				}
+				expected = tmpExpected
 			}
 
 			// Check expectations.
-			require.Equalf(t, expected, actual,
-				"backup contents:\nparent_schema_name,object_name,object_type\n%s\n%s",
-				sqlutils.MatrixToStr(backupContents), pe.GetExplain())
+			if !skipComparison {
+				require.Equalf(t, expected, actual,
+					"backup contents:\nparent_schema_name,object_name,object_type\n%s\n%s",
+					sqlutils.MatrixToStr(backupContents), pe.GetExplain())
+			} else {
+				t.Log("Skipping comparison of SQL afterwards as requested.")
+			}
 
 			// Clean up.
 			tdb.Exec(t, fmt.Sprintf("DROP DATABASE %q CASCADE", cs.DatabaseName))

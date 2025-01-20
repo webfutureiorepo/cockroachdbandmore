@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package sqlstats is a subsystem that is responsible for tracking the
 // statistics of statements and transactions.
@@ -174,4 +169,10 @@ func (s *SQLStatsAtomicCounters) freeByCnt(
 // transaction fingerprints stored in the current SQLStats.
 func (s *SQLStatsAtomicCounters) GetTotalFingerprintCount() int64 {
 	return atomic.LoadInt64(&s.uniqueStmtFingerprintCount) + atomic.LoadInt64(&s.uniqueTxnFingerprintCount)
+}
+
+// GetStatementCount returns the number of unique statement fingerprints stored
+// in the current SQLStats.
+func (s *SQLStatsAtomicCounters) GetStatementCount() int64 {
+	return atomic.LoadInt64(&s.uniqueStmtFingerprintCount)
 }

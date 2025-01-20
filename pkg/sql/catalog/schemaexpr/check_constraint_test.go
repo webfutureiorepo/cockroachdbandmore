@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemaexpr_test
 
@@ -25,7 +20,7 @@ import (
 
 func TestCheckConstraintBuilder_Build(t *testing.T) {
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 
 	// Trick to get the init() for the builtins package to run.
 	_ = builtins.AllBuiltinNames()
@@ -147,7 +142,7 @@ func TestCheckConstraintBuilder_Build(t *testing.T) {
 
 func TestCheckConstraintBuilder_DefaultName(t *testing.T) {
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 
 	database := tree.Name("foo")
 	table := tree.Name("bar")

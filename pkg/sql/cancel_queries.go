@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -23,7 +18,7 @@ import (
 )
 
 type cancelQueriesNode struct {
-	rows     planNode
+	singleInputPlanNode
 	ifExists bool
 }
 
@@ -36,11 +31,11 @@ func (n *cancelQueriesNode) Next(params runParams) (bool, error) {
 	// accumulate all the query IDs and then send batches to each of the
 	// nodes.
 
-	if ok, err := n.rows.Next(params); err != nil || !ok {
+	if ok, err := n.input.Next(params); err != nil || !ok {
 		return ok, err
 	}
 
-	datum := n.rows.Values()[0]
+	datum := n.input.Values()[0]
 	if datum == tree.DNull {
 		return true, nil
 	}
@@ -79,5 +74,5 @@ func (n *cancelQueriesNode) Next(params runParams) (bool, error) {
 func (*cancelQueriesNode) Values() tree.Datums { return nil }
 
 func (n *cancelQueriesNode) Close(ctx context.Context) {
-	n.rows.Close(ctx)
+	n.input.Close(ctx)
 }

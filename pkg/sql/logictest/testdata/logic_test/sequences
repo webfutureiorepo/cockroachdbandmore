@@ -921,13 +921,31 @@ DROP TABLE drop_test_tbl
 statement ok
 DROP SEQUENCE drop_test
 
-# Test that sequences can only be modified with the UPDATE permission
-# and read with the SELECT permission.
+# Test that sequences can only be:
+# - created with CREATE permission on the parent schema,
+# - modified with the UPDATE permission,
+# - read with the SELECT permission.
 
 statement ok
 CREATE SEQUENCE priv_test
 
+statement ok
+CREATE DATABASE another_db;
+
+statement ok
+CREATE SCHEMA another_db.seq_schema_allow;
+CREATE SCHEMA another_db.seq_schema_deny;
+
+statement ok
+GRANT CREATE ON SCHEMA another_db.seq_schema_allow TO testuser
+
 user testuser
+
+statement ok
+CREATE SEQUENCE another_db.seq_schema_allow.seq;
+
+statement error user testuser does not have CREATE privilege on schema seq_schema_deny
+CREATE SEQUENCE another_db.seq_schema_deny.seq;
 
 statement error pq: user testuser does not have SELECT privilege on relation priv_test
 SELECT * FROM priv_test
@@ -1533,7 +1551,7 @@ SELECT last_value FROM cache_test
 10
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER SEQUENCE cache_test INCREMENT 5
@@ -2410,3 +2428,98 @@ subtest regression_106838
 
 statement error pgcode 42601 pq: invalid OWNED BY option
 CREATE SEQUENCE s_106838 OWNED BY col;
+
+subtest sequence_type_name_conflict
+
+statement ok
+SET serial_normalization = 'sql_sequence';
+SET default_int_size=8;
+
+statement ok
+CREATE TYPE t72820_i_seq AS enum ('a')
+
+statement ok
+CREATE TABLE t72820 (i SERIAL PRIMARY KEY)
+
+query T
+SELECT create_statement FROM [SHOW CREATE TABLE t72820]
+----
+CREATE TABLE public.t72820 (
+   i INT8 NOT NULL DEFAULT nextval('public.t72820_i_seq1'::REGCLASS),
+   CONSTRAINT t72820_pkey PRIMARY KEY (i ASC)
+)
+
+# Also make sure that creating a sequence directly handles the name conflict.
+skipif config local-legacy-schema-changer
+statement error relation "test.public.t72820_i_seq" already exists
+CREATE SEQUENCE t72820_i_seq
+
+onlyif config local-legacy-schema-changer
+statement error type "test.public.t72820_i_seq" already exists
+CREATE SEQUENCE t72820_i_seq
+
+statement ok
+RESET serial_normalization;
+RESET default_int_size;
+
+subtest end
+
+# The following subtest ensures sequences do not have any unexpected columns
+# on creation. Previously, we were incorrectly creating a rowid column.
+subtest regression_119108
+
+statement ok
+CREATE SEQUENCE sq_119108;
+
+query T
+SELECT crdb_internal.pb_to_json('desc', descriptor)->'table'->'columns' FROM system.descriptor WHERE id = 'sq_119108'::REGCLASS::OID;
+----
+[{"id": 1, "name": "value", "type": {"family": "IntFamily", "oid": 20, "width": 64}}]
+
+subtest end
+
+subtest geo_types
+
+onlyif config local-legacy-schema-changer
+statement error type "geography" already exists
+CREATE SEQUENCE geography
+
+onlyif config local-legacy-schema-changer
+statement error type "geometry" already exists
+CREATE SEQUENCE geometry
+
+onlyif config local-legacy-schema-changer
+statement error type "box2d" already exists
+CREATE SEQUENCE box2d
+
+skipif config local-legacy-schema-changer
+statement error geography is a built-in type and cannot be modified
+CREATE SEQUENCE geography
+
+skipif config local-legacy-schema-changer
+statement error geometry is a built-in type and cannot be modified
+CREATE SEQUENCE geometry
+
+skipif config local-legacy-schema-changer
+statement error box2d is a built-in type and cannot be modified
+CREATE SEQUENCE box2d
+
+subtest end
+
+subtest temp_sequence
+
+statement error temporary tables are only supported experimentally
+CREATE TEMP SEQUENCE temp_seq
+
+statement ok
+SET experimental_enable_temp_tables = true
+
+statement ok
+CREATE TEMP SEQUENCE temp_seq
+
+query TT
+SELECT substring(sequence_schema FOR 7), sequence_name FROM [SHOW SEQUENCES] WHERE sequence_name = 'temp_seq'
+----
+pg_temp  temp_seq
+
+subtest end

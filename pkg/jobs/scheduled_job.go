@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -176,12 +171,18 @@ func (j *ScheduledJob) ExecutionArgs() *jobspb.ExecutionArguments {
 	return &j.rec.ExecutionArgs
 }
 
-// SetSchedule updates periodicity of this schedule, and updates this schedules
+// SetScheduleAndNextRun updates periodicity of this schedule, and updates this schedules
 // next run time.
-func (j *ScheduledJob) SetSchedule(scheduleExpr string) error {
+func (j *ScheduledJob) SetScheduleAndNextRun(scheduleExpr string) error {
 	j.rec.ScheduleExpr = scheduleExpr
 	j.markDirty("schedule_expr")
 	return j.ScheduleNextRun()
+}
+
+// SetScheduleExpr updates schedule expression for this schedule without updating next run time.
+func (j *ScheduledJob) SetScheduleExpr(scheduleExpr string) {
+	j.rec.ScheduleExpr = scheduleExpr
+	j.markDirty("schedule_expr")
 }
 
 // HasRecurringSchedule returns true if this schedule job runs periodically.
@@ -239,12 +240,14 @@ func (j *ScheduledJob) SetScheduleDetails(details jobspb.ScheduleDetails) {
 }
 
 // SetScheduleStatus sets schedule status.
-func (j *ScheduledJob) SetScheduleStatus(fmtOrMsg string, args ...interface{}) {
-	if len(args) == 0 {
-		j.rec.ScheduleState.Status = fmtOrMsg
-	} else {
-		j.rec.ScheduleState.Status = fmt.Sprintf(fmtOrMsg, args...)
-	}
+func (j *ScheduledJob) SetScheduleStatus(msg string) {
+	j.rec.ScheduleState.Status = msg
+	j.markDirty("schedule_state")
+}
+
+// SetScheduleStatusf sets schedule status.
+func (j *ScheduledJob) SetScheduleStatusf(format string, args ...interface{}) {
+	j.rec.ScheduleState.Status = fmt.Sprintf(format, args...)
 	j.markDirty("schedule_state")
 }
 
@@ -452,7 +455,7 @@ func (s scheduledJobStorageTxn) DeleteByID(
 		ctx,
 		"delete-schedule",
 		s.txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf(
 			"DELETE FROM %s WHERE schedule_id = $1",
 			env.ScheduledJobsTableName(),
@@ -466,7 +469,7 @@ func (s scheduledJobStorageTxn) Load(
 	ctx context.Context, env scheduledjobs.JobSchedulerEnv, id jobspb.ScheduleID,
 ) (*ScheduledJob, error) {
 	row, cols, err := s.txn.QueryRowExWithCols(ctx, "lookup-schedule", s.txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf("SELECT * FROM %s WHERE schedule_id = %d",
 			env.ScheduledJobsTableName(), id))
 
@@ -504,7 +507,7 @@ func (s scheduledJobStorageTxn) Create(ctx context.Context, j *ScheduledJob) err
 	}
 
 	row, retCols, err := s.txn.QueryRowExWithCols(ctx, "sched-create", s.txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf("INSERT INTO %s (%s) VALUES(%s) RETURNING schedule_id",
 			j.env.ScheduledJobsTableName(), strings.Join(cols, ","), generatePlaceholders(len(qargs))),
 		qargs...,
@@ -525,7 +528,7 @@ func (s scheduledJobStorageTxn) Delete(ctx context.Context, j *ScheduledJob) err
 		return errors.New("cannot delete schedule: missing schedule id")
 	}
 	_, err := s.txn.ExecEx(ctx, "sched-delete", s.txn.KV(),
-		sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf("DELETE FROM %s WHERE schedule_id = %d",
 			j.env.ScheduledJobsTableName(), j.ScheduleID()),
 	)
@@ -552,7 +555,7 @@ func (s scheduledJobStorageTxn) Update(ctx context.Context, j *ScheduledJob) err
 	}
 
 	n, err := s.txn.ExecEx(ctx, "sched-update", s.txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		fmt.Sprintf("UPDATE %s SET (%s) = (%s) WHERE schedule_id = %d",
 			j.env.ScheduledJobsTableName(), strings.Join(cols, ","),
 			generatePlaceholders(len(qargs)), j.ScheduleID()),

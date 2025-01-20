@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades_test
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -47,7 +42,7 @@ func TestSchemaTelemetrySchedule(t *testing.T) {
 
 		ctx := context.Background()
 		var args base.TestServerArgs
-		var injectedFailure syncutil.AtomicBool
+		var injectedFailure atomic.Bool
 		// The statement which writes the completion of the migration will
 		// match the below regexp.
 		completeRegexp := regexp.MustCompile(`INSERT\s+INTO\s+system.migrations`)
@@ -60,8 +55,8 @@ func TestSchemaTelemetrySchedule(t *testing.T) {
 		args.Knobs.JobsTestingKnobs = jobKnobs
 		args.Knobs.SQLExecutor = &sql.ExecutorTestingKnobs{
 			BeforePrepare: func(ctx context.Context, stmt string, txn *kv.Txn) error {
-				if forceRetry && !injectedFailure.Get() && completeRegexp.MatchString(stmt) {
-					injectedFailure.Set(true)
+				if forceRetry && !injectedFailure.Load() && completeRegexp.MatchString(stmt) {
+					injectedFailure.Store(true)
 					return errors.New("boom")
 				}
 				return nil

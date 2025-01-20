@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package team involves processing team information based on a yaml
 // file containing team metadata.
@@ -39,14 +34,8 @@ type Team struct {
 	Label string `yaml:"label"`
 	// TriageColumnID is the GitHub Column ID to assign issues to.
 	TriageColumnID int `yaml:"triage_column_id"`
-	// Email is the email address for this team.
-	//
-	// Currently unused.
-	Email string `yaml:"email"`
-	// Slack is the slack channel for this team.
-	//
-	// Currently unused.
-	Slack string `yaml:"slack"`
+	// SilenceMentions is true if @-mentions should be supressed for this team.
+	SilenceMentions bool `yaml:"silence_mentions"`
 }
 
 // Name returns the main Alias of the team.
@@ -100,11 +89,13 @@ const (
 	// PurposeRoachtest indicates that the team handles that should be mentioned
 	// in roachtest issues should be returned.
 	PurposeRoachtest = Purpose("roachtest")
+	PurposeUnittest  = Purpose("unittest")
 )
 
 var validPurposes = map[Purpose]struct{}{
 	PurposeOther:     {},
 	PurposeRoachtest: {}, // mention in roachtest issues
+	PurposeUnittest:  {}, // mention in unit test issues
 }
 
 // LoadTeams loads the teams from an io input.

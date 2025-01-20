@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file provides generic interfaces that allow tests to set up test servers
 // without importing the server package (avoiding circular dependencies).
@@ -33,15 +28,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 )
+
+const defaultTestTenantName = roachpb.TenantName("test-tenant")
 
 // defaultTestTenantMessage is a message that is printed when a test is run
 // under cluster virtualization. This is useful for debugging test failures.
@@ -152,7 +149,7 @@ func ShouldStartDefaultTestTenant(
 	// Note: we ask the metamorphic framework for a "disable" value, instead
 	// of an "enable" value, because it probabilistically returns its default value
 	// more often than not and that is what we want.
-	enabled := !util.ConstantWithMetamorphicTestBoolWithoutLogging("disable-test-tenant", false)
+	enabled := !metamorphic.ConstantWithTestBoolWithoutLogging("disable-test-tenant", false)
 	if enabled && t != nil {
 		t.Log(defaultTestTenantMessage(shared))
 	}
@@ -322,6 +319,10 @@ func NewServer(params base.TestServerArgs) (TestServerInterface, error) {
 	tcfg := params.DefaultTestTenant
 	if tcfg.TestTenantNoDecisionMade() {
 		return nil, errors.AssertionFailedf("programming error: DefaultTestTenant does not contain a decision\n(maybe call ShouldStartDefaultTestTenant?)")
+	}
+
+	if params.DefaultTenantName == "" {
+		params.DefaultTenantName = defaultTestTenantName
 	}
 
 	srv, err := srvFactoryImpl.New(params)

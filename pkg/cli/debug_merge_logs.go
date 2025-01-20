@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -16,6 +11,7 @@ import (
 	"container/heap"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -354,12 +350,11 @@ func findLogFiles(
 	}
 	var files []fileInfo
 	for _, p := range paths {
-		// NB: come go1.16, we should use WalkDir here as it is more efficient.
-		if err := filepath.Walk(p, func(p string, info os.FileInfo, err error) error {
+		if err := filepath.WalkDir(p, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() {
+			if d.IsDir() {
 				// Don't act on the directory itself, Walk will visit it for us.
 				return nil
 			}

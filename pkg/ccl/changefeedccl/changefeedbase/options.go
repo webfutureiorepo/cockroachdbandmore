@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedbase
 
@@ -15,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -76,35 +72,37 @@ const (
 
 // Constants for the options.
 const (
-	OptAvroSchemaPrefix             = `avro_schema_prefix`
-	OptConfluentSchemaRegistry      = `confluent_schema_registry`
-	OptCursor                       = `cursor`
-	OptCustomKeyColumn              = `key_column`
-	OptEndTime                      = `end_time`
-	OptEnvelope                     = `envelope`
-	OptFormat                       = `format`
-	OptFullTableName                = `full_table_name`
-	OptKeyInValue                   = `key_in_value`
-	OptTopicInValue                 = `topic_in_value`
-	OptResolvedTimestamps           = `resolved`
-	OptMinCheckpointFrequency       = `min_checkpoint_frequency`
-	OptUpdatedTimestamps            = `updated`
-	OptMVCCTimestamps               = `mvcc_timestamp`
-	OptDiff                         = `diff`
-	OptCompression                  = `compression`
-	OptSchemaChangeEvents           = `schema_change_events`
-	OptSchemaChangePolicy           = `schema_change_policy`
-	OptSplitColumnFamilies          = `split_column_families`
-	OptExpirePTSAfter               = `gc_protect_expires_after`
-	OptWebhookAuthHeader            = `webhook_auth_header`
-	OptWebhookClientTimeout         = `webhook_client_timeout`
-	OptOnError                      = `on_error`
-	OptMetricsScope                 = `metrics_label`
-	OptUnordered                    = `unordered`
-	OptVirtualColumns               = `virtual_columns`
-	OptExecutionLocality            = `execution_locality`
-	OptLaggingRangesThreshold       = `lagging_ranges_threshold`
-	OptLaggingRangesPollingInterval = `lagging_ranges_polling_interval`
+	OptAvroSchemaPrefix                   = `avro_schema_prefix`
+	OptConfluentSchemaRegistry            = `confluent_schema_registry`
+	OptCursor                             = `cursor`
+	OptCustomKeyColumn                    = `key_column`
+	OptEndTime                            = `end_time`
+	OptEnvelope                           = `envelope`
+	OptFormat                             = `format`
+	OptFullTableName                      = `full_table_name`
+	OptKeyInValue                         = `key_in_value`
+	OptTopicInValue                       = `topic_in_value`
+	OptResolvedTimestamps                 = `resolved`
+	OptMinCheckpointFrequency             = `min_checkpoint_frequency`
+	OptUpdatedTimestamps                  = `updated`
+	OptMVCCTimestamps                     = `mvcc_timestamp`
+	OptDiff                               = `diff`
+	OptCompression                        = `compression`
+	OptSchemaChangeEvents                 = `schema_change_events`
+	OptSchemaChangePolicy                 = `schema_change_policy`
+	OptSplitColumnFamilies                = `split_column_families`
+	OptExpirePTSAfter                     = `gc_protect_expires_after`
+	OptWebhookAuthHeader                  = `webhook_auth_header`
+	OptWebhookClientTimeout               = `webhook_client_timeout`
+	OptOnError                            = `on_error`
+	OptMetricsScope                       = `metrics_label`
+	OptUnordered                          = `unordered`
+	OptVirtualColumns                     = `virtual_columns`
+	OptExecutionLocality                  = `execution_locality`
+	OptLaggingRangesThreshold             = `lagging_ranges_threshold`
+	OptLaggingRangesPollingInterval       = `lagging_ranges_polling_interval`
+	OptIgnoreDisableChangefeedReplication = `ignore_disable_changefeed_replication`
+	OptEncodeJSONValueNullAsObject        = `encode_json_value_null_as_object`
 
 	OptVirtualColumnsOmitted VirtualColumnVisibility = `omitted`
 	OptVirtualColumnsNull    VirtualColumnVisibility = `null`
@@ -206,6 +204,7 @@ const (
 	SinkSchemeNull                  = `null`
 	SinkSchemeWebhookHTTP           = `webhook-http`
 	SinkSchemeWebhookHTTPS          = `webhook-https`
+	SinkSchemePulsar                = `pulsar`
 	SinkSchemeExternalConnection    = `external`
 	SinkParamSASLEnabled            = `sasl_enabled`
 	SinkParamSASLHandshake          = `sasl_handshake`
@@ -217,11 +216,18 @@ const (
 	SinkParamSASLTokenURL           = `sasl_token_url`
 	SinkParamSASLScopes             = `sasl_scopes`
 	SinkParamSASLGrantType          = `sasl_grant_type`
+	SinkParamSASLAwsIAMRoleArn      = `sasl_aws_iam_role_arn`
+	SinkParamSASLAwsRegion          = `sasl_aws_region`
+	SinkParamSASLAwsIAMSessionName  = `sasl_aws_iam_session_name`
 	SinkParamTableNameAttribute     = `with_table_name_attribute`
 
 	SinkSchemeConfluentKafka    = `confluent-cloud`
 	SinkParamConfluentAPIKey    = `api_key`
 	SinkParamConfluentAPISecret = `api_secret`
+
+	SinkSchemeAzureKafka        = `azure-event-hub`
+	SinkParamAzureAccessKeyName = `shared_access_key_name`
+	SinkParamAzureAccessKey     = `shared_access_key`
 
 	RegistryParamCACert     = `ca_cert`
 	RegistryParamClientCert = `client_cert`
@@ -361,6 +367,8 @@ var ChangefeedOptionExpectValues = map[string]OptionPermittedValues{
 	OptExecutionLocality:                  stringOption,
 	OptLaggingRangesThreshold:             durationOption,
 	OptLaggingRangesPollingInterval:       durationOption,
+	OptIgnoreDisableChangefeedReplication: flagOption,
+	OptEncodeJSONValueNullAsObject:        flagOption,
 }
 
 // CommonOptions is options common to all sinks
@@ -374,6 +382,7 @@ var CommonOptions = makeStringSet(OptCursor, OptEndTime, OptEnvelope,
 	OptInitialScan, OptNoInitialScan, OptInitialScanOnly, OptUnordered, OptCustomKeyColumn,
 	OptMinCheckpointFrequency, OptMetricsScope, OptVirtualColumns, Topics, OptExpirePTSAfter,
 	OptExecutionLocality, OptLaggingRangesThreshold, OptLaggingRangesPollingInterval,
+	OptIgnoreDisableChangefeedReplication, OptEncodeJSONValueNullAsObject,
 )
 
 // SQLValidOptions is options exclusive to SQL sink
@@ -758,18 +767,19 @@ func (s StatementOptions) GetCanHandle() CanHandle {
 // EncodingOptions describe how events are encoded when
 // sent to the sink.
 type EncodingOptions struct {
-	Format            FormatType
-	VirtualColumns    VirtualColumnVisibility
-	Envelope          EnvelopeType
-	KeyInValue        bool
-	TopicInValue      bool
-	UpdatedTimestamps bool
-	MVCCTimestamps    bool
-	Diff              bool
-	AvroSchemaPrefix  string
-	SchemaRegistryURI string
-	Compression       string
-	CustomKeyColumn   string
+	Format                      FormatType
+	VirtualColumns              VirtualColumnVisibility
+	Envelope                    EnvelopeType
+	KeyInValue                  bool
+	TopicInValue                bool
+	UpdatedTimestamps           bool
+	MVCCTimestamps              bool
+	Diff                        bool
+	EncodeJSONValueNullAsObject bool
+	AvroSchemaPrefix            string
+	SchemaRegistryURI           string
+	Compression                 string
+	CustomKeyColumn             string
 }
 
 // GetEncodingOptions populates and validates an EncodingOptions.
@@ -811,6 +821,7 @@ func (s StatementOptions) GetEncodingOptions() (EncodingOptions, error) {
 	_, o.UpdatedTimestamps = s.m[OptUpdatedTimestamps]
 	_, o.MVCCTimestamps = s.m[OptMVCCTimestamps]
 	_, o.Diff = s.m[OptDiff]
+	_, o.EncodeJSONValueNullAsObject = s.m[OptEncodeJSONValueNullAsObject]
 
 	o.SchemaRegistryURI = s.m[OptConfluentSchemaRegistry]
 	o.AvroSchemaPrefix = s.m[OptAvroSchemaPrefix]
@@ -827,6 +838,9 @@ func (e EncodingOptions) Validate() error {
 		return errors.Errorf(`%s=%s is not supported with %s=%s`,
 			OptEnvelope, OptEnvelopeRow, OptFormat, OptFormatAvro,
 		)
+	}
+	if e.Format != OptFormatJSON && e.EncodeJSONValueNullAsObject {
+		return errors.Errorf(`%s is only usable with %s=%s`, OptEncodeJSONValueNullAsObject, OptFormat, OptFormatJSON)
 	}
 	if e.Envelope != OptEnvelopeWrapped && e.Format != OptFormatJSON && e.Format != OptFormatParquet {
 		requiresWrap := []struct {
@@ -886,14 +900,17 @@ func (s StatementOptions) GetSchemaChangeHandlingOptions() (SchemaChangeHandling
 // Filters are aspects of the feed that the backing
 // kvfeed or rangefeed want to know about.
 type Filters struct {
-	WithDiff bool
+	WithDiff      bool
+	WithFiltering bool
 }
 
 // GetFilters returns a populated Filters.
 func (s StatementOptions) GetFilters() Filters {
 	_, withDiff := s.m[OptDiff]
+	_, withIgnoreDisableChangefeedReplication := s.m[OptIgnoreDisableChangefeedReplication]
 	return Filters{
-		WithDiff: withDiff,
+		WithDiff:      withDiff,
+		WithFiltering: !withIgnoreDisableChangefeedReplication,
 	}
 }
 
@@ -955,18 +972,10 @@ func (s StatementOptions) GetMetricScope() (string, bool) {
 func (s StatementOptions) GetLaggingRangesConfig(
 	ctx context.Context, settings *cluster.Settings,
 ) (threshold time.Duration, pollingInterval time.Duration, e error) {
-	// This version gate prevents the scenario where the changefeed is created
-	// with options on a 23.2 node and resumed on a node with an old version
-	// which does not have those options.
-	laggingRangesVersionIsActive := settings.Version.IsActive(ctx, clusterversion.V23_2_ChangefeedLaggingRangesOpts)
 	threshold = DefaultLaggingRangesThreshold
 	pollingInterval = DefaultLaggingRangesPollingInterval
 	_, ok := s.m[OptLaggingRangesThreshold]
 	if ok {
-		if !laggingRangesVersionIsActive {
-			return threshold, pollingInterval, WithTerminalError(errors.New("cluster version must be 23.2 or" +
-				" greater to use lagging ranges metrics configs"))
-		}
 		t, err := s.getDurationValue(OptLaggingRangesThreshold)
 		if err != nil {
 			return threshold, pollingInterval, err
@@ -975,10 +984,6 @@ func (s StatementOptions) GetLaggingRangesConfig(
 	}
 	_, ok = s.m[OptLaggingRangesPollingInterval]
 	if ok {
-		if !laggingRangesVersionIsActive {
-			return threshold, pollingInterval, WithTerminalError(errors.New("cluster version must be 23.2 or" +
-				" greater to use lagging ranges metrics configs"))
-		}
 		i, err := s.getDurationValue(OptLaggingRangesPollingInterval)
 		if err != nil {
 			return threshold, pollingInterval, err

@@ -756,6 +756,25 @@ SELECT * FROM t_disallow_scans@{FORCE_INDEX=b_idx,NO_FULL_SCAN} WHERE b > 0
 statement ok
 SELECT * FROM t_disallow_scans@{FORCE_INDEX=b_partial,NO_FULL_SCAN} WHERE a > 0 AND b = 1
 
+# Now avoid full scans with a hint. A full scan should not cause an error.
+statement ok
+SELECT * FROM t_disallow_scans@{AVOID_FULL_SCAN}
+
+statement ok
+SELECT * FROM t_disallow_scans@{FORCE_INDEX=b_idx,AVOID_FULL_SCAN}
+
+statement ok
+SELECT * FROM t_disallow_scans@{FORCE_INDEX=b_partial,AVOID_FULL_SCAN} WHERE a > 0
+
+statement ok
+SELECT * FROM t_disallow_scans@{AVOID_FULL_SCAN} WHERE a > 0
+
+statement ok
+SELECT * FROM t_disallow_scans@{FORCE_INDEX=b_idx,AVOID_FULL_SCAN} WHERE b > 0
+
+statement ok
+SELECT * FROM t_disallow_scans@{FORCE_INDEX=b_partial,AVOID_FULL_SCAN} WHERE a > 0 AND b = 1
+
 # Now disable full scans with the session variable.
 statement ok
 SET disallow_full_table_scans = true;
@@ -807,7 +826,7 @@ SELECT * FROM t_disallow_scans
 statement error pq: index "b_idx" cannot be used for this query\nHINT: try overriding the `disallow_full_table_scans`
 SELECT * FROM t_disallow_scans@b_idx
 
-# Internal statements should still be allowed with this setting.
+# Full scans of virtual tables are still allowed with this setting (#123783).
 statement ok
 SELECT * FROM pg_class
 
@@ -938,3 +957,14 @@ ORDER BY 1 DESC
 ----
 5ebfedee-0dcf-41e6-a315-5fa0b51b9883  2  1999-11-30 23:59:58 +0000 +0000
 5ebfedee-0dcf-41e6-a315-5fa0b51b9882  1  1999-11-30 23:59:59 +0000 +0000
+
+# Regression test for incorrect evaluation of the IN filter due to integer
+# overflow when working with INT4 type (#102864).
+statement ok
+CREATE TABLE t102864 (c INT4);
+INSERT INTO t102864 (c) VALUES (0);
+
+query I
+SELECT c FROM t102864 WHERE c IN (0, 862827606027206657::INT8);
+----
+0

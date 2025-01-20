@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto2";
 
@@ -39,12 +34,17 @@ message Function {
 
   message Param {
     enum Class {
-      UNKNOWN_ARG_CLASS = 0;
+      DEFAULT = 0;
       IN = 1;
       OUT = 2;
       IN_OUT = 3;
       VARIADIC = 4;
     }
+  }
+
+  enum Security {
+    INVOKER = 0;
+    DEFINER = 1;
   }
 }
 
@@ -68,4 +68,10 @@ message FunctionLanguage {
 message FunctionParamClass {
   option (gogoproto.equal) = true;
   optional Function.Param.Class class = 1 [(gogoproto.nullable) = false];
+}
+
+message FunctionSecurity {
+  option (gogoproto.equal) = true;
+  // If security is not explicitly set, the default security mode is INVOKER.
+  optional Function.Security security = 1 [(gogoproto.nullable) = false];
 }

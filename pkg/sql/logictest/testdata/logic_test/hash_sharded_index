@@ -221,8 +221,9 @@ sharded_secondary  CREATE TABLE public.sharded_secondary (
 statement ok
 CREATE INDEX idx on sharded_secondary (a) USING HASH WITH (bucket_count=3)
 
+# Use high priority to decrease the likelihood of the transaction being aborted.
 statement ok
-BEGIN
+BEGIN TRANSACTION PRIORITY HIGH ISOLATION LEVEL SERIALIZABLE
 
 statement ok
 SELECT crdb_internal_a_shard_3 FROM sharded_secondary
@@ -837,7 +838,7 @@ t_hash_pre_split  133       t_hash_pre_split_idx_b  /Table/133/2/3  /Table/133/2
 t_hash_pre_split  133       t_hash_pre_split_idx_b  /Table/133/2/4  /Table/133/2/5
 t_hash_pre_split  133       t_hash_pre_split_idx_b  /Table/133/2/5  /Table/133/2/6
 t_hash_pre_split  133       t_hash_pre_split_idx_b  /Table/133/2/6  /Table/133/2/7
-t_hash_pre_split  133       t_hash_pre_split_idx_b  /Table/133/2/7  /Table/133/3/0
+t_hash_pre_split  133       t_hash_pre_split_idx_b  /Table/133/2/7  /Table/133/3
 
 subtest test_default_bucket_count
 
@@ -1048,13 +1049,13 @@ statement ok
 ALTER TABLE products DROP COLUMN description;
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 SET LOCAL use_declarative_schema_changer = off;
 ALTER TABLE products ADD COLUMN description STRING NOT NULL DEFAULT '';
 COMMIT;
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 SET LOCAL use_declarative_schema_changer = off;
 ALTER TABLE products DROP COLUMN description;
 COMMIT;

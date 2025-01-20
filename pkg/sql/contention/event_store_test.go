@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package contention
 
@@ -148,7 +143,7 @@ func TestCollectionThreshold(t *testing.T) {
 		{
 			BlockingEvent: kvpb.ContentionEvent{
 				TxnMeta: enginepb.TxnMeta{
-					ID: uuid.FastMakeV4(),
+					ID: uuid.MakeV4(),
 				},
 				Duration: 10 * time.Millisecond,
 			},
@@ -156,7 +151,7 @@ func TestCollectionThreshold(t *testing.T) {
 		{
 			BlockingEvent: kvpb.ContentionEvent{
 				TxnMeta: enginepb.TxnMeta{
-					ID: uuid.FastMakeV4(),
+					ID: uuid.MakeV4(),
 				},
 				Duration: 2 * time.Second,
 			},
@@ -206,7 +201,7 @@ func BenchmarkEventStoreIntake(b *testing.B) {
 		input := make([]contentionpb.ExtendedContentionEvent, 0, b.N)
 		for i := 0; i < b.N; i++ {
 			event := contentionpb.ExtendedContentionEvent{}
-			event.BlockingEvent.TxnMeta.ID = uuid.FastMakeV4()
+			event.BlockingEvent.TxnMeta.ID = uuid.MakeV4()
 			input = append(input, event)
 		}
 		starter := make(chan struct{})
@@ -271,11 +266,11 @@ func randomlyGenerateTestData(testSize int, numOfCoordinator int) []testData {
 	for i := 0; i < testSize; i++ {
 		tcs = append(tcs, testData{
 			blockingTxn: contentionpb.ResolvedTxnID{
-				TxnID:            uuid.FastMakeV4(),
+				TxnID:            uuid.MakeV4(),
 				TxnFingerprintID: appstatspb.TransactionFingerprintID(math.MaxUint64 - uint64(i)),
 			},
 			waitingTxn: contentionpb.ResolvedTxnID{
-				TxnID:            uuid.FastMakeV4(),
+				TxnID:            uuid.MakeV4(),
 				TxnFingerprintID: appstatspb.TransactionFingerprintID(math.MaxUint64/2 - uint64(i)),
 			},
 			coordinatorNodeID: strconv.Itoa(rand.Intn(numOfCoordinator)),

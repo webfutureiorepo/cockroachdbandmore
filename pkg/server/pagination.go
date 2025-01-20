@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -30,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // simplePaginate takes in an input slice, and returns a sub-slice of the next
@@ -292,7 +288,7 @@ type paginatedNodeResponse[T any] struct {
 type rpcNodePaginator[Client, Result any] struct {
 	limit        int
 	numNodes     int
-	errorCtx     string
+	errorCtx     redact.RedactableString
 	pagState     paginationState
 	responseChan chan paginatedNodeResponse[Result]
 	nodeStatuses map[serverID]livenesspb.NodeLivenessStatus

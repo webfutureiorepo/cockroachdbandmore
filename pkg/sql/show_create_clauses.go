@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -28,8 +23,8 @@ import (
 	plpgsql "github.com/cockroachdb/cockroach/pkg/sql/plpgsql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/plpgsqltree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/plpgsqltree/utils"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/semenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -58,7 +53,7 @@ type comment struct {
 // can just fetch comments from collection cache instead of firing extra query.
 // An alternative approach would be to leverage a virtual table which internally
 // uses the collection.
-func selectComment(ctx context.Context, p PlanHookState, tableID descpb.ID) (tc *tableComments) {
+func selectComment(ctx context.Context, p *planner, tableID descpb.ID) (tc *tableComments) {
 	query := fmt.Sprintf("SELECT type, object_id, sub_id, comment FROM system.comments WHERE object_id = %d ORDER BY type, sub_id", tableID)
 
 	txn := p.Txn()
@@ -107,6 +102,7 @@ func selectComment(ctx context.Context, p PlanHookState, tableID descpb.ID) (tc 
 // the crdb_internal.create_statements virtual table.
 func ShowCreateView(
 	ctx context.Context,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	tn *tree.TableName,
@@ -145,7 +141,7 @@ func ShowCreateView(
 	cfg.UseTabs = true
 	cfg.LineWidth = 100 - cfg.TabWidth
 	cfg.ValueRedaction = redactableValues
-	q, err := formatViewQueryForDisplay(ctx, semaCtx, sessionData, desc, cfg)
+	q, err := formatViewQueryForDisplay(ctx, evalCtx, semaCtx, sessionData, desc, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -164,6 +160,7 @@ func ShowCreateView(
 // a human-readable output with the correct level of indentation.
 func formatViewQueryForDisplay(
 	ctx context.Context,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	desc catalog.TableDescriptor,
@@ -188,7 +185,7 @@ func formatViewQueryForDisplay(
 		}
 	}()
 
-	typeReplacedViewQuery, err := formatViewQueryTypesForDisplay(ctx, semaCtx, sessionData, desc)
+	typeReplacedViewQuery, err := formatViewQueryTypesForDisplay(ctx, evalCtx, semaCtx, sessionData, desc)
 	if err != nil {
 		log.Warningf(ctx, "error deserializing user defined types for view %s (%v): %+v",
 			desc.GetName(), desc.GetID(), err)
@@ -269,7 +266,7 @@ func formatQuerySequencesForDisplay(
 		}
 		stmts = plstmt.AST
 
-		v := utils.SQLStmtVisitor{Fn: replaceFunc}
+		v := plpgsqltree.SQLStmtVisitor{Fn: replaceFunc}
 		newStmt := plpgsqltree.Walk(&v, stmts)
 		fmtCtx.FormatNode(newStmt)
 	}
@@ -281,6 +278,7 @@ func formatQuerySequencesForDisplay(
 // it will deserialize it to display its name.
 func formatViewQueryTypesForDisplay(
 	ctx context.Context,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	desc catalog.TableDescriptor,
@@ -306,7 +304,7 @@ func formatViewQueryTypesForDisplay(
 			return true, expr, nil
 		}
 		formattedExpr, err := schemaexpr.FormatExprForDisplay(
-			ctx, desc, expr.String(), semaCtx, sessionData, tree.FmtParsable,
+			ctx, desc, expr.String(), evalCtx, semaCtx, sessionData, tree.FmtParsable,
 		)
 		if err != nil {
 			return false, expr, err
@@ -340,6 +338,7 @@ func formatViewQueryTypesForDisplay(
 // formatViewQueryTypesForDisplay.
 func formatFunctionQueryTypesForDisplay(
 	ctx context.Context,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	queries string,
@@ -371,7 +370,7 @@ func formatFunctionQueryTypesForDisplay(
 			return true, expr, nil
 		}
 		formattedExpr, err := schemaexpr.FormatExprForDisplay(
-			ctx, nil, expr.String(), semaCtx, sessionData, tree.FmtParsable,
+			ctx, nil, expr.String(), evalCtx, semaCtx, sessionData, tree.FmtParsable,
 		)
 		if err != nil {
 			return false, expr, err
@@ -405,9 +404,11 @@ func formatFunctionQueryTypesForDisplay(
 		}
 		name := t.TypeMeta.Name
 		typname := tree.MakeTypeNameWithPrefix(tree.ObjectNamePrefix{
-			CatalogName:     tree.Name(name.Catalog),
-			SchemaName:      tree.Name(name.Schema),
-			ExplicitCatalog: name.Catalog != "",
+			CatalogName: tree.Name(name.Catalog),
+			SchemaName:  tree.Name(name.Schema),
+			// Do not include database name, as it makes the type definition less
+			// portable when displayed in SHOW CREATE output.
+			ExplicitCatalog: false,
 			ExplicitSchema:  name.ExplicitSchema,
 		}, name.Name)
 		ref := typname.ToUnresolvedObjectName()
@@ -446,12 +447,12 @@ func formatFunctionQueryTypesForDisplay(
 		}
 		stmts = plstmt.AST
 
-		v := utils.SQLStmtVisitor{Fn: replaceFunc}
+		v := plpgsqltree.SQLStmtVisitor{Fn: replaceFunc}
 		newStmt := plpgsqltree.Walk(&v, stmts)
 		// Some PLpgSQL statements (i.e., declarations), may contain type
 		// annotations containing the UDT. We need to walk the AST to replace them,
 		// too.
-		v2 := utils.TypeRefVisitor{Fn: replaceTypeFunc}
+		v2 := plpgsqltree.TypeRefVisitor{Fn: replaceTypeFunc}
 		newStmt = plpgsqltree.Walk(&v2, newStmt)
 		fmtCtx.FormatNode(newStmt)
 	}
@@ -617,6 +618,9 @@ func ShowCreateSequence(
 	}
 	if opts.CacheSize > 1 {
 		f.Printf(" CACHE %d", opts.CacheSize)
+	}
+	if opts.CacheSize == 1 && opts.NodeCacheSize > 0 {
+		f.Printf(" PER NODE CACHE %d", opts.NodeCacheSize)
 	}
 	return f.CloseAndGetString(), nil
 }
@@ -802,6 +806,7 @@ func ShowCreatePartitioning(
 func showConstraintClause(
 	ctx context.Context,
 	desc catalog.TableDescriptor,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	f *tree.FmtCtx,
@@ -829,7 +834,7 @@ func showConstraintClause(
 		}
 		f.WriteString("CHECK (")
 		expr, err := schemaexpr.FormatExprForDisplay(
-			ctx, desc, e.GetExpr(), semaCtx, sessionData, exprFmtFlags,
+			ctx, desc, e.GetExpr(), evalCtx, semaCtx, sessionData, exprFmtFlags,
 		)
 		if err != nil {
 			return err
@@ -857,7 +862,7 @@ func showConstraintClause(
 		if c.IsPartial() {
 			f.WriteString(" WHERE ")
 			pred, err := schemaexpr.FormatExprForDisplay(
-				ctx, desc, c.GetPredicate(), semaCtx, sessionData, exprFmtFlags,
+				ctx, desc, c.GetPredicate(), evalCtx, semaCtx, sessionData, exprFmtFlags,
 			)
 			if err != nil {
 				return err

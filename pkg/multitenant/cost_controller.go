@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multitenant
 
@@ -14,7 +9,9 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -37,9 +34,13 @@ type TenantSideCostController interface {
 	// the CPU usage (in CPU secs) per wall-clock second.
 	GetCPUMovingAvg() float64
 
-	// GetCostConfig returns the cost model config this TenantSideCostController
-	// is using.
-	GetCostConfig() *tenantcostmodel.Config
+	// GetRequestUnitModel returns the request unit cost model that this
+	// TenantSideCostController is using.
+	GetRequestUnitModel() *tenantcostmodel.RequestUnitModel
+
+	// GetEstimatedCPUModel returns the estimated CPU cost model that this
+	// TenantSideCostController is using.
+	GetEstimatedCPUModel() *tenantcostmodel.EstimatedCPUModel
 
 	// Metrics returns a metric.Struct which holds metrics for the controller.
 	Metrics() metric.Struct
@@ -91,7 +92,11 @@ type TenantSideKVInterceptor interface {
 	// If the context (or a parent context) was created using
 	// WithTenantCostControlExemption, the method is a no-op.
 	OnResponseWait(
-		ctx context.Context, req tenantcostmodel.RequestInfo, resp tenantcostmodel.ResponseInfo,
+		ctx context.Context,
+		request *kvpb.BatchRequest,
+		response *kvpb.BatchResponse,
+		targetRange *roachpb.RangeDescriptor,
+		targetReplica *roachpb.ReplicaDescriptor,
 	) error
 }
 

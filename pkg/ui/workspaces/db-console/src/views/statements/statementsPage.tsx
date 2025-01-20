@@ -1,36 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-import { connect } from "react-redux";
-import { bindActionCreators } from "redux";
-import { createSelector } from "reselect";
-import { RouteComponentProps, withRouter } from "react-router-dom";
-import {
-  refreshNodes,
-  refreshDatabases,
-  refreshStatementDiagnosticsRequests,
-  refreshStatements,
-  refreshUserSQLRoles,
-} from "src/redux/apiReducers";
-import { CachedDataReducerState } from "src/redux/cachedDataReducer";
-import { AdminUIState, AppDispatch } from "src/redux/state";
-import { StatementsResponseMessage } from "src/util/api";
-import { PrintTime } from "src/views/reports/containers/range/print";
-import {
-  createStatementDiagnosticsAlertLocalSetting,
-  cancelStatementDiagnosticsAlertLocalSetting,
-} from "src/redux/alerts";
-import {
-  selectHasViewActivityRedactedRole,
-  selectHasAdminRole,
-} from "src/redux/user";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import {
   Filters,
@@ -44,27 +15,51 @@ import {
   StatementsPageRootProps,
   api,
 } from "@cockroachlabs/cluster-ui";
+import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
+import { bindActionCreators } from "redux";
+import { createSelector } from "reselect";
+
 import {
-  cancelStatementDiagnosticsReportAction,
-  createOpenDiagnosticsModalAction,
-  createStatementDiagnosticsReportAction,
-  setGlobalTimeScaleAction,
-} from "src/redux/statements";
+  createStatementDiagnosticsAlertLocalSetting,
+  cancelStatementDiagnosticsAlertLocalSetting,
+} from "src/redux/alerts";
 import {
   trackApplySearchCriteriaAction,
   trackCancelDiagnosticsBundleAction,
   trackDownloadDiagnosticsBundleAction,
   trackStatementsPaginationAction,
 } from "src/redux/analyticsActions";
-import { resetSQLStatsAction } from "src/redux/sqlStats";
+import {
+  refreshNodes,
+  refreshDatabases,
+  refreshStatementDiagnosticsRequests,
+  refreshStatements,
+  refreshUserSQLRoles,
+  createSelectorForCachedDataField,
+} from "src/redux/apiReducers";
+import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { LocalSetting } from "src/redux/localsettings";
 import { nodeRegionsByIDSelector } from "src/redux/nodes";
+import { resetSQLStatsAction } from "src/redux/sqlStats";
+import { AdminUIState, AppDispatch } from "src/redux/state";
+import {
+  cancelStatementDiagnosticsReportAction,
+  createOpenDiagnosticsModalAction,
+  createStatementDiagnosticsReportAction,
+  setGlobalTimeScaleAction,
+} from "src/redux/statements";
+import { selectTimeScale } from "src/redux/timeScale";
+import {
+  selectHasViewActivityRedactedRole,
+  selectHasAdminRole,
+} from "src/redux/user";
+import { PrintTime } from "src/views/reports/containers/range/print";
+
 import {
   activeStatementsViewActions,
   mapStateToActiveStatementViewProps,
 } from "./activeStatementsSelectors";
-import { selectTimeScale } from "src/redux/timeScale";
-import { createSelectorForCachedDataField } from "src/redux/apiReducers";
 
 // selectDatabases returns the array of all databases in the cluster.
 export const selectDatabases = createSelector(
@@ -84,7 +79,7 @@ export const selectDatabases = createSelector(
 // statistics were reset.
 export const selectLastReset = createSelector(
   (state: AdminUIState) => state.cachedData.statements,
-  (state: CachedDataReducerState<StatementsResponseMessage>) => {
+  state => {
     if (!state?.data) {
       return "unknown";
     }
@@ -226,7 +221,8 @@ export default withRouter(
     StateProps,
     DispatchProps,
     RouteComponentProps,
-    StatementsPageRootProps
+    StatementsPageRootProps,
+    AdminUIState
   >(
     (state: AdminUIState, props: RouteComponentProps) => ({
       fingerprintsPageProps: {

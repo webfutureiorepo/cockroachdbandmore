@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 )
@@ -124,7 +120,23 @@ func setupGenerator(
 				return
 			case <-comm:
 			}
-			err := worker(ctx, funcRowPusher(addRow))
+			err := func() (retErr error) {
+				// Guard against crashes when populating the virtual table
+				// (#135760). This should be safe since we assume that the
+				// generator functions do not update shared state and do not
+				// manipulate locks.
+				defer func() {
+					if r := recover(); r != nil {
+						if ok, e := errorutil.ShouldCatch(r); ok {
+							retErr = e
+						} else {
+							// Panic object that is not an error - unexpected.
+							panic(r)
+						}
+					}
+				}()
+				return worker(ctx, funcRowPusher(addRow))
+			}()
 			// Notify that we are done sending rows.
 			select {
 			case <-ctx.Done():
@@ -160,6 +172,7 @@ func setupGenerator(
 // virtualTableNode is a planNode that constructs its rows by repeatedly
 // invoking a virtualTableGenerator function.
 type virtualTableNode struct {
+	zeroInputPlanNode
 	columns    colinfo.ResultColumns
 	next       virtualTableGenerator
 	cleanup    func(ctx context.Context)
@@ -203,7 +216,7 @@ func (n *virtualTableNode) Close(ctx context.Context) {
 // virtual index on the equality columns. For each row of the input, a virtual
 // table index lookup is performed, and the rows are joined together.
 type vTableLookupJoinNode struct {
-	input planNode
+	singleInputPlanNode
 
 	dbName string
 	db     catalog.DatabaseDescriptor
@@ -255,7 +268,7 @@ var _ rowPusher = &vTableLookupJoinNode{}
 
 // startExec implements the planNode interface.
 func (v *vTableLookupJoinNode) startExec(params runParams) error {
-	v.run.keyCtx = constraint.KeyContext{EvalCtx: params.EvalContext()}
+	v.run.keyCtx = constraint.KeyContext{Ctx: params.ctx, EvalCtx: params.EvalContext()}
 	if v.joinType == descpb.InnerJoin || v.joinType == descpb.LeftOuterJoin {
 		v.run.rows = rowcontainer.NewRowContainer(
 			params.p.Mon().MakeBoundAccount(),

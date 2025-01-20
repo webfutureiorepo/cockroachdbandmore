@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package norm
 
@@ -902,4 +897,35 @@ func (c *CustomFuncs) RemapProjectionCols(
 // OptimizerUseImprovedJoinElimination.
 func (c *CustomFuncs) CanUseImprovedJoinElimination(from, to opt.ColSet) bool {
 	return c.f.evalCtx.SessionData().OptimizerUseImprovedJoinElimination || from.SubsetOf(to)
+}
+
+// FoldIsNullProjectionsItems folds all projections in the form "x IS NULL" if
+// "x" is known to be not null in the input relational expression.
+func (c *CustomFuncs) FoldIsNullProjectionsItems(
+	projections memo.ProjectionsExpr, input memo.RelExpr,
+) memo.ProjectionsExpr {
+	isNullColExpr := func(e opt.ScalarExpr) (opt.ColumnID, bool) {
+		is, ok := e.(*memo.IsExpr)
+		if !ok {
+			return 0, false
+		}
+		v, ok := is.Left.(*memo.VariableExpr)
+		if !ok {
+			return 0, false
+		}
+		if _, ok := is.Right.(*memo.NullExpr); !ok {
+			return 0, false
+		}
+		return v.Col, true
+	}
+	newProjections := make(memo.ProjectionsExpr, len(projections))
+	for i := range projections {
+		p := &projections[i]
+		if col, ok := isNullColExpr(p.Element); ok && c.IsColNotNull(col, input) {
+			newProjections[i] = c.f.ConstructProjectionsItem(memo.FalseSingleton, p.Col)
+		} else {
+			newProjections[i] = *p
+		}
+	}
+	return newProjections
 }

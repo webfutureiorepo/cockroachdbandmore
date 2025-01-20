@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -19,11 +14,13 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowdispatch"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/node_rac2"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
@@ -60,24 +57,25 @@ func TestRaftTransportStartNewQueue(t *testing.T) {
 
 	var addr net.Addr
 
-	resolver := func(roachpb.NodeID) (net.Addr, error) {
+	resolver := func(roachpb.NodeID) (net.Addr, roachpb.Locality, error) {
 		if addr == nil {
-			return nil, errors.New("no addr yet") // should not happen in this test
+			return nil, roachpb.Locality{}, errors.New("no addr yet") // should not happen in this test
 		}
-		return addr, nil
+		return addr, roachpb.Locality{}, nil
 	}
 
-	ctxWithTracer := log.MakeTestingAmbientCtxWithNewTracer()
 	tp := NewRaftTransport(
-		ctxWithTracer,
+		log.MakeTestingAmbientCtxWithNewTracer(),
 		cluster.MakeTestingClusterSettings(),
-		ctxWithTracer.Tracer,
+		stopper,
+		hlc.NewClockForTesting(nil),
 		nodedialer.New(rpcC, resolver),
 		grpcServer,
-		stopper,
 		kvflowdispatch.NewDummyDispatch(),
 		NoopStoresFlowControlIntegration{},
 		NoopRaftTransportDisconnectListener{},
+		(*node_rac2.AdmittedPiggybacker)(nil),
+		nil, /* PiggybackedAdmittedResponseScheduler */
 		nil, /* knobs */
 	)
 

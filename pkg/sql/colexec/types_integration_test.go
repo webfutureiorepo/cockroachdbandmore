@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -83,13 +78,13 @@ func TestSQLTypesIntegration(t *testing.T) {
 
 			c, err := colserde.NewArrowBatchConverter(typs, colserde.BiDirectional, testMemAcc)
 			require.NoError(t, err)
-			defer c.Release(ctx)
+			defer c.Close(ctx)
 			r, err := colserde.NewRecordBatchSerializer(typs)
 			require.NoError(t, err)
 			arrowOp := newArrowTestOperator(columnarizer, c, r, typs)
 
 			materializer := NewMaterializer(
-				nil, /* allocator */
+				nil, /* streamingMemAcc */
 				flowCtx,
 				1, /* processorID */
 				colexecargs.OpWithMetaInfo{Root: arrowOp},
@@ -103,7 +98,7 @@ func TestSQLTypesIntegration(t *testing.T) {
 				require.Nil(t, meta)
 				numActualRows++
 				require.Equal(t, len(expectedRow), len(actualRow))
-				cmp, err := expectedRow[0].Compare(typ, &da, &evalCtx, &actualRow[0])
+				cmp, err := expectedRow[0].Compare(ctx, typ, &da, &evalCtx, &actualRow[0])
 				require.NoError(t, err)
 				require.Equal(t, 0, cmp)
 			}

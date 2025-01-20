@@ -1,17 +1,13 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -39,7 +35,6 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/constraints"
 )
 
 func TestCategory(t *testing.T) {
@@ -84,7 +79,7 @@ func TestGenerateUniqueIDOrder(t *testing.T) {
 
 // sorterWithSwapCount implements sort.Interface and wraps a slice of data
 // with a counter that tracks the number of swaps performed during sorting.
-type sorterWithSwapCount[T constraints.Ordered] struct {
+type sorterWithSwapCount[T cmp.Ordered] struct {
 	data      []T
 	swapCount int
 }
@@ -423,7 +418,9 @@ func TestStringToArrayAndBack(t *testing.T) {
 			}
 
 			evalContext := eval.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
-			if result.Compare(evalContext, expectedArray) != 0 {
+			if cmp, err := result.Compare(context.Background(), evalContext, expectedArray); err != nil {
+				t.Fatal(err)
+			} else if cmp != 0 {
 				t.Errorf("expected %v, got %v", tc.expected, result)
 			}
 

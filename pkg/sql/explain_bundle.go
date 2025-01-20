@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -18,22 +13,25 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/colfetcher"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/memzipper"
 	"github.com/cockroachdb/cockroach/pkg/util/pretty"
@@ -41,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
+	"github.com/lib/pq/oid"
 )
 
 const noPlan = "no plan"
@@ -138,6 +137,7 @@ func buildStatementBundle(
 	ctx context.Context,
 	explainFlags explain.Flags,
 	db *kv.DB,
+	p *planner,
 	ie *InternalExecutor,
 	stmtRawSQL string,
 	plan *planTop,
@@ -151,7 +151,7 @@ func buildStatementBundle(
 	if plan == nil {
 		return diagnosticsBundle{collectionErr: errors.AssertionFailedf("execution terminated early")}
 	}
-	b, err := makeStmtBundleBuilder(explainFlags, db, ie, stmtRawSQL, plan, trace, placeholders, sv)
+	b, err := makeStmtBundleBuilder(explainFlags, db, p, ie, stmtRawSQL, plan, trace, placeholders, sv)
 	if err != nil {
 		return diagnosticsBundle{collectionErr: err}
 	}
@@ -209,6 +209,7 @@ type stmtBundleBuilder struct {
 	flags explain.Flags
 
 	db *kv.DB
+	p  *planner
 	ie *InternalExecutor
 
 	stmt         string
@@ -226,6 +227,7 @@ type stmtBundleBuilder struct {
 func makeStmtBundleBuilder(
 	flags explain.Flags,
 	db *kv.DB,
+	p *planner,
 	ie *InternalExecutor,
 	stmtRawSQL string,
 	plan *planTop,
@@ -234,7 +236,7 @@ func makeStmtBundleBuilder(
 	sv *settings.Values,
 ) (stmtBundleBuilder, error) {
 	b := stmtBundleBuilder{
-		flags: flags, db: db, ie: ie, plan: plan, trace: trace, placeholders: placeholders, sv: sv,
+		flags: flags, db: db, p: p, ie: ie, plan: plan, trace: trace, placeholders: placeholders, sv: sv,
 	}
 	err := b.buildPrettyStatement(stmtRawSQL)
 	if err != nil {
@@ -530,12 +532,12 @@ func (b *stmtBundleBuilder) addInFlightTrace(c inFlightTraceCollector) {
 // as well as accumulates the string into b.errorStrings. The method should only
 // be used for non-critical errors.
 func (b *stmtBundleBuilder) printError(errString string, buf *bytes.Buffer) {
-	fmt.Fprintf(buf, errString+"\n")
+	fmt.Fprintln(buf, errString)
 	b.errorStrings = append(b.errorStrings, errString)
 }
 
 func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
-	c := makeStmtEnvCollector(ctx, b.ie)
+	c := makeStmtEnvCollector(ctx, b.p, b.ie)
 
 	var buf bytes.Buffer
 	if err := c.PrintVersion(&buf); err != nil {
@@ -543,17 +545,19 @@ func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
 	}
 	fmt.Fprintf(&buf, "\n")
 
-	// Show the values of session variables that can impact planning decisions.
-	if err := c.PrintSessionSettings(&buf, b.sv); err != nil {
+	// Show the values of session variables and cluster settings that have
+	// values different from their defaults.
+	if err := c.PrintSessionSettings(&buf, b.sv, false /* all */); err != nil {
 		b.printError(fmt.Sprintf("-- error getting session settings: %v", err), &buf)
 	}
-
 	fmt.Fprintf(&buf, "\n")
-
-	if err := c.PrintClusterSettings(&buf); err != nil {
+	if err := c.PrintClusterSettings(&buf, false /* all */); err != nil {
 		b.printError(fmt.Sprintf("-- error getting cluster settings: %v", err), &buf)
 	}
-
+	// Note: ensure that cluster settings are added last to 'env.sql' - 'debug
+	// statement-bundle recreate' relies on SET CLUSTER SETTING stmts being
+	// last. In other words, any new additions to 'env.sql' should go above the
+	// PrintClusterSettings call.
 	b.z.AddFile("env.sql", buf.String())
 
 	mem := b.plan.mem
@@ -585,78 +589,87 @@ func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
 		return
 	}
 
-	dbNames := make(map[string]struct{})
-	schemaNames := make(map[string]struct{})
+	dbNames := make(map[tree.Name]struct{})
+	// Mapping from a DB name to all schemas within that DB.
+	schemaNames := make(map[tree.Name]map[tree.Name]struct{})
 	collectDBAndSchemaNames := func(dataSources []tree.TableName) {
 		for _, ds := range dataSources {
-			dbNames[ds.CatalogName.String()] = struct{}{}
-			schemaNames[fmt.Sprintf("%s.%s", ds.CatalogName.String(), ds.SchemaName.String())] = struct{}{}
+			dbNames[ds.CatalogName] = struct{}{}
+			if _, ok := schemaNames[ds.CatalogName]; !ok {
+				schemaNames[ds.CatalogName] = make(map[tree.Name]struct{})
+			}
+			schemaNames[ds.CatalogName][ds.SchemaName] = struct{}{}
 		}
 	}
 	collectDBAndSchemaNames(tables)
 	collectDBAndSchemaNames(sequences)
 	collectDBAndSchemaNames(views)
+	// TODO(138024): we need to also collect DBs and schemas for UDTs and
+	// routines.
+	// TODO(138022): we need to collect DBs and schemas for transitive
+	// dependencies.
 
 	// Note: we do not shortcut out of this function if there is no table/sequence/view to report:
 	// the bundle analysis tool require schema.sql to always be present, even if it's empty.
 
-	first := true
 	blankLine := func() {
-		if !first {
+		if buf.Len() > 0 {
+			// Don't add newlines to the beginning of the file.
 			buf.WriteByte('\n')
 		}
-		first = false
 	}
 	blankLine()
-	c.printCreateAllDatabases(&buf, dbNames)
-	if err := c.printCreateAllSchemas(&buf, schemaNames); err != nil {
+	if err = c.printCreateAllDatabases(&buf, dbNames); err != nil {
+		b.printError(fmt.Sprintf("-- error getting all databases: %v", err), &buf)
+	}
+	if err = c.printCreateAllSchemas(&buf, schemaNames); err != nil {
 		b.printError(fmt.Sprintf("-- error getting all schemas: %v", err), &buf)
 	}
 	for i := range sequences {
 		blankLine()
-		if err := c.PrintCreateSequence(&buf, &sequences[i]); err != nil {
+		if err = c.PrintCreateSequence(&buf, &sequences[i]); err != nil {
 			b.printError(fmt.Sprintf("-- error getting schema for sequence %s: %v", sequences[i].FQString(), err), &buf)
 		}
 	}
-	// Get all user-defined types. If redaction is a
-	blankLine()
-	if err := c.PrintCreateEnum(&buf, b.flags.RedactValues); err != nil {
-		b.printError(fmt.Sprintf("-- error getting schema for enums: %v", err), &buf)
-	}
-	if mem.Metadata().HasUserDefinedFunctions() {
-		// Get all relevant user-defined functions.
+	// Get all relevant user-defined types.
+	for _, t := range mem.Metadata().AllUserDefinedTypes() {
 		blankLine()
-		err = c.PrintRelevantCreateRoutine(
-			&buf, strings.ToLower(b.stmt), b.flags.RedactValues, &b.errorStrings, false, /* procedure */
-		)
-		if err != nil {
-			b.printError(fmt.Sprintf("-- error getting schema for udfs: %v", err), &buf)
+		if err = c.PrintCreateUDT(&buf, t.Oid(), b.flags.RedactValues); err != nil {
+			b.printError(fmt.Sprintf("-- error getting schema for type %s: %v", t.SQLStringForError(), err), &buf)
 		}
 	}
-	if call, ok := mem.RootExpr().(*memo.CallExpr); ok {
-		// Currently, a stored procedure can only be called from a CALL statement,
-		// which can only be the root expression.
-		if proc, ok := call.Proc.(*memo.UDFCallExpr); ok {
+	if mem.Metadata().HasUserDefinedRoutines() {
+		// Get all relevant user-defined routines.
+		//
+		// Note that we first populate fast int set so that we add routines in
+		// increasing order of Oids to the bundle. This should allow for easier
+		// recreation when we have dependencies between routines since _usually_
+		// smaller Oid would indicate an older routine which makes it less
+		// likely to depend on another routine.
+		var ids intsets.Fast
+		isProcedure := make(map[oid.Oid]bool)
+		mem.Metadata().ForEachUserDefinedRoutine(func(ol *tree.Overload) {
+			ids.Add(int(ol.Oid))
+			isProcedure[ol.Oid] = ol.Type == tree.ProcedureRoutine
+		})
+		ids.ForEach(func(id int) {
 			blankLine()
-			err = c.PrintRelevantCreateRoutine(
-				&buf, strings.ToLower(proc.Def.Name), b.flags.RedactValues, &b.errorStrings, true, /* procedure */
-			)
+			routineOid := oid.Oid(id)
+			err = c.PrintCreateRoutine(&buf, routineOid, b.flags.RedactValues, isProcedure[routineOid])
 			if err != nil {
-				b.printError(fmt.Sprintf("-- error getting schema for procedure: %v", err), &buf)
+				b.printError(fmt.Sprintf("-- error getting schema for routine with ID %d: %v", id, err), &buf)
 			}
-		} else {
-			b.printError("-- unexpected input expression for CALL statement", &buf)
-		}
+		})
 	}
 	for i := range tables {
 		blankLine()
-		if err := c.PrintCreateTable(&buf, &tables[i], b.flags.RedactValues); err != nil {
+		if err = c.PrintCreateTable(&buf, &tables[i], b.flags.RedactValues); err != nil {
 			b.printError(fmt.Sprintf("-- error getting schema for table %s: %v", tables[i].FQString(), err), &buf)
 		}
 	}
 	for i := range views {
 		blankLine()
-		if err := c.PrintCreateView(&buf, &views[i], b.flags.RedactValues); err != nil {
+		if err = c.PrintCreateView(&buf, &views[i], b.flags.RedactValues); err != nil {
 			b.printError(fmt.Sprintf("-- error getting schema for view %s: %v", views[i].FQString(), err), &buf)
 		}
 	}
@@ -667,7 +680,7 @@ func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
 	for i := range tables {
 		buf.Reset()
 		hideHistograms := b.flags.RedactValues
-		if err := c.PrintTableStats(&buf, &tables[i], hideHistograms); err != nil {
+		if err = c.PrintTableStats(&buf, &tables[i], hideHistograms); err != nil {
 			b.printError(fmt.Sprintf("-- error getting statistics for table %s: %v", tables[i].FQString(), err), &buf)
 		}
 		b.z.AddFile(fmt.Sprintf("stats-%s.sql", tables[i].FQString()), buf.String())
@@ -702,48 +715,28 @@ func (b *stmtBundleBuilder) finalize() (*bytes.Buffer, error) {
 // schema, table statistics.
 type stmtEnvCollector struct {
 	ctx context.Context
+	p   *planner
 	ie  *InternalExecutor
 }
 
-func makeStmtEnvCollector(ctx context.Context, ie *InternalExecutor) stmtEnvCollector {
-	return stmtEnvCollector{ctx: ctx, ie: ie}
+func makeStmtEnvCollector(ctx context.Context, p *planner, ie *InternalExecutor) stmtEnvCollector {
+	return stmtEnvCollector{ctx: ctx, p: p, ie: ie}
 }
 
-// query is a helper to run a query that returns a single string value.
+// query is a helper to run a query that returns a single string value. It
+// returns an error if the query didn't return exactly one row.
 func (c *stmtEnvCollector) query(query string) (string, error) {
-	row, err := c.ie.QueryRowEx(
-		c.ctx,
-		"stmtEnvCollector",
-		nil, /* txn */
-		sessiondata.NoSessionDataOverride,
-		query,
-	)
+	res, err := c.queryEx(query, 1 /* numCols */, false /* emptyOk */)
 	if err != nil {
 		return "", err
 	}
-
-	if len(row) != 1 {
-		return "", errors.AssertionFailedf(
-			"expected env query %q to return a single column, returned %d",
-			query, len(row),
-		)
-	}
-
-	s, ok := row[0].(*tree.DString)
-	if !ok {
-		return "", errors.AssertionFailedf(
-			"expected env query %q to return a DString, returned %T",
-			query, row[0],
-		)
-	}
-
-	return string(*s), nil
+	return res[0], nil
 }
 
-// queryRows is similar to query() for the case when multiple rows with single
-// string values can be returned.
-func (c *stmtEnvCollector) queryRows(query string) ([]string, error) {
-	rows, err := c.ie.QueryBufferedEx(
+// queryEx is a helper to run a query that returns a single row of numCols
+// string values. emptyOk specifies whether no rows are allowed to be returned.
+func (c *stmtEnvCollector) queryEx(query string, numCols int, emptyOk bool) ([]string, error) {
+	row, err := c.ie.QueryRowEx(
 		c.ctx,
 		"stmtEnvCollector",
 		nil, /* txn */
@@ -753,26 +746,33 @@ func (c *stmtEnvCollector) queryRows(query string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	var values []string
-	for _, row := range rows {
-		if len(row) != 1 {
-			return nil, errors.AssertionFailedf(
-				"expected env query %q to return a single column, returned %d",
-				query, len(row),
-			)
+	res := make([]string, numCols)
+	if row == nil {
+		// The query returned no rows.
+		if emptyOk {
+			return res, nil
 		}
-		s, ok := row[0].(*tree.DString)
+		return nil, errors.AssertionFailedf(
+			"expected env query %q to return one row, returned none", query,
+		)
+	}
+	if len(row) != numCols {
+		return nil, errors.AssertionFailedf(
+			"expected env query %q to return %d columns, returned %d",
+			query, numCols, len(row),
+		)
+	}
+	for i := range res {
+		s, ok := row[i].(*tree.DString)
 		if !ok {
 			return nil, errors.AssertionFailedf(
 				"expected env query %q to return a DString, returned %T",
-				query, row[0],
+				query, row[i],
 			)
 		}
-		values = append(values, string(*s))
+		res[i] = string(*s)
 	}
-
-	return values, nil
+	return res, nil
 }
 
 var testingOverrideExplainEnvVersion string
@@ -800,164 +800,182 @@ func (c *stmtEnvCollector) PrintVersion(w io.Writer) error {
 	return err
 }
 
-// PrintSessionSettings appends information about session settings that can
-// impact planning decisions.
-func (c *stmtEnvCollector) PrintSessionSettings(w io.Writer, sv *settings.Values) error {
-	// Cluster setting encoded default value to session setting value conversion
-	// functions.
-	boolToOnOff := func(boolStr string) string {
-		switch boolStr {
-		case "true":
-			return "on"
-		case "false":
-			return "off"
+// makeSingleLine replaces all control characters with a single space. This is
+// needed so that session variables and cluster settings would fit on a single
+// line.
+func makeSingleLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
 		}
-		return boolStr
-	}
+		return r
+	}, s)
+}
 
-	datestyleConv := func(enumVal string) string {
-		n, err := strconv.ParseInt(enumVal, 10, 32)
-		if err != nil || n < 0 || n >= int64(len(dateStyleEnumMap)) {
-			return enumVal
-		}
-		return dateStyleEnumMap[n]
-	}
+// binarySVForBundle is a Values container that can be used to access "binary
+// defaults" of session variables.
+var binarySVForBundle *settings.Values
 
-	intervalstyleConv := func(enumVal string) string {
-		n, err := strconv.ParseInt(enumVal, 10, 32)
-		if err != nil || n < 0 || n >= int64(len(duration.IntervalStyle_name)) {
-			return enumVal
-		}
-		return strings.ToLower(duration.IntervalStyle(n).String())
-	}
+func init() {
+	// Using a "testing" method seems a bit sketchy but is ok for our purposes.
+	st := cluster.MakeTestingClusterSettings()
+	binarySVForBundle = &st.SV
+}
 
-	distsqlConv := func(enumVal string) string {
-		n, err := strconv.ParseInt(enumVal, 10, 32)
-		if err != nil {
-			return enumVal
-		}
-		return sessiondatapb.DistSQLExecMode(n).String()
-	}
-
-	vectorizeConv := func(enumVal string) string {
-		n, err := strconv.ParseInt(enumVal, 10, 32)
-		if err != nil {
-			return enumVal
-		}
-		return sessiondatapb.VectorizeExecMode(n).String()
-	}
-
-	// TODO(rytaft): Keeping this list up to date is a challenge. Consider just
-	// printing all session settings.
-	relevantSettings := []struct {
-		sessionSetting string
-		clusterSetting settings.NonMaskedSetting
-		convFunc       func(string) string
-	}{
-		{sessionSetting: "allow_prepare_as_opt_plan"},
-		{sessionSetting: "cost_scans_with_default_col_size", clusterSetting: costScansWithDefaultColSize, convFunc: boolToOnOff},
-		{sessionSetting: "datestyle", clusterSetting: dateStyle, convFunc: datestyleConv},
-		{sessionSetting: "default_int_size", clusterSetting: defaultIntSize},
-		{sessionSetting: "default_transaction_priority"},
-		{sessionSetting: "default_transaction_quality_of_service"},
-		{sessionSetting: "default_transaction_read_only"},
-		{sessionSetting: "default_transaction_use_follower_reads"},
-		{sessionSetting: "direct_columnar_scans_enabled", clusterSetting: colfetcher.DirectScansEnabled, convFunc: boolToOnOff},
-		{sessionSetting: "disallow_full_table_scans", clusterSetting: disallowFullTableScans, convFunc: boolToOnOff},
-		{sessionSetting: "distsql", clusterSetting: DistSQLClusterExecMode, convFunc: distsqlConv},
-		{sessionSetting: "enable_implicit_select_for_update", clusterSetting: implicitSelectForUpdateClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "enable_implicit_transaction_for_batch_statements"},
-		{sessionSetting: "enable_insert_fast_path", clusterSetting: insertFastPathClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "enable_multiple_modifications_of_table"},
-		{sessionSetting: "enable_zigzag_join", clusterSetting: zigzagJoinClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "expect_and_ignore_not_visible_columns_in_copy"},
-		{sessionSetting: "intervalstyle", clusterSetting: intervalStyle, convFunc: intervalstyleConv},
-		{sessionSetting: "large_full_scan_rows", clusterSetting: largeFullScanRows},
-		{sessionSetting: "locality_optimized_partitioned_index_scan", clusterSetting: localityOptimizedSearchMode, convFunc: boolToOnOff},
-		{sessionSetting: "null_ordered_last"},
-		{sessionSetting: "on_update_rehome_row_enabled", clusterSetting: onUpdateRehomeRowEnabledClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "opt_split_scan_limit"},
-		{sessionSetting: "optimizer_use_forecasts", convFunc: boolToOnOff},
-		{sessionSetting: "optimizer_use_histograms", clusterSetting: optUseHistogramsClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "optimizer_use_multicol_stats", clusterSetting: optUseMultiColStatsClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "optimizer_use_not_visible_indexes"},
-		{sessionSetting: "pg_trgm.similarity_threshold"},
-		{sessionSetting: "prefer_lookup_joins_for_fks", clusterSetting: preferLookupJoinsForFKs, convFunc: boolToOnOff},
-		{sessionSetting: "propagate_input_ordering", clusterSetting: propagateInputOrdering, convFunc: boolToOnOff},
-		{sessionSetting: "reorder_joins_limit", clusterSetting: ReorderJoinsLimitClusterValue},
-		{sessionSetting: "sql_safe_updates"},
-		{sessionSetting: "testing_optimizer_cost_perturbation"},
-		{sessionSetting: "testing_optimizer_disable_rule_probability"},
-		{sessionSetting: "testing_optimizer_random_seed"},
-		{sessionSetting: "timezone"},
-		{sessionSetting: "unbounded_parallel_scans"},
-		{sessionSetting: "unconstrained_non_covering_index_scan_enabled"},
-		{sessionSetting: "vectorize", clusterSetting: VectorizeClusterMode, convFunc: vectorizeConv},
-	}
-
-	for _, s := range relevantSettings {
-		value, err := c.query(fmt.Sprintf("SHOW %s", s.sessionSetting))
+// PrintSessionSettings appends information about all session variables that
+// differ from their defaults.
+//
+// If all is true, then all variables are included.
+func (c *stmtEnvCollector) PrintSessionSettings(w io.Writer, sv *settings.Values, all bool) error {
+	// When thinking about a "default" value for a session variable, there might
+	// be two options:
+	// - the "binary" default - this is the value that the variable gets on a
+	//   new session on a fresh cluster
+	// - the "cluster" default - this is the value that the variable gets on a
+	//   new session on this cluster (which might have some modified cluster
+	//   settings that provide defaults).
+	// Using the given Values provides us access to the latter, and we use the
+	// global singleton container for the former.
+	binarySV, clusterSV := binarySVForBundle, sv
+	for _, varName := range varNames {
+		gen := varGen[varName]
+		value, err := gen.Get(&c.p.extendedEvalCtx, c.p.Txn())
 		if err != nil {
 			return err
 		}
-		// Get the default value for the cluster setting.
-		var def string
-		if s.clusterSetting == nil {
-			if ok, v, _ := getSessionVar(s.sessionSetting, true); ok {
-				if v.GlobalDefault != nil {
-					def = v.GlobalDefault(sv)
-				}
-			}
-		} else {
-			def = s.clusterSetting.EncodedDefault()
+		value = makeSingleLine(value)
+		if gen.Set == nil && gen.RuntimeSet == nil && gen.SetWithPlanner == nil {
+			// Read-only variable.
 			if buildutil.CrdbTestBuild {
-				// In test builds we might randomize some setting defaults, so
-				// we need to override them to make the tests deterministic.
-				switch s.sessionSetting {
-				case "direct_columnar_scans_enabled":
-					def = "false"
+				// Skip all read-only variables in tests.
+				continue
+			}
+			if _, skip := skipReadOnlySessionVar[varName]; skip {
+				// Skip it since its value is unlikely to be useful.
+				continue
+			}
+			fmt.Fprintf(w, "-- read-only %s = %s\n", varName, value)
+			continue
+		}
+		maybeAdjustTimeout := func(value string) (string, error) {
+			switch varName {
+			case "idle_in_session_timeout", "idle_in_transaction_session_timeout",
+				"idle_session_timeout", "lock_timeout", "deadlock_timeout",
+				"statement_timeout", "transaction_timeout":
+				// Defaults for timeout settings are of the duration type (i.e.
+				// "0s"), so we'll parse it to extract the number of
+				// milliseconds (which is what the session variable uses).
+				d, err := time.ParseDuration(value)
+				if err != nil {
+					return "", err
 				}
+				return strconv.Itoa(int(d.Milliseconds())), nil
+			default:
+				return value, nil
 			}
 		}
-		if s.convFunc != nil {
-			// If necessary, convert the encoded cluster setting to a session setting
-			// value (e.g.  "true"->"on"), depending on the setting.
-			def = s.convFunc(def)
+		// All writable variables must have GlobalDefault set.
+		binaryDefault, err := maybeAdjustTimeout(makeSingleLine(gen.GlobalDefault(binarySV)))
+		if err != nil {
+			return err
 		}
-
-		if value == def {
-			fmt.Fprintf(w, "-- %s has the default value: %s\n", s.sessionSetting, value)
-		} else {
-			fmt.Fprintf(w, "SET %s = %s;  -- default value: %s\n", s.sessionSetting, value, def)
+		clusterDefault, err := maybeAdjustTimeout(makeSingleLine(gen.GlobalDefault(clusterSV)))
+		if err != nil {
+			return err
 		}
+		// We'll skip this variable only if its value matches both of the
+		// defaults.
+		skip := value == binaryDefault && value == clusterDefault
+		if buildutil.CrdbTestBuild {
+			// In test builds we might randomize some setting defaults, so
+			// we need to ignore them to make the tests deterministic.
+			switch varName {
+			case "direct_columnar_scans_enabled":
+				// This variable's default is randomized in test builds.
+				skip = true
+			}
+		}
+		// Use the "binary default" as the value that we will set to.
+		defaultValue := binaryDefault
+		if skip && !all {
+			continue
+		}
+		if _, ok := sessionVarNeedsEscaping[varName]; ok {
+			value = lexbase.EscapeSQLString(value)
+		}
+		if value == "" {
+			// Need a special case for empty strings to make the SET statement
+			// parsable.
+			value = "''"
+		}
+		fmt.Fprintf(w, "SET %s = %s;  -- default value: %s\n", varName, value, defaultValue)
 	}
 	return nil
 }
 
-func (c *stmtEnvCollector) PrintClusterSettings(w io.Writer) error {
+// PrintClusterSettings appends information about all cluster settings that
+// differ from their binary defaults.
+//
+// If all is true, then all settings are included.
+func (c *stmtEnvCollector) PrintClusterSettings(w io.Writer, all bool) error {
 	// TODO(michae2): We should also query system.database_role_settings.
 
+	var suffix string
+	if !all {
+		suffix = " WHERE value != default_value"
+	}
 	rows, err := c.ie.QueryBufferedEx(
 		c.ctx,
 		"stmtEnvCollector",
 		nil, /* txn */
 		sessiondata.NoSessionDataOverride,
-		"SELECT variable, value, description FROM [ SHOW ALL CLUSTER SETTINGS ]",
+		fmt.Sprintf(`SELECT variable, value, default_value FROM crdb_internal.cluster_settings%s`, suffix),
 	)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "-- Cluster settings:\n")
 	for _, r := range rows {
 		// The datums should always be DString, but we should be defensive.
-		variable, ok1 := r[0].(*tree.DString)
+		setting, ok1 := r[0].(*tree.DString)
 		value, ok2 := r[1].(*tree.DString)
-		description, ok3 := r[2].(*tree.DString)
+		def, ok3 := r[2].(*tree.DString)
 		if ok1 && ok2 && ok3 {
-			fmt.Fprintf(w, "--   %s = %s  (%s)\n", *variable, *value, *description)
+			var skip bool
+			// Ignore some settings that might differ from their default values
+			// but aren't useful in stmt bundles.
+			switch *setting {
+			case "cluster.secret", "diagnostics.reporting.enabled", "enterprise.license", "version":
+				skip = true
+			}
+			if buildutil.CrdbTestBuild {
+				switch *setting {
+				case "sql.distsql.direct_columnar_scans.enabled":
+					// This setting's default is randomized in test builds.
+					skip = true
+				case "bulkio.import.constraint_validation.unsafe.enabled",
+					"kv.raft_log.synchronization.unsafe.disabled":
+					// These settings are marked as "unsafe", so skip them in
+					// the tests.
+					skip = true
+				}
+			}
+			if skip {
+				continue
+			}
+			// All cluster settings, regardless of the type, accept values in
+			// single quotes.
+			fmt.Fprintf(
+				w, "SET CLUSTER SETTING %s = '%s';  -- default value: %s\n",
+				*setting, makeSingleLine(string(*value)), makeSingleLine(string(*def)),
+			)
 		}
 	}
 	return nil
+}
+
+func printCreateStatement(w io.Writer, dbName tree.Name, createStatement string) {
+	fmt.Fprintf(w, "USE %s;\n", dbName.String())
+	fmt.Fprintf(w, "%s;\n", createStatement)
 }
 
 func (c *stmtEnvCollector) PrintCreateTable(
@@ -970,14 +988,10 @@ func (c *stmtEnvCollector) PrintCreateTable(
 	createStatement, err := c.query(
 		fmt.Sprintf("SELECT create_statement FROM [SHOW CREATE TABLE %s%s]", tn.FQString(), formatOption),
 	)
-	// We need to replace schema.table_name in the create statement with the fully
-	// qualified table name.
-	createStatement = strings.Replace(createStatement,
-		fmt.Sprintf("%s.%s", tn.SchemaName, tn.Table()), tn.FQString(), 1)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "%s;\n", createStatement)
+	printCreateStatement(w, tn.CatalogName, createStatement)
 	return nil
 }
 
@@ -988,70 +1002,52 @@ func (c *stmtEnvCollector) PrintCreateSequence(w io.Writer, tn *tree.TableName) 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "%s;\n", createStatement)
+	printCreateStatement(w, tn.CatalogName, createStatement)
 	return nil
 }
 
-func (c *stmtEnvCollector) PrintCreateEnum(w io.Writer, redactValues bool) error {
-	qry := "SELECT create_statement FROM [SHOW CREATE ALL TYPES]"
+func (c *stmtEnvCollector) PrintCreateUDT(w io.Writer, id oid.Oid, redactValues bool) error {
+	descID := catid.UserDefinedOIDToID(id)
+	// Use "".crdb_internal to allow for cross-DB lookups.
+	query := fmt.Sprintf(`SELECT database_name, create_statement FROM "".crdb_internal.create_type_statements WHERE descriptor_id = %d::OID`, descID)
 	if redactValues {
-		qry = "SELECT crdb_internal.redact(crdb_internal.redactable_sql_constants(create_statement)) FROM [SHOW CREATE ALL TYPES]"
-
+		query = fmt.Sprintf("SELECT database_name, crdb_internal.redact(crdb_internal.redactable_sql_constants(create_statement)) FROM (%s)", query)
 	}
-	createStatement, err := c.queryRows(qry)
+	// Implicit crdb_internal_region type won't be found via the vtable, so we
+	// allow empty result.
+	res, err := c.queryEx(query, 2 /* numCols */, true /* emptyOk */)
 	if err != nil {
 		return err
 	}
-	for _, cs := range createStatement {
-		fmt.Fprintf(w, "%s\n", cs)
+	if res[0] != "" {
+		printCreateStatement(w, tree.Name(res[0]) /* dbName */, res[1] /* createStatement */)
 	}
 	return nil
 }
 
-func (c *stmtEnvCollector) PrintRelevantCreateRoutine(
-	w io.Writer, stmt string, redactValues bool, errorStrings *[]string, procedure bool,
+func (c *stmtEnvCollector) PrintCreateRoutine(
+	w io.Writer, id oid.Oid, redactValues bool, procedure bool,
 ) error {
-	// The select function_name returns a DOidWrapper,
-	// we need to cast it to string for queryRows function to process.
-	// TODO(#104976): consider getting the udf sql body statements from the memo metadata.
-	var routineTypeName, routineNameQuery string
+	var createRoutineQuery string
+	descID := catid.UserDefinedOIDToID(id)
+	// Use "".crdb_internal to allow for cross-DB lookups.
+	queryTemplate := `SELECT database_name, create_statement FROM "".crdb_internal.create_%[1]s_statements WHERE %[1]s_id = %[2]d::OID`
 	if procedure {
-		routineTypeName = "PROCEDURE"
-		routineNameQuery = "SELECT procedure_name::STRING as procedure_name_str FROM [SHOW PROCEDURES]"
+		createRoutineQuery = fmt.Sprintf(queryTemplate, "procedure", descID)
 	} else {
-		routineTypeName = "FUNCTION"
-		routineNameQuery = "SELECT function_name::STRING as function_name_str FROM [SHOW FUNCTIONS]"
+		createRoutineQuery = fmt.Sprintf(queryTemplate, "function", descID)
 	}
-	routineNames, err := c.queryRows(routineNameQuery)
+	if redactValues {
+		createRoutineQuery = fmt.Sprintf(
+			"SELECT database_name, crdb_internal.redact(crdb_internal.redactable_sql_constants(create_statement)) FROM (%s)",
+			createRoutineQuery,
+		)
+	}
+	res, err := c.queryEx(createRoutineQuery, 2 /* numCols */, false /* emptyOk */)
 	if err != nil {
 		return err
 	}
-	for _, name := range routineNames {
-		if strings.Contains(stmt, name) {
-			createRoutineQuery := fmt.Sprintf(
-				"SELECT create_statement FROM [ SHOW CREATE %s \"%s\" ]", routineTypeName, name,
-			)
-			if redactValues {
-				createRoutineQuery = fmt.Sprintf(
-					"SELECT crdb_internal.redact(crdb_internal.redactable_sql_constants(create_statement)) FROM [ SHOW CREATE %s \"%s\" ]",
-					routineTypeName, name,
-				)
-			}
-			createStatement, err := c.query(createRoutineQuery)
-			if err != nil {
-				var errString string
-				if procedure {
-					errString = fmt.Sprintf("-- error getting stored procedure %s: %s", name, err)
-				} else {
-					errString = fmt.Sprintf("-- error getting user defined function %s: %s", name, err)
-				}
-				fmt.Fprint(w, errString+"\n")
-				*errorStrings = append(*errorStrings, errString)
-				continue
-			}
-			fmt.Fprintf(w, "%s\n", createStatement)
-		}
-	}
+	printCreateStatement(w, tree.Name(res[0]) /* dbName */, res[1] /* createStatement */)
 	return nil
 }
 
@@ -1068,11 +1064,13 @@ func (c *stmtEnvCollector) PrintCreateView(
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "%s;\n", createStatement)
+	printCreateStatement(w, tn.CatalogName, createStatement)
 	return nil
 }
 
-func (c *stmtEnvCollector) printCreateAllDatabases(w io.Writer, dbNames map[string]struct{}) {
+func (c *stmtEnvCollector) printCreateAllDatabases(
+	w io.Writer, dbNames map[tree.Name]struct{},
+) error {
 	for db := range dbNames {
 		switch db {
 		case catalogkeys.DefaultDatabaseName, catalogkeys.PgDatabaseName, catconstants.SystemDatabaseName:
@@ -1080,29 +1078,35 @@ func (c *stmtEnvCollector) printCreateAllDatabases(w io.Writer, dbNames map[stri
 			// exclude them to ease the recreation of the bundle.
 			continue
 		}
-		fmt.Fprintf(w, "CREATE DATABASE %s;\n", db)
+		dbName := lexbase.EscapeSQLString(string(db))
+		createStatement, err := c.query(fmt.Sprintf(
+			"SELECT create_statement FROM crdb_internal.databases WHERE name = %s", dbName,
+		))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s;\n", createStatement)
 	}
+	return nil
 }
 
 func (c *stmtEnvCollector) printCreateAllSchemas(
-	w io.Writer, schemaNames map[string]struct{},
+	w io.Writer, schemaNames map[tree.Name]map[tree.Name]struct{},
 ) error {
-	for schema := range schemaNames {
-		_, schemaOnly, found := strings.Cut(schema, ".")
-		if !found {
-			return errors.AssertionFailedf("expected schema name to be qualified with DB name")
+	for dbName, schemas := range schemaNames {
+		for schema := range schemas {
+			switch schema {
+			case catconstants.PublicSchemaName,
+				catconstants.InformationSchemaName,
+				catconstants.CRDBInternalSchemaName,
+				catconstants.PgCatalogName,
+				catconstants.PgExtensionSchemaName:
+				// The public and virtual schemas are always present, so
+				// exclude them to ease the recreation of the bundle.
+				continue
+			}
+			printCreateStatement(w, dbName, fmt.Sprintf("CREATE SCHEMA %s", schema.String()))
 		}
-		switch schemaOnly {
-		case catconstants.PublicSchemaName,
-			catconstants.InformationSchemaName,
-			catconstants.CRDBInternalSchemaName,
-			catconstants.PgCatalogName,
-			catconstants.PgExtensionSchemaName:
-			// The public and virtual schemas are always present, so
-			// exclude them to ease the recreation of the bundle.
-			continue
-		}
-		fmt.Fprintf(w, "CREATE SCHEMA %s;\n", schema)
 	}
 	return nil
 }
@@ -1130,4 +1134,46 @@ func (c *stmtEnvCollector) PrintTableStats(
 	stats = strings.Replace(stats, "'", "''", -1)
 	fmt.Fprintf(w, "ALTER TABLE %s INJECT STATISTICS '%s';\n", tn.FQString(), stats)
 	return nil
+}
+
+// skipReadOnlySessionVar contains all read-only session variables that are
+// explicitly excluded from env.sql of the bundle (they were deemed unlikely to
+// be useful in investigations).
+var skipReadOnlySessionVar = map[string]struct{}{
+	"crdb_version":              {}, // version is included separately
+	"integer_datetimes":         {},
+	"lc_collate":                {},
+	"lc_ctype":                  {},
+	"max_connections":           {},
+	"max_identifier_length":     {},
+	"max_index_keys":            {},
+	"max_prepared_transactions": {},
+	"server_encoding":           {},
+	"server_version":            {},
+	"server_version_num":        {},
+	"session_authorization":     {},
+	"session_user":              {},
+	"system_identity":           {},
+	"tracing":                   {},
+	"virtual_cluster_name":      {},
+}
+
+// sessionVarNeedsEscaping contains all writable session variables that have
+// values that need escaping in SET statements.
+var sessionVarNeedsEscaping = map[string]struct{}{
+	"application_name":               {},
+	"database":                       {},
+	"datestyle":                      {},
+	"distsql_workmem":                {},
+	"index_join_streamer_batch_size": {},
+	"join_reader_index_join_strategy_batch_size":  {},
+	"join_reader_no_ordering_strategy_batch_size": {},
+	"join_reader_ordering_strategy_batch_size":    {},
+	"lc_messages":                    {},
+	"lc_monetary":                    {},
+	"lc_numeric":                     {},
+	"lc_time":                        {},
+	"password_encryption":            {},
+	"prepared_statements_cache_size": {},
+	"timezone":                       {},
 }

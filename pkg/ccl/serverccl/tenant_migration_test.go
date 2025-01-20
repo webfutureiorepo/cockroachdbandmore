@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package serverccl
 
@@ -91,7 +88,7 @@ func TestValidateTargetTenantClusterVersion(t *testing.T) {
 				Settings:          makeSettings(),
 				Knobs: base.TestingKnobs{
 					Server: &server.TestingKnobs{
-						BinaryVersionOverride: test.binaryVersion,
+						ClusterVersionOverride: test.binaryVersion,
 						// We're bumping cluster versions manually ourselves. We
 						// want to avoid racing with the auto-upgrade process.
 						DisableAutomaticVersionUpgrade: make(chan struct{}),
@@ -107,7 +104,7 @@ func TestValidateTargetTenantClusterVersion(t *testing.T) {
 					TenantID: serverutils.TestTenantID(),
 					TestingKnobs: base.TestingKnobs{
 						Server: &server.TestingKnobs{
-							BinaryVersionOverride: test.binaryVersion,
+							ClusterVersionOverride: test.binaryVersion,
 						},
 					},
 				})
@@ -207,7 +204,7 @@ func TestBumpTenantClusterVersion(t *testing.T) {
 						// This test wants to bootstrap at the previously active
 						// cluster version, so we can actually bump the cluster
 						// version to the binary version.
-						BinaryVersionOverride: test.initialClusterVersion.Version,
+						ClusterVersionOverride: test.initialClusterVersion.Version,
 						// We're bumping cluster versions manually ourselves. We
 						// want to avoid racing with the auto-upgrade process.
 						DisableAutomaticVersionUpgrade: make(chan struct{}),
@@ -222,7 +219,7 @@ func TestBumpTenantClusterVersion(t *testing.T) {
 					TenantID: serverutils.TestTenantID(),
 					TestingKnobs: base.TestingKnobs{
 						Server: &server.TestingKnobs{
-							BinaryVersionOverride: test.initialClusterVersion.Version,
+							ClusterVersionOverride: test.initialClusterVersion.Version,
 						},
 					},
 				})

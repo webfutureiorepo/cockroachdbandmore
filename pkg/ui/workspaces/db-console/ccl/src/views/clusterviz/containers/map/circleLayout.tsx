@@ -1,20 +1,17 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 
+import { cockroach } from "src/js/protos";
 import { LocalityTree } from "src/redux/localities";
+import { LivenessStatus } from "src/redux/nodes";
 import { getChildLocalities } from "src/util/localities";
 
 import { LocalityView } from "./localityView";
 import { NodeView } from "./nodeView";
-import { LivenessStatus } from "src/redux/nodes";
-import { cockroach } from "src/js/protos";
 
 type Liveness = cockroach.kv.kvserver.liveness.livenesspb.ILiveness;
 

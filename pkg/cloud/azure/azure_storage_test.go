@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package azure
 
@@ -109,45 +104,29 @@ func TestAzure(t *testing.T) {
 		skip.IgnoreLint(t, "Test not configured for Azure")
 		return
 	}
-	testSettings := cluster.MakeTestingClusterSettings()
 	testID := cloudtestutils.NewTestID()
 	testPath := fmt.Sprintf("backup-test-%d", testID)
 	testListPath := fmt.Sprintf("listing-test-%d", testID)
 
-	cloudtestutils.CheckExportStore(t, cfg.filePath(testPath),
-		false, username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
-	cloudtestutils.CheckListFiles(t, cfg.filePath(testListPath),
-		username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
+	info := cloudtestutils.StoreInfo{
+		URI:  cfg.filePath(testPath),
+		User: username.RootUserName(),
+	}
+	cloudtestutils.CheckExportStore(t, info)
+	info.URI = cfg.filePath(testListPath)
+	cloudtestutils.CheckListFiles(t, info)
 
 	// Client Secret auth
-	cloudtestutils.CheckExportStore(t, cfg.filePathClientAuth(testPath),
-		false, username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
-	cloudtestutils.CheckListFiles(t, cfg.filePathClientAuth(testListPath),
-		username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
+	info.URI = cfg.filePathClientAuth(testPath)
+	cloudtestutils.CheckExportStore(t, info)
+	info.URI = cfg.filePathClientAuth(testListPath)
+	cloudtestutils.CheckListFiles(t, info)
 
 	// Implicit auth
-	cloudtestutils.CheckExportStore(t, cfg.filePathImplicitAuth(testPath),
-		false, username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
-	cloudtestutils.CheckListFiles(t, cfg.filePathImplicitAuth(testListPath),
-		username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
+	info.URI = cfg.filePathImplicitAuth(testPath)
+	cloudtestutils.CheckExportStore(t, info)
+	info.URI = cfg.filePathImplicitAuth(testListPath)
+	cloudtestutils.CheckListFiles(t, info)
 }
 
 func TestAzureSchemes(t *testing.T) {
@@ -259,7 +238,8 @@ func TestMakeAzureStorageURLFromEnvironment(t *testing.T) {
 		{environment: azure.USGovernmentCloud.Name, expected: "https://account.blob.core.usgovcloudapi.net/container"},
 	} {
 		t.Run(tt.environment, func(t *testing.T) {
-			sut, err := makeAzureStorage(context.Background(), cloud.EarlyBootExternalStorageContext{}, cloudpb.ExternalStorage{
+			testSettings := cluster.MakeTestingClusterSettings()
+			sut, err := makeAzureStorage(context.Background(), cloud.EarlyBootExternalStorageContext{Settings: testSettings}, cloudpb.ExternalStorage{
 				AzureConfig: &cloudpb.ExternalStorage_Azure{
 					Container:   "container",
 					Prefix:      "path",
@@ -283,7 +263,6 @@ func TestAzureStorageFileImplicitAuth(t *testing.T) {
 		skip.IgnoreLint(t, "Test not configured for Azure")
 		return
 	}
-	testSettings := cluster.MakeTestingClusterSettings()
 	testID := cloudtestutils.NewTestID()
 
 	cleanup := envutil.TestSetEnv(t, "AZURE_CLIENT_ID", "")
@@ -292,8 +271,11 @@ func TestAzureStorageFileImplicitAuth(t *testing.T) {
 	testPath := fmt.Sprintf("backup-test-%d", testID)
 	testListPath := fmt.Sprintf("listing-test-%d", testID)
 
-	cloudtestutils.CheckNoPermission(t, cfg.filePathImplicitAuth(testPath), username.RootUserName(),
-		nil /*db*/, testSettings)
+	info := cloudtestutils.StoreInfo{
+		URI:  cfg.filePathImplicitAuth(testPath),
+		User: username.RootUserName(),
+	}
+	cloudtestutils.CheckNoPermission(t, info)
 
 	tmpDir, cleanup2 := testutils.TempDir(t)
 	defer cleanup2()
@@ -304,14 +286,7 @@ func TestAzureStorageFileImplicitAuth(t *testing.T) {
 	cleanup3 := envutil.TestSetEnv(t, "COCKROACH_AZURE_APPLICATION_CREDENTIALS_FILE", credFile)
 	defer cleanup3()
 
-	cloudtestutils.CheckExportStore(t, cfg.filePathImplicitAuth(testPath),
-		false, username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
-	cloudtestutils.CheckListFiles(t, cfg.filePathImplicitAuth(testListPath),
-		username.RootUserName(),
-		nil, /* db */
-		testSettings,
-	)
+	cloudtestutils.CheckExportStore(t, info)
+	info.URI = cfg.filePathImplicitAuth(testListPath)
+	cloudtestutils.CheckListFiles(t, info)
 }

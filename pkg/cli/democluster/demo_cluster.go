@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package democluster
 
@@ -21,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -44,6 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlclustersettings"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils/regionlatency"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -55,7 +52,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
@@ -89,7 +85,7 @@ type transientCluster struct {
 	adminPassword string
 	adminUser     username.SQLUsername
 
-	stickyVFSRegistry server.StickyVFSRegistry
+	stickyVFSRegistry fs.StickyRegistry
 
 	drainAndShutdown func(ctx context.Context, adminClient serverpb.AdminClient) error
 
@@ -99,7 +95,7 @@ type transientCluster struct {
 
 	// latencyEnabled controls whether simulated latency is currently enabled.
 	// It is only relevant when using SimulateLatency.
-	latencyEnabled syncutil.AtomicBool
+	latencyEnabled atomic.Bool
 }
 
 // maxNodeInitTime is the maximum amount of time to wait for nodes to
@@ -108,7 +104,7 @@ const maxNodeInitTime = 60 * time.Second
 
 // secondaryTenantID is the ID of the secondary tenant to use when
 // --multitenant=true.
-const secondaryTenantID = 2
+const secondaryTenantID = 3
 
 // demoOrg is the organization to use to request an evaluation
 // license.
@@ -212,7 +208,7 @@ func NewDemoCluster(
 		}
 	}
 
-	c.stickyVFSRegistry = server.NewStickyVFSRegistry()
+	c.stickyVFSRegistry = fs.NewStickyRegistry()
 	return c, nil
 }
 
@@ -546,7 +542,7 @@ func (c *transientCluster) startTenantService(
 				Server: &server.TestingKnobs{
 					ContextTestingKnobs: rpc.ContextTestingKnobs{
 						InjectedLatencyOracle:  latencyMap,
-						InjectedLatencyEnabled: c.latencyEnabled.Get,
+						InjectedLatencyEnabled: c.latencyEnabled.Load,
 					},
 				},
 			},
@@ -574,7 +570,7 @@ func (c *transientCluster) startTenantService(
 					Server: &server.TestingKnobs{
 						ContextTestingKnobs: rpc.ContextTestingKnobs{
 							InjectedLatencyOracle:  latencyMap,
-							InjectedLatencyEnabled: c.latencyEnabled.Get,
+							InjectedLatencyEnabled: c.latencyEnabled.Load,
 						},
 					},
 				},
@@ -593,7 +589,7 @@ func (c *transientCluster) startTenantService(
 // clears the remote clock tracking. If the remote clocks were not cleared,
 // bad routing decisions would be made as soon as latency is turned on.
 func (c *transientCluster) SetSimulatedLatency(on bool) {
-	c.latencyEnabled.Set(on)
+	c.latencyEnabled.Store(on)
 	for _, s := range c.servers {
 		s.RPCContext().RemoteClocks.TestingResetLatencyInfos()
 	}
@@ -653,7 +649,7 @@ func (c *transientCluster) createAndAddNode(
 		// startup routine.
 		serverKnobs.ContextTestingKnobs = rpc.ContextTestingKnobs{
 			InjectedLatencyOracle:  regionlatency.MakeAddrMap(),
-			InjectedLatencyEnabled: c.latencyEnabled.Get,
+			InjectedLatencyEnabled: c.latencyEnabled.Load,
 		}
 	}
 
@@ -908,7 +904,7 @@ func (demoCtx *Context) testServerArgsForTransientCluster(
 	serverIdx int,
 	joinAddr string,
 	demoDir string,
-	stickyVFSRegistry server.StickyVFSRegistry,
+	stickyVFSRegistry fs.StickyRegistry,
 ) base.TestServerArgs {
 	// Assign a path to the store spec, to be saved.
 	storeSpec := base.DefaultTestStoreSpec
@@ -921,14 +917,15 @@ func (demoCtx *Context) testServerArgsForTransientCluster(
 		JoinAddr:                joinAddr,
 		DisableTLSForHTTP:       true,
 		StoreSpecs:              []base.StoreSpec{storeSpec},
+		ExternalIODir:           filepath.Join(demoDir, "nodelocal", fmt.Sprintf("n%d", serverIdx+1)),
 		SQLMemoryPoolSize:       demoCtx.SQLPoolMemorySize,
 		CacheSize:               demoCtx.CacheSize,
-		AutoConfigProvider:      demoCtx.AutoConfigProvider,
 		NoAutoInitializeCluster: true,
 		EnableDemoLoginEndpoint: true,
 		// Demo clusters by default will create their own tenants, so we
 		// don't need to create them here.
 		DefaultTestTenant: base.TODOTestTenantDisabled,
+		DefaultTenantName: roachpb.TenantName(demoTenantName),
 
 		Knobs: base.TestingKnobs{
 			Server: &server.TestingKnobs{
@@ -1485,6 +1482,7 @@ func (c *transientCluster) generateCerts(ctx context.Context, certsDir string) (
 			true, /* overwrite */
 			username.RootUserName(),
 			nil,  /* tenantIDs - this makes it valid for all tenants */
+			nil,  /* tenantNames - this makes it valid for all tenants */
 			true, /* generatePKCS8Key */
 		); err != nil {
 			return err
@@ -1501,6 +1499,7 @@ func (c *transientCluster) generateCerts(ctx context.Context, certsDir string) (
 			true, /* overwrite */
 			demoUser,
 			nil,  /* tenantIDs - this makes it valid for all tenants */
+			nil,  /* tenantNames - this makes it valid for all tenants */
 			true, /* generatePKCS8Key */
 		); err != nil {
 			return err
@@ -1715,7 +1714,7 @@ func (c *transientCluster) SetupWorkload(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
-				sqlURLs = append(sqlURLs, sqlURL.ToPQ().String())
+				sqlURLs = append(sqlURLs, sqlURL.WithDatabase(gen.Meta().Name).ToPQ().String())
 			}
 			if err := c.runWorkload(ctx, c.demoCtx.WorkloadGenerator, sqlURLs); err != nil {
 				return errors.Wrapf(err, "starting background workload")

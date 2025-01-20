@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ptstorage_test
 
@@ -35,10 +30,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -47,18 +44,33 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
 )
 
 func TestStorage(t *testing.T) {
+	skip.UnderRace(t, "very large test which is slow under race")
 	for _, withDeprecatedSpans := range []bool{true, false} {
-		for _, test := range testCases {
-			name := test.name
-			if withDeprecatedSpans {
-				name = fmt.Sprintf("%s_withDeprecatedSpans", name)
-				test.runWithDeprecatedSpans = true
+		for _, withMetaTable := range []bool{true, false} {
+			for _, test := range testCases {
+				name := test.name
+				if withDeprecatedSpans {
+					name = fmt.Sprintf("%s_withDeprecatedSpans", name)
+					test.runWithDeprecatedSpans = true
+				}
+
+				// Some tests will set test.runWithMetaTable themselves if they
+				// only test metadata. Run these tests once only. We don't
+				// need to run them with `runWithMetaTable` = false.
+				if !withMetaTable && test.runWithMetaTable {
+					continue
+				}
+				if withMetaTable || test.runWithMetaTable {
+					name = fmt.Sprintf("%s_withMetaTable", name)
+					test.runWithMetaTable = true
+				}
+				t.Run(name, test.run)
 			}
-			t.Run(name, test.run)
 		}
 	}
 }
@@ -140,6 +152,8 @@ var testCases = []testCase{
 	},
 	{
 		name: "Protect - too many spans",
+		// This test is exclusively for metadata.
+		runWithMetaTable: true,
 		ops: []op{
 			protectOp{spans: tableSpans(42)},
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
@@ -170,6 +184,8 @@ var testCases = []testCase{
 	},
 	{
 		name: "Protect - too many bytes",
+		// This test is exclusively for metadata.
+		runWithMetaTable: true,
 		ops: []op{
 			protectOp{spans: tableSpans(42), target: tableTarget(42)},
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
@@ -451,6 +467,7 @@ type testCase struct {
 	name                   string
 	ops                    []op
 	runWithDeprecatedSpans bool
+	runWithMetaTable       bool
 }
 
 func (test testCase) run(t *testing.T) {
@@ -459,9 +476,12 @@ func (test testCase) run(t *testing.T) {
 	var params base.TestServerArgs
 
 	ptsKnobs := &protectedts.TestingKnobs{}
+	params.Knobs.ProtectedTS = ptsKnobs
 	if test.runWithDeprecatedSpans {
 		ptsKnobs.DisableProtectedTimestampForMultiTenant = true
-		params.Knobs.ProtectedTS = ptsKnobs
+	}
+	if test.runWithMetaTable {
+		ptsKnobs.UseMetaTable = true
 	}
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: params})
 	defer tc.Stopper().Stop(ctx)
@@ -476,14 +496,16 @@ func (test testCase) run(t *testing.T) {
 	}
 	pts := ptstorage.WithDatabase(ptm, s.InternalDB().(isql.DB))
 	verify := func(t *testing.T) {
-		var state ptpb.State
 		state, err := pts.GetState(ctx)
 		require.NoError(t, err)
 
-		md, err := pts.GetMetadata(ctx)
-		require.NoError(t, err)
-		require.EqualValues(t, tCtx.state, state)
-		require.EqualValues(t, tCtx.state.Metadata, md)
+		if test.runWithMetaTable {
+			md, err := pts.GetMetadata(ctx)
+			require.EqualValues(t, tCtx.state.Metadata, md)
+			require.NoError(t, err)
+			require.EqualValues(t, tCtx.state, state)
+		}
+		require.EqualValues(t, tCtx.state.Records, tCtx.state.Records)
 		for _, r := range tCtx.state.Records {
 			var rec *ptpb.Record
 			rec, err := pts.GetRecord(ctx, r.ID.GetUUID())
@@ -632,93 +654,99 @@ func TestCorruptData(t *testing.T) {
 		}
 	}
 
-	// TODO(adityamaru): Remove test when we delete `spans` field from
-	// record.
-	t.Run("corrupt spans", func(t *testing.T) {
-		// Set the log scope so we can introspect the logged errors.
-		scope := log.Scope(t)
-		defer scope.Close(t)
+	testutils.RunTrueAndFalse(t, "using meta table", func(t *testing.T, withMetaTable bool) {
+		// TODO(adityamaru): Remove test when we delete `spans` field from
+		// record.
+		t.Run("corrupt spans", func(t *testing.T) {
+			// Set the log scope so we can introspect the logged errors.
+			scope := log.Scope(t)
+			defer scope.Close(t)
 
-		tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
-			ServerArgs: base.TestServerArgs{
-				Knobs: base.TestingKnobs{
-					SpanConfig:  &spanconfig.TestingKnobs{ManagerDisableJobCreation: true},
-					ProtectedTS: &protectedts.TestingKnobs{DisableProtectedTimestampForMultiTenant: true},
+			tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+				ServerArgs: base.TestServerArgs{
+					Knobs: base.TestingKnobs{
+						SpanConfig: &spanconfig.TestingKnobs{ManagerDisableJobCreation: true},
+						ProtectedTS: &protectedts.TestingKnobs{DisableProtectedTimestampForMultiTenant: true,
+							UseMetaTable: withMetaTable},
+					},
 				},
-			},
+			})
+			defer tc.Stopper().Stop(ctx)
+
+			s := tc.Server(0)
+			ptp := s.ExecutorConfig().(sql.ExecutorConfig).ProtectedTimestampProvider
+			tCtx := &testContext{runWithDeprecatedSpans: true}
+			runCorruptDataTest(tCtx, s, tc, ptstorage.WithDatabase(
+				ptp, tc.Server(0).InternalDB().(isql.DB),
+			))
 		})
-		defer tc.Stopper().Stop(ctx)
 
-		s := tc.Server(0)
-		ptp := s.ExecutorConfig().(sql.ExecutorConfig).ProtectedTimestampProvider
-		tCtx := &testContext{runWithDeprecatedSpans: true}
-		runCorruptDataTest(tCtx, s, tc, ptstorage.WithDatabase(
-			ptp, tc.Server(0).InternalDB().(isql.DB),
-		))
+		t.Run("corrupt target", func(t *testing.T) {
+			// Set the log scope so we can introspect the logged errors.
+			scope := log.Scope(t)
+			defer scope.Close(t)
+
+			var params base.TestServerArgs
+			params.Knobs.SpanConfig = &spanconfig.TestingKnobs{ManagerDisableJobCreation: true}
+			params.Knobs.ProtectedTS = &protectedts.TestingKnobs{UseMetaTable: withMetaTable}
+			tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: params})
+			defer tc.Stopper().Stop(ctx)
+
+			s := tc.Server(0)
+			pts := s.ExecutorConfig().(sql.ExecutorConfig).ProtectedTimestampProvider
+			runCorruptDataTest(
+				&testContext{}, s, tc,
+				ptstorage.WithDatabase(pts, s.InternalDB().(isql.DB)),
+			)
+		})
+		t.Run("corrupt hlc timestamp", func(t *testing.T) {
+			// Set the log scope so we can introspect the logged errors.
+			scope := log.Scope(t)
+			defer scope.Close(t)
+
+			var params base.TestServerArgs
+			params.Knobs.SpanConfig = &spanconfig.TestingKnobs{ManagerDisableJobCreation: true}
+			params.Knobs.ProtectedTS = &protectedts.TestingKnobs{UseMetaTable: withMetaTable}
+			tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: params})
+			defer tc.Stopper().Stop(ctx)
+
+			s := tc.Server(0)
+			ptp := s.ExecutorConfig().(sql.ExecutorConfig).ProtectedTimestampProvider
+			pts := ptstorage.WithDatabase(ptp, s.InternalDB().(isql.DB))
+			rec := newRecord(&testContext{}, s.Clock().Now(), "foo", []byte("bar"), tableTarget(42), tableSpan(42))
+			require.NoError(t, pts.Protect(ctx, &rec))
+
+			// This timestamp has too many logical digits and thus will fail parsing.
+			var d tree.DDecimal
+			d.SetFinite(math.MaxInt32, -12)
+			ie := tc.Server(0).InternalExecutor().(isql.Executor)
+			affected, err := ie.ExecEx(
+				ctx, "corrupt-data", nil, /* txn */
+				sessiondata.NodeUserSessionDataOverride,
+				"UPDATE system.protected_ts_records SET ts = $1 WHERE id = $2",
+				d.String(), rec.ID.String())
+			require.NoError(t, err)
+			require.Equal(t, 1, affected)
+
+			msg := regexp.MustCompile("failed to parse timestamp for " + rec.ID.String() +
+				": logical part has too many digits")
+			got, err := pts.GetRecord(ctx, rec.ID.GetUUID())
+			require.Regexp(t, msg, err)
+			require.Nil(t, got)
+			_, err = pts.GetState(ctx)
+			require.NoError(t, err)
+			log.FlushFiles()
+
+			entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 100, msg,
+				log.WithFlattenedSensitiveData)
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, 1, len(entries), "entries: %v", entries)
+			for _, e := range entries {
+				require.Equal(t, severity.ERROR, e.Severity)
+			}
+		})
 	})
 
-	t.Run("corrupt target", func(t *testing.T) {
-		// Set the log scope so we can introspect the logged errors.
-		scope := log.Scope(t)
-		defer scope.Close(t)
-
-		var params base.TestServerArgs
-		params.Knobs.SpanConfig = &spanconfig.TestingKnobs{ManagerDisableJobCreation: true}
-		tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: params})
-		defer tc.Stopper().Stop(ctx)
-
-		s := tc.Server(0)
-		pts := s.ExecutorConfig().(sql.ExecutorConfig).ProtectedTimestampProvider
-		runCorruptDataTest(
-			&testContext{}, s, tc,
-			ptstorage.WithDatabase(pts, s.InternalDB().(isql.DB)),
-		)
-	})
-	t.Run("corrupt hlc timestamp", func(t *testing.T) {
-		// Set the log scope so we can introspect the logged errors.
-		scope := log.Scope(t)
-		defer scope.Close(t)
-
-		var params base.TestServerArgs
-		params.Knobs.SpanConfig = &spanconfig.TestingKnobs{ManagerDisableJobCreation: true}
-		tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: params})
-		defer tc.Stopper().Stop(ctx)
-
-		s := tc.Server(0)
-		ptp := s.ExecutorConfig().(sql.ExecutorConfig).ProtectedTimestampProvider
-		pts := ptstorage.WithDatabase(ptp, s.InternalDB().(isql.DB))
-		rec := newRecord(&testContext{}, s.Clock().Now(), "foo", []byte("bar"), tableTarget(42), tableSpan(42))
-		require.NoError(t, pts.Protect(ctx, &rec))
-
-		// This timestamp has too many logical digits and thus will fail parsing.
-		var d tree.DDecimal
-		d.SetFinite(math.MaxInt32, -12)
-		ie := tc.Server(0).InternalExecutor().(isql.Executor)
-		affected, err := ie.ExecEx(
-			ctx, "corrupt-data", nil, /* txn */
-			sessiondata.NodeUserSessionDataOverride,
-			"UPDATE system.protected_ts_records SET ts = $1 WHERE id = $2",
-			d.String(), rec.ID.String())
-		require.NoError(t, err)
-		require.Equal(t, 1, affected)
-
-		msg := regexp.MustCompile("failed to parse timestamp for " + rec.ID.String() +
-			": logical part has too many digits")
-		got, err := pts.GetRecord(ctx, rec.ID.GetUUID())
-		require.Regexp(t, msg, err)
-		require.Nil(t, got)
-		_, err = pts.GetState(ctx)
-		require.NoError(t, err)
-		log.FlushFiles()
-
-		entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 100, msg,
-			log.WithFlattenedSensitiveData)
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, 1, len(entries), "entries: %v", entries)
-		for _, e := range entries {
-			require.Equal(t, severity.ERROR, e.Severity)
-		}
-	})
 }
 
 // TestErrorsFromSQL ensures that errors from the underlying Executor
@@ -789,13 +817,19 @@ func (txn *wrappedInternalTxn) SessionData() *sessiondata.SessionData {
 	return txn.wrapped.SessionData()
 }
 
+func (txn *wrappedInternalTxn) GetSystemSchemaVersion(
+	ctx context.Context,
+) (roachpb.Version, error) {
+	return txn.wrapped.GetSystemSchemaVersion(ctx)
+}
+
 func wrapTxn(txn isql.Txn, errFunc func(statement string) error) *wrappedInternalTxn {
 	return &wrappedInternalTxn{wrapped: txn, errFunc: errFunc}
 }
 
 func (txn *wrappedInternalTxn) QueryBufferedExWithCols(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	_ *kv.Txn,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
@@ -807,14 +841,18 @@ func (txn *wrappedInternalTxn) QueryBufferedExWithCols(
 var _ isql.Executor = &wrappedInternalTxn{}
 
 func (txn *wrappedInternalTxn) Exec(
-	ctx context.Context, opName string, _ *kv.Txn, statement string, params ...interface{},
+	ctx context.Context,
+	opName redact.RedactableString,
+	_ *kv.Txn,
+	statement string,
+	params ...interface{},
 ) (int, error) {
 	panic("unimplemented")
 }
 
 func (txn *wrappedInternalTxn) ExecEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	kvTxn *kv.Txn,
 	o sessiondata.InternalExecutorOverride,
 	stmt string,
@@ -828,9 +866,20 @@ func (txn *wrappedInternalTxn) ExecEx(
 	return txn.wrapped.ExecEx(ctx, opName, kvTxn, o, stmt, qargs...)
 }
 
+func (txn *wrappedInternalTxn) ExecParsed(
+	ctx context.Context,
+	opName redact.RedactableString,
+	_ *kv.Txn,
+	o sessiondata.InternalExecutorOverride,
+	parsedStmt statements.Statement[tree.Statement],
+	params ...interface{},
+) (int, error) {
+	panic("unimplemented")
+}
+
 func (txn *wrappedInternalTxn) QueryRowEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	kvTxn *kv.Txn,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
@@ -844,15 +893,35 @@ func (txn *wrappedInternalTxn) QueryRowEx(
 	return txn.wrapped.QueryRowEx(ctx, opName, kvTxn, session, stmt, qargs...)
 }
 
+func (txn *wrappedInternalTxn) QueryRowExParsed(
+	ctx context.Context,
+	opName redact.RedactableString,
+	kvTxn *kv.Txn,
+	session sessiondata.InternalExecutorOverride,
+	parsedStmt statements.Statement[tree.Statement],
+	qargs ...interface{},
+) (tree.Datums, error) {
+	if f := txn.errFunc; f != nil {
+		if err := f(parsedStmt.SQL); err != nil {
+			return nil, err
+		}
+	}
+	return txn.wrapped.QueryRowExParsed(ctx, opName, kvTxn, session, parsedStmt, qargs...)
+}
+
 func (txn *wrappedInternalTxn) QueryRow(
-	ctx context.Context, opName string, _ *kv.Txn, statement string, qargs ...interface{},
+	ctx context.Context,
+	opName redact.RedactableString,
+	_ *kv.Txn,
+	statement string,
+	qargs ...interface{},
 ) (tree.Datums, error) {
 	panic("not implemented")
 }
 
 func (txn *wrappedInternalTxn) QueryRowExWithCols(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	_ *kv.Txn,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
@@ -862,14 +931,14 @@ func (txn *wrappedInternalTxn) QueryRowExWithCols(
 }
 
 func (txn *wrappedInternalTxn) QueryBuffered(
-	ctx context.Context, opName string, _ *kv.Txn, stmt string, qargs ...interface{},
+	ctx context.Context, opName redact.RedactableString, _ *kv.Txn, stmt string, qargs ...interface{},
 ) ([]tree.Datums, error) {
 	panic("not implemented")
 }
 
 func (txn *wrappedInternalTxn) QueryBufferedEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	_ *kv.Txn,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,
@@ -879,14 +948,14 @@ func (txn *wrappedInternalTxn) QueryBufferedEx(
 }
 
 func (txn *wrappedInternalTxn) QueryIterator(
-	ctx context.Context, opName string, _ *kv.Txn, stmt string, qargs ...interface{},
+	ctx context.Context, opName redact.RedactableString, _ *kv.Txn, stmt string, qargs ...interface{},
 ) (isql.Rows, error) {
 	panic("not implemented")
 }
 
 func (txn *wrappedInternalTxn) QueryIteratorEx(
 	ctx context.Context,
-	opName string,
+	opName redact.RedactableString,
 	kvTxn *kv.Txn,
 	session sessiondata.InternalExecutorOverride,
 	stmt string,

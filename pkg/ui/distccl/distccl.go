@@ -1,10 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package distccl embeds the assets for the CCL version of the web UI into the
 // Cockroach binary.
@@ -19,14 +16,14 @@ import (
 	_ "embed"
 
 	"github.com/cockroachdb/cockroach/pkg/ui"
-	"github.com/cockroachdb/cockroach/pkg/util/targz"
+	"github.com/cockroachdb/cockroach/pkg/util/assetbundle"
 )
 
-//go:embed assets.tar.gz
+//go:embed assets.tar.zst
 var assets []byte
 
 func init() {
-	fs, err := targz.AsFS(bytes.NewBuffer(assets))
+	fs, err := assetbundle.AsFS(bytes.NewBuffer(assets))
 	if err != nil {
 		panic(err)
 	}

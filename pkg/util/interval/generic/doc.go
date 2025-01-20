@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /*
 Package generic provides an implementation of a generic immutable interval
@@ -22,9 +17,10 @@ Users of the package should follow these steps:
  1. Define a type that will be used to parameterize the generic tree structure.
  2. Ensure that the parameter type fulfills the type contract defined in
     internal/contract.go.
- 3. Include a go generate declaration that invokes the gen.sh script with the
-    type name as the first argument and the package name as the second argument.
- 4. Invoke go generate.
+ 3. Add an entry to their BUILD.bazel to generate the file by using the
+    gen_interval_btree macro in //pkg/util/interval/generic:gen.bzl.
+ 4. Add the generated files to the BUILD.bazel file targets.
+ 5. Run ./dev gen to generate the files.
 
 # Example
 
@@ -48,19 +44,45 @@ Users of the package should follow these steps:
 	func (la *latch) SetKey(v []byte)    { la.span.Key = v }
 	func (la *latch) SetEndKey(v []byte) { la.span.EndKey = v }
 
-3. The following comment is added near the declaration of the latch type:
+3. Add the following entry to the BUILD.bazel file:
 
-	//go:generate ../../util/interval/generic/gen.sh *latch spanlatch
+	load("//pkg/util/interval/generic:gen.bzl", "gen_interval_btree")
 
-4. Invoking go generate results in the creation of the following files:
+	gen_interval_btree(
+	  name = "latch_interval_btree",
+	  package = "spanlatch",
+	  type = "*latch",
+	)
+
+4. Add the generated files to the BUILD.bazel file targets:
+
+	go_library(
+	    # ...
+	    srcs = [
+	        # ...
+	        ":latch_interval_btree.go",  # keep
+	    ],
+	    # ...
+	)
+
+	go_test(
+	    # ...
+	    srcs = [
+	      # ...
+	      ":latch_interval_btree_test.go", # keep
+	    ],
+	    # ...
+	)
+
+5. Run ./dev gen which should result in the following files:
 
   - latch_interval_btree.go
   - latch_interval_btree_test.go
 
 # Working Example
 
-See example_t.go for a working example. Running go generate on this package
-generates:
+See example_t.go for a working example. Running ./dev gen generates:
+
   - example_interval_btree.go
   - example_interval_btree_test.go
 */

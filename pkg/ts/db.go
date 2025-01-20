@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ts
 
@@ -151,7 +146,7 @@ func (p *poller) start() (firstDone <-chan struct{}) {
 	bgCtx := p.AnnotateCtx(context.Background())
 	if p.stopper.RunAsyncTask(bgCtx, "ts-poller", func(ctx context.Context) {
 		ch := ch // goroutine-local copy
-		ticker := timeutil.NewTimer()
+		var ticker timeutil.Timer
 		ticker.Reset(0)
 		defer ticker.Stop()
 		for {

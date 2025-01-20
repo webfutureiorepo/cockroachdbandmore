@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package lease
 
@@ -48,6 +43,21 @@ var MoveTablePrimaryIndexIDtoTarget func(
 	context.Context, *testing.T, serverutils.ApplicationLayerInterface, descpb.ID, descpb.IndexID,
 )
 
+type dummySessionModeReader struct {
+	mode SessionBasedLeasingMode
+}
+
+func (d *dummySessionModeReader) sessionBasedLeasingModeAtLeast(
+	_ context.Context, minimumMode SessionBasedLeasingMode,
+) bool {
+	return d.mode >= minimumMode
+}
+func (d *dummySessionModeReader) getSessionBasedLeasingMode(
+	_ context.Context,
+) SessionBasedLeasingMode {
+	return d.mode
+}
+
 // TestKVWriterMatchesIEWriter is a rather involved test to exercise the
 // kvWriter and ieWriter and confirm that they write exactly the same thing
 // to the underlying key-value store. It does this by teeing operations to
@@ -67,7 +77,7 @@ func TestKVWriterMatchesIEWriter(t *testing.T) {
 			srv, sqlDB, kvDB := serverutils.StartServer(t, serverArgs)
 			defer srv.Stopper().Stop(ctx)
 			s := srv.ApplicationLayer()
-			LeaseEnableSessionBasedLeasing.Override(ctx, &s.ClusterSettings().SV, int64(mode))
+			LeaseEnableSessionBasedLeasing.Override(ctx, &s.ClusterSettings().SV, mode)
 
 			// Otherwise, we wouldn't get complete SSTs in our export under stress.
 			sqlutils.MakeSQLRunner(srv.SystemLayer().SQLConn(t)).Exec(
@@ -77,9 +87,15 @@ func TestKVWriterMatchesIEWriter(t *testing.T) {
 			tdb := sqlutils.MakeSQLRunner(sqlDB)
 			schema := systemschema.LeaseTableSchema
 			if mode == SessionBasedOnly {
-				schema = systemschema.LeaseTableSchema_V24_1
+				schema = strings.Replace(systemschema.LeaseTableSchema_V24_1,
+					"exclude_data_from_backup = true",
+					"exclude_data_from_backup = false",
+					1)
+
 			}
 			makeTable := func(name string) (id descpb.ID) {
+				// Rewrite the schema and drop the exclude_data_from_backup from flag,
+				// since this will prevent export from working later on in the test.
 				tdb.Exec(t, strings.Replace(schema, "system.lease", name, 1))
 				tdb.QueryRow(t, "SELECT id FROM system.namespace WHERE name = $1", name).Scan(&id)
 				// Modifies the primary index IDs to line up with the session based
@@ -93,16 +109,14 @@ func TestKVWriterMatchesIEWriter(t *testing.T) {
 			}
 			lease1ID := makeTable("lease1")
 			lease2ID := makeTable("lease2")
-
-			ie := s.InternalExecutor().(isql.Executor)
+			ie := s.InternalDB().(isql.DB).Executor()
 			codec := s.Codec()
 			settingsWatcher := s.SettingsWatcher().(*settingswatcher.SettingsWatcher)
-			modeReader := s.LeaseManager().(sessionBasedLeasingModeReader)
+			modeReader := &dummySessionModeReader{mode: mode}
 			w := teeWriter{
 				a: newInternalExecutorWriter(ie, "defaultdb.public.lease1", mode),
 				b: newKVWriter(codec, kvDB, lease2ID, settingsWatcher, modeReader),
 			}
-			require.Equal(t, modeReader.getSessionBasedLeasingMode(), mode)
 			start := kvDB.Clock().Now()
 			groups := generateWriteOps(2<<10, 1<<10)
 			for {

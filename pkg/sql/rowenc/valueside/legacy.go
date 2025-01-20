@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package valueside
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/cockroach/pkg/util/tsearch"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/cockroach/pkg/util/vector"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -168,6 +164,15 @@ func MarshalLegacy(colType *types.T, val tree.Datum) (roachpb.Value, error) {
 			r.SetBytes(data)
 			return r, nil
 		}
+	case types.PGVectorFamily:
+		if v, ok := val.(*tree.DPGVector); ok {
+			data, err := vector.Encode(nil, v.T)
+			if err != nil {
+				return r, err
+			}
+			r.SetBytes(data)
+			return r, nil
+		}
 	case types.ArrayFamily:
 		if v, ok := val.(*tree.DArray); ok {
 			if err := checkElementType(v.ParamTyp, colType.ArrayContents()); err != nil {
@@ -182,7 +187,7 @@ func MarshalLegacy(colType *types.T, val tree.Datum) (roachpb.Value, error) {
 		}
 	case types.TupleFamily:
 		if v, ok := val.(*tree.DTuple); ok {
-			b, err := encodeUntaggedTuple(v, nil /* appendTo */, 0 /* colID */, nil /* scratch */)
+			b, _, err := encodeUntaggedTuple(v, nil /* appendTo */, nil /* scratch */)
 			if err != nil {
 				return r, err
 			}
@@ -422,6 +427,16 @@ func UnmarshalLegacy(a *tree.DatumAlloc, typ *types.T, value roachpb.Value) (tre
 			return nil, err
 		}
 		return tree.NewDTSVector(vec), nil
+	case types.PGVectorFamily:
+		v, err := value.GetBytes()
+		if err != nil {
+			return nil, err
+		}
+		vec, err := vector.Decode(v)
+		if err != nil {
+			return nil, err
+		}
+		return tree.NewDPGVector(vec), nil
 	case types.EnumFamily:
 		v, err := value.GetBytes()
 		if err != nil {

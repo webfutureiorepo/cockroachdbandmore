@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ptstorage
 
@@ -34,7 +29,7 @@ WITH
     current_meta AS (` + currentMetaCTE + `),
     checks AS (` + protectChecksCTE + `),
     updated_meta AS (` + protectUpsertMetaCTE + `),
-    new_record AS (` + protectInsertRecordCTE + `)
+    new_record AS (` + protectInsertRecordCTEWithChecks + `)
 SELECT
     failed,
     total_bytes AS prev_total_bytes,
@@ -103,6 +98,23 @@ RETURNING
 `
 
 	protectInsertRecordCTE = `
+WITH
+checks AS (SELECT EXISTS(SELECT * FROM system.protected_ts_records WHERE id = $1) as failed),
+new_record AS (
+	INSERT INTO
+   		system.protected_ts_records (id, ts, meta_type, meta, num_spans, spans, target)
+ 	(
+		SELECT $1, $2, $3, $4, $5, $6, $7
+		WHERE NOT EXISTS(SELECT * FROM checks WHERE failed)
+	)
+	RETURNING id
+)
+SELECT
+	failed
+FROM checks;
+`
+
+	protectInsertRecordCTEWithChecks = `
 INSERT
 INTO
     system.protected_ts_records (id, ts, meta_type, meta, num_spans, spans, target)
@@ -170,7 +182,7 @@ RETURNING
     true
 `
 
-	releaseQuery = `
+	releaseQueryWithMeta = `
 WITH
     current_meta AS (` + currentMetaCTE + `),
     record AS (` + releaseSelectRecordCTE + `),
@@ -181,6 +193,14 @@ WHERE
     EXISTS(SELECT NULL FROM record WHERE r.id = record.id)
 RETURNING
     NULL;`
+
+	releaseQuery = `
+DELETE FROM
+    system.protected_ts_records AS r
+WHERE
+    r.id = $1 
+RETURNING
+    r.id;`
 
 	// Collect the number of spans for the record identified by $1.
 	releaseSelectRecordCTE = `

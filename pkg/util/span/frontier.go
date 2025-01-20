@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package span
 
@@ -20,11 +15,11 @@ import (
 	// Needed for roachpb.Span.String().
 	_ "github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
@@ -109,7 +104,7 @@ func (r OpResult) asBool() bool {
 type Operation func(roachpb.Span, hlc.Timestamp) (done OpResult)
 
 var useBtreeFrontier = envutil.EnvOrDefaultBool("COCKROACH_BTREE_SPAN_FRONTIER_ENABLED",
-	util.ConstantWithMetamorphicTestBool("COCKROACH_BTREE_SPAN_FRONTIER_ENABLED", true))
+	metamorphic.ConstantWithTestBool("COCKROACH_BTREE_SPAN_FRONTIER_ENABLED", true))
 
 func enableBtreeFrontier(enabled bool) func() {
 	old := useBtreeFrontier
@@ -119,11 +114,19 @@ func enableBtreeFrontier(enabled bool) func() {
 	}
 }
 
+func newBTreeFrontier() Frontier {
+	return &btreeFrontier{}
+}
+
+func newLLBRFrontier() Frontier {
+	return &llrbFrontier{tree: interval.NewTree(interval.ExclusiveOverlapper)}
+}
+
 func newFrontier() Frontier {
 	if useBtreeFrontier {
-		return &btreeFrontier{}
+		return newBTreeFrontier()
 	}
-	return &llrbFrontier{tree: interval.NewTree(interval.ExclusiveOverlapper)}
+	return newLLBRFrontier()
 }
 
 // MakeFrontier returns a Frontier that tracks the given set of spans.
@@ -372,6 +375,12 @@ func (f *btreeFrontier) mergeEntries(e *btreeFrontierEntry) (*btreeFrontierEntry
 		f.mergeAlloc = append(f.mergeAlloc, rightIter.Cur())
 	}
 
+	// If there were no left or right merges, return without restructuring the
+	// tree.
+	if len(f.mergeAlloc) == 0 {
+		return leftMost, nil
+	}
+
 	// Delete entries first, before updating leftMost boundaries since doing so
 	// will mess up btree.
 	for i, toRemove := range f.mergeAlloc {
@@ -381,10 +390,8 @@ func (f *btreeFrontier) mergeEntries(e *btreeFrontierEntry) (*btreeFrontierEntry
 		}
 	}
 
-	leftMost.End = end
-	if expensiveChecksEnabled() {
-		leftMost.spanCopy.EndKey = append(roachpb.Key{}, end...)
-	}
+	f.setEndKey(leftMost, end)
+
 	return leftMost, nil
 }
 
@@ -432,17 +439,29 @@ func (f *btreeFrontier) splitEntryAt(
 
 	right = newFrontierEntry(&f.idAlloc, split, e.End, e.ts)
 
-	// Adjust e boundary before we add right (so that there is no overlap in the tree).
-	e.End = split
-	if expensiveChecksEnabled() {
-		e.spanCopy.EndKey = append(roachpb.Key{}, split...)
-	}
+	// Adjust e boundary before we add right (so that there is no overlap in the
+	// tree).
+	f.setEndKey(e, split)
 
 	if err := f.setEntry(right); err != nil {
 		putFrontierEntry(right)
 		return nil, nil, err
 	}
 	return e, right, nil
+}
+
+// setEndKey changes the end key assigned to the entry. setEndKey requires the
+// entry to be in the tree.
+func (f *btreeFrontier) setEndKey(e *btreeFrontierEntry, endKey roachpb.Key) {
+	// The tree implementation expects the Start and End keys of a span to be
+	// immutable. We remove the leftMost node before updating the End index in
+	// order to avoid corrupting the `maxKey` that is inlined in the `node`.
+	f.tree.Delete(e)
+	e.End = endKey
+	if expensiveChecksEnabled() {
+		e.spanCopy.EndKey = append(roachpb.Key{}, endKey...)
+	}
+	f.tree.Set(e)
 }
 
 // forward is the work horse of the btreeFrontier.  It forwards the timestamp
@@ -691,7 +710,7 @@ func (h frontierHeap) Len() int { return len(h) }
 
 // Less implements heap.Interface.
 func (h frontierHeap) Less(i, j int) bool {
-	if h[i].ts.EqOrdering(h[j].ts) {
+	if h[i].ts == h[j].ts {
 		return h[i].Start.Compare(h[j].Start) < 0
 	}
 	return h[i].ts.Less(h[j].ts)

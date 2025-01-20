@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowcontainer
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -39,8 +35,11 @@ type DiskRowContainer struct {
 	diskAcc mon.BoundAccount
 	// bufferedRows buffers writes to the diskMap.
 	bufferedRows diskmap.SortedDiskMapBatchWriter
-	scratchKey   []byte
-	scratchVal   []byte
+	// memAcc keeps track of memory usage of scratchKey, scratchVal, and keys
+	// stored in deDupCache if applicable.
+	memAcc     mon.BoundAccount
+	scratchKey []byte
+	scratchVal []byte
 
 	// For computing mean encoded row bytes.
 	totalEncodedRowBytes uint64
@@ -75,9 +74,9 @@ type DiskRowContainer struct {
 	// contains all the key strings that are potentially buffered in bufferedRows.
 	// Since we need to de-duplicate for every insert attempt, we don't want to
 	// keep flushing bufferedRows after every insert.
-	// There is currently no memory-accounting for the deDupCache, just like there
-	// is none for the bufferedRows. Both will be approximately the same size.
 	deDupCache map[string]int
+
+	deDupCacheAccountedFor int64
 
 	diskMonitor *mon.BytesMonitor
 	engine      diskmap.Factory
@@ -91,27 +90,40 @@ var _ DeDupingRowContainer = &DiskRowContainer{}
 // MakeDiskRowContainer creates a DiskRowContainer with the given engine as the
 // underlying store that rows are stored on.
 // Arguments:
+//   - memAcc is used to monitor this DiskRowContainer's memory usage. It must
+//     be bound to an unlimited memory monitor. The container takes ownership of
+//     the account.
 //   - diskMonitor is used to monitor this DiskRowContainer's disk usage.
 //   - types is the schema of rows that will be added to this container.
 //   - ordering is the output ordering; the order in which rows should be sorted.
 //   - e is the underlying store that rows are stored on.
 func MakeDiskRowContainer(
+	ctx context.Context,
+	memAcc mon.BoundAccount,
 	diskMonitor *mon.BytesMonitor,
-	types []*types.T,
+	typs []*types.T,
 	ordering colinfo.ColumnOrdering,
 	e diskmap.Factory,
-) DiskRowContainer {
+) (_ DiskRowContainer, retErr error) {
 	diskMap := e.NewSortedDiskMap()
 	d := DiskRowContainer{
-		diskMap:     diskMap,
-		diskAcc:     diskMonitor.MakeBoundAccount(),
-		types:       types,
-		ordering:    ordering,
-		diskMonitor: diskMonitor,
-		engine:      e,
-		datumAlloc:  &tree.DatumAlloc{},
+		diskMap:      diskMap,
+		diskAcc:      diskMonitor.MakeBoundAccount(),
+		bufferedRows: diskMap.NewBatchWriter(),
+		memAcc:       memAcc,
+		types:        typs,
+		ordering:     ordering,
+		diskMonitor:  diskMonitor,
+		engine:       e,
+		datumAlloc:   &tree.DatumAlloc{},
 	}
-	d.bufferedRows = d.diskMap.NewBatchWriter()
+	defer func() {
+		if retErr != nil {
+			// Ensure to close the container since we're not returning it to the
+			// caller.
+			d.Close(ctx)
+		}
+	}()
 
 	// The ordering is specified for a subset of the columns. These will be
 	// encoded as a key in the given order according to the given direction so
@@ -140,9 +152,19 @@ func MakeDiskRowContainer(
 	d.encodings = make([]catenumpb.DatumEncoding, len(d.ordering))
 	for i, orderInfo := range ordering {
 		d.encodings[i] = rowenc.EncodingDirToDatumEncoding(orderInfo.Direction)
+		switch t := typs[orderInfo.ColIdx]; t.Family() {
+		case types.TSQueryFamily, types.TSVectorFamily, types.PGVectorFamily:
+			return DiskRowContainer{}, unimplemented.NewWithIssueDetailf(
+				92165, "", "can't order by column type %s", t.SQLStringForError(),
+			)
+		case types.TupleFamily:
+			return DiskRowContainer{}, unimplemented.NewWithIssueDetailf(
+				49975, "", "can't spill column type %s to disk", t.SQLStringForError(),
+			)
+		}
 	}
 
-	return d
+	return d, nil
 }
 
 // DoDeDuplicate causes DiskRowContainer to behave as an implementation of
@@ -190,8 +212,12 @@ func (d *DiskRowContainer) AddRow(ctx context.Context, row rowenc.EncDatumRow) e
 	// calls to AddRowWithDeDup() de-duplicate wrt this cache.
 	if d.deDuplicate {
 		if d.bufferedRows.NumPutsSinceFlush() == 0 {
-			d.clearDeDupCache()
+			d.clearDeDupCache(ctx)
 		} else {
+			if err := d.memAcc.Grow(ctx, int64(len(d.scratchKey))); err != nil {
+				return err
+			}
+			d.deDupCacheAccountedFor += int64(len(d.scratchKey))
 			d.deDupCache[string(d.scratchKey)] = int(d.rowID)
 		}
 	}
@@ -251,8 +277,12 @@ func (d *DiskRowContainer) AddRowWithDeDup(
 		return 0, err
 	}
 	if d.bufferedRows.NumPutsSinceFlush() == 0 {
-		d.clearDeDupCache()
+		d.clearDeDupCache(ctx)
 	} else {
+		if err = d.memAcc.Grow(ctx, int64(len(d.scratchKey))); err != nil {
+			return 0, err
+		}
+		d.deDupCacheAccountedFor += int64(len(d.scratchKey))
 		d.deDupCache[string(d.scratchKey)] = int(d.rowID)
 	}
 	d.totalEncodedRowBytes += uint64(len(d.scratchKey) + len(d.scratchVal))
@@ -261,23 +291,32 @@ func (d *DiskRowContainer) AddRowWithDeDup(
 	return idx, nil
 }
 
-func (d *DiskRowContainer) clearDeDupCache() {
+func (d *DiskRowContainer) clearDeDupCache(ctx context.Context) {
 	for k := range d.deDupCache {
 		delete(d.deDupCache, k)
 	}
+	d.memAcc.Shrink(ctx, d.deDupCacheAccountedFor)
+	d.deDupCacheAccountedFor = 0
 }
 
 func (d *DiskRowContainer) testingFlushBuffer(ctx context.Context) {
 	if err := d.bufferedRows.Flush(); err != nil {
 		log.Fatalf(ctx, "%v", err)
 	}
-	d.clearDeDupCache()
+	d.clearDeDupCache(ctx)
 }
 
-func (d *DiskRowContainer) encodeRow(ctx context.Context, row rowenc.EncDatumRow) error {
+func (d *DiskRowContainer) encodeRow(ctx context.Context, row rowenc.EncDatumRow) (retErr error) {
 	if len(row) != len(d.types) {
 		log.Fatalf(ctx, "invalid row length %d, expected %d", len(row), len(d.types))
 	}
+	oldScratchMemUse := int64(cap(d.scratchKey) + cap(d.scratchVal))
+	defer func() {
+		if retErr == nil {
+			newScratchMemUse := int64(cap(d.scratchKey) + cap(d.scratchVal))
+			retErr = d.memAcc.Resize(ctx, oldScratchMemUse, newScratchMemUse)
+		}
+	}()
 
 	for i, orderInfo := range d.ordering {
 		col := orderInfo.ColIdx
@@ -326,7 +365,11 @@ func (d *DiskRowContainer) Sort(context.Context) {}
 func (d *DiskRowContainer) Reorder(ctx context.Context, ordering colinfo.ColumnOrdering) error {
 	// We need to create a new DiskRowContainer since its ordering can only be
 	// changed at initialization.
-	newContainer := MakeDiskRowContainer(d.diskMonitor, d.types, ordering, d.engine)
+	memAcc := d.memAcc.Monitor().MakeBoundAccount()
+	newContainer, err := MakeDiskRowContainer(ctx, memAcc, d.diskMonitor, d.types, ordering, d.engine)
+	if err != nil {
+		return err
+	}
 	i := d.NewFinalIterator(ctx)
 	defer i.Close()
 	for i.Rewind(); ; i.Next() {
@@ -349,7 +392,7 @@ func (d *DiskRowContainer) Reorder(ctx context.Context, ordering colinfo.ColumnO
 }
 
 // InitTopK limits iterators to read the first k rows.
-func (d *DiskRowContainer) InitTopK() {
+func (d *DiskRowContainer) InitTopK(context.Context) {
 	d.topK = d.Len()
 }
 
@@ -376,7 +419,10 @@ func (d *DiskRowContainer) UnsafeReset(ctx context.Context) error {
 	}
 	d.diskAcc.Clear(ctx)
 	d.bufferedRows = d.diskMap.NewBatchWriter()
-	d.clearDeDupCache()
+	d.scratchKey = nil
+	d.scratchVal = nil
+	d.clearDeDupCache(ctx)
+	d.memAcc.Clear(ctx)
 	d.lastReadKey = nil
 	d.rowID = 0
 	d.totalEncodedRowBytes = 0
@@ -385,11 +431,16 @@ func (d *DiskRowContainer) UnsafeReset(ctx context.Context) error {
 
 // Close is part of the SortableRowContainer interface.
 func (d *DiskRowContainer) Close(ctx context.Context) {
-	// We can ignore the error here because the flushed data is immediately cleared
-	// in the following Close.
-	_ = d.bufferedRows.Close(ctx)
-	d.diskMap.Close(ctx)
-	d.diskAcc.Close(ctx)
+	if d.diskMap != nil {
+		// diskMap and bufferedRows could be nil in some error paths.
+
+		// We can ignore the error here because the flushed data is immediately
+		// cleared in the following Close.
+		_ = d.bufferedRows.Close(ctx)
+		d.diskMap.Close(ctx)
+	}
+	d.diskAcc.Close(ctx) // diskAcc is never nil
+	d.memAcc.Close(ctx)  // memAcc is never nil
 }
 
 // diskRowIterator iterates over the rows in a DiskRowContainer.

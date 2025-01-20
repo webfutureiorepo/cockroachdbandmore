@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scstage
 
@@ -634,8 +629,13 @@ func (sb stageBuilder) hasUnmeetableOutboundDeps(n *screl.Node) (ret bool) {
 		// there are other nodes preceding it in the op-edge path that need to be
 		// scheduled first.
 		if sb.hasDebugTrace() {
-			sb.debugTracef("  - %s targeting %s hasn't reached %s yet",
-				screl.ElementString(t.n.Element()), t.n.TargetStatus, t.e.To().CurrentStatus)
+			if t.e == nil {
+				sb.debugTracef("  %s targeting %s does not have outbound edge yet",
+					screl.ElementString(t.n.Element()), t.n.TargetStatus)
+			} else {
+				sb.debugTracef("  %s targeting %s hasn't reached %s yet",
+					screl.ElementString(t.n.Element()), t.n.TargetStatus, t.e.To().CurrentStatus)
+			}
 		}
 		return true
 	}

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -22,6 +17,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scbuild"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 type tableDescReferences []descpb.TableDescriptor_Reference
@@ -29,6 +26,7 @@ type tableDescReferences []descpb.TableDescriptor_Reference
 type referenceProvider struct {
 	tableReferences     map[descpb.ID]tableDescReferences
 	viewReferences      map[descpb.ID]tableDescReferences
+	referencedFunctions catalog.DescriptorIDSet
 	referencedSequences catalog.DescriptorIDSet
 	referencedTypes     catalog.DescriptorIDSet
 	allRelationIDs      catalog.DescriptorIDSet
@@ -64,6 +62,16 @@ func (r *referenceProvider) ForEachTableReference(
 	return nil
 }
 
+// ForEachFunctionReference implements scbuildstmt.ReferenceProvider.
+func (r *referenceProvider) ForEachFunctionReference(f func(functionID descpb.ID) error) error {
+	for _, functionID := range r.referencedFunctions.Ordered() {
+		if err := f(functionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ForEachViewReference implements scbuildstmt.ReferenceProvider
 func (r *referenceProvider) ForEachViewReference(
 	f func(viewID descpb.ID, colIDs descpb.ColumnIDs) error,
@@ -92,6 +100,11 @@ func (r *referenceProvider) ReferencedTypes() catalog.DescriptorIDSet {
 	return r.referencedTypes
 }
 
+// ReferencedRoutines implements scbuildstmt.ReferenceProvider
+func (r *referenceProvider) ReferencedRoutines() catalog.DescriptorIDSet {
+	return r.referencedFunctions
+}
+
 type referenceProviderFactory struct {
 	p *planner
 }
@@ -107,17 +120,27 @@ func (f *referenceProviderFactory) NewReferenceProvider(
 	if err := optBld.Build(); err != nil {
 		return nil, err
 	}
-	// For the time being this is only used for CREATE FUNCTION. We need to handle
-	// CREATE VIEW when it's needed.
-	createFnExpr := optFactory.Memo().RootExpr().(*memo.CreateFunctionExpr)
-	tableReferences, typeReferences, err := toPlanDependencies(createFnExpr.Deps, createFnExpr.TypeDeps)
+	var (
+		err      error
+		planDeps planDependencies
+		typeDeps typeDependencies
+		funcDeps functionDependencies
+	)
+	switch t := optFactory.Memo().RootExpr().(type) {
+	case *memo.CreateFunctionExpr:
+		planDeps, typeDeps, funcDeps, err = toPlanDependencies(t.Deps, t.TypeDeps, t.FuncDeps)
+	case *memo.CreateTriggerExpr:
+		planDeps, typeDeps, funcDeps, err = toPlanDependencies(t.Deps, t.TypeDeps, t.FuncDeps)
+	default:
+		return nil, errors.AssertionFailedf("unexpected root expression: %s", t.(memo.RelExpr).Op())
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	ret := newReferenceProvider()
 
-	for descID, refs := range tableReferences {
+	for descID, refs := range planDeps {
 		ret.allRelationIDs.Add(descID)
 		if refs.desc.IsView() {
 			ret.viewReferences[descID] = append(ret.viewReferences[descID], refs.deps...)
@@ -128,8 +151,8 @@ func (f *referenceProviderFactory) NewReferenceProvider(
 		}
 	}
 
-	for typeID := range typeReferences {
-		desc, err := f.p.descCollection.ByID(f.p.txn).WithoutNonPublic().Get().Desc(ctx, typeID)
+	for typeID := range typeDeps {
+		desc, err := f.p.descCollection.ByIDWithoutLeased(f.p.txn).WithoutNonPublic().Get().Desc(ctx, typeID)
 		if err != nil {
 			return nil, err
 		}
@@ -141,6 +164,9 @@ func (f *referenceProviderFactory) NewReferenceProvider(
 		}
 	}
 
+	for functionID := range funcDeps {
+		ret.referencedFunctions.Add(functionID)
+	}
 	return ret, nil
 }
 
@@ -154,7 +180,7 @@ func NewReferenceProviderFactory(p *planner) scbuild.ReferenceProviderFactory {
 // after test is done.
 func NewReferenceProviderFactoryForTest(
 	ctx context.Context,
-	opName string,
+	opName redact.SafeString,
 	txn *kv.Txn,
 	user username.SQLUsername,
 	execCfg *ExecutorConfig,

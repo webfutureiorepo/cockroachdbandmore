@@ -1,14 +1,10 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { all, call, takeEvery } from "redux-saga/effects";
+
 import { PayloadAction } from "src/interfaces/action";
 import {
   CREATE_STATEMENT_DIAGNOSTICS_REPORT,
@@ -24,6 +20,8 @@ import {
   trackDownloadDiagnosticsBundle,
   trackSubnavSelection,
 } from "src/util/analytics";
+import trackCancelDiagnosticsBundle from "src/util/analytics/trackCancelDiagnosticsBundle";
+
 import {
   TRACK_STATEMENTS_SEARCH,
   TRACK_STATEMENTS_PAGINATION,
@@ -33,7 +31,6 @@ import {
   TRACK_STATEMENT_DETAILS_SUBNAV_SELECTION,
   TRACK_CANCEL_DIAGNOSTIC_BUNDLE,
 } from "./analyticsActions";
-import trackCancelDiagnosticsBundle from "src/util/analytics/trackCancelDiagnosticsBundle";
 
 export function* trackActivateStatementsDiagnostics(
   action: PayloadAction<DiagnosticsReportPayload>,

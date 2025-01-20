@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cliccl
 
@@ -25,12 +22,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/datadriven"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +43,7 @@ func TestDecrypt(t *testing.T) {
 
 	// Generate a new encryption key to use.
 	keyPath := filepath.Join(dir, "aes.key")
-	err := cli.GenEncryptionKeyCmd.RunE(nil, []string{keyPath})
+	err := genEncryptionKeyCmd.RunE(nil, []string{keyPath})
 	require.NoError(t, err)
 
 	// Spin up a new encrypted store.
@@ -53,11 +52,14 @@ func TestDecrypt(t *testing.T) {
 	require.NoError(t, err)
 	encOpts, err := encSpec.ToEncryptionOptions()
 	require.NoError(t, err)
-	p, err := storage.Open(ctx, storage.Filesystem(dir), cluster.MakeClusterSettings(), storage.EncryptionAtRest(encOpts))
+
+	env, err := fs.InitEnv(ctx, vfs.Default, dir, fs.EnvConfig{EncryptionOptions: encOpts}, nil /* statsCollector */)
+	require.NoError(t, err)
+	p, err := storage.Open(ctx, env, cluster.MakeClusterSettings())
 	require.NoError(t, err)
 
 	// Find a manifest file to check.
-	files, err := p.List(dir)
+	files, err := p.Env().List(dir)
 	require.NoError(t, err)
 	sort.Strings(files)
 	var manifestPath string
@@ -124,7 +126,7 @@ func TestList(t *testing.T) {
 
 	// Generate a new encryption key to use.
 	keyPath := filepath.Join(dir, "aes.key")
-	err := cli.GenEncryptionKeyCmd.RunE(nil, []string{keyPath})
+	err := genEncryptionKeyCmd.RunE(nil, []string{keyPath})
 	require.NoError(t, err)
 
 	// Spin up a new encrypted store.
@@ -133,7 +135,9 @@ func TestList(t *testing.T) {
 	require.NoError(t, err)
 	encOpts, err := encSpec.ToEncryptionOptions()
 	require.NoError(t, err)
-	p, err := storage.Open(ctx, storage.Filesystem(dir), cluster.MakeClusterSettings(), storage.EncryptionAtRest(encOpts))
+	env, err := fs.InitEnv(ctx, vfs.Default, dir, fs.EnvConfig{EncryptionOptions: encOpts}, nil /* statsCollector */)
+	require.NoError(t, err)
+	p, err := storage.Open(ctx, env, cluster.MakeTestingClusterSettings())
 	require.NoError(t, err)
 
 	// Write a key and flush, to create a table in the store.
@@ -153,8 +157,8 @@ func TestList(t *testing.T) {
 		var b bytes.Buffer
 		cmd.SetOut(&b)
 		cmd.SetErr(&b)
-		err = runList(cmd, []string{dir})
-		require.NoError(t, err)
+		require.NoError(t, cmd.Flags().Set("enterprise-encryption", encSpecStr))
+		require.NoError(t, runList(cmd, []string{dir}))
 		return b.String()
 	})
 }

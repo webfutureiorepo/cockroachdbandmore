@@ -1,20 +1,16 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
-import { DOMAIN_NAME, noopReducer } from "../utils";
+
 import {
   CancelStmtDiagnosticRequest,
   InsertStmtDiagnosticRequest,
   StatementDiagnosticsResponse,
 } from "../../api";
+import { DOMAIN_NAME, noopReducer } from "../utils";
 
 export type StatementDiagnosticsState = {
   data: StatementDiagnosticsResponse;
@@ -32,18 +28,12 @@ const statementDiagnosticsSlice = createSlice({
   name: `${DOMAIN_NAME}/statementDiagnostics`,
   initialState,
   reducers: {
-    received: (
-      state: StatementDiagnosticsState,
-      action: PayloadAction<StatementDiagnosticsResponse>,
-    ) => {
+    received: (state, action: PayloadAction<StatementDiagnosticsResponse>) => {
       state.data = action.payload;
       state.lastError = null;
       state.valid = true;
     },
-    failed: (
-      state: StatementDiagnosticsState,
-      action: PayloadAction<Error>,
-    ) => {
+    failed: (state, action: PayloadAction<Error>) => {
       state.lastError = action.payload;
       state.valid = false;
     },

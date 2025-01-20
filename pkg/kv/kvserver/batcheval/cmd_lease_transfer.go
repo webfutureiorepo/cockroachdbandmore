@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -69,17 +64,12 @@ func TransferLease(
 	// When returning an error from this method, must always return
 	// a newFailedLeaseTrigger() to satisfy stats.
 	args := cArgs.Args.(*kvpb.TransferLeaseRequest)
-
-	// NOTE: we use the range's current lease as prevLease instead of
-	// args.PrevLease so that we can detect lease transfers that will
-	// inevitably fail early and reject them with a detailed
-	// LeaseRejectedError before going through Raft.
-	prevLease, _ := cArgs.EvalCtx.GetLease()
-
+	prevLease := args.PrevLease
 	newLease := args.Lease
 
 	// If this check is removed at some point, the filtering of learners on the
 	// sending side would have to be removed as well.
+	// TODO(nvanbenschoten): move this into leases.Verify.
 	if err := roachpb.CheckCanReceiveLease(
 		newLease.Replica, cArgs.EvalCtx.Desc().Replicas(), false, /* wasLastLeaseholder */
 	); err != nil {
@@ -105,7 +95,7 @@ func TransferLease(
 	// such cases, we could detect that here and fail fast, but it's safe and
 	// easier to just let the TransferLease be proposed under the wrong lease
 	// and be rejected with the correct error below Raft.
-	cArgs.EvalCtx.RevokeLease(ctx, args.PrevLease.Sequence)
+	cArgs.EvalCtx.RevokeLease(ctx, prevLease.Sequence)
 
 	// Forward the lease's start time to a current clock reading. At this
 	// point, we're holding latches across the entire range, we know that
@@ -115,7 +105,13 @@ func TransferLease(
 	// previous lease was revoked).
 	newLease.Start.Forward(cArgs.EvalCtx.Clock().NowAsClockTimestamp())
 
+	// Forwarding the lease's start time is safe because we know that the
+	// lease's sequence number has been incremented. Assert this.
+	if newLease.Sequence <= prevLease.Sequence {
+		log.Fatalf(ctx, "lease sequence not incremented: prev=%s, new=%s", prevLease, newLease)
+	}
+
 	log.VEventf(ctx, 2, "lease transfer: prev lease: %+v, new lease: %+v", prevLease, newLease)
 	return evalNewLease(ctx, cArgs.EvalCtx, readWriter, cArgs.Stats,
-		newLease, prevLease, false /* isExtension */, true /* isTransfer */)
+		newLease, prevLease, true /* isTransfer */)
 }

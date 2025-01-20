@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -34,6 +29,7 @@ type hashGroupJoiner struct {
 
 var _ colexecop.BufferingInMemoryOperator = &hashGroupJoiner{}
 var _ colexecop.Closer = &hashGroupJoiner{}
+var _ colexecop.ResettableOperator = &hashGroupJoiner{}
 
 // NewHashGroupJoiner creates a new hash group-join operator.
 func NewHashGroupJoiner(
@@ -105,16 +101,14 @@ func (h *hashGroupJoiner) Next() coldata.Batch {
 // always instantiate a copyingOperator around the left input which allows us to
 // perform the export.
 func (h *hashGroupJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch {
-	if h.ha.ht != nil {
-		// This is the first call to ExportBuffered - release the hash table of
-		// the hash aggregator since we no longer need it.
-		h.ha.ht.Release()
-		h.ha.ht = nil
-	}
 	if h.InputTwo == input {
 		// When exporting from the right input, simply delegate to the hash
 		// joiner.
 		return h.hj.ExportBuffered(input)
+	}
+	if h.hjLeftSource.sq == nil {
+		// All tuples have been exported.
+		return coldata.ZeroBatch
 	}
 	if !h.hjLeftSource.zeroBatchEnqueued {
 		h.hjLeftSource.sq.Enqueue(h.Ctx, coldata.ZeroBatch)
@@ -125,6 +119,37 @@ func (h *hashGroupJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch
 		colexecerror.InternalError(err)
 	}
 	return b
+}
+
+// ReleaseBeforeExport implements the colexecop.BufferingInMemoryOperator
+// interface.
+func (h *hashGroupJoiner) ReleaseBeforeExport() {
+	h.ha.ReleaseBeforeExport()
+}
+
+// ReleaseAfterExport implements the colexecop.BufferingInMemoryOperator
+// interface.
+func (h *hashGroupJoiner) ReleaseAfterExport(input colexecop.Operator) {
+	if h.InputTwo == input {
+		// The right input handling is delegated to the hash joiner.
+		h.hj.ReleaseAfterExport(input)
+		return
+	}
+	if h.hjLeftSource.sq == nil {
+		// Resources have already been released.
+		return
+	}
+	if err := h.hjLeftSource.sq.Close(h.Ctx); err != nil {
+		colexecerror.InternalError(err)
+	}
+	h.hjLeftSource.sq = nil
+}
+
+// Reset implements the colexecop.Resetter interface.
+func (h *hashGroupJoiner) Reset(ctx context.Context) {
+	h.TwoInputInitHelper.Reset(ctx)
+	h.hj.(colexecop.ResettableOperator).Reset(ctx)
+	h.ha.Reset(ctx)
 }
 
 // Close implements the colexecop.Closer interface.
@@ -139,21 +164,23 @@ func (h *hashGroupJoiner) Close(ctx context.Context) error {
 // copyingOperator is a utility operator that copies all the batches from the
 // input into the spilling queue first before propagating the batch further.
 type copyingOperator struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputHelper
 	colexecop.NonExplainable
 
+	// sq will be nil once the queue has been closed.
 	sq                *colexecutils.SpillingQueue
 	zeroBatchEnqueued bool
 }
 
 var _ colexecop.ClosableOperator = &copyingOperator{}
+var _ colexecop.ResettableOperator = &copyingOperator{}
 
 func newCopyingOperator(
 	input colexecop.Operator, args *colexecutils.NewSpillingQueueArgs,
 ) *copyingOperator {
 	return &copyingOperator{
-		OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-		sq:                       colexecutils.NewSpillingQueue(args),
+		OneInputHelper: colexecop.MakeOneInputHelper(input),
+		sq:             colexecutils.NewSpillingQueue(args),
 	}
 }
 
@@ -165,9 +192,18 @@ func (c *copyingOperator) Next() coldata.Batch {
 	return b
 }
 
+// Reset implements the colexecop.Resetter interface.
+func (c *copyingOperator) Reset(ctx context.Context) {
+	if r, ok := c.Input.(colexecop.Resetter); ok {
+		r.Reset(ctx)
+	}
+	c.sq.Reset(ctx)
+	c.zeroBatchEnqueued = false
+}
+
 // Close implements the colexecop.Closer interface.
 func (c *copyingOperator) Close(ctx context.Context) error {
-	if !c.CloserHelper.Close() {
+	if c.sq == nil {
 		return nil
 	}
 	err := c.sq.Close(ctx)

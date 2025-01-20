@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -20,20 +15,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/obsservice/obspb"
-	v1 "github.com/cockroachdb/cockroach/pkg/obsservice/obspb/opentelemetry-proto/common/v1"
-	otel_logs_pb "github.com/cockroachdb/cockroach/pkg/obsservice/obspb/opentelemetry-proto/logs/v1"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scbuild"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scrun"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -163,33 +155,10 @@ type eventLogOptions struct {
 	// If verboseTraceLevel is non-zero, its value is used as value for
 	// the vmodule filter. See exec_log for an example use.
 	verboseTraceLevel log.Level
-
-	// Additional redaction options, if necessary.
-	rOpts redactionOptions
 }
 
-// redactionOptions contains instructions on how to redact the SQL
-// events.
-type redactionOptions struct {
-	omitSQLNameRedaction bool
-}
-
-func (ro *redactionOptions) toFlags() tree.FmtFlags {
-	if ro.omitSQLNameRedaction {
-		return tree.FmtOmitNameRedaction
-	}
-	return tree.FmtSimple
-}
-
-var defaultRedactionOptions = redactionOptions{
-	omitSQLNameRedaction: false,
-}
-
-func (p *planner) getCommonSQLEventDetails(opt redactionOptions) eventpb.CommonSQLEventDetails {
-	redactableStmt := formatStmtKeyAsRedactableString(
-		p.extendedEvalCtx.VirtualSchemas, p.stmt.AST,
-		p.extendedEvalCtx.Context.Annotations, opt.toFlags(), p,
-	)
+func (p *planner) getCommonSQLEventDetails() eventpb.CommonSQLEventDetails {
+	redactableStmt := p.FormatAstAsRedactableString(p.stmt.AST, p.extendedEvalCtx.Context.Annotations)
 	commonSQLEventDetails := eventpb.CommonSQLEventDetails{
 		Statement:       redactableStmt,
 		Tag:             p.stmt.AST.StatementTag(),
@@ -217,7 +186,7 @@ func (p *planner) logEventsWithOptions(
 		p.extendedEvalCtx.ExecCfg, p.InternalSQLTxn(),
 		1+depth,
 		opts,
-		p.getCommonSQLEventDetails(opts.rOpts),
+		p.getCommonSQLEventDetails(),
 		entries...)
 }
 
@@ -453,8 +422,9 @@ func (*EventLogTestingKnobs) ModuleTestingKnobs() {}
 // event should be directed to.
 type LogEventDestination int
 
+// hasFlag returns true if the receiver has all of the given flags.
 func (d LogEventDestination) hasFlag(f LogEventDestination) bool {
-	return d&f != 0
+	return d&f == f
 }
 
 const (
@@ -564,7 +534,7 @@ func insertEventRecords(
 		// Simply emit the events to their respective channels and call it a day.
 		if opts.dst.hasFlag(LogExternally) {
 			for i := range entries {
-				log.StructuredEvent(ctx, entries[i])
+				log.StructuredEvent(ctx, severity.INFO, entries[i])
 			}
 		}
 		// Not writing to system table: shortcut.
@@ -577,7 +547,7 @@ func insertEventRecords(
 	if txn != nil && opts.dst.hasFlag(LogExternally) {
 		txn.KV().AddCommitTrigger(func(ctx context.Context) {
 			for i := range entries {
-				log.StructuredEvent(ctx, entries[i])
+				log.StructuredEvent(ctx, severity.INFO, entries[i])
 			}
 		})
 	}
@@ -586,8 +556,7 @@ func insertEventRecords(
 	syncWrites := execCfg.EventLogTestingKnobs != nil && execCfg.EventLogTestingKnobs.SyncWrites
 	if txn != nil && syncWrites {
 		// Yes, do it now.
-		query, args, otelEvents := prepareEventWrite(ctx, execCfg, entries)
-		txn.KV().AddCommitTrigger(func(ctx context.Context) { sendEventsToObsService(ctx, execCfg, otelEvents) })
+		query, args := prepareEventWrite(ctx, execCfg, entries)
 		return writeToSystemEventsTable(ctx, txn, len(entries), query, args)
 	}
 	// No: do them async.
@@ -633,10 +602,7 @@ func asyncWriteToOtelAndSystemEventsTable(
 			defer stopCancel()
 
 			// Prepare the data to send.
-			query, args, otelEvents := prepareEventWrite(ctx, execCfg, entries)
-
-			// Send to the Obs Service.
-			sendEventsToObsService(ctx, execCfg, otelEvents)
+			query, args := prepareEventWrite(ctx, execCfg, entries)
 
 			// We use a retry loop in case there are transient
 			// non-retriable errors on the cluster during the table write.
@@ -669,17 +635,9 @@ func asyncWriteToOtelAndSystemEventsTable(
 	}
 }
 
-func sendEventsToObsService(
-	ctx context.Context, execCfg *ExecutorConfig, events []*otel_logs_pb.LogRecord,
-) {
-	for i := range events {
-		execCfg.EventsExporter.SendEvent(ctx, obspb.EventlogEvent, events[i])
-	}
-}
-
 func prepareEventWrite(
 	ctx context.Context, execCfg *ExecutorConfig, entries []logpb.EventPayload,
-) (query string, args []interface{}, events []*otel_logs_pb.LogRecord) {
+) (query string, args []interface{}) {
 	reportingID := execCfg.NodeInfo.NodeID.SQLInstanceID()
 	const colsPerEvent = 4
 	// Note: we insert the value zero as targetID because sadly this
@@ -692,7 +650,6 @@ INSERT INTO system.eventlog (
 VALUES($1, $2, $3, $4, 0)`
 	args = make([]interface{}, 0, len(entries)*colsPerEvent)
 
-	events = make([]*otel_logs_pb.LogRecord, len(entries))
 	sp := tracing.SpanFromContext(ctx)
 	var traceID [16]byte
 	var spanID [8]byte
@@ -705,7 +662,6 @@ VALUES($1, $2, $3, $4, 0)`
 		binary.BigEndian.PutUint64(traceID[:], uint64(sp.TraceID()))
 		binary.BigEndian.PutUint64(spanID[:], uint64(sp.SpanID()))
 	}
-	nowNanos := timeutil.Now().UnixNano()
 	for i := 0; i < len(entries); i++ {
 		event := entries[i]
 
@@ -723,17 +679,6 @@ VALUES($1, $2, $3, $4, 0)`
 			reportingID,
 			string(infoBytes),
 		)
-
-		events[i] = &otel_logs_pb.LogRecord{
-			TimeUnixNano: uint64(nowNanos),
-			Body:         &v1.AnyValue{Value: &v1.AnyValue_StringValue{StringValue: args[len(args)-1].(string)}},
-			Attributes: []*v1.KeyValue{{
-				Key:   obspb.EventlogEventTypeAttribute,
-				Value: &v1.AnyValue{Value: &v1.AnyValue_StringValue{StringValue: eventType}},
-			}},
-			TraceId: traceID[:],
-			SpanId:  spanID[:],
-		}
 	}
 
 	// In the common case where we have just 1 event, we want to skeep
@@ -754,7 +699,7 @@ VALUES($1, $2, $3, $4, 0)`
 		query = completeQuery.String()
 	}
 
-	return query, args, events
+	return query, args
 }
 
 func writeToSystemEventsTable(

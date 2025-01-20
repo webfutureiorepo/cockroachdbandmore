@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowenc_test
 
@@ -266,8 +261,9 @@ func TestIndexKey(t *testing.T) {
 	}
 
 	for i, test := range tests {
+		ctx := context.Background()
 		evalCtx := eval.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
-		defer evalCtx.Stop(context.Background())
+		defer evalCtx.Stop(ctx)
 		tableDesc, colMap := makeTableDescForTest(test, true /* isSecondaryIndexForward */)
 		// Add the default family to each test, since secondary indexes support column families.
 		var (
@@ -298,7 +294,9 @@ func TestIndexKey(t *testing.T) {
 		primaryIndexKV := kv.KeyValue{Key: primaryKey, Value: &primaryValue}
 
 		secondaryIndexEntry, err := EncodeSecondaryIndex(
-			codec, tableDesc, tableDesc.PublicNonPrimaryIndexes()[0], colMap, testValues, true /* includeEmpty */)
+			ctx, codec, tableDesc, tableDesc.PublicNonPrimaryIndexes()[0],
+			colMap, testValues, true, /* includeEmpty */
+		)
 		if len(secondaryIndexEntry) != 1 {
 			t.Fatalf("expected 1 index entry, got %d. got %#v", len(secondaryIndexEntry), secondaryIndexEntry)
 		}
@@ -318,7 +316,9 @@ func TestIndexKey(t *testing.T) {
 
 			for j, value := range values {
 				testValue := testValues[colMap.GetDefault(index.GetKeyColumnID(j))]
-				if value.Compare(evalCtx, testValue) != 0 {
+				if cmp, err := value.Compare(ctx, evalCtx, testValue); err != nil {
+					t.Fatal(err)
+				} else if cmp != 0 {
 					t.Fatalf("%d: value %d got %q but expected %q", i, j, value, testValue)
 				}
 			}
@@ -449,7 +449,9 @@ func TestInvertedIndexKey(t *testing.T) {
 		codec := keys.SystemSQLCodec
 
 		secondaryIndexEntries, err := EncodeSecondaryIndex(
-			codec, tableDesc, tableDesc.PublicNonPrimaryIndexes()[0], colMap, testValues, true /* includeEmpty */)
+			context.Background(), codec, tableDesc, tableDesc.PublicNonPrimaryIndexes()[0],
+			colMap, testValues, true, /* includeEmpty */
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -551,7 +553,7 @@ func TestEncodeContainingArrayInvertedIndexSpans(t *testing.T) {
 
 		// First check that evaluating `indexedValue @> value` matches the expected
 		// result.
-		res, err := tree.ArrayContains(&evalCtx, indexedValue.(*tree.DArray), value.(*tree.DArray))
+		res, err := tree.ArrayContains(context.Background(), &evalCtx, indexedValue.(*tree.DArray), value.(*tree.DArray))
 		require.NoError(t, err)
 		if bool(*res) != c.expected {
 			t.Fatalf(
@@ -573,7 +575,7 @@ func TestEncodeContainingArrayInvertedIndexSpans(t *testing.T) {
 		left := randgen.RandArray(rng, typ, 0 /* nullChance */)
 		right := randgen.RandArray(rng, typ, 0 /* nullChance */)
 
-		res, err := tree.ArrayContains(&evalCtx, left.(*tree.DArray), right.(*tree.DArray))
+		res, err := tree.ArrayContains(context.Background(), &evalCtx, left.(*tree.DArray), right.(*tree.DArray))
 		require.NoError(t, err)
 
 		// The spans should not have duplicate values if there is at least one
@@ -688,7 +690,7 @@ func TestEncodeContainedArrayInvertedIndexSpans(t *testing.T) {
 
 		// Since the spans are never tight, apply an additional filter to determine
 		// if the result is contained.
-		actual, err := tree.ArrayContains(&evalCtx, value.(*tree.DArray), indexedValue.(*tree.DArray))
+		actual, err := tree.ArrayContains(context.Background(), &evalCtx, value.(*tree.DArray), indexedValue.(*tree.DArray))
 		require.NoError(t, err)
 		if bool(*actual) != expected {
 			if expected {
@@ -716,7 +718,7 @@ func TestEncodeContainedArrayInvertedIndexSpans(t *testing.T) {
 
 		// We cannot check for false positives with these tests (due to the fact that
 		// the spans are not tight), so we will only test for false negatives.
-		isContained, err := tree.ArrayContains(&evalCtx, right.(*tree.DArray), left.(*tree.DArray))
+		isContained, err := tree.ArrayContains(context.Background(), &evalCtx, right.(*tree.DArray), left.(*tree.DArray))
 		require.NoError(t, err)
 		if !*isContained {
 			continue
@@ -885,6 +887,7 @@ func TestEncodeOverlapsArrayInvertedIndexSpans(t *testing.T) {
 		{`{2, NULL}`, `{1, NULL}`, true, false, true},
 	}
 
+	ctx := context.Background()
 	evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	parseArray := func(s string) tree.Datum {
 		if s == "NULL" {
@@ -955,7 +958,7 @@ func TestEncodeOverlapsArrayInvertedIndexSpans(t *testing.T) {
 		left := randgen.RandArray(rng, typ, 9 /* nullChance */)
 		right := randgen.RandArray(rng, typ, 9 /* nullChance */)
 
-		overlaps, err := tree.ArrayOverlaps(&evalCtx, right.(*tree.DArray), left.(*tree.DArray))
+		overlaps, err := tree.ArrayOverlaps(ctx, &evalCtx, right.(*tree.DArray), left.(*tree.DArray))
 		require.NoError(t, err)
 
 		rightArr, _ := right.(*tree.DArray)
@@ -966,7 +969,8 @@ func TestEncodeOverlapsArrayInvertedIndexSpans(t *testing.T) {
 		// the form:
 		// Array A && Array containing one or more entries of same non-null
 		// element e.g. A && [1, 1].
-		unique := containsNonNullUniqueElement(&evalCtx, rightArr)
+		unique, err := containsNonNullUniqueElement(ctx, &evalCtx, rightArr)
+		require.NoError(t, err)
 
 		// Now check that we get the same result with the inverted index spans.
 		runTest(left, right, bool(*overlaps), ok, unique)
@@ -975,17 +979,24 @@ func TestEncodeOverlapsArrayInvertedIndexSpans(t *testing.T) {
 
 // Determines if the input array contains only one or more entries of the
 // same non-null element. NULL entries are not considered.
-func containsNonNullUniqueElement(evalCtx *eval.Context, valArr *tree.DArray) bool {
+func containsNonNullUniqueElement(
+	ctx context.Context, evalCtx *eval.Context, valArr *tree.DArray,
+) (bool, error) {
 	var lastVal tree.Datum = tree.DNull
 	for _, val := range valArr.Array {
 		if val != tree.DNull {
-			if lastVal != tree.DNull && lastVal.Compare(evalCtx, val) != 0 {
-				return false
+			if lastVal == tree.DNull {
+				lastVal = val
+				continue
 			}
-			lastVal = val
+			if cmp, err := lastVal.Compare(ctx, evalCtx, val); err != nil {
+				return false, err
+			} else if cmp != 0 {
+				return false, nil
+			}
 		}
 	}
-	return lastVal != tree.DNull
+	return lastVal != tree.DNull, nil
 }
 
 type trigramSearchType int
@@ -1178,7 +1189,7 @@ func makeTrigramBinOp(
 	expr, err := parser.ParseExpr(fmt.Sprintf("'%s' %s '%s'", indexedValue, opstr, value))
 	require.NoError(t, err)
 
-	semaContext := tree.MakeSemaContext()
+	semaContext := tree.MakeSemaContext(nil /* resolver */)
 	typedExpr, err = tree.TypeCheck(context.Background(), expr, &semaContext, types.Bool)
 	require.NoError(t, err)
 	return typedExpr

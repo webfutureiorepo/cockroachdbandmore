@@ -1,21 +1,18 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package status
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"runtime"
-	"runtime/debug"
+	"runtime/metrics"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
@@ -26,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/elastic/gosigar"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/net"
@@ -63,6 +59,36 @@ var (
 		Measurement: "Memory",
 		Unit:        metric.Unit_BYTES,
 	}
+	metaGoMemStackSysBytes = metric.Metadata{
+		Name:        "sys.go.stack.systembytes",
+		Help:        "Stack memory obtained from the OS.",
+		Measurement: "Memory",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaGoHeapFragmentBytes = metric.Metadata{
+		Name:        "sys.go.heap.heapfragmentbytes",
+		Help:        "Total heap fragmentation bytes, derived from bytes in in-use spans minus bytes allocated",
+		Measurement: "Memory",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaGoHeapReservedBytes = metric.Metadata{
+		Name:        "sys.go.heap.heapreservedbytes",
+		Help:        "Total bytes reserved by heap, derived from bytes in idle (unused) spans subtracts bytes returned to the OS",
+		Measurement: "Memory",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaGoHeapReleasedBytes = metric.Metadata{
+		Name:        "sys.go.heap.heapreleasedbytes",
+		Help:        "Total bytes returned to the OS from heap.",
+		Measurement: "Memory",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaGoTotalAllocBytes = metric.Metadata{
+		Name:        "sys.go.heap.allocbytes",
+		Help:        "Cumulative bytes allocated for heap objects.",
+		Measurement: "Memory",
+		Unit:        metric.Unit_BYTES,
+	}
 	metaCgoAllocBytes = metric.Metadata{
 		Name:        "sys.cgo.allocbytes",
 		Help:        "Current bytes of memory allocated by cgo",
@@ -87,11 +113,35 @@ var (
 		Measurement: "GC Pause",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaGCStopNS = metric.Metadata{
+		Name:        "sys.gc.stop.ns",
+		Help:        "Estimated GC stop-the-world stopping latencies",
+		Measurement: "GC Stopping",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 	metaGCPausePercent = metric.Metadata{
 		Name:        "sys.gc.pause.percent",
 		Help:        "Current GC pause percentage",
 		Measurement: "GC Pause",
 		Unit:        metric.Unit_PERCENT,
+	}
+	metaGCAssistNS = metric.Metadata{
+		Name:        "sys.gc.assist.ns",
+		Help:        "Estimated total CPU time user goroutines spent to assist the GC process",
+		Measurement: "CPU Time",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaNonGCPauseNS = metric.Metadata{
+		Name:        "sys.go.pause.other.ns",
+		Help:        "Estimated non-GC-related total pause time",
+		Measurement: "Non-GC Pause",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaNonGCStopNS = metric.Metadata{
+		Name:        "sys.go.stop.other.ns",
+		Help:        "Estimated non-GC-related stop-the-world stopping latencies",
+		Measurement: "Non-GC Stopping",
+		Unit:        metric.Unit_NANOSECONDS,
 	}
 
 	metaCPUUserNS = metric.Metadata{
@@ -219,7 +269,7 @@ var (
 		Name:        "sys.host.disk.weightedio.time",
 		Unit:        metric.Unit_NANOSECONDS,
 		Measurement: "Time",
-		Help:        "Weighted time spent reading from or writing to to all disks since this process started (as reported by the OS)",
+		Help:        "Weighted time spent reading from or writing to all disks since this process started (as reported by the OS)",
 	}
 	metaHostIopsInProgress = metric.Metadata{
 		Name:        "sys.host.disk.iopsinprogress",
@@ -292,6 +342,227 @@ var diskMetricsIgnoredDevices = envutil.EnvOrDefaultString("COCKROACH_DISK_METRI
 // error           : any issues fetching stats. This should be a warning only.
 var getCgoMemStats func(context.Context) (uint, uint, error)
 
+// Distribution of individual GC-related stop-the-world pause
+// latencies. This is the time from deciding to stop the world
+// until the world is started again. Some of this time is spent
+// getting all threads to stop (this is measured directly in
+// /sched/pauses/stopping/gc:seconds), during which some threads
+// may still be running. Bucket counts increase monotonically.
+const runtimeMetricGCPauseTotal = "/sched/pauses/total/gc:seconds"
+
+// Distribution of individual GC-related stop-the-world stopping
+// latencies. This is the time it takes from deciding to stop the
+// world until all Ps are stopped. This is a subset of the total
+// GC-related stop-the-world time (/sched/pauses/total/gc:seconds).
+// During this time, some threads may be executing. Bucket counts
+// increase monotonically.
+const runtimeMetricGCStopTotal = "/sched/pauses/stopping/gc:seconds"
+
+// Estimated total CPU time goroutines spent performing GC tasks to assist the
+// GC and prevent it from falling behind the application. This metric is an
+// overestimate, and not directly comparable to system CPU time measurements.
+// Compare only with other /cpu/classes metrics.
+const runtimeMetricGCAssist = "/cpu/classes/gc/mark/assist:cpu-seconds"
+
+// Distribution of individual non-GC-related stop-the-world
+// pause latencies. This is the time from deciding to stop the
+// world until the world is started again. Some of this time
+// is spent getting all threads to stop (measured directly in
+// /sched/pauses/stopping/other:seconds). Bucket counts increase
+// monotonically.
+const runtimeMetricNonGCPauseTotal = "/sched/pauses/total/other:seconds"
+
+// Distribution of individual non-GC-related stop-the-world
+// stopping latencies. This is the time it takes from deciding
+// to stop the world until all Ps are stopped. This is a
+// subset of the total non-GC-related stop-the-world time
+// (/sched/pauses/total/other:seconds). During this time, some
+// threads may be executing. Bucket counts increase monotonically.
+const runtimeMetricNonGCStopTotal = "/sched/pauses/stopping/other:seconds"
+
+// Memory occupied by live objects and dead objects that have not
+// yet been marked free by the garbage collector.
+const runtimeMetricHeapAlloc = "/memory/classes/heap/objects:bytes"
+
+// Cumulative sum of memory allocated to the heap by the
+// application.
+const runtimeMetricCumulativeAlloc = "/gc/heap/allocs:bytes"
+
+// Memory that is reserved for heap objects but is not currently
+// used to hold heap objects.
+const runtimeMetricHeapFragmentBytes = "/memory/classes/heap/unused:bytes"
+
+// Memory that is completely free and eligible to be returned to
+// the underlying system, but has not been. This metric is the
+// runtime's estimate of free address space that is backed by
+// physical memory.
+const runtimeMetricHeapReservedBytes = "/memory/classes/heap/free:bytes"
+
+// Memory that is completely free and has been returned to the
+// underlying system. This metric is the runtime's estimate of free
+// address space that is still mapped into the process, but is not
+// backed by physical memory.
+const runtimeMetricHeapReleasedBytes = "/memory/classes/heap/released:bytes"
+
+// Memory allocated from the heap that is reserved for stack space,
+// whether or not it is currently in-use. Currently, this
+// represents all stack memory for goroutines. It also includes all
+// OS thread stacks in non-cgo programs. Note that stacks may be
+// allocated differently in the future, and this may change.
+const runtimeMetricMemStackHeapBytes = "/memory/classes/heap/stacks:bytes"
+
+// Stack memory allocated by the underlying operating system.
+// In non-cgo programs this metric is currently zero. This may
+// change in the future. In cgo programs this metric includes
+// OS thread stacks allocated directly from the OS. Currently,
+// this only accounts for one stack in c-shared and c-archive build
+// modes, and other sources of stacks from the OS are not measured.
+// This too may change in the future.
+const runtimeMetricMemStackOSBytes = "/memory/classes/os-stacks:bytes"
+
+// All memory mapped by the Go runtime into the current process
+// as read-write. Note that this does not include memory mapped
+// by code called via cgo or via the syscall package. Sum of all
+// metrics in /memory/classes.
+const runtimeMetricGoTotal = "/memory/classes/total:bytes"
+
+// Count of all completed GC cycles.
+const runtimeMetricGCCount = "/gc/cycles/total:gc-cycles"
+
+var runtimeMetrics = []string{
+	runtimeMetricGCAssist,
+	runtimeMetricGoTotal,
+	runtimeMetricHeapAlloc,
+	runtimeMetricHeapFragmentBytes,
+	runtimeMetricHeapReservedBytes,
+	runtimeMetricHeapReleasedBytes,
+	runtimeMetricMemStackHeapBytes,
+	runtimeMetricMemStackOSBytes,
+	runtimeMetricCumulativeAlloc,
+	runtimeMetricGCCount,
+	runtimeMetricGCPauseTotal,
+	runtimeMetricNonGCPauseTotal,
+	runtimeMetricGCStopTotal,
+	runtimeMetricNonGCStopTotal,
+}
+
+// GoRuntimeSampler are a collection of metrics to sample from golang's runtime environment and
+// runtime metrics metadata. It fetches go runtime metrics and provides read access.
+// https://pkg.go.dev/runtime/metrics
+type GoRuntimeSampler struct {
+	// The collection of metrics we want to sample.
+	metricSamples []metrics.Sample
+	// The mapping to find metric slot in metricSamples by name.
+	metricIndexes map[string]int
+}
+
+// getIndex finds the position of metrics in the sample array by name.
+func (grm *GoRuntimeSampler) getIndex(name string) int {
+	i, found := grm.metricIndexes[name]
+	if !found {
+		panic(fmt.Sprintf("unsampled metric: %s", name))
+	}
+	return i
+}
+
+// uint64 gets the sampled value by metrics name as uint64.
+// N.B. This method will panic if the metrics value is not metrics.KindUint64.
+func (grm *GoRuntimeSampler) uint64(name string) uint64 {
+	i := grm.getIndex(name)
+	return grm.metricSamples[i].Value.Uint64()
+}
+
+// float64 gets the sampled value by metrics name as float64.
+// N.B. This method will panic if the metrics value is not metrics.KindFloat64.
+func (grm *GoRuntimeSampler) float64(name string) float64 {
+	i := grm.getIndex(name)
+	return grm.metricSamples[i].Value.Float64()
+}
+
+// float64Histogram gets the sampled value by metrics name as *metrics.Float64Histogram.
+// N.B. This method will panic if the metrics value is not
+// metrics.KindFloat64Histogram.
+func (grm *GoRuntimeSampler) float64Histogram(name string) *metrics.Float64Histogram {
+	i := grm.getIndex(name)
+	return grm.metricSamples[i].Value.Float64Histogram()
+}
+
+// float64HistogramSum performs an estimated sum to the float64histogram.
+// The sum is estimated by taking the average of the bucket boundaries *
+// their count. Buckets with extreme boundary values such as -inf or inf
+// will be normalized to the other non infinity boundary value.
+func float64HistogramSum(h *metrics.Float64Histogram) float64 {
+	estSum := 0.0
+	if len(h.Buckets) == 2 && math.IsInf(h.Buckets[0], -1) && math.IsInf(h.Buckets[1], 1) {
+		panic("unable to estimate from histogram with boundary: [-inf, inf]")
+	}
+	var start, end float64 // start and end of current bucket
+	for i := 0; i <= len(h.Counts)-1; i++ {
+		start, end = h.Buckets[i], h.Buckets[i+1]
+		if math.IsInf(start, -1) { // -Inf
+			// Avoid interpolating with infinity by replacing it with
+			// the right boundary value.
+			start = end
+		}
+		if math.IsInf(end, 1) { // +Inf
+			// Avoid interpolating with infinity by replacing it with
+			// the left boundary value.
+			end = start
+		}
+		estBucketValue := start
+		if end != start {
+			estBucketValue += (end - start) / 2.0
+		}
+		estSum += estBucketValue * float64(h.Counts[i])
+	}
+	return estSum
+}
+
+// sampleRuntimeMetrics reads from metrics.Read api and fill in the value
+// in the metricSamples field.
+// Benchmark results on 12 core Apple M3 Pro:
+// goos: darwin
+// goarch: arm64
+// pkg: github.com/cockroachdb/cockroach/pkg/server/status
+// BenchmarkGoRuntimeSampler
+// BenchmarkGoRuntimeSampler-12    	28886398	        40.03 ns/op
+//
+//	func BenchmarkGoRuntimeSampler(b *testing.B) {
+//		 s := NewGoRuntimeSampler([]string{runtimeMetricGCAssist})
+//		 for n := 0; n < b.N; n++ {
+//			 s.sampleRuntimeMetrics()
+//		 }
+//	}
+func (grm *GoRuntimeSampler) sampleRuntimeMetrics() {
+	metrics.Read(grm.metricSamples)
+}
+
+// NewGoRuntimeSampler constructs a new GoRuntimeSampler object.
+// This method will panic on invalid metrics names provided.
+func NewGoRuntimeSampler(metricNames []string) *GoRuntimeSampler {
+	m := metrics.All()
+	metricTypes := make(map[string]metrics.ValueKind, len(m))
+	for _, desc := range m {
+		metricTypes[desc.Name] = desc.Kind
+	}
+	metricSamples := make([]metrics.Sample, len(metricNames))
+	metricIndexes := make(map[string]int, len(metricNames))
+	for i, n := range metricNames {
+		_, hasDesc := metricTypes[n]
+		if !hasDesc {
+			panic(fmt.Sprintf("unexpected metric: %s", n))
+		}
+		metricSamples[i] = metrics.Sample{Name: n}
+		metricIndexes[n] = i
+	}
+
+	grm := &GoRuntimeSampler{
+		metricSamples: metricSamples,
+		metricIndexes: metricIndexes,
+	}
+	return grm
+}
+
 // RuntimeStatSampler is used to periodically sample the runtime environment
 // for useful statistics, performing some rudimentary calculations and storing
 // the resulting information in a format that can be easily consumed by status
@@ -326,25 +597,36 @@ type RuntimeStatSampler struct {
 	// Only show "not implemented" errors once, we don't need the log spam.
 	fdUsageNotImplemented bool
 
+	goRuntimeSampler *GoRuntimeSampler
+
 	// Metric gauges maintained by the sampler.
 	// Go runtime stats.
-	CgoCalls                 *metric.Gauge
+	CgoCalls                 *metric.Counter
 	Goroutines               *metric.Gauge
 	RunnableGoroutinesPerCPU *metric.GaugeFloat64
 	GoAllocBytes             *metric.Gauge
 	GoTotalBytes             *metric.Gauge
+	GoMemStackSysBytes       *metric.Gauge
+	GoHeapFragmentBytes      *metric.Gauge
+	GoHeapReservedBytes      *metric.Gauge
+	GoHeapReleasedBytes      *metric.Gauge
+	GoTotalAllocBytes        *metric.Counter
 	CgoAllocBytes            *metric.Gauge
 	CgoTotalBytes            *metric.Gauge
-	GcCount                  *metric.Gauge
-	GcPauseNS                *metric.Gauge
+	GcCount                  *metric.Counter
+	GcPauseNS                *metric.Counter
+	NonGcPauseNS             *metric.Gauge
+	GcStopNS                 *metric.Gauge
+	NonGcStopNS              *metric.Gauge
 	GcPausePercent           *metric.GaugeFloat64
+	GcAssistNS               *metric.Counter
 	// CPU stats for the CRDB process usage.
-	CPUUserNS              *metric.Gauge
+	CPUUserNS              *metric.Counter
 	CPUUserPercent         *metric.GaugeFloat64
-	CPUSysNS               *metric.Gauge
+	CPUSysNS               *metric.Counter
 	CPUSysPercent          *metric.GaugeFloat64
 	CPUCombinedPercentNorm *metric.GaugeFloat64
-	CPUNowNS               *metric.Gauge
+	CPUNowNS               *metric.Counter
 	// CPU stats for the CRDB process usage.
 	HostCPUCombinedPercentNorm *metric.GaugeFloat64
 	// Memory stats.
@@ -354,25 +636,25 @@ type RuntimeStatSampler struct {
 	FDOpen      *metric.Gauge
 	FDSoftLimit *metric.Gauge
 	// Disk and network stats.
-	HostDiskReadBytes      *metric.Gauge
-	HostDiskReadCount      *metric.Gauge
-	HostDiskReadTime       *metric.Gauge
-	HostDiskWriteBytes     *metric.Gauge
-	HostDiskWriteCount     *metric.Gauge
-	HostDiskWriteTime      *metric.Gauge
-	HostDiskIOTime         *metric.Gauge
-	HostDiskWeightedIOTime *metric.Gauge
+	HostDiskReadBytes      *metric.Counter
+	HostDiskReadCount      *metric.Counter
+	HostDiskReadTime       *metric.Counter
+	HostDiskWriteBytes     *metric.Counter
+	HostDiskWriteCount     *metric.Counter
+	HostDiskWriteTime      *metric.Counter
+	HostDiskIOTime         *metric.Counter
+	HostDiskWeightedIOTime *metric.Counter
 	IopsInProgress         *metric.Gauge
-	HostNetRecvBytes       *metric.Gauge
-	HostNetRecvPackets     *metric.Gauge
-	HostNetRecvErr         *metric.Gauge
-	HostNetRecvDrop        *metric.Gauge
-	HostNetSendBytes       *metric.Gauge
-	HostNetSendPackets     *metric.Gauge
-	HostNetSendErr         *metric.Gauge
-	HostNetSendDrop        *metric.Gauge
+	HostNetRecvBytes       *metric.Counter
+	HostNetRecvPackets     *metric.Counter
+	HostNetRecvErr         *metric.Counter
+	HostNetRecvDrop        *metric.Counter
+	HostNetSendBytes       *metric.Counter
+	HostNetSendPackets     *metric.Counter
+	HostNetSendErr         *metric.Counter
+	HostNetSendDrop        *metric.Counter
 	// Uptime and build.
-	Uptime         *metric.Gauge // We use a gauge to be able to call Update.
+	Uptime         *metric.Counter
 	BuildTimestamp *metric.Gauge
 }
 
@@ -414,61 +696,63 @@ func NewRuntimeStatSampler(ctx context.Context, clock hlc.WallClock) *RuntimeSta
 		startTimeNanos:           clock.Now().UnixNano(),
 		initialNetCounters:       netCounters,
 		initialDiskCounters:      diskCounters,
-		CgoCalls:                 metric.NewGauge(metaCgoCalls),
+		goRuntimeSampler:         NewGoRuntimeSampler(runtimeMetrics),
+		CgoCalls:                 metric.NewCounter(metaCgoCalls),
 		Goroutines:               metric.NewGauge(metaGoroutines),
 		RunnableGoroutinesPerCPU: metric.NewGaugeFloat64(metaRunnableGoroutinesPerCPU),
 		GoAllocBytes:             metric.NewGauge(metaGoAllocBytes),
 		GoTotalBytes:             metric.NewGauge(metaGoTotalBytes),
+		GoMemStackSysBytes:       metric.NewGauge(metaGoMemStackSysBytes),
+		GoHeapFragmentBytes:      metric.NewGauge(metaGoHeapFragmentBytes),
+		GoHeapReservedBytes:      metric.NewGauge(metaGoHeapReservedBytes),
+		GoHeapReleasedBytes:      metric.NewGauge(metaGoHeapReleasedBytes),
+		GoTotalAllocBytes:        metric.NewCounter(metaGoTotalAllocBytes),
 		CgoAllocBytes:            metric.NewGauge(metaCgoAllocBytes),
 		CgoTotalBytes:            metric.NewGauge(metaCgoTotalBytes),
-		GcCount:                  metric.NewGauge(metaGCCount),
-		GcPauseNS:                metric.NewGauge(metaGCPauseNS),
+		GcCount:                  metric.NewCounter(metaGCCount),
+		GcPauseNS:                metric.NewCounter(metaGCPauseNS),
+		GcStopNS:                 metric.NewGauge(metaGCStopNS),
 		GcPausePercent:           metric.NewGaugeFloat64(metaGCPausePercent),
+		GcAssistNS:               metric.NewCounter(metaGCAssistNS),
+		NonGcPauseNS:             metric.NewGauge(metaNonGCPauseNS),
+		NonGcStopNS:              metric.NewGauge(metaNonGCStopNS),
 
-		CPUUserNS:              metric.NewGauge(metaCPUUserNS),
+		CPUUserNS:              metric.NewCounter(metaCPUUserNS),
 		CPUUserPercent:         metric.NewGaugeFloat64(metaCPUUserPercent),
-		CPUSysNS:               metric.NewGauge(metaCPUSysNS),
+		CPUSysNS:               metric.NewCounter(metaCPUSysNS),
 		CPUSysPercent:          metric.NewGaugeFloat64(metaCPUSysPercent),
 		CPUCombinedPercentNorm: metric.NewGaugeFloat64(metaCPUCombinedPercentNorm),
-		CPUNowNS:               metric.NewGauge(metaCPUNowNS),
+		CPUNowNS:               metric.NewCounter(metaCPUNowNS),
 
 		HostCPUCombinedPercentNorm: metric.NewGaugeFloat64(metaHostCPUCombinedPercentNorm),
 
 		RSSBytes:               metric.NewGauge(metaRSSBytes),
 		TotalMemBytes:          metric.NewGauge(metaTotalMemBytes),
-		HostDiskReadBytes:      metric.NewGauge(metaHostDiskReadBytes),
-		HostDiskReadCount:      metric.NewGauge(metaHostDiskReadCount),
-		HostDiskReadTime:       metric.NewGauge(metaHostDiskReadTime),
-		HostDiskWriteBytes:     metric.NewGauge(metaHostDiskWriteBytes),
-		HostDiskWriteCount:     metric.NewGauge(metaHostDiskWriteCount),
-		HostDiskWriteTime:      metric.NewGauge(metaHostDiskWriteTime),
-		HostDiskIOTime:         metric.NewGauge(metaHostDiskIOTime),
-		HostDiskWeightedIOTime: metric.NewGauge(metaHostDiskWeightedIOTime),
+		HostDiskReadBytes:      metric.NewCounter(metaHostDiskReadBytes),
+		HostDiskReadCount:      metric.NewCounter(metaHostDiskReadCount),
+		HostDiskReadTime:       metric.NewCounter(metaHostDiskReadTime),
+		HostDiskWriteBytes:     metric.NewCounter(metaHostDiskWriteBytes),
+		HostDiskWriteCount:     metric.NewCounter(metaHostDiskWriteCount),
+		HostDiskWriteTime:      metric.NewCounter(metaHostDiskWriteTime),
+		HostDiskIOTime:         metric.NewCounter(metaHostDiskIOTime),
+		HostDiskWeightedIOTime: metric.NewCounter(metaHostDiskWeightedIOTime),
 		IopsInProgress:         metric.NewGauge(metaHostIopsInProgress),
-		HostNetRecvBytes:       metric.NewGauge(metaHostNetRecvBytes),
-		HostNetRecvPackets:     metric.NewGauge(metaHostNetRecvPackets),
-		HostNetRecvErr:         metric.NewGauge(metaHostNetRecvErr),
-		HostNetRecvDrop:        metric.NewGauge(metaHostNetRecvDrop),
-		HostNetSendBytes:       metric.NewGauge(metaHostNetSendBytes),
-		HostNetSendPackets:     metric.NewGauge(metaHostNetSendPackets),
-		HostNetSendErr:         metric.NewGauge(metaHostNetSendErr),
-		HostNetSendDrop:        metric.NewGauge(metaHostNetSendDrop),
+		HostNetRecvBytes:       metric.NewCounter(metaHostNetRecvBytes),
+		HostNetRecvPackets:     metric.NewCounter(metaHostNetRecvPackets),
+		HostNetRecvErr:         metric.NewCounter(metaHostNetRecvErr),
+		HostNetRecvDrop:        metric.NewCounter(metaHostNetRecvDrop),
+		HostNetSendBytes:       metric.NewCounter(metaHostNetSendBytes),
+		HostNetSendPackets:     metric.NewCounter(metaHostNetSendPackets),
+		HostNetSendErr:         metric.NewCounter(metaHostNetSendErr),
+		HostNetSendDrop:        metric.NewCounter(metaHostNetSendDrop),
 		FDOpen:                 metric.NewGauge(metaFDOpen),
 		FDSoftLimit:            metric.NewGauge(metaFDSoftLimit),
-		Uptime:                 metric.NewGauge(metaUptime),
+		Uptime:                 metric.NewCounter(metaUptime),
 		BuildTimestamp:         buildTimestamp,
 	}
 	rsr.last.disk = rsr.initialDiskCounters
 	rsr.last.net = rsr.initialNetCounters
 	return rsr
-}
-
-// GoMemStats groups a runtime.MemStats structure with the timestamp when it
-// was collected.
-type GoMemStats struct {
-	runtime.MemStats
-	// Collected is the timestamp at which these values were collected.
-	Collected time.Time
 }
 
 // CGoMemStats reports what has been allocated outside of Go.
@@ -495,6 +779,8 @@ func GetCGoMemStats(ctx context.Context) *CGoMemStats {
 	}
 }
 
+var netstatEvery = log.Every(time.Minute)
+
 // SampleEnvironment queries the runtime system for various interesting metrics,
 // storing the resulting values in the set of metric gauges maintained by
 // RuntimeStatSampler. This makes runtime statistics more convenient for
@@ -502,18 +788,9 @@ func GetCGoMemStats(ctx context.Context) *CGoMemStats {
 //
 // This method should be called periodically by a higher level system in order
 // to keep runtime statistics current.
-//
-// SampleEnvironment takes GoMemStats as input because that is collected
-// separately, on a different schedule.
 // The CGoMemStats should be provided via GetCGoMemStats().
-func (rsr *RuntimeStatSampler) SampleEnvironment(
-	ctx context.Context, ms *GoMemStats, cs *CGoMemStats,
-) {
-	// Note that debug.ReadGCStats() does not suffer the same problem as
-	// runtime.ReadMemStats(). The only way you can know that is by reading the
-	// source.
-	gc := &debug.GCStats{}
-	debug.ReadGCStats(gc)
+func (rsr *RuntimeStatSampler) SampleEnvironment(ctx context.Context, cs *CGoMemStats) {
+	rsr.goRuntimeSampler.sampleRuntimeMetrics()
 
 	numCgoCall := runtime.NumCgoCall()
 	numGoroutine := runtime.NumGoroutine()
@@ -528,15 +805,15 @@ func (rsr *RuntimeStatSampler) SampleEnvironment(
 	if err != nil {
 		log.Ops.Errorf(ctx, "unable to get process CPU usage: %v", err)
 	}
-	cpuCapacity, err := getCPUCapacity()
-	if err != nil {
-		log.Ops.Errorf(ctx, "unable to get CPU capacity: %v", err)
-	}
+	cpuCapacity := getCPUCapacity()
 	cpuUsageStats, err := cpu.Times(false /* percpu */)
 	if err != nil {
 		log.Ops.Errorf(ctx, "unable to get system CPU usage: %v", err)
 	}
-	cpuUsage := cpuUsageStats[0]
+	var cpuUsage cpu.TimesStat
+	if len(cpuUsageStats) > 0 {
+		cpuUsage = cpuUsageStats[0]
+	}
 	numHostCPUs, err := cpu.Counts(true /* logical */)
 	if err != nil {
 		log.Ops.Errorf(ctx, "unable to get system CPU details: %v", err)
@@ -554,13 +831,10 @@ func (rsr *RuntimeStatSampler) SampleEnvironment(
 		}
 	}
 
-	var deltaDisk DiskStats
 	diskCounters, err := getSummedDiskCounters(ctx)
 	if err != nil {
 		log.Ops.Warningf(ctx, "problem fetching disk stats: %s; disk stats will be empty.", err)
 	} else {
-		deltaDisk = diskCounters
-		subtractDiskCounters(&deltaDisk, rsr.last.disk)
 		rsr.last.disk = diskCounters
 		subtractDiskCounters(&diskCounters, rsr.initialDiskCounters)
 
@@ -578,7 +852,9 @@ func (rsr *RuntimeStatSampler) SampleEnvironment(
 	var deltaNet net.IOCountersStat
 	netCounters, err := getSummedNetStats(ctx)
 	if err != nil {
-		log.Ops.Warningf(ctx, "problem fetching net stats: %s; net stats will be empty.", err)
+		if netstatEvery.ShouldLog() {
+			log.Ops.Warningf(ctx, "problem fetching net stats: %s; net stats will be empty.", err)
+		}
 	} else {
 		deltaNet = netCounters
 		subtractNetworkCounters(&deltaNet, rsr.last.net)
@@ -616,8 +892,20 @@ func (rsr *RuntimeStatSampler) SampleEnvironment(
 
 	combinedNormalizedProcPerc := (procSrate + procUrate) / cpuCapacity
 	combinedNormalizedHostPerc := (hostSrate + hostUrate) / float64(numHostCPUs)
-	gcPauseRatio := float64(uint64(gc.PauseTotal)-rsr.last.gcPauseTime) / dur
+
+	gcPauseTotal := float64HistogramSum(rsr.goRuntimeSampler.float64Histogram(runtimeMetricGCPauseTotal))
+	nonGcPauseTotal := float64HistogramSum(rsr.goRuntimeSampler.float64Histogram(runtimeMetricNonGCPauseTotal))
+	gcStopTotal := float64HistogramSum(rsr.goRuntimeSampler.float64Histogram(runtimeMetricGCStopTotal))
+	nonGcStopTotal := float64HistogramSum(rsr.goRuntimeSampler.float64Histogram(runtimeMetricNonGCStopTotal))
+	gcPauseTotalNs := uint64(gcPauseTotal * 1.e9)
+	nonGcPauseTotalNs := int64(nonGcPauseTotal * 1.e9)
+	gcStopTotalNs := int64(gcStopTotal * 1.e9)
+	nonGcStopTotalNs := int64(nonGcStopTotal * 1.e9)
+	gcCount := rsr.goRuntimeSampler.uint64(runtimeMetricGCCount)
+	gcPauseRatio := float64(gcPauseTotalNs-rsr.last.gcPauseTime) / dur
 	runnableSum := goschedstats.CumulativeNormalizedRunnableGoroutines()
+	gcAssistSeconds := rsr.goRuntimeSampler.float64(runtimeMetricGCAssist)
+	gcAssistNS := int64(gcAssistSeconds * 1e9)
 	// The number of runnable goroutines per CPU is a count, but it can vary
 	// quickly. We don't just want to get a current snapshot of it, we want the
 	// average value since the last sampling.
@@ -627,31 +915,36 @@ func (rsr *RuntimeStatSampler) SampleEnvironment(
 	rsr.last.procStime = procStime
 	rsr.last.hostUtime = hostUtime
 	rsr.last.hostStime = hostStime
-	rsr.last.gcPauseTime = uint64(gc.PauseTotal)
+	rsr.last.gcPauseTime = gcPauseTotalNs
 	rsr.last.runnableSum = runnableSum
 
 	// Log summary of statistics to console.
+	osStackBytes := rsr.goRuntimeSampler.uint64(runtimeMetricMemStackOSBytes)
 	cgoRate := float64((numCgoCall-rsr.last.cgoCall)*int64(time.Second)) / dur
-	goStatsStaleness := float32(timeutil.Since(ms.Collected)) / float32(time.Second)
-	goTotal := ms.Sys - ms.HeapReleased
-
+	goAlloc := rsr.goRuntimeSampler.uint64(runtimeMetricHeapAlloc)
+	goTotal := rsr.goRuntimeSampler.uint64(runtimeMetricGoTotal) -
+		rsr.goRuntimeSampler.uint64(runtimeMetricHeapReleasedBytes)
+	stackTotal := rsr.goRuntimeSampler.uint64(runtimeMetricMemStackHeapBytes) +
+		osStackBytes
+	heapFragmentBytes := rsr.goRuntimeSampler.uint64(runtimeMetricHeapFragmentBytes)
+	heapReservedBytes := rsr.goRuntimeSampler.uint64(runtimeMetricHeapReservedBytes)
+	heapReleasedBytes := rsr.goRuntimeSampler.uint64(runtimeMetricHeapReleasedBytes)
 	stats := &eventpb.RuntimeStats{
 		MemRSSBytes:       mem.Resident,
 		GoroutineCount:    uint64(numGoroutine),
-		MemStackSysBytes:  ms.StackSys,
-		GoAllocBytes:      ms.HeapAlloc,
+		MemStackSysBytes:  stackTotal,
+		GoAllocBytes:      goAlloc,
 		GoTotalBytes:      goTotal,
-		GoStatsStaleness:  goStatsStaleness,
-		HeapFragmentBytes: ms.HeapInuse - ms.HeapAlloc,
-		HeapReservedBytes: ms.HeapIdle - ms.HeapReleased,
-		HeapReleasedBytes: ms.HeapReleased,
+		HeapFragmentBytes: heapFragmentBytes,
+		HeapReservedBytes: heapReservedBytes,
+		HeapReleasedBytes: heapReleasedBytes,
 		CGoAllocBytes:     cs.CGoAllocatedBytes,
 		CGoTotalBytes:     cs.CGoTotalBytes,
 		CGoCallRate:       float32(cgoRate),
 		CPUUserPercent:    float32(procUrate) * 100,
 		CPUSysPercent:     float32(procSrate) * 100,
 		GCPausePercent:    float32(gcPauseRatio) * 100,
-		GCRunCount:        uint64(gc.NumGC),
+		GCRunCount:        gcCount,
 		NetHostRecvBytes:  deltaNet.BytesRecv,
 		NetHostSendBytes:  deltaNet.BytesSent,
 	}
@@ -659,18 +952,27 @@ func (rsr *RuntimeStatSampler) SampleEnvironment(
 	logStats(ctx, stats)
 
 	rsr.last.cgoCall = numCgoCall
-	rsr.last.gcCount = gc.NumGC
+	rsr.last.gcCount = int64(gcCount)
 
-	rsr.GoAllocBytes.Update(int64(ms.HeapAlloc))
+	rsr.GoAllocBytes.Update(int64(goAlloc))
 	rsr.GoTotalBytes.Update(int64(goTotal))
+	rsr.GoMemStackSysBytes.Update(int64(osStackBytes))
+	rsr.GoHeapFragmentBytes.Update(int64(heapFragmentBytes))
+	rsr.GoHeapReservedBytes.Update(int64(heapReservedBytes))
+	rsr.GoHeapReleasedBytes.Update(int64(heapReleasedBytes))
+	rsr.GoTotalAllocBytes.Update(int64(rsr.goRuntimeSampler.uint64(runtimeMetricCumulativeAlloc)))
 	rsr.CgoCalls.Update(numCgoCall)
 	rsr.Goroutines.Update(int64(numGoroutine))
 	rsr.RunnableGoroutinesPerCPU.Update(runnableAvg)
 	rsr.CgoAllocBytes.Update(int64(cs.CGoAllocatedBytes))
 	rsr.CgoTotalBytes.Update(int64(cs.CGoTotalBytes))
-	rsr.GcCount.Update(gc.NumGC)
-	rsr.GcPauseNS.Update(int64(gc.PauseTotal))
+	rsr.GcCount.Update(int64(gcCount))
+	rsr.GcPauseNS.Update(int64(gcPauseTotalNs))
+	rsr.GcStopNS.Update(gcStopTotalNs)
 	rsr.GcPausePercent.Update(gcPauseRatio)
+	rsr.GcAssistNS.Update(gcAssistNS)
+	rsr.NonGcPauseNS.Update(nonGcPauseTotalNs)
+	rsr.NonGcStopNS.Update(nonGcStopTotalNs)
 
 	rsr.CPUUserNS.Update(procUtime)
 	rsr.CPUUserPercent.Update(procUrate)
@@ -842,19 +1144,20 @@ func GetProcCPUTime(ctx context.Context) (userTimeMillis, sysTimeMillis int64, e
 // getCPUCapacity returns the number of logical CPU processors available for
 // use by the process. The capacity accounts for cgroup constraints, GOMAXPROCS
 // and the number of host processors.
-func getCPUCapacity() (float64, error) {
+func getCPUCapacity() float64 {
 	numProcs := float64(runtime.GOMAXPROCS(0 /* read only */))
 	cgroupCPU, err := cgroups.GetCgroupCPU()
 	if err != nil {
-		// Return the GOMAXPROCS value if unable to read the cgroup settings, in
-		// practice this is not likely to occur.
-		return numProcs, err
+		// Return the GOMAXPROCS value if unable to read the cgroup settings. This
+		// can happen if cockroach is not running inside a CPU cgroup, which is a
+		// supported deployment mode. We could log here, but we don't to avoid spam.
+		return numProcs
 	}
 	cpuShare := cgroupCPU.CPUShares()
 	// Take the minimum of the CPU shares and the GOMAXPROCS value. The most CPU
 	// the process could use is the lesser of the two.
 	if cpuShare > numProcs {
-		return numProcs, nil
+		return numProcs
 	}
-	return cpuShare, nil
+	return cpuShare
 }

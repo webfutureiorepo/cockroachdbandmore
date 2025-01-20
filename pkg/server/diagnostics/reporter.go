@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package diagnostics
 
@@ -14,13 +9,17 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl/licenseccl"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -36,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
@@ -47,6 +47,11 @@ import (
 	"github.com/mitchellh/reflectwalk"
 	"google.golang.org/protobuf/proto"
 )
+
+// TelemetryHttpTimeout allows for configuration of the client timeout
+// for sending telemetry reports. It is not expected that customers
+// would tweak this.
+var TelemetryHttpTimeout = envutil.EnvOrDefaultDuration("COCKROACH_TELEMETRY_HTTP_CLIENT_TIMEOUT", 1*time.Minute)
 
 // NodeStatusGenerator abstracts the status.MetricRecorder for read access.
 type NodeStatusGenerator interface {
@@ -94,12 +99,92 @@ type Reporter struct {
 
 	// TestingKnobs is used for internal test controls only.
 	TestingKnobs *TestingKnobs
+
+	// LastSuccessfulTelemetryPing records the current timestamp in
+	// seconds since the Unix epoch whenever we successfully make contact
+	// with the registration server. This timestamp will be updated
+	// regardless of whether the response we get back is successful or
+	// not.
+	LastSuccessfulTelemetryPing atomic.Int64
+
+	// client is the HTTP client used for sending requests to the
+	// registration server.
+	client *httputil.Client
+}
+
+func NewDiagnosticReporter(
+	startTime time.Time,
+	ambientCtx *log.AmbientContext,
+	config *base.Config,
+	settings *cluster.Settings,
+	storageClusterID func() uuid.UUID,
+	logicalClusterID func() uuid.UUID,
+	tenantID roachpb.TenantID,
+	sqlInstanceID func() base.SQLInstanceID,
+	sqlServer *sql.Server,
+	internalExec *sql.InternalExecutor,
+	db *kv.DB,
+	recorder NodeStatusGenerator,
+	locality roachpb.Locality,
+) *Reporter {
+	timeout := TelemetryHttpTimeout
+	if timeout > 5*time.Minute {
+		timeout = 5 * time.Minute
+	} else if timeout < 3*time.Second {
+		timeout = 3 * time.Second
+	}
+
+	r := &Reporter{
+		StartTime:        startTime,
+		AmbientCtx:       ambientCtx,
+		Config:           config,
+		Settings:         settings,
+		StorageClusterID: storageClusterID,
+		LogicalClusterID: logicalClusterID,
+		TenantID:         tenantID,
+		SQLInstanceID:    sqlInstanceID,
+		SQLServer:        sqlServer,
+		InternalExec:     internalExec,
+		DB:               db,
+		Recorder:         recorder,
+		Locality:         locality,
+		client:           httputil.NewClientWithTimeout(timeout),
+	}
+	r.LastSuccessfulTelemetryPing.Store(r.now().Unix())
+
+	return r
+}
+
+// shouldReportDiagnostics determines using the diagnostics report setting in
+// addition to the license value to determine whether to send telemetry data.
+// If the reporting value is true, or the cluster is on a Trial or Free license
+// it returns true.
+func shouldReportDiagnostics(ctx context.Context, st *cluster.Settings) bool {
+	if logcrash.DiagnosticsReportingEnabled.Get(&st.SV) {
+		return true
+	}
+
+	license, err := utilccl.GetLicense(st)
+	// If we cannot fetch the license, we do not send the report.
+	if err != nil {
+		log.Errorf(ctx, "error fetching license in shouldReportDiagnostics: %s", err)
+		return false
+	}
+	if license == nil {
+		return false
+	}
+	isLimited := license.Type == licenseccl.License_Free || license.Type == licenseccl.License_Trial
+
+	return isLimited
 }
 
 // PeriodicallyReportDiagnostics starts a background worker that periodically
 // phones home to report usage and diagnostics.
 func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *stop.Stopper) {
 	_ = stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: "diagnostics", SpanOpt: stop.SterileRootSpan}, func(ctx context.Context) {
+		var cancel context.CancelFunc
+		ctx, cancel = stopper.WithCancelOnQuiesce(ctx)
+		defer cancel()
 		defer logcrash.RecoverAndReportNonfatalPanic(ctx, &r.Settings.SV)
 		nextReport := r.StartTime
 
@@ -109,7 +194,7 @@ func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *s
 			// TODO(dt): we should allow tuning the reset and report intervals separately.
 			// Consider something like rand.Float() > resetFreq/reportFreq here to sample
 			// stat reset periods for reporting.
-			if logcrash.DiagnosticsReportingEnabled.Get(&r.Settings.SV) {
+			if shouldReportDiagnostics(ctx, r.Settings) {
 				r.ReportDiagnostics(ctx)
 			}
 
@@ -126,6 +211,13 @@ func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *s
 	})
 }
 
+func (r *Reporter) now() time.Time {
+	if r.TestingKnobs != nil && r.TestingKnobs.TimeSource != nil {
+		return r.TestingKnobs.TimeSource.Now()
+	}
+	return timeutil.Now()
+}
+
 // ReportDiagnostics phones home to report usage and diagnostics.
 //
 // NOTE: This can be slow because of cloud detection; use cloudinfo.Disable() in
@@ -136,7 +228,13 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 
 	report := r.CreateReport(ctx, telemetry.ResetCounts)
 
-	url := r.buildReportingURL(report)
+	license, err := utilccl.GetLicense(r.Settings)
+	if err != nil {
+		if log.V(2) {
+			log.Warningf(ctx, "failed to retrieve license while reporting diagnostics: %v", err)
+		}
+	}
+	url := r.buildReportingURL(report, license)
 	if url == nil {
 		return
 	}
@@ -147,7 +245,7 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 		return
 	}
 
-	res, err := httputil.Post(
+	res, err := r.client.Post(
 		ctx, url.String(), "application/x-protobuf", bytes.NewReader(b),
 	)
 	if err != nil {
@@ -156,16 +254,41 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 			// environments where network access is usually curtailed.
 			log.Warningf(ctx, "failed to report node usage metrics: %v", err)
 		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			// We consider timeout errors to signal successful "contact" with
+			// telemetry server. They can happen for a number of reasons
+			// outside of the cluster's control.
+			r.LastSuccessfulTelemetryPing.Store(r.now().Unix())
+		}
 		return
 	}
 	defer res.Body.Close()
 	b, err = io.ReadAll(res.Body)
-	if err != nil || res.StatusCode != http.StatusOK {
+	if err != nil {
 		log.Warningf(ctx, "failed to report node usage metrics: status: %s, body: %s, "+
 			"error: %v", res.Status, b, err)
 		return
 	}
+
+	// If `err` == nil then we assume that we've made successful contact
+	// with the telemetry server and any further problems are not the
+	// customer's fault. We update the telemetry timestamp before moving
+	// on with other request handling.
+	r.LastSuccessfulTelemetryPing.Store(r.now().Unix())
+
+	if res.StatusCode != http.StatusOK {
+		log.Warningf(ctx, "failed to report node usage metrics: status: %s, body: %s", res.Status, b)
+		return
+	}
 	r.SQLServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
+}
+
+// GetLastSuccessfulTelemetryPing will return the timestamp of when we last got
+// a ping back from the registration server.
+func (r *Reporter) GetLastSuccessfulTelemetryPing() time.Time {
+	ts := timeutil.Unix(r.LastSuccessfulTelemetryPing.Load(), 0)
+	return ts
 }
 
 // CreateReport generates a new diagnostics report containing information about
@@ -204,7 +327,7 @@ func (r *Reporter) CreateReport(
 	// flattened for quick reads, but we'd rather only report the non-defaults.
 	if it, err := r.InternalExec.QueryIteratorEx(
 		ctx, "read-setting", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT name FROM system.settings",
 	); err != nil {
 		log.Warningf(ctx, "failed to read settings: %s", err)
@@ -229,7 +352,7 @@ func (r *Reporter) CreateReport(
 		ctx,
 		"read-zone-configs",
 		nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT id, config FROM system.zones",
 	); err != nil {
 		log.Warningf(ctx, "%v", err)
@@ -259,7 +382,7 @@ func (r *Reporter) CreateReport(
 		}
 	}
 
-	info.SqlStats, err = r.SQLServer.GetScrubbedReportingStats(ctx)
+	info.SqlStats, err = r.SQLServer.GetScrubbedReportingStats(ctx, 100 /* limit */, false)
 	if err != nil {
 		if log.V(2 /* level */) {
 			log.Warningf(ctx, "unexpected error encountered when getting scrubbed reporting stats: %s", err)
@@ -353,13 +476,20 @@ func (r *Reporter) collectSchemaInfo(ctx context.Context) ([]descpb.TableDescrip
 
 // buildReportingURL creates a URL to report diagnostics.
 // If an empty updates URL is set (via empty environment variable), returns nil.
-func (r *Reporter) buildReportingURL(report *diagnosticspb.DiagnosticReport) *url.URL {
+func (r *Reporter) buildReportingURL(
+	report *diagnosticspb.DiagnosticReport, license *licenseccl.License,
+) *url.URL {
+	if license == nil {
+		license = &licenseccl.License{}
+	}
+
 	clusterInfo := ClusterInfo{
 		StorageClusterID: r.StorageClusterID(),
 		LogicalClusterID: r.LogicalClusterID(),
 		TenantID:         r.TenantID,
 		IsInsecure:       r.Config.Insecure,
 		IsInternal:       sql.ClusterIsInternal(&r.Settings.SV),
+		License:          license,
 	}
 
 	url := reportingURL

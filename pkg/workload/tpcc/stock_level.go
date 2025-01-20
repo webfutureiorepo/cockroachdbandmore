@@ -1,20 +1,17 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tpcc
 
 import (
 	"context"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
+	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/exp/rand"
 )
@@ -85,7 +82,7 @@ func createStockLevel(
 	return s, nil
 }
 
-func (s *stockLevel) run(ctx context.Context, wID int) (interface{}, error) {
+func (s *stockLevel) run(ctx context.Context, wID int) (interface{}, time.Duration, error) {
 	rng := rand.New(rand.NewSource(uint64(timeutil.Now().UnixNano())))
 
 	// 2.8.1.2: The threshold of minimum quantity in stock is selected at random
@@ -95,23 +92,28 @@ func (s *stockLevel) run(ctx context.Context, wID int) (interface{}, error) {
 		dID:       rng.Intn(10) + 1,
 	}
 
-	if err := s.config.executeTx(
+	onTxnStartDuration, err := s.config.executeTx(
 		ctx, s.mcp.Get(),
 		func(tx pgx.Tx) error {
 			var dNextOID int
 			if err := s.selectDNextOID.QueryRowTx(
 				ctx, tx, wID, d.dID,
 			).Scan(&dNextOID); err != nil {
-				return err
+				return errors.Wrap(err, "select district failed")
 			}
 
 			// Count the number of recently sold items that have a stock level below
 			// the threshold.
-			return s.countRecentlySold.QueryRowTx(
+			if err := s.countRecentlySold.QueryRowTx(
 				ctx, tx, wID, d.dID, dNextOID, d.threshold,
-			).Scan(&d.lowStock)
-		}); err != nil {
-		return nil, err
+			).Scan(&d.lowStock); err != nil {
+				return errors.Wrap(err, "select order_line, stock failed")
+			}
+
+			return nil
+		})
+	if err != nil {
+		return nil, 0, err
 	}
-	return d, nil
+	return d, onTxnStartDuration, nil
 }

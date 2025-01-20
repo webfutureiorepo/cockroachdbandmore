@@ -1,18 +1,14 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package txnrecovery
 
 import (
+	"bytes"
 	"context"
-	"sort"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -205,13 +201,15 @@ func (m *manager) resolveIndeterminateCommitForTxnProbe(
 			RequestHeader: kvpb.RequestHeader{
 				Key: w.Key,
 			},
-			Txn: meta,
+			Txn:            meta,
+			Strength:       w.Strength,
+			IgnoredSeqNums: txn.IgnoredSeqNums,
 		})
 	}
 
 	// Sort the query intent requests to maximize batching by range.
-	sort.Slice(queryIntentReqs, func(i, j int) bool {
-		return queryIntentReqs[i].Header().Key.Compare(queryIntentReqs[j].Header().Key) < 0
+	slices.SortFunc(queryIntentReqs, func(a, b kvpb.QueryIntentRequest) int {
+		return bytes.Compare(a.Key, b.Key)
 	})
 
 	// Query all of the intents in batches of size defaultBatchSize. The maximum
@@ -332,7 +330,7 @@ func (m *manager) updateMetrics() func(*roachpb.Transaction, error) {
 				m.metrics.SuccessesAsCommitted.Inc(1)
 			case roachpb.ABORTED:
 				m.metrics.SuccessesAsAborted.Inc(1)
-			case roachpb.PENDING, roachpb.STAGING:
+			case roachpb.PENDING, roachpb.PREPARED, roachpb.STAGING:
 				m.metrics.SuccessesAsPending.Inc(1)
 			default:
 				panic("unexpected")

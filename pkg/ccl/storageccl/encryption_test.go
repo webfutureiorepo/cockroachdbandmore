@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storageccl
 
@@ -17,6 +14,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +41,7 @@ func TestEncryptDecrypt(t *testing.T) {
 						require.NoError(t, err)
 						require.True(t, AppearsEncrypted(ciphertext), "cipher text should appear encrypted")
 
-						decrypted, err := DecryptFile(context.Background(), ciphertext, key, nil /* mm */)
+						decrypted, err := DecryptFile(context.Background(), ciphertext, key, mon.NewStandaloneUnlimitedAccount())
 						require.NoError(t, err)
 						require.Equal(t, plaintext, decrypted)
 					})
@@ -53,7 +51,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	})
 
 	t.Run("helpful error on bad input", func(t *testing.T) {
-		_, err := DecryptFile(context.Background(), []byte("a"), key, nil /* mm */)
+		_, err := DecryptFile(context.Background(), []byte("a"), key, mon.NewStandaloneUnlimitedAccount())
 		require.EqualError(t, err, "file does not appear to be encrypted")
 	})
 
@@ -162,7 +160,7 @@ func TestEncryptDecrypt(t *testing.T) {
 					plaintext := randutil.RandBytes(rng, rng.Intn(1024*32))
 					ciphertext, err := EncryptFile(plaintext, key)
 					require.NoError(t, err)
-					decrypted, err := DecryptFile(context.Background(), ciphertext, key, nil /* mm */)
+					decrypted, err := DecryptFile(context.Background(), ciphertext, key, mon.NewStandaloneUnlimitedAccount())
 					require.NoError(t, err)
 					if len(plaintext) == 0 {
 						require.Equal(t, len(plaintext), len(decrypted))

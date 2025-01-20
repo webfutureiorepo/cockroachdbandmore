@@ -1,23 +1,20 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -31,8 +28,8 @@ func registerFollowerOverload(r registry.Registry) {
 		return registry.TestSpec{
 			Name:             "admission/follower-overload/" + subtest,
 			Owner:            registry.OwnerAdmissionControl,
-			Timeout:          3 * time.Hour,
-			CompatibleClouds: registry.AllExceptAWS,
+			Timeout:          6 * time.Hour,
+			CompatibleClouds: registry.AllClouds,
 			Suites:           registry.ManualOnly,
 			// TODO(aaditya): Revisit this as part of #111614.
 			//Suites:           registry.Suites(registry.Weekly),
@@ -43,7 +40,14 @@ func registerFollowerOverload(r registry.Registry) {
 			// NB: use 16vcpu machines to avoid getting anywhere close to EBS
 			// bandwidth limits on AWS, see:
 			// https://github.com/cockroachdb/cockroach/issues/82109#issuecomment-1154049976
-			Cluster: r.MakeClusterSpec(4, spec.CPU(4), spec.ReuseNone()),
+			Cluster: func() spec.ClusterSpec {
+				c := r.MakeClusterSpec(4, spec.CPU(4), spec.WorkloadNode(), spec.ReuseNone(), spec.DisableLocalSSD())
+				c.AWS.MachineType = cfg.cloudConfig.AWSInstanceType
+				c.AWS.Zones = cfg.cloudConfig.AWSRegion
+				c.GCE.MachineType = cfg.cloudConfig.GCEInstanceType
+				c.GCE.Zones = cfg.cloudConfig.GCERegion
+				return c
+			}(),
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 				runAdmissionControlFollowerOverload(ctx, t, c, cfg)
 			},
@@ -95,15 +99,38 @@ func registerFollowerOverload(r registry.Registry) {
 		kv50N3:         true,
 	}))
 
+	// Similar to presplit-no-leases, but using specific instance type and
+	// increased kv0 writes to isolate for bandwidth induced overload.
+	//
+	// NB: As of Jan 2024, this test is specific to AWS only.
+	r.Add(spec("bandwidth", admissionControlFollowerOverloadOpts{
+		kv0N12:           true,
+		kvN12ExtraArgs:   "--splits 100",
+		kv0N12BlockBytes: "10000",
+		kv0N12Rate:       "600",
+		kv50N3:           true,
+		cloudConfig:      followerOverloadTestCloudConfig{AWSInstanceType: "c5.xlarge", AWSRegion: "us-east-1a"},
+	}))
+
 	// TODO(irfansharif,aaditya): Add variants that enable regular traffic flow
 	// control. Run variants without follower pausing too.
 }
 
 type admissionControlFollowerOverloadOpts struct {
-	ioNemesis      bool // limit write throughput on s3 (n3) to 20MiB/s
-	kvN12ExtraArgs string
-	kv0N12         bool // run kv0 on n1 and n2
-	kv50N3         bool // run kv50 on n3
+	ioNemesis        bool // limit write throughput on s3 (n3) to 20MiB/s
+	kvN12ExtraArgs   string
+	kv0N12           bool                            // run kv0 on n1 and n2
+	kv0N12BlockBytes string                          // [optional] block bytes for kv0 on n1 and n2, default=5000
+	kv0N12Rate       string                          // [optional] rate limit for kv0 on n1 and n2, default=400
+	kv50N3           bool                            // run kv50 on n3
+	cloudConfig      followerOverloadTestCloudConfig // optional
+}
+
+type followerOverloadTestCloudConfig struct {
+	AWSInstanceType string
+	AWSRegion       string
+	GCEInstanceType string
+	GCERegion       string
 }
 
 func runAdmissionControlFollowerOverload(
@@ -124,15 +151,13 @@ func runAdmissionControlFollowerOverload(
 
 	// Set up prometheus.
 	{
-		clusNodes := c.Range(1, c.Spec().NodeCount-1)
-		workloadNode := c.Node(c.Spec().NodeCount)
 		cfg := (&prometheus.Config{}).
-			WithPrometheusNode(workloadNode.InstallNodes()[0]).
+			WithPrometheusNode(c.WorkloadNode().InstallNodes()[0]).
 			WithGrafanaDashboard("https://go.crdb.dev/p/index-admission-control-grafana").
-			WithCluster(clusNodes.InstallNodes()).
-			WithNodeExporter(clusNodes.InstallNodes()).
-			WithWorkload("kv-n12", workloadNode.InstallNodes()[0], 2112). // kv-n12
-			WithWorkload("kv-n3", workloadNode.InstallNodes()[0], 2113)   // kv-n3 (if present)
+			WithCluster(c.CRDBNodes().InstallNodes()).
+			WithNodeExporter(c.CRDBNodes().InstallNodes()).
+			WithWorkload("kv-n12", c.WorkloadNode().InstallNodes()[0], 2112). // kv-n12
+			WithWorkload("kv-n3", c.WorkloadNode().InstallNodes()[0], 2113)   // kv-n3 (if present)
 
 		require.NoError(t, c.StartGrafana(ctx, t.L(), cfg))
 		cleanupFunc := func() {
@@ -143,12 +168,11 @@ func runAdmissionControlFollowerOverload(
 		defer cleanupFunc()
 	}
 
-	phaseDuration := time.Hour
+	phaseDuration := 3 * time.Hour
 
-	nodes := c.Range(1, 3)
-	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), nodes)
+	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.CRDBNodes())
 	db := c.Conn(ctx, t.L(), 1)
-	require.NoError(t, WaitFor3XReplication(ctx, t, db))
+	require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), db))
 
 	{
 		_, err := c.Conn(ctx, t.L(), 1).ExecContext(ctx, `SET CLUSTER SETTING admission.kv.pause_replication_io_threshold = 0.8`)
@@ -158,11 +182,11 @@ func runAdmissionControlFollowerOverload(
 	if cfg.kv0N12 {
 		args := strings.Fields("./cockroach workload init kv {pgurl:1}")
 		args = append(args, strings.Fields(cfg.kvN12ExtraArgs)...)
-		c.Run(ctx, option.WithNodes(c.Node(1)), args...)
+		c.Run(ctx, option.WithNodes(c.WorkloadNode()), args...)
 	}
 	if cfg.kv50N3 {
 		args := strings.Fields("./cockroach workload init kv --db kvn3 {pgurl:1}")
-		c.Run(ctx, option.WithNodes(c.Node(1)), args...)
+		c.Run(ctx, option.WithNodes(c.WorkloadNode()), args...)
 	}
 
 	// Node 3 should not have any leases (excepting kvn3, if present).
@@ -170,7 +194,7 @@ func runAdmissionControlFollowerOverload(
 	for _, row := range runner.QueryStr(
 		t, `SELECT target FROM [ SHOW ZONE CONFIGURATIONS ]`,
 	) {
-		q := `ALTER ` + row[0] + ` CONFIGURE ZONE USING lease_preferences = '[[-node3]]'`
+		q := `ALTER ` + row[0] + ` CONFIGURE ZONE USING lease_preferences = '[[-node3]]', constraints = COPY FROM PARENT`
 		t.L().Printf("%s", q)
 		_, err := db.Exec(q)
 		require.NoError(t, err)
@@ -185,8 +209,8 @@ func runAdmissionControlFollowerOverload(
 		var attempts int
 		for ctx.Err() == nil {
 			attempts++
-			m1 := runner.QueryStr(t, `SELECT range_id FROM crdb_internal.ranges WHERE lease_holder=3 AND database_name != 'kvn3'`)
-			m2 := runner.QueryStr(t, `SELECT range_id FROM crdb_internal.ranges WHERE lease_holder!=3 AND database_name = 'kvn3'`)
+			m1 := runner.QueryStr(t, `SELECT DISTINCT range_id FROM [SHOW CLUSTER RANGES WITH TABLES, DETAILS] WHERE lease_holder=3 AND database_name != 'kvn3'`)
+			m2 := runner.QueryStr(t, `SELECT DISTINCT range_id FROM [SHOW CLUSTER RANGES WITH TABLES, DETAILS] WHERE lease_holder!=3 AND database_name = 'kvn3'`)
 			if len(m1)+len(m2) == 0 {
 				t.L().Printf("done waiting for lease movement")
 				break
@@ -226,14 +250,25 @@ func runAdmissionControlFollowerOverload(
 		// to EBS, see:
 		//
 		// https://github.com/cockroachdb/cockroach/issues/82109#issuecomment-1154049976
-		deployWorkload := `
-mkdir -p logs && \
-sudo systemd-run --property=Type=exec \
---property=StandardOutput=file:/home/ubuntu/logs/kv-n12.stdout.log \
---property=StandardError=file:/home/ubuntu/logs/kv-n12.stderr.log \
---remain-after-exit --unit kv-n12 -- ./cockroach workload run kv --read-percent 0 \
---max-rate 400 --concurrency 400 --min-block-bytes 5000 --max-block-bytes 5000 --tolerate-errors {pgurl:1-2}`
-		c.Run(ctx, option.WithNodes(c.Node(4)), deployWorkload)
+
+		// We override the values, if specified, otherwise we use defaults as explained above.
+		maxRate := cfg.kv0N12Rate
+		if maxRate == "" {
+			maxRate = "400"
+		}
+		maxBytes := cfg.kv0N12BlockBytes
+		if maxBytes == "" {
+			maxBytes = "5000"
+		}
+		deployWorkload := fmt.Sprintf("mkdir -p logs && sudo systemd-run --property=Type=exec "+
+			"--property=StandardOutput=file:/home/ubuntu/logs/kv-n12.stdout.log "+
+			"--property=StandardError=file:/home/ubuntu/logs/kv-n12.stderr.log "+
+			"--remain-after-exit --unit kv-n12 -- ./cockroach workload run kv --read-percent 0 "+
+			"--max-rate %s --concurrency 400 --min-block-bytes %s --max-block-bytes %s --tolerate-errors {pgurl:1-2}",
+			maxRate, maxBytes, maxBytes,
+		)
+
+		c.Run(ctx, option.WithNodes(c.WorkloadNode()), deployWorkload)
 	}
 	if cfg.kv50N3 {
 		// On n3, we run a "trickle" workload that does not add much work to the
@@ -247,11 +282,11 @@ sudo systemd-run --property=Type=exec \
 --remain-after-exit --unit kv-n3 -- ./cockroach workload run kv --db kvn3 \
 --read-percent 50 --max-rate 100 --concurrency 1000 --min-block-bytes 100 --max-block-bytes 100 \
 --prometheus-port 2113 --tolerate-errors {pgurl:3}`
-		c.Run(ctx, option.WithNodes(c.Node(4)), deployWorkload)
+		c.Run(ctx, option.WithNodes(c.WorkloadNode()), deployWorkload)
 	}
 	t.L().Printf("deployed workload")
 
-	wait(c.NewMonitor(ctx, nodes), phaseDuration)
+	wait(c.NewMonitor(ctx, c.CRDBNodes()), phaseDuration)
 
 	if cfg.ioNemesis {
 		// Limit write throughput on s3 to 20mb/s. This is not enough to keep up
@@ -266,11 +301,13 @@ sudo systemd-run --property=Type=exec \
 		//   └─md0         9:0    0 872.3G  0 raid0 /mnt/data1
 		//
 		// and so the actual write throttle is about 2x what was set.
-		c.Run(ctx, option.WithNodes(c.Node(3)), "sudo", "systemctl", "set-property", "cockroach", "'IOWriteBandwidthMax={store-dir} 20971520'")
+		c.Run(ctx, option.WithNodes(c.Node(3)), "sudo", "systemctl", "set-property",
+			roachtestutil.SystemInterfaceSystemdUnitName(),
+			"'IOWriteBandwidthMax={store-dir} 20971520'")
 		t.L().Printf("installed write throughput limit on n3")
 	}
 
-	wait(c.NewMonitor(ctx, nodes), phaseDuration)
+	wait(c.NewMonitor(ctx, c.CRDBNodes()), phaseDuration)
 
 	// TODO(aaditya,irfansharif): collect, assert on, and export metrics, using:
 	// https://github.com/cockroachdb/cockroach/pull/80724.

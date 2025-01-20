@@ -1,19 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { PayloadAction } from "@reduxjs/toolkit";
 import { all, call, put, takeLatest } from "redux-saga/effects";
 
-import { actions } from "./job.reducer";
 import { getJob, JobRequest, JobResponseWithKey } from "src/api/jobsApi";
-import { PayloadAction } from "@reduxjs/toolkit";
+
 import { ErrorWithKey } from "../../api";
+import { maybeError } from "../../util";
+
+import { actions } from "./job.reducer";
 
 export function* refreshJobSaga(action: PayloadAction<JobRequest>) {
   yield put(actions.request(action.payload));
@@ -30,7 +28,7 @@ export function* requestJobSaga(action: PayloadAction<JobRequest>): any {
     yield put(actions.received(resultWithKey));
   } catch (e) {
     const err: ErrorWithKey = {
-      err: e,
+      err: maybeError(e),
       key,
     };
     yield put(actions.failed(err));

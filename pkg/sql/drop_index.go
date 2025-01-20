@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -32,6 +27,7 @@ import (
 )
 
 type dropIndexNode struct {
+	zeroInputPlanNode
 	n        *tree.DropIndex
 	idxNames []fullIndexName
 }
@@ -70,7 +66,7 @@ func (p *planner) DropIndex(ctx context.Context, n *tree.DropIndex) (planNode, e
 		}
 
 		// Disallow schema changes if this table's schema is locked.
-		if err = checkTableSchemaUnlocked(tableDesc); err != nil {
+		if err = checkSchemaChangeIsAllowed(tableDesc, n); err != nil {
 			return nil, err
 		}
 
@@ -348,32 +344,6 @@ func (p *planner) dropIndexByName(
 				"index %q is in use as unique constraint", idx.GetName()),
 			"use CASCADE if you really want to drop it.",
 		)
-	}
-
-	// Check if requires CCL binary for eventual zone config removal.
-	_, zone, _, err := GetZoneConfigInTxn(
-		ctx, p.txn, p.Descriptors(), tableDesc.ID, nil /* index */, "", false,
-	)
-	if err != nil {
-		return err
-	}
-
-	for _, s := range zone.Subzones {
-		if s.IndexID != uint32(idx.GetID()) {
-			_, err = GenerateSubzoneSpans(
-				p.ExecCfg().Settings,
-				p.ExecCfg().Codec,
-				tableDesc,
-				zone.Subzones,
-				false, /* newSubzones */
-			)
-			if sqlerrors.IsCCLRequiredError(err) {
-				return sqlerrors.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
-					"because table %q has at least one remaining index or partition with a zone config",
-					tableDesc.Name))
-			}
-			break
-		}
 	}
 
 	// Remove all foreign key references and backreferences from the index.

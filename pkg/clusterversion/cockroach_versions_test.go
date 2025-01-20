@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clusterversion
 
@@ -96,7 +91,7 @@ func TestKeyConstants(t *testing.T) {
 
 func TestFinalVersion(t *testing.T) {
 	if finalVersion >= 0 {
-		require.False(t, developmentBranch, "final version set but developmentBranch is still set")
+		require.False(t, DevelopmentBranch, "final version set but developmentBranch is still set")
 		require.Equal(t, Latest, finalVersion, "finalVersion must match the minted latest version")
 	} else {
 		require.False(t, Latest.IsFinal(), "finalVersion not set but Latest is final")
@@ -152,7 +147,7 @@ func TestClusterVersionPrettyPrint(t *testing.T) {
 		{cv(22, 2, 1, 4), "22.2-upgrading-to-23.1-step-004"},
 	}
 	for _, test := range tests {
-		if actual := test.cv.PrettyPrint(); actual != test.exp {
+		if actual := test.cv.PrettyPrint().StripMarkers(); actual != test.exp {
 			t.Errorf("expected %s, got %q", test.exp, actual)
 		}
 	}
@@ -169,7 +164,8 @@ func TestReleaseSeries(t *testing.T) {
 	}
 
 	// Verify the latest version.
-	require.Equal(t, fmt.Sprintf("v%s", Latest.ReleaseSeries()), build.BinaryVersionPrefix())
+	major, minor := build.BranchReleaseSeries()
+	require.Equal(t, fmt.Sprintf("v%s", Latest.ReleaseSeries()), fmt.Sprintf("v%d.%d", major, minor))
 
 	// Verify the ReleaseSeries results down to MinSupported.
 	expected := Latest.ReleaseSeries()
@@ -179,5 +175,40 @@ func TestReleaseSeries(t *testing.T) {
 			expected = roachpb.ReleaseSeries{Major: v.Major, Minor: v.Minor}
 		}
 		require.Equalf(t, expected, k.ReleaseSeries(), "version: %s", k)
+	}
+}
+
+func TestStringForPersistence(t *testing.T) {
+	testCases := []struct {
+		v            roachpb.Version
+		minSupported roachpb.Version
+		expected     string
+	}{
+		{
+			v:            roachpb.Version{Major: 23, Minor: 2},
+			minSupported: roachpb.Version{Major: 23, Minor: 2},
+			expected:     "23.2",
+		},
+		{
+			v:            roachpb.Version{Major: 24, Minor: 1},
+			minSupported: roachpb.Version{Major: 23, Minor: 2},
+			expected:     "24.1",
+		},
+		{
+			v:            roachpb.Version{Major: 24, Minor: 1, Internal: 10},
+			minSupported: roachpb.Version{Major: 23, Minor: 2},
+			expected:     "24.1-10",
+		},
+		{
+			v:            roachpb.Version{Major: 24, Minor: 1, Internal: 10},
+			minSupported: roachpb.Version{Major: 24, Minor: 1},
+			expected:     "24.1-upgrading-to-24.2-step-010",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			require.Equal(t, tc.expected, stringForPersistenceWithMinSupported(tc.v, tc.minSupported))
+		})
 	}
 }

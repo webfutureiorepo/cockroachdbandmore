@@ -48,6 +48,7 @@ go_library(
         "//pkg/sql/catalog/internal/catkv",
         "//pkg/sql/catalog/internal/validate",
         "//pkg/sql/catalog/lease",
+        "//pkg/sql/catalog/multiregion",
         "//pkg/sql/catalog/nstree",
         "//pkg/sql/catalog/schemadesc",
         "//pkg/sql/catalog/systemschema",
@@ -89,10 +90,6 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":descs"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/keys",
@@ -122,6 +119,7 @@ go_test(
         "//pkg/sql/sem/catid",
         "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",
+        "//pkg/sql/sqlerrors",
         "//pkg/sql/sqlliveness",
         "//pkg/sql/sqlliveness/sqllivenesstestutils",
         "//pkg/sql/types",

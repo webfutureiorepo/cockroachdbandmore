@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -55,10 +50,22 @@ const (
 type PreparedStatement struct {
 	querycache.PrepareMetadata
 
-	// Memo is the memoized data structure constructed by the cost-based optimizer
-	// during prepare of a SQL statement. It can significantly speed up execution
-	// if it is used by the optimizer as a starting point.
-	Memo *memo.Memo
+	// BaseMemo is the memoized data structure constructed by the cost-based
+	// optimizer during prepare of a SQL statement.
+	BaseMemo *memo.Memo
+
+	// GenericMemo, if present, is a fully-optimized memo that can be executed
+	// as-is.
+	GenericMemo *memo.Memo
+
+	// IdealGenericPlan is true if GenericMemo is guaranteed to be optimal
+	// across all executions of the prepared statement. Ideal generic plans are
+	// generated when the statement has no placeholders nor fold-able stable
+	// expressions, or when the placeholder fast-path is utilized.
+	IdealGenericPlan bool
+
+	// Costs tracks the costs of previously optimized custom and generic plans.
+	Costs planCosts
 
 	// refCount keeps track of the number of references to this PreparedStatement.
 	// New references are registered through incRef().
@@ -84,8 +91,11 @@ func (p *PreparedStatement) MemoryEstimate() int64 {
 	//   1. Size of the prepare metadata.
 	//   2. Size of the prepared memo, if using the cost-based optimizer.
 	size := p.PrepareMetadata.MemoryEstimate()
-	if p.Memo != nil {
-		size += p.Memo.MemoryEstimate()
+	if p.BaseMemo != nil {
+		size += p.BaseMemo.MemoryEstimate()
+	}
+	if p.GenericMemo != nil {
+		size += p.GenericMemo.MemoryEstimate()
 	}
 	return size
 }
@@ -105,6 +115,76 @@ func (p *PreparedStatement) incRef(ctx context.Context) {
 		log.Fatal(ctx, "corrupt PreparedStatement refcount")
 	}
 	p.refCount++
+}
+
+const (
+	// CustomPlanThreshold is the maximum number of custom plan costs tracked by
+	// planCosts. It is also the number of custom plans executed when
+	// plan_cache_mode=auto before attempting to generate a generic plan.
+	CustomPlanThreshold = 5
+)
+
+// planCosts tracks costs of generic and custom plans.
+type planCosts struct {
+	generic memo.Cost
+	custom  struct {
+		nextIdx int
+		length  int
+		costs   [CustomPlanThreshold]memo.Cost
+	}
+}
+
+// Generic returns the cost of the generic plan.
+func (p *planCosts) Generic() memo.Cost {
+	return p.generic
+}
+
+// SetGeneric sets the cost of the generic plan.
+func (p *planCosts) SetGeneric(cost memo.Cost) {
+	p.generic = cost
+}
+
+// AddCustom adds a custom plan cost to the planCosts, evicting the oldest cost
+// if necessary.
+func (p *planCosts) AddCustom(cost memo.Cost) {
+	p.custom.costs[p.custom.nextIdx] = cost
+	p.custom.nextIdx++
+	if p.custom.nextIdx >= CustomPlanThreshold {
+		p.custom.nextIdx = 0
+	}
+	if p.custom.length < CustomPlanThreshold {
+		p.custom.length++
+	}
+}
+
+// NumCustom returns the number of custom plan costs in the planCosts.
+func (p *planCosts) NumCustom() int {
+	return p.custom.length
+}
+
+// AvgCustom returns the average cost of all the custom plan costs in planCosts.
+// If there are no custom plan costs, it returns 0.
+func (p *planCosts) AvgCustom() memo.Cost {
+	if p.custom.length == 0 {
+		return memo.Cost{C: 0}
+	}
+	var sum memo.Cost
+	for i := 0; i < p.custom.length; i++ {
+		sum.Add(p.custom.costs[i])
+	}
+	sum.C /= float64(p.custom.length)
+	return sum
+}
+
+// ClearGeneric clears the generic cost.
+func (p *planCosts) ClearGeneric() {
+	p.generic = memo.Cost{C: 0}
+}
+
+// ClearCustom clears any previously added custom costs.
+func (p *planCosts) ClearCustom() {
+	p.custom.nextIdx = 0
+	p.custom.length = 0
 }
 
 // preparedStatementsAccessor gives a planner access to a session's collection
@@ -237,7 +317,7 @@ func (p *PreparedPortal) close(
 	prepStmtsNamespaceMemAcc.Shrink(ctx, p.size(portalName))
 	p.Stmt.decRef(ctx)
 	if p.pauseInfo != nil {
-		p.pauseInfo.cleanupAll()
+		p.pauseInfo.cleanupAll(ctx)
 		p.pauseInfo = nil
 	}
 }
@@ -246,34 +326,28 @@ func (p *PreparedPortal) size(portalName string) int64 {
 	return int64(uintptr(len(portalName)) + unsafe.Sizeof(p))
 }
 
+// isPausable checks if a portal is pausable.
 func (p *PreparedPortal) isPausable() bool {
-	return p.pauseInfo != nil
+	return p != nil && p.pauseInfo != nil
 }
 
 // cleanupFuncStack stores cleanup functions for a portal. The clean-up
 // functions are added during the first-time execution of a portal. When the
 // first-time execution is finished, we mark isComplete to true.
 type cleanupFuncStack struct {
-	stack      []namedFunc
+	stack      []func(context.Context)
 	isComplete bool
 }
 
-func (n *cleanupFuncStack) appendFunc(f namedFunc) {
+func (n *cleanupFuncStack) appendFunc(f func(context.Context)) {
 	n.stack = append(n.stack, f)
 }
 
-func (n *cleanupFuncStack) run() {
+func (n *cleanupFuncStack) run(ctx context.Context) {
 	for i := 0; i < len(n.stack); i++ {
-		n.stack[i].f()
+		n.stack[i](ctx)
 	}
 	*n = cleanupFuncStack{}
-}
-
-// namedFunc is function with name, which makes the debugging easier. It is
-// used just for clean up functions of a pausable portal.
-type namedFunc struct {
-	fName string
-	f     func()
 }
 
 // instrumentationHelperWrapper wraps the instrumentation helper.
@@ -385,11 +459,11 @@ type portalPauseInfo struct {
 }
 
 // cleanupAll is to run all the cleanup layers.
-func (pm *portalPauseInfo) cleanupAll() {
-	pm.resumableFlow.cleanup.run()
-	pm.dispatchToExecutionEngine.cleanup.run()
-	pm.execStmtInOpenState.cleanup.run()
-	pm.exhaustPortal.cleanup.run()
+func (pm *portalPauseInfo) cleanupAll(ctx context.Context) {
+	pm.resumableFlow.cleanup.run(ctx)
+	pm.dispatchToExecutionEngine.cleanup.run(ctx)
+	pm.execStmtInOpenState.cleanup.run(ctx)
+	pm.exhaustPortal.cleanup.run(ctx)
 }
 
 // isQueryIDSet returns true if the query id for the portal is set.

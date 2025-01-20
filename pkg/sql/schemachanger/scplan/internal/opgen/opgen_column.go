@@ -1,18 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -36,14 +32,20 @@ func init() {
 				}),
 			),
 			to(scpb.Status_PUBLIC,
-				revertible(false),
+				revertibleFunc(func(e scpb.Element, state *opGenContext) bool {
+					return checkIfDescriptorIsWithoutData(screl.GetDescID(e), state)
+				}),
 				emit(func(this *scpb.Column, md *opGenContext) *scop.MakeWriteOnlyColumnPublic {
 					return &scop.MakeWriteOnlyColumnPublic{
 						TableID:  this.TableID,
 						ColumnID: this.ColumnID,
 					}
 				}),
-				emit(func(this *scpb.Column) *scop.RefreshStats {
+				emit(func(this *scpb.Column, md *opGenContext) *scop.RefreshStats {
+					// No need to generate stats for empty descriptors.
+					if checkIfDescriptorIsWithoutData(this.TableID, md) {
+						return nil
+					}
 					return &scop.RefreshStats{
 						TableID: this.TableID,
 					}

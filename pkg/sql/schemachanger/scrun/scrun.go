@@ -1,18 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scrun
 
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -30,7 +26,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -82,6 +80,7 @@ func runTransactionPhase(
 		ExecutionPhase:             phase,
 		SchemaChangerJobIDSupplier: deps.TransactionalJobRegistry().SchemaChangerJobID,
 		SkipPlannerSanityChecks:    !enforcePlannerSanityCheck.Get(&deps.ClusterSettings().SV),
+		MemAcc:                     mon.NewStandaloneUnlimitedAccount(),
 	})
 	if err != nil {
 		return scpb.CurrentState{}, jobspb.InvalidJobID, err
@@ -115,6 +114,7 @@ func RunSchemaChangesInJob(
 	knobs *scexec.TestingKnobs,
 	deps JobRunDependencies,
 	jobID jobspb.JobID,
+	jobStartTime time.Time,
 	descriptorIDs []descpb.ID,
 	rollbackCause error,
 ) error {
@@ -123,13 +123,14 @@ func RunSchemaChangesInJob(
 			return err
 		}
 	}
-	p, err := makePostCommitPlan(ctx, deps, jobID, descriptorIDs, rollbackCause)
+	p, err := makePostCommitPlan(ctx, deps, jobID, jobStartTime, descriptorIDs, rollbackCause)
 	if err != nil {
 		if knobs != nil && knobs.OnPostCommitPlanError != nil {
 			return knobs.OnPostCommitPlanError(err)
 		}
 		return err
 	}
+	deps.SetExplain(p.ExplainCompact())
 	for i := range p.Stages {
 		// Execute each stage in its own transaction.
 		if err := deps.WithTxnInJob(ctx, func(ctx context.Context, td scexec.Dependencies, el EventLogger) error {
@@ -143,9 +144,13 @@ func RunSchemaChangesInJob(
 			if i+1 == len(p.Stages) {
 				var template eventpb.EventWithCommonSchemaChangePayload
 				if p.CurrentState.InRollback {
-					template = &eventpb.FinishSchemaChangeRollback{}
+					template = &eventpb.FinishSchemaChangeRollback{
+						LatencyNanos: timeutil.Since(jobStartTime).Nanoseconds(),
+					}
 				} else {
-					template = &eventpb.FinishSchemaChange{}
+					template = &eventpb.FinishSchemaChange{
+						LatencyNanos: timeutil.Since(jobStartTime).Nanoseconds(),
+					}
 				}
 				if err := logSchemaChangeEvents(ctx, el, p.CurrentState, template); err != nil {
 					return err
@@ -180,6 +185,7 @@ func executeStage(
 ) (err error) {
 	defer scerrors.StartEventf(
 		ctx,
+		0, /* level */
 		"executing declarative schema change %s (rollback=%v) for %s",
 		redact.Safe(stage),
 		redact.Safe(p.InRollback),
@@ -219,6 +225,7 @@ func makePostCommitPlan(
 	ctx context.Context,
 	deps JobRunDependencies,
 	jobID jobspb.JobID,
+	jobStartTime time.Time,
 	descriptorIDs []descpb.ID,
 	rollbackCause error,
 ) (scplan.Plan, error) {
@@ -253,8 +260,9 @@ func makePostCommitPlan(
 			// Revert the schema change and write about it in the event log.
 			state.Rollback()
 			return logSchemaChangeEvents(ctx, eventLogger, state, &eventpb.ReverseSchemaChange{
-				Error:    fmt.Sprintf("%v", rollbackCause),
-				SQLSTATE: pgerror.GetPGCode(rollbackCause).String(),
+				Error:        redact.Sprintf("%+v", rollbackCause),
+				SQLSTATE:     pgerror.GetPGCode(rollbackCause).String(),
+				LatencyNanos: timeutil.Since(jobStartTime).Nanoseconds(),
 			})
 		}
 		return nil
@@ -269,6 +277,7 @@ func makePostCommitPlan(
 		SchemaChangerJobIDSupplier: func() jobspb.JobID { return jobID },
 		SkipPlannerSanityChecks:    true,
 		InRollback:                 state.InRollback,
+		MemAcc:                     mon.NewStandaloneUnlimitedAccount(),
 	})
 }
 
@@ -305,6 +314,7 @@ func makeState(
 ) (state scpb.CurrentState, err error) {
 	defer scerrors.StartEventf(
 		ctx,
+		0, /* level */
 		"rebuilding declarative schema change state from descriptors %v",
 		redact.Safe(descriptorIDs),
 	).HandlePanicAndLogError(ctx, &err)

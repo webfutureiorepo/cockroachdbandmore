@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execinfra
 
@@ -86,15 +81,10 @@ func (r *RepeatableRowSource) ConsumerClosed() {}
 // (currently it would create an import cycle, so this code will need to be
 // moved).
 func NewTestMemMonitor(ctx context.Context, st *cluster.Settings) *mon.BytesMonitor {
-	memMonitor := mon.NewMonitor(
-		"test-mem",
-		mon.MemoryResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
-		-1,            /* increment */
-		math.MaxInt64, /* noteworthy */
-		st,
-	)
+	memMonitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-mem"),
+		Settings: st,
+	})
 	memMonitor.Start(ctx, nil, mon.NewStandaloneBudget(math.MaxInt64))
 	return memMonitor
 }
@@ -102,15 +92,11 @@ func NewTestMemMonitor(ctx context.Context, st *cluster.Settings) *mon.BytesMoni
 // NewTestDiskMonitor creates and starts a new disk monitor to be used in
 // tests.
 func NewTestDiskMonitor(ctx context.Context, st *cluster.Settings) *mon.BytesMonitor {
-	diskMonitor := mon.NewMonitor(
-		"test-disk",
-		mon.DiskResource,
-		nil, /* curCount */
-		nil, /* maxHist */
-		-1,  /* increment: use default block size */
-		math.MaxInt64,
-		st,
-	)
+	diskMonitor := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test-disk"),
+		Res:      mon.DiskResource,
+		Settings: st,
+	})
 	diskMonitor.Start(ctx, nil /* pool */, mon.NewStandaloneBudget(math.MaxInt64))
 	return diskMonitor
 }

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -76,6 +71,11 @@ func (i *immediateVisitor) DeleteDescriptor(_ context.Context, op scop.DeleteDes
 
 func (i *immediateVisitor) RemoveTableComment(_ context.Context, op scop.RemoveTableComment) error {
 	i.DeleteComment(op.TableID, 0, catalogkeys.TableCommentType)
+	return nil
+}
+
+func (i *immediateVisitor) RemoveTypeComment(_ context.Context, op scop.RemoveTypeComment) error {
+	i.DeleteComment(op.TypeID, 0, catalogkeys.TypeCommentType)
 	return nil
 }
 

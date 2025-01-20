@@ -1,23 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { SQLPrivilege } from "../../support/types";
 
 describe("health check: authenticated user", () => {
   it("serves a DB Console overview page", () => {
-    cy.login();
-
-    // Ensure that something reasonable renders at / when authenticated, making
-    // just enough assertions to ensure the right page loaded. If this test
-    // fails, the server probably isn't running or authentication is broken.
-    cy.visit({
-      url: "/",
-      failOnStatusCode: true,
+    cy.getUserWithExactPrivileges([SQLPrivilege.ADMIN]);
+    cy.fixture("users").then((users) => {
+      cy.login(users[0].username, users[0].password);
     });
 
     // Ensure the Cluster ID appears
@@ -30,8 +22,12 @@ describe("health check: authenticated user", () => {
     cy.findByText("Capacity Usage", { selector: "h3>span" });
     cy.findByText("Node Status");
     cy.findByText("Replication Status");
-    cy.findByText("Nodes (1)");
-
+    // Asserts that storage usable from nodes_ui metrics is populated
+    cy.get(".cluster-summary__metric.storage-usable").should(
+      isTextGreaterThanZero,
+    );
+    // Asserts that there is at least 1 live node
+    cy.get(".cluster-summary__metric.live-nodes").should(isTextGreaterThanZero);
     // Check for sidebar contents
     cy.findByRole("navigation").within(() => {
       cy.findByRole("link", { name: "Overview" });
@@ -44,3 +40,9 @@ describe("health check: authenticated user", () => {
     });
   });
 });
+
+const isTextGreaterThanZero = (ele: JQuery<HTMLElement>) => {
+  const text = ele.get()[0].innerText;
+  const textAsFloat = parseFloat(text);
+  expect(textAsFloat).to.be.greaterThan(0);
+};

@@ -1,40 +1,35 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useEffect, useState } from "react";
 import { ArrowLeft } from "@cockroachlabs/icons";
-import { Button } from "src/button";
-import Helmet from "react-helmet";
-import { commonStyles } from "src/common";
-import classNames from "classnames/bind";
-import { useHistory, match } from "react-router-dom";
 import { Col, Row, Tabs } from "antd";
-import { ActiveStatementDetailsOverviewTab } from "./activeStatementDetailsOverviewTab";
-import { SqlBox, SqlBoxSize } from "src/sql/box";
-import { getExplainPlanFromGist } from "../api/decodePlanGistApi";
-import { getMatchParamByName } from "src/util/query";
-import { executionIdAttr } from "../util";
+import classNames from "classnames/bind";
+import React, { useEffect, useState } from "react";
+import Helmet from "react-helmet";
+import { useHistory, match } from "react-router-dom";
+
 import {
   ActiveStatement,
   ExecutionContentionDetails,
 } from "src/activeExecutions";
+import { Button } from "src/button";
+import { commonStyles } from "src/common";
+import { SqlBox, SqlBoxSize } from "src/sql/box";
+import { getMatchParamByName } from "src/util/query";
 
-import "antd/lib/tabs/style";
-import "antd/lib/col/style";
-import "antd/lib/row/style";
-import styles from "./statementDetails.module.scss";
-import LoadingError from "../sqlActivity/errorComponent";
-import { Loading } from "../loading";
-import { Insights } from "./planDetails";
+import { getExplainPlanFromGist } from "../api/decodePlanGistApi";
 import { getIdxRecommendationsFromExecution } from "../api/idxRecForStatementApi";
+import { Loading } from "../loading";
 import { SortSetting } from "../sortedtable";
+import LoadingError from "../sqlActivity/errorComponent";
+import { executionIdAttr } from "../util";
+
+import { ActiveStatementDetailsOverviewTab } from "./activeStatementDetailsOverviewTab";
+import { Insights } from "./planDetails";
+import styles from "./statementDetails.module.scss";
+
 const cx = classNames.bind(styles);
 
 export type ActiveStatementDetailsStateProps = {
@@ -142,7 +137,7 @@ export const ActiveStatementDetails: React.FC<ActiveStatementDetailsProps> = ({
           <Col className="gutter-row" span={24}>
             <SqlBox
               value={statement?.query || "SQL Execution not found."}
-              size={SqlBoxSize.custom}
+              size={SqlBoxSize.CUSTOM}
             />
           </Col>
         </Row>
@@ -176,7 +171,7 @@ export const ActiveStatementDetails: React.FC<ActiveStatementDetailsProps> = ({
               >
                 <SqlBox
                   value={explainPlanState.explainPlan || "Not available."}
-                  size={SqlBoxSize.custom}
+                  size={SqlBoxSize.CUSTOM}
                 />
                 {hasInsights && (
                   <Insights

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -42,7 +37,7 @@ type slidingWindowAggregateFunc interface {
 	// Note: the implementations should be careful to account for their memory
 	// usage.
 	// Note: endIdx is assumed to be greater than zero.
-	Remove(vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int)
+	Remove(vecs []*coldata.Vec, inputIdxs []uint32, startIdx, endIdx int)
 }
 
 // NewWindowAggregatorOperator creates a new Operator that computes aggregate
@@ -67,7 +62,7 @@ func NewWindowAggregatorOperator(
 	colsToStore := framer.getColsToStore(append([]int{}, argIdxs...))
 	buffer := colexecutils.NewSpillingBuffer(
 		args.BufferAllocator, bufferMemLimit, args.QueueCfg, args.FdSemaphore,
-		args.InputTypes, args.DiskAcc, args.ConverterMemAcc, colsToStore...,
+		args.InputTypes, args.DiskAcc, args.DiskQueueMemAcc, colsToStore...,
 	)
 	inputIdxs := make([]uint32, len(argIdxs))
 	for i := range inputIdxs {
@@ -83,7 +78,7 @@ func NewWindowAggregatorOperator(
 		outputColIdx: args.OutputColIdx,
 		inputIdxs:    inputIdxs,
 		framer:       framer,
-		vecs:         make([]coldata.Vec, len(inputIdxs)),
+		vecs:         make([]*coldata.Vec, len(inputIdxs)),
 	}
 	var agg colexecagg.AggregateFunc
 	if aggAlloc != nil {
@@ -148,7 +143,7 @@ type windowAggregatorBase struct {
 
 	outputColIdx int
 	inputIdxs    []uint32
-	vecs         []coldata.Vec
+	vecs         []*coldata.Vec
 	framer       windowFramer
 }
 
@@ -215,7 +210,7 @@ func (a *windowAggregator) Close(ctx context.Context) {
 func (a *windowAggregator) processBatch(batch coldata.Batch, startIdx, endIdx int) {
 	outVec := batch.ColVec(a.outputColIdx)
 	a.agg.SetOutput(outVec)
-	a.allocator.PerformOperation([]coldata.Vec{outVec}, func() {
+	a.allocator.PerformOperation([]*coldata.Vec{outVec}, func() {
 		for i := startIdx; i < endIdx; i++ {
 			a.framer.next(a.Ctx)
 			aggregateOverIntervals(a.framer.frameIntervals(), false /* removeRows */)
@@ -240,7 +235,7 @@ func (a *slidingWindowAggregator) Close(ctx context.Context) {
 func (a *slidingWindowAggregator) processBatch(batch coldata.Batch, startIdx, endIdx int) {
 	outVec := batch.ColVec(a.outputColIdx)
 	a.agg.SetOutput(outVec)
-	a.allocator.PerformOperation([]coldata.Vec{outVec}, func() {
+	a.allocator.PerformOperation([]*coldata.Vec{outVec}, func() {
 		for i := startIdx; i < endIdx; i++ {
 			a.framer.next(a.Ctx)
 			toAdd, toRemove := a.framer.slidingWindowIntervals()
@@ -252,6 +247,11 @@ func (a *slidingWindowAggregator) processBatch(batch coldata.Batch, startIdx, en
 	})
 }
 
+// INVARIANT: the rows within a window frame are always processed in the same
+// order, regardless of whether the user specified an ordering. This means that
+// two rows with the exact same frame will produce the same result for a given
+// aggregation.
+//
 // execgen:inline
 // execgen:template<removeRows>
 func aggregateOverIntervals(intervals []windowInterval, removeRows bool) {

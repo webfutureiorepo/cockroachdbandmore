@@ -20,8 +20,10 @@ go_library(
         "//pkg/build",
         "//pkg/server/serverpb",
         "//pkg/settings",
+        "//pkg/settings/cluster",
         "//pkg/util/httputil",
         "//pkg/util/log",
+        "//pkg/util/timeutil",
     ],
 )
 
@@ -45,10 +47,6 @@ go_test(
     name = "ui_test",
     srcs = ["ui_test.go"],
     embed = [":ui"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/util/leaktest",

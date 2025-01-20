@@ -1,17 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { AxisUnits } from "@cockroachlabs/cluster-ui";
+import map from "lodash/map";
 import React from "react";
-import _ from "lodash";
 
 import LineGraph from "src/views/cluster/components/linegraph";
+import { CapacityGraphTooltip } from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
 import { Axis, Metric } from "src/views/shared/components/metricQuery";
 
 import {
@@ -19,8 +16,6 @@ import {
   nodeDisplayName,
   storeIDsForNode,
 } from "./dashboardUtils";
-import { CapacityGraphTooltip } from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
-import { AxisUnits } from "@cockroachlabs/cluster-ui";
 
 export default function (props: GraphDashboardProps) {
   const {
@@ -35,12 +30,12 @@ export default function (props: GraphDashboardProps) {
 
   return [
     <LineGraph
-      title="SQL Statements"
+      title="SQL Queries Per Second"
       isKvGraph={false}
       sources={nodeSources}
       tenantSource={tenantSource}
       tooltip={`A moving average of the number of SELECT, INSERT, UPDATE, and DELETE
-          statements successfully executed per second ${tooltipSelection}.`}
+          statements, and the sum of all four, successfully executed per second ${tooltipSelection}.`}
       showMetricsInTooltip={true}
       preCalcGraphSize={true}
     >
@@ -65,6 +60,11 @@ export default function (props: GraphDashboardProps) {
           title="Deletes"
           nonNegativeRate
         />
+        <Metric
+          name="cr.node.sql.crud_query.count"
+          title="Total Queries"
+          nonNegativeRate
+        />
       </Axis>
     </LineGraph>,
 
@@ -86,7 +86,7 @@ export default function (props: GraphDashboardProps) {
       preCalcGraphSize={true}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, node => (
+        {map(nodeIDs, node => (
           <Metric
             key={node}
             name="cr.node.sql.service.latency-p99"
@@ -133,7 +133,7 @@ export default function (props: GraphDashboardProps) {
       preCalcGraphSize={true}
     >
       <Axis label="replicas">
-        {_.map(nodeIDs, nid => (
+        {map(nodeIDs, nid => (
           <Metric
             key={nid}
             name="cr.store.replicas"

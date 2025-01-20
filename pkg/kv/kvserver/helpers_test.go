@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // This file includes test-only helper methods added to types in
 // package storage. These methods are only linked in to tests in this
@@ -18,21 +13,28 @@ package kvserver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/plan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/storepool"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -45,14 +47,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3"
 )
 
 func (s *Store) Transport() *RaftTransport {
 	return s.cfg.Transport
+}
+
+func (s *Store) StoreLivenessTransport() *storeliveness.Transport {
+	return s.cfg.StoreLivenessTransport
 }
 
 func (s *Store) FindTargetAndTransferLease(
@@ -156,35 +160,40 @@ func (s *Store) SplitQueuePurgatoryLength() int {
 	return s.splitQueue.PurgatoryLength()
 }
 
+// LeaseQueuePurgatory returns a map of RangeIDs representing the purgatory.
+func (s *Store) LeaseQueuePurgatory() map[roachpb.RangeID]struct{} {
+	defer s.leaseQueue.baseQueue.lockProcessing()()
+	m := make(map[roachpb.RangeID]struct{}, len(s.leaseQueue.baseQueue.mu.purgatory))
+	for k := range s.leaseQueue.baseQueue.mu.purgatory {
+		m[k] = struct{}{}
+	}
+	return m
+}
+
 // SetRaftLogQueueActive enables or disables the raft log queue.
 func (s *Store) SetRaftLogQueueActive(active bool) {
-	s.setRaftLogQueueActive(active)
+	s.testingSetRaftLogQueueActive(active)
 }
 
 // SetReplicaGCQueueActive enables or disables the replica GC queue.
 func (s *Store) SetReplicaGCQueueActive(active bool) {
-	s.setReplicaGCQueueActive(active)
-}
-
-// SetSplitQueueActive enables or disables the split queue.
-func (s *Store) SetSplitQueueActive(active bool) {
-	s.setSplitQueueActive(active)
+	s.testingSetReplicaGCQueueActive(active)
 }
 
 // SetMergeQueueActive enables or disables the merge queue.
 func (s *Store) SetMergeQueueActive(active bool) {
-	s.setMergeQueueActive(active)
+	s.testingSetMergeQueueActive(active)
 }
 
 // SetRaftSnapshotQueueActive enables or disables the raft snapshot queue.
 func (s *Store) SetRaftSnapshotQueueActive(active bool) {
-	s.setRaftSnapshotQueueActive(active)
+	s.testingSetRaftSnapshotQueueActive(active)
 }
 
 // SetReplicaScannerActive enables or disables the scanner. Note that while
 // inactive, removals are still processed.
 func (s *Store) SetReplicaScannerActive(active bool) {
-	s.setScannerActive(active)
+	s.testingSetScannerActive(active)
 }
 
 // EnqueueRaftUpdateCheck enqueues the replica for a Raft update check, forcing
@@ -223,7 +232,7 @@ func (s *Store) ManualRaftSnapshot(repl *Replica, target roachpb.ReplicaID) erro
 // ReservationCount counts the number of outstanding reservations that are not
 // running.
 func (s *Store) ReservationCount() int {
-	return int(s.cfg.SnapshotApplyLimit) - s.snapshotApplyQueue.AvailableLen()
+	return s.snapshotApplyQueue.MaxConcurrency() - s.snapshotApplyQueue.AvailableLen()
 }
 
 // RaftSchedulerPriorityID returns the Raft scheduler's prioritized ranges.
@@ -320,7 +329,7 @@ func (r *Replica) RaftUnlock() {
 
 func (r *Replica) RaftReportUnreachable(id roachpb.ReplicaID) error {
 	return r.withRaftGroup(func(raftGroup *raft.RawNode) (bool, error) {
-		raftGroup.ReportUnreachable(uint64(id))
+		raftGroup.ReportUnreachable(raftpb.PeerID(id))
 		return false /* unquiesceAndWakeLeader */, nil
 	})
 }
@@ -340,10 +349,10 @@ func (r *Replica) Campaign(ctx context.Context) {
 }
 
 // ForceCampaign force-campaigns the replica.
-func (r *Replica) ForceCampaign(ctx context.Context) {
+func (r *Replica) ForceCampaign(ctx context.Context, raftStatus raft.BasicStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.forceCampaignLocked(ctx)
+	r.forceCampaignLocked(ctx, raftStatus)
 }
 
 // LastAssignedLeaseIndexRLocked is like LastAssignedLeaseIndex, but requires
@@ -400,18 +409,24 @@ func (r *Replica) QuotaReleaseQueueLen() int {
 	return len(r.mu.quotaReleaseQueue)
 }
 
-func (r *Replica) NumPendingProposals() int {
+func (r *Replica) NumPendingProposals() int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.numPendingProposalsRLocked()
 }
 
+func (r *Replica) LastUpdateTimes() map[roachpb.ReplicaID]time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return maps.Clone(r.mu.lastUpdateTimes)
+}
+
 func (r *Replica) IsFollowerActiveSince(
-	ctx context.Context, followerID roachpb.ReplicaID, threshold time.Duration,
+	followerID roachpb.ReplicaID, now time.Time, threshold time.Duration,
 ) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.mu.lastUpdateTimes.isFollowerActiveSince(followerID, timeutil.Now(), threshold)
+	return r.mu.lastUpdateTimes.isFollowerActiveSince(followerID, now, threshold)
 }
 
 // GetTSCacheHighWater returns the high water mark of the replica's timestamp
@@ -434,7 +449,7 @@ func (r *Replica) ShouldBackpressureWrites(_ context.Context) bool {
 func (r *Replica) GetRaftLogSize() (int64, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.mu.raftLogSize, r.mu.raftLogSizeTrusted
+	return r.shMu.raftLogSize, r.shMu.raftLogSizeTrusted
 }
 
 // GetCachedLastTerm returns the cached last term value. May return
@@ -442,7 +457,7 @@ func (r *Replica) GetRaftLogSize() (int64, bool) {
 func (r *Replica) GetCachedLastTerm() kvpb.RaftTerm {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.mu.lastTermNotDurable
+	return r.shMu.lastTermNotDurable
 }
 
 // SideloadedRaftMuLocked returns r.raftMu.sideloaded. Requires a previous call
@@ -463,6 +478,13 @@ func (r *Replica) LargestPreviousMaxRangeSizeBytes() int64 {
 // assist load-based split (and merge) decisions.
 func (r *Replica) LoadBasedSplitter() *split.Decider {
 	return &r.loadBasedSplitter
+}
+
+// AllocatorToken returns the replica's allocator token, which should be
+// acquired before planning and executing allocator lease transfers or replica
+// changes for the range on the leaseholder.
+func (r *Replica) AllocatorToken() *plan.AllocatorToken {
+	return r.allocatorToken
 }
 
 func MakeSSTable(
@@ -639,8 +661,9 @@ func WatchForDisappearingReplicas(t testing.TB, store *Store) {
 		default:
 		}
 
-		store.mu.replicasByRangeID.Range(func(repl *Replica) {
-			m[repl.RangeID] = struct{}{}
+		store.mu.replicasByRangeID.Range(func(rangeID roachpb.RangeID, _ *Replica) bool {
+			m[rangeID] = struct{}{}
+			return true
 		})
 
 		for k := range m {
@@ -662,4 +685,26 @@ func getMapsDiff(beforeMap map[string]int64, afterMap map[string]int64) map[stri
 		}
 	}
 	return diffMap
+}
+
+func NewRangefeedTxnPusher(
+	ir *intentresolver.IntentResolver, r *Replica, span roachpb.RSpan,
+) rangefeed.TxnPusher {
+	return &rangefeedTxnPusher{
+		ir:   ir,
+		r:    r,
+		span: span,
+	}
+}
+
+// SupportFromEnabled exports (replicaRLockedStoreLiveness).SupportFromEnabled
+// for testing purposes.
+func (r *Replica) SupportFromEnabled() bool {
+	return (*replicaRLockedStoreLiveness)(r).SupportFromEnabled()
+}
+
+// RaftFortificationEnabledForRangeID exports raftFortificationEnabledForRangeID
+// for use in tests.
+func RaftFortificationEnabledForRangeID(fracEnabled float64, rangeID roachpb.RangeID) bool {
+	return raftFortificationEnabledForRangeID(fracEnabled, rangeID)
 }

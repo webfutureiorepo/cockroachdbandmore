@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -30,8 +25,9 @@ import (
 type projectSetProcessor struct {
 	execinfra.ProcessorBase
 
-	input execinfra.RowSource
-	spec  *execinfrapb.ProjectSetSpec
+	evalCtx *eval.Context
+	input   execinfra.RowSource
+	spec    *execinfrapb.ProjectSetSpec
 
 	// eh contains the type-checked expression specified in the ROWS FROM
 	// syntax. It can contain many kinds of expressions (anything that is
@@ -82,6 +78,8 @@ func newProjectSetProcessor(
 ) (*projectSetProcessor, error) {
 	outputTypes := append(input.OutputTypes(), spec.GeneratedColumns...)
 	ps := &projectSetProcessor{
+		// We'll be mutating the eval context, so we always need a copy.
+		evalCtx:   flowCtx.NewEvalCtx(),
 		input:     input,
 		spec:      spec,
 		funcs:     make([]tree.TypedExpr, len(spec.Exprs)),
@@ -89,12 +87,13 @@ func newProjectSetProcessor(
 		gens:      make([]eval.ValueGenerator, len(spec.Exprs)),
 		done:      make([]bool, len(spec.Exprs)),
 	}
-	if err := ps.Init(
+	if err := ps.InitWithEvalCtx(
 		ctx,
 		ps,
 		post,
 		outputTypes,
 		flowCtx,
+		ps.evalCtx,
 		processorID,
 		nil, /* memMonitor */
 		execinfra.ProcStateOpts{
@@ -110,7 +109,7 @@ func newProjectSetProcessor(
 
 	// Initialize exprHelper.
 	semaCtx := ps.FlowCtx.NewSemaContext(ps.FlowCtx.Txn)
-	err := ps.eh.Init(ctx, len(ps.spec.Exprs), ps.input.OutputTypes(), semaCtx, ps.EvalCtx)
+	err := ps.eh.Init(ctx, len(ps.spec.Exprs), ps.input.OutputTypes(), semaCtx, ps.evalCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +158,7 @@ func (ps *projectSetProcessor) nextInputRow() (
 	// Set expression helper row so that we can use it as an
 	// IndexedVarContainer.
 	ps.eh.SetRow(row)
-	ps.EvalCtx.IVarContainer = ps.eh.IVarContainer()
+	ps.evalCtx.IVarContainer = ps.eh.IVarContainer()
 
 	// Initialize a round of SRF generators or scalar values.
 	for i, n := 0, ps.eh.ExprCount(); i < n; i++ {
@@ -177,9 +176,9 @@ func (ps *projectSetProcessor) nextInputRow() (
 			var err error
 			switch t := fn.(type) {
 			case *tree.FuncExpr:
-				gen, err = eval.GetFuncGenerator(ps.Ctx(), ps.EvalCtx, t)
+				gen, err = eval.GetFuncGenerator(ps.Ctx(), ps.evalCtx, t)
 			case *tree.RoutineExpr:
-				gen, err = eval.GetRoutineGenerator(ps.Ctx(), ps.EvalCtx, t)
+				gen, err = eval.GetRoutineGenerator(ps.Ctx(), ps.evalCtx, t)
 				if err == nil && gen == nil && t.MultiColOutput && !t.Generator {
 					// If the routine will return multiple output columns, we expect the
 					// routine to return nulls for each column type instead of no rows, so
@@ -237,7 +236,10 @@ func (ps *projectSetProcessor) nextGeneratorValues() (newValAvail bool, err erro
 						return false, err
 					}
 					for _, value := range values {
-						ps.rowBuffer[colIdx] = ps.toEncDatum(value, colIdx)
+						ps.rowBuffer[colIdx], err = ps.toEncDatum(value, colIdx)
+						if err != nil {
+							return false, err
+						}
 						colIdx++
 					}
 					newValAvail = true
@@ -245,7 +247,10 @@ func (ps *projectSetProcessor) nextGeneratorValues() (newValAvail bool, err erro
 					ps.done[i] = true
 					// No values left. Fill the buffer with NULLs for future results.
 					for j := 0; j < numCols; j++ {
-						ps.rowBuffer[colIdx] = ps.toEncDatum(tree.DNull, colIdx)
+						ps.rowBuffer[colIdx], err = ps.toEncDatum(tree.DNull, colIdx)
+						if err != nil {
+							return false, err
+						}
 						colIdx++
 					}
 				}
@@ -262,13 +267,19 @@ func (ps *projectSetProcessor) nextGeneratorValues() (newValAvail bool, err erro
 				if err != nil {
 					return false, err
 				}
-				ps.rowBuffer[colIdx] = ps.toEncDatum(value, colIdx)
+				ps.rowBuffer[colIdx], err = ps.toEncDatum(value, colIdx)
+				if err != nil {
+					return false, err
+				}
 				colIdx++
 				newValAvail = true
 				ps.done[i] = true
 			} else {
 				// Ensure that every row after the first returns a NULL value.
-				ps.rowBuffer[colIdx] = ps.toEncDatum(tree.DNull, colIdx)
+				ps.rowBuffer[colIdx], err = ps.toEncDatum(tree.DNull, colIdx)
+				if err != nil {
+					return false, err
+				}
 				colIdx++
 			}
 		}
@@ -327,10 +338,10 @@ func (ps *projectSetProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.Producer
 	return nil, ps.DrainHelper()
 }
 
-func (ps *projectSetProcessor) toEncDatum(d tree.Datum, colIdx int) rowenc.EncDatum {
+func (ps *projectSetProcessor) toEncDatum(d tree.Datum, colIdx int) (rowenc.EncDatum, error) {
 	generatedColIdx := colIdx - len(ps.input.OutputTypes())
 	ctyp := ps.spec.GeneratedColumns[generatedColIdx]
-	return rowenc.DatumToEncDatum(ctyp, d)
+	return rowenc.DatumToEncDatumEx(ctyp, d)
 }
 
 func (ps *projectSetProcessor) close() {

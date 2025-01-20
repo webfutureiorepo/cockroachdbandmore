@@ -1,24 +1,21 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
 	"context"
 	"math"
+	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
@@ -30,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 var (
@@ -48,7 +44,8 @@ type raftReceiveQueue struct {
 	mu struct { // not to be locked directly
 		destroyed bool
 		syncutil.Mutex
-		infos []raftRequestInfo
+		infos         []raftRequestInfo
+		enforceMaxLen bool
 	}
 	maxLen int
 	acc    mon.BoundAccount
@@ -111,7 +108,7 @@ func (q *raftReceiveQueue) Append(
 	size = int64(req.Size())
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.mu.destroyed || len(q.mu.infos) >= q.maxLen {
+	if q.mu.destroyed || (q.mu.enforceMaxLen && len(q.mu.infos) >= q.maxLen) {
 		return false, size, false
 	}
 	if q.acc.Grow(context.Background(), size) != nil {
@@ -127,14 +124,26 @@ func (q *raftReceiveQueue) Append(
 	return len(q.mu.infos) == 1, size, true
 }
 
+func (q *raftReceiveQueue) SetEnforceMaxLen(enforceMaxLen bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.mu.enforceMaxLen = enforceMaxLen
+}
+
+func (q *raftReceiveQueue) getEnforceMaxLenForTesting() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.mu.enforceMaxLen
+}
+
 type raftReceiveQueues struct {
-	mon *mon.BytesMonitor
-	m   syncutil.IntMap // RangeID -> *raftReceiveQueue
+	mon           *mon.BytesMonitor
+	m             syncutil.Map[roachpb.RangeID, raftReceiveQueue]
+	enforceMaxLen atomic.Bool
 }
 
 func (qs *raftReceiveQueues) Load(rangeID roachpb.RangeID) (*raftReceiveQueue, bool) {
-	value, ok := qs.m.Load(int64(rangeID))
-	return (*raftReceiveQueue)(value), ok
+	return qs.m.Load(rangeID)
 }
 
 func (qs *raftReceiveQueues) LoadOrCreate(
@@ -145,8 +154,34 @@ func (qs *raftReceiveQueues) LoadOrCreate(
 	}
 	q := &raftReceiveQueue{maxLen: maxLen}
 	q.acc.Init(context.Background(), qs.mon)
-	value, loaded := qs.m.LoadOrStore(int64(rangeID), unsafe.Pointer(q))
-	return (*raftReceiveQueue)(value), loaded
+	q, loaded = qs.m.LoadOrStore(rangeID, q)
+	if loaded {
+		return q, true
+	}
+	// The sampling of enforceMaxLen can be concurrent with a call to
+	// SetEnforceMaxLen. We can sample a stale value, then SetEnforceMaxLen can
+	// fully execute, and then set the stale value here. Since
+	// qs.SetEnforceMaxLen sets the latest value first, before iterating over
+	// the map, it suffices to check after setting the value here that it has
+	// not changed. There are two cases:
+	//
+	// - Has changed: it is possible that our call to q.SetEnforceMaxLen
+	//   occurred after the corresponding call in qs.SetEnforceMaxLen, so we
+	//   have to loop back and correct it.
+	//
+	// - Has not changed: there may be a concurrent call to
+	//   qs.SetEnforceMaxLen with a different bool parameter, but it has not
+	//   yet updated qs.enforceMaxLen. Which is fine -- that call will iterate
+	//   over the map and do what is necessary.
+	for {
+		enforceBefore := qs.enforceMaxLen.Load()
+		q.SetEnforceMaxLen(enforceBefore)
+		enforceAfter := qs.enforceMaxLen.Load()
+		if enforceAfter == enforceBefore {
+			break
+		}
+	}
+	return q, false
 }
 
 // Delete drains the queue and marks it as deleted. Future Appends
@@ -154,8 +189,20 @@ func (qs *raftReceiveQueues) LoadOrCreate(
 func (qs *raftReceiveQueues) Delete(rangeID roachpb.RangeID) {
 	if q, ok := qs.Load(rangeID); ok {
 		q.Delete()
-		qs.m.Delete(int64(rangeID))
+		qs.m.Delete(rangeID)
 	}
+}
+
+// SetEnforceMaxLen specifies the latest state of whether maxLen needs to be
+// enforced or not. Calls to this method are serialized by the caller.
+func (qs *raftReceiveQueues) SetEnforceMaxLen(enforceMaxLen bool) {
+	// Store the latest value first. A concurrent creation of raftReceiveQueue
+	// can race with this method -- see how this is handled in LoadOrCreate.
+	qs.enforceMaxLen.Store(enforceMaxLen)
+	qs.m.Range(func(_ roachpb.RangeID, q *raftReceiveQueue) bool {
+		q.SetEnforceMaxLen(enforceMaxLen)
+		return true
+	})
 }
 
 // HandleDelegatedSnapshot reads the incoming delegated snapshot message and
@@ -243,8 +290,8 @@ func (s *Store) uncoalesceBeats(
 	for i, beat := range beats {
 		msg := raftpb.Message{
 			Type:   msgT,
-			From:   uint64(beat.FromReplicaID),
-			To:     uint64(beat.ToReplicaID),
+			From:   raftpb.PeerID(beat.FromReplicaID),
+			To:     raftpb.PeerID(beat.ToReplicaID),
 			Term:   uint64(beat.Term),
 			Commit: uint64(beat.Commit),
 		}
@@ -380,7 +427,7 @@ func (s *Store) processRaftRequestWithReplica(
 	defer r.MeasureRaftCPUNanos(grunning.Time())
 
 	if verboseRaftLoggingEnabled() {
-		log.Infof(ctx, "incoming raft message:\n%s", raftDescribeMessage(req.Message, raftEntryFormatter))
+		log.Infof(ctx, "incoming raft message:\n%s", raft.DescribeMessage(req.Message, raftEntryFormatter))
 	}
 
 	if req.Message.Type == raftpb.MsgSnap {
@@ -411,7 +458,7 @@ func (s *Store) processRaftRequestWithReplica(
 
 	drop := maybeDropMsgApp(ctx, (*replicaMsgAppDropper)(r), &req.Message, req.RangeStartKey)
 	if !drop {
-		if err := r.stepRaftGroup(req); err != nil {
+		if err := r.stepRaftGroupRaftMuLocked(req); err != nil {
 			return kvpb.NewError(err)
 		}
 	}
@@ -451,7 +498,7 @@ func (s *Store) processRaftSnapshotRequest(
 			// the snapshot is targeting an uninitialized replica. The only known reason
 			// for raft to ignore a snapshot is if it doesn't move the applied index
 			// forward, but an uninitialized replica's applied index is zero (and a
-			// snapshot's is at least raftInitialLogIndex).
+			// snapshot's is at least RaftInitialLogIndex).
 			if inSnap.placeholder != nil {
 				if _, err := s.removePlaceholder(ctx, inSnap.placeholder, typ); err != nil {
 					log.Fatalf(ctx, "unable to remove placeholder: %s", err)
@@ -478,7 +525,7 @@ func (s *Store) processRaftSnapshotRequest(
 		// NB: we cannot get errRemoved here because we're promised by
 		// withReplicaForRequest that this replica is not currently being removed
 		// and we've been holding the raftMu the entire time.
-		if err := r.stepRaftGroup(&snapHeader.RaftMessageRequest); err != nil {
+		if err := r.stepRaftGroupRaftMuLocked(&snapHeader.RaftMessageRequest); err != nil {
 			return kvpb.NewError(err)
 		}
 
@@ -723,6 +770,18 @@ func (s *Store) processTick(_ context.Context, rangeID roachpb.RangeID) bool {
 	return exists // ready
 }
 
+func (s *Store) processRACv2PiggybackedAdmitted(ctx context.Context, rangeID roachpb.RangeID) {
+	if r, ok := s.mu.replicasByRangeID.Load(rangeID); ok {
+		r.processRACv2PiggybackedAdmitted(ctx)
+	}
+}
+
+func (s *Store) processRACv2RangeController(ctx context.Context, rangeID roachpb.RangeID) {
+	if r, ok := s.mu.replicasByRangeID.Load(rangeID); ok {
+		r.processRACv2RangeController(ctx)
+	}
+}
+
 // nodeIsLiveCallback is invoked when a node transitions from non-live to live.
 // Iterate through all replicas and find any which belong to ranges containing
 // the implicated node. Unquiesce if currently quiesced and the node's replica
@@ -743,7 +802,7 @@ func (s *Store) nodeIsLiveCallback(l livenesspb.Liveness) {
 	ctx := context.TODO()
 	s.updateLivenessMap()
 
-	s.mu.replicasByRangeID.Range(func(r *Replica) {
+	s.mu.replicasByRangeID.Range(func(_ roachpb.RangeID, r *Replica) bool {
 		r.mu.RLock()
 		quiescent := r.mu.quiescent
 		lagging := r.mu.laggingFollowersOnQuiesce
@@ -751,6 +810,7 @@ func (s *Store) nodeIsLiveCallback(l livenesspb.Liveness) {
 		if quiescent && lagging.MemberStale(l) {
 			r.maybeUnquiesce(ctx, false /* wakeLeader */, false /* mayCampaign */) // already leader
 		}
+		return true
 	})
 }
 
@@ -768,7 +828,9 @@ func (s *Store) processRaft(ctx context.Context) {
 		s.cfg.Transport.StopOutgoingMessage(s.StoreID())
 	}))
 
-	s.syncWaiter.Start(ctx, s.stopper)
+	for _, w := range s.syncWaiters {
+		w.Start(ctx, s.stopper)
+	}
 
 	// We'll want to cancel all in-flight proposals. Proposals embed tracing
 	// spans in them, and we don't want to be leaking any.

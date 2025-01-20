@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createIdxName } from "./indexActionBtn";
 
@@ -68,6 +63,25 @@ describe("Create index name", () => {
       query: "CREATE INDEX ON t ((i + l)), (j + k), a) STORING (k)",
       expected:
         "CREATE INDEX IF NOT EXISTS t_expr_storing_rec_idx ON t ((i + l)), (j + k), a) STORING (k)",
+    },
+    {
+      name: "handles table names containing quotes, doesn't include quotes in idx name",
+      query:
+        'CREATE INDEX ON defaultdb.public."offers"."startdate" (n) STORING (b);',
+      expected:
+        'CREATE INDEX IF NOT EXISTS startdate_n_storing_rec_idx ON defaultdb.public."offers"."startdate" (n) STORING (b);',
+    },
+    {
+      name: "handles table and column names containing quotes & whitespace, doesn't include quotes in idx name",
+      query: 'CREATE INDEX ON "my table" ("my col");',
+      expected:
+        'CREATE INDEX IF NOT EXISTS my_table_my_col_rec_idx ON "my table" ("my col");',
+    },
+    {
+      name: "handles quotes within quotes, doesn't include quotes in idx name",
+      query: 'CREATE INDEX ON "my""table" ("with""quote");',
+      expected:
+        'CREATE INDEX IF NOT EXISTS mytable_withquote_rec_idx ON "my""table" ("with""quote");',
     },
   ];
 

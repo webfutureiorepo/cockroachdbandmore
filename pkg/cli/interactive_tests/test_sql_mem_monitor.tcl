@@ -71,7 +71,7 @@ start_test "Ensure that memory over-allocation without monitoring crashes the se
 # (importantly, this budget must be larger than vmem).
 send "set distsql_workmem='32GiB';\r"
 eexpect SET
-send "with a as (select * from generate_series(1,10000000)) select * from a as a, a as b, a as c, a as d limit 10;\r"
+send "select a, random() AS r, repeat('a', 1000) from generate_series(1,10000000) g(a) order by r;\r"
 eexpect "connection lost"
 
 # Check that the query crashed the server
@@ -79,12 +79,13 @@ set spawn_id $shell_spawn_id
 # Error is either an explicit "out of memory" emitted by Go or one of the errors
 # thrown by CGo.
 #
-# "fatal error: unexpected signal during runtime execution" might seem like it
-# doesn't belong here, but it's an artifact of how we're limiting the memory
-# usage of the CRDB process. In particular, ulimit is a "user limit" which is
-# enforced not at the OS kernel level (i.e. not via oomkiller) but at the
-# process execution level. As a result, memory allocation error doesn't kill the
-# process, so it keeps on running and can hit this "fatal error" later on.
+# "fatal error: unexpected signal during runtime execution" and "segmentation
+# violation" might seem like they don't belong here, but it's an artifact of how
+# we're limiting the memory usage of the CRDB process. In particular, ulimit is
+# a "user limit" which is enforced not at the OS kernel level (i.e. not via
+# oomkiller) but at the process execution level. As a result, memory allocation
+# error doesn't kill the process, so it keeps on running and can hit this "fatal
+# error" or "segmentation violation" later on.
 expect {
     "out of memory" {}
     "cannot allocate memory" {}
@@ -92,6 +93,7 @@ expect {
     "Resource temporarily unavailable" {}
     "_Cfunc_calloc" {}
     "fatal error: unexpected signal during runtime execution" {}
+    "segmentation violation" {}
     timeout { handle_timeout "memory allocation error" }
 }
 # Stop the tail command.
@@ -121,7 +123,7 @@ sleep 2
 set spawn_id $client_spawn_id
 send "select 1;\r"
 eexpect root@
-send "with a as (select * from generate_series(1,100000)) select * from a as a, a as b, a as c, a as d limit 10;\r"
+send "select a, random() AS r, repeat('a', 1000) from generate_series(1,10000000) g(a) order by r;\r"
 eexpect "root: memory budget exceeded"
 eexpect root@
 

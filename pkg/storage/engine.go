@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/storage/pebbleiter"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -32,7 +28,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/rangekey"
-	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/cockroachdb/redact"
 	prometheusgo "github.com/prometheus/client_model/go"
@@ -459,7 +454,7 @@ type IterOptions struct {
 	RangeKeyMaskingBelow hlc.Timestamp
 	// ReadCategory is used to map to a user-understandable category string, for
 	// stats aggregation and metrics, and a Pebble-understandable QoS.
-	ReadCategory ReadCategory
+	ReadCategory fs.ReadCategory
 	// useL6Filters allows the caller to opt into reading filter blocks for
 	// L6 sstables. Only for use with Prefix = true. Helpful if a lot of prefix
 	// Seeks are expected in quick succession, that are also likely to not
@@ -557,7 +552,7 @@ type Reader interface {
 	// iteration.
 	MVCCIterate(
 		ctx context.Context, start, end roachpb.Key, iterKind MVCCIterKind, keyTypes IterKeyType,
-		readCategory ReadCategory, f func(MVCCKeyValue, MVCCRangeKeyStack) error,
+		readCategory fs.ReadCategory, f func(MVCCKeyValue, MVCCRangeKeyStack) error,
 	) error
 	// NewMVCCIterator returns a new instance of an MVCCIterator over this engine.
 	// The caller must invoke Close() on it when done to free resources.
@@ -601,9 +596,10 @@ type Reader interface {
 	ScanInternal(
 		ctx context.Context, lower, upper roachpb.Key,
 		visitPointKey func(key *pebble.InternalKey, value pebble.LazyValue, info pebble.IteratorLevel) error,
-		visitRangeDel func(start, end []byte, seqNum uint64) error,
+		visitRangeDel func(start, end []byte, seqNum pebble.SeqNum) error,
 		visitRangeKey func(start, end []byte, keys []rangekey.Key) error,
 		visitSharedFile func(sst *pebble.SharedSSTMeta) error,
+		visitExternalFile func(sst *pebble.ExternalFile) error,
 	) error
 	// ConsistentIterators returns true if the Reader implementation guarantees
 	// that the different iterators constructed by this Reader will see the same
@@ -622,7 +618,7 @@ type Reader interface {
 	// is somewhere in the time interval between the creation of the Reader and
 	// the first call to PinEngineStateForIterators.
 	// REQUIRES: ConsistentIterators returns true.
-	PinEngineStateForIterators(readCategory ReadCategory) error
+	PinEngineStateForIterators(readCategory fs.ReadCategory) error
 }
 
 // EventuallyFileOnlyReader is a specialized Reader that supports a method to
@@ -934,6 +930,8 @@ type Engine interface {
 	Properties() roachpb.StoreProperties
 	// Compact forces compaction over the entire database.
 	Compact() error
+	// Env returns the filesystem environment used by the Engine.
+	Env() *fs.Env
 	// Flush causes the engine to write all in-memory data to disk
 	// immediately.
 	Flush() error
@@ -941,10 +939,10 @@ type Engine interface {
 	GetMetrics() Metrics
 	// GetEncryptionRegistries returns the file and key registries when encryption is enabled
 	// on the store.
-	GetEncryptionRegistries() (*EncryptionRegistries, error)
+	GetEncryptionRegistries() (*fs.EncryptionRegistries, error)
 	// GetEnvStats retrieves stats about the engine's environment
 	// For RocksDB, this includes details of at-rest encryption.
-	GetEnvStats() (*EnvStats, error)
+	GetEnvStats() (*fs.EnvStats, error)
 	// GetAuxiliaryDir returns a path under which files can be stored
 	// persistently, and from which data can be ingested by the engine.
 	//
@@ -954,6 +952,14 @@ type Engine interface {
 	// this engine. Batched engines accumulate all mutations and apply
 	// them atomically on a call to Commit().
 	NewBatch() Batch
+	// NewReader returns a new instance of a Reader that wraps this engine, and
+	// with the given durability requirement. This wrapper caches iterators to
+	// avoid the overhead of creating multiple iterators for batched reads.
+	//
+	// All iterators created from a read-only engine are guaranteed to provide a
+	// consistent snapshot of the underlying engine. See the comment on the
+	// Reader interface and the Reader.ConsistentIterators method.
+	NewReader(durability DurabilityRequirement) Reader
 	// NewReadOnly returns a new instance of a ReadWriter that wraps this
 	// engine, and with the given durability requirement. This wrapper panics
 	// when unexpected operations (e.g., write operations) are executed on it
@@ -963,6 +969,9 @@ type Engine interface {
 	// All iterators created from a read-only engine are guaranteed to provide a
 	// consistent snapshot of the underlying engine. See the comment on the
 	// Reader interface and the Reader.ConsistentIterators method.
+	//
+	// TODO(sumeer,jackson): Remove this method and force the caller to operate
+	// explicitly with a separate WriteBatch and Reader.
 	NewReadOnly(durability DurabilityRequirement) ReadWriter
 	// NewUnindexedBatch returns a new instance of a batched engine which wraps
 	// this engine. It is unindexed, in that writes to the batch are not
@@ -1019,11 +1028,22 @@ type Engine interface {
 	// additionally returns ingestion stats.
 	IngestLocalFilesWithStats(
 		ctx context.Context, paths []string) (pebble.IngestOperationStats, error)
-	// IngestAndExciseFiles is a variant of IngestLocalFilesWithStats
-	// that excises an ExciseSpan, and ingests either local or shared sstables or
-	// both.
+	// IngestAndExciseFiles is a variant of IngestLocalFilesWithStats that excises
+	// an ExciseSpan, and ingests either local or shared sstables or both. It also
+	// takes the flag sstsContainExciseTombstone to signal that the exciseSpan
+	// contains RANGEDELs and RANGEKEYDELs.
+	//
+	// NB: It is the caller's responsibility to ensure if
+	// sstsContainExciseTombstone is set to true, the ingestion sstables must
+	// contain a tombstone for the exciseSpan.
 	IngestAndExciseFiles(
-		ctx context.Context, paths []string, shared []pebble.SharedSSTMeta, exciseSpan roachpb.Span) (pebble.IngestOperationStats, error)
+		ctx context.Context,
+		paths []string,
+		shared []pebble.SharedSSTMeta,
+		external []pebble.ExternalFile,
+		exciseSpan roachpb.Span,
+		sstsContainExciseTombstone bool,
+	) (pebble.IngestOperationStats, error)
 	// IngestExternalFiles is a variant of IngestLocalFiles that takes external
 	// files. These files can be referred to by multiple stores, but are not
 	// modified or deleted by the Engine doing the ingestion.
@@ -1066,8 +1086,6 @@ type Engine interface {
 	// of the callback since it could cause a deadlock (since the callback may
 	// be invoked while holding mutexes).
 	RegisterFlushCompletedCallback(cb func())
-	// Filesystem functionality.
-	vfs.FS
 	// CreateCheckpoint creates a checkpoint of the engine in the given directory,
 	// which must not exist. The directory should be on the same file system so
 	// that hard links can be used. If spans is not empty, the checkpoint excludes
@@ -1101,8 +1119,25 @@ type Engine interface {
 	GetStoreID() (int32, error)
 
 	// Download informs the engine to download remote files corresponding to the
-	// given span.
-	Download(ctx context.Context, span roachpb.Span) error
+	// given span. The parameter copy controls how it is downloaded -- i.e. if it
+	// just copies the backing bytes to a local file of if it rewrites the file
+	// key-by-key to a new file.
+	Download(ctx context.Context, span roachpb.Span, copy bool) error
+
+	// RegisterDiskSlowCallback registers a callback that will be run when a
+	// write operation on the disk has been seen to be slow. This callback
+	// needs to be thread-safe as it could be called repeatedly in multiple threads
+	// over a short period of time.
+	RegisterDiskSlowCallback(cb func(info pebble.DiskSlowInfo))
+
+	// RegisterLowDiskSpaceCallback registers a callback that will be run when a
+	// disk is running out of space. This callback needs to be thread-safe as it
+	// could be called repeatedly in multiple threads over a short period of time.
+	RegisterLowDiskSpaceCallback(cb func(info pebble.LowDiskSpaceInfo))
+
+	// GetPebbleOptions returns the options used when creating the engine. The
+	// caller must not modify these.
+	GetPebbleOptions() *pebble.Options
 }
 
 // Batch is the interface for batch specific operations.
@@ -1219,6 +1254,18 @@ type Metrics struct {
 	// distinguished in the pebble logs.
 	WriteStallCount    int64
 	WriteStallDuration time.Duration
+
+	// BlockLoadConcurrencyLimit is the current limit on the number of concurrent
+	// sstable block reads.
+	BlockLoadConcurrencyLimit int64
+	// BlockLoadsInProgress is the (instantaneous) number of sstable blocks that
+	// are being read from disk.
+	BlockLoadsInProgress int64
+	// BlockLoadsQueued is the cumulative total number of sstable block reads
+	// that had to wait on the BlockLoadConcurrencyLimit.
+	BlockLoadsQueued int64
+
+	DiskWriteStats []vfs.DiskWriteStatsAggregate
 }
 
 // AggregatedIteratorStats holds cumulative stats, collected and summed over all
@@ -1272,10 +1319,13 @@ type AggregatedBatchCommitStats struct {
 }
 
 // MetricsForInterval is a set of pebble.Metrics that need to be saved in order to
-// compute metrics according to an interval.
+// compute metrics according to an interval. The metrics recorded here are
+// cumulative values, that are used to subtract from, when the next cumulative
+// values are received.
 type MetricsForInterval struct {
-	WALFsyncLatency      prometheusgo.Metric
-	FlushWriteThroughput pebble.ThroughputMetric
+	WALFsyncLatency                prometheusgo.Metric
+	FlushWriteThroughput           pebble.ThroughputMetric
+	WALFailoverWriteAndSyncLatency prometheusgo.Metric
 }
 
 // NumSSTables returns the total number of SSTables in the LSM, aggregated
@@ -1371,41 +1421,11 @@ func (m *Metrics) AsStoreStatsEvent() eventpb.StoreStats {
 	return e
 }
 
-// EnvStats is a set of RocksDB env stats, including encryption status.
-type EnvStats struct {
-	// TotalFiles is the total number of files reported by rocksdb.
-	TotalFiles uint64
-	// TotalBytes is the total size of files reported by rocksdb.
-	TotalBytes uint64
-	// ActiveKeyFiles is the number of files using the active data key.
-	ActiveKeyFiles uint64
-	// ActiveKeyBytes is the size of files using the active data key.
-	ActiveKeyBytes uint64
-	// EncryptionType is an enum describing the active encryption algorithm.
-	// See: ccl/storageccl/engineccl/enginepbccl/key_registry.proto
-	EncryptionType int32
-	// EncryptionStatus is a serialized enginepbccl/stats.proto::EncryptionStatus protobuf.
-	EncryptionStatus []byte
-}
-
-// EncryptionRegistries contains the encryption-related registries:
-// Both are serialized protobufs.
-type EncryptionRegistries struct {
-	// FileRegistry is the list of files with encryption status.
-	// serialized storage/engine/enginepb/file_registry.proto::FileRegistry
-	FileRegistry []byte
-	// KeyRegistry is the list of keys, scrubbed of actual key data.
-	// serialized ccl/storageccl/engineccl/enginepbccl/key_registry.proto::DataKeysRegistry
-	KeyRegistry []byte
-}
-
 // GetIntent will look up an intent given a key. It there is no intent for a
 // key, it will return nil rather than an error. Errors are returned for problem
 // at the storage layer, problem decoding the key, problem unmarshalling the
 // intent, missing transaction on the intent, or multiple intents for this key.
-func GetIntent(
-	ctx context.Context, reader Reader, key roachpb.Key, category ReadCategory,
-) (*roachpb.Intent, error) {
+func GetIntent(ctx context.Context, reader Reader, key roachpb.Key) (*roachpb.Intent, error) {
 	// Probe the lock table at key using a lock-table iterator.
 	opts := LockTableIteratorOptions{
 		Prefix: true,
@@ -1481,7 +1501,7 @@ func Scan(
 ) ([]MVCCKeyValue, error) {
 	var kvs []MVCCKeyValue
 	err := reader.MVCCIterate(ctx, start, end, MVCCKeyAndIntentsIterKind, IterKeyTypePointsOnly,
-		UnknownReadCategory,
+		fs.UnknownReadCategory,
 		func(kv MVCCKeyValue, _ MVCCRangeKeyStack) error {
 			if max != 0 && int64(len(kvs)) >= max {
 				return iterutil.StopIteration()
@@ -1495,11 +1515,7 @@ func Scan(
 // ScanLocks scans locks (shared, exclusive, and intent) using only the lock
 // table keyspace. It does not scan over the MVCC keyspace.
 func ScanLocks(
-	ctx context.Context,
-	reader Reader,
-	start, end roachpb.Key,
-	maxLocks, targetBytes int64,
-	category ReadCategory,
+	ctx context.Context, reader Reader, start, end roachpb.Key, maxLocks, targetBytes int64,
 ) ([]roachpb.Lock, error) {
 	var locks []roachpb.Lock
 
@@ -1784,7 +1800,7 @@ func iterateOnReader(
 	start, end roachpb.Key,
 	iterKind MVCCIterKind,
 	keyTypes IterKeyType,
-	readCategory ReadCategory,
+	readCategory fs.ReadCategory,
 	f func(MVCCKeyValue, MVCCRangeKeyStack) error,
 ) error {
 	if reader.Closed() {
@@ -2042,6 +2058,7 @@ func ScanConflictingIntentsForDroppingLatchesEarly(
 	start, end roachpb.Key,
 	intents *[]roachpb.Intent,
 	maxLockConflicts int64,
+	targetLockConflictBytes int64,
 ) (needIntentHistory bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -2062,7 +2079,7 @@ func ScanConflictingIntentsForDroppingLatchesEarly(
 		// unreplicated locks is governed by the ExclusiveLocksBlockNonLockingReads
 		// cluster setting.
 		MatchMinStr:  lock.Intent,
-		ReadCategory: BatchEvalReadCategory,
+		ReadCategory: fs.BatchEvalReadCategory,
 	}
 	if upperBoundUnset {
 		opts.Prefix = true
@@ -2075,12 +2092,24 @@ func ScanConflictingIntentsForDroppingLatchesEarly(
 		return false, err
 	}
 	defer iter.Close()
+	if log.ExpensiveLogEnabled(ctx, 3) {
+		defer func() {
+			ss := iter.Stats().Stats
+			log.VEventf(ctx, 3, "lock table scan stats: %s", ss.String())
+		}()
+	}
 
 	var meta enginepb.MVCCMetadata
 	var ok bool
+	intentSize := int64(0)
 	for ok, err = iter.SeekEngineKeyGE(EngineKey{Key: ltStart}); ok; ok, err = iter.NextEngineKey() {
 		if maxLockConflicts != 0 && int64(len(*intents)) >= maxLockConflicts {
 			// Return early if we're done accumulating intents; make no claims about
+			// not needing intent history.
+			return true /* needsIntentHistory */, nil
+		}
+		if targetLockConflictBytes != 0 && intentSize >= targetLockConflictBytes {
+			// Return early if we're exceed intent byte limits; make no claims about
 			// not needing intent history.
 			return true /* needsIntentHistory */, nil
 		}
@@ -2125,7 +2154,7 @@ func ScanConflictingIntentsForDroppingLatchesEarly(
 			needIntentHistory = true
 			continue
 		}
-		if conflictingIntent := meta.Timestamp.ToTimestamp().LessEq(ts); !conflictingIntent {
+		if intentConflicts := meta.Timestamp.ToTimestamp().LessEq(ts); !intentConflicts {
 			continue
 		}
 		key, err := iter.EngineKey()
@@ -2139,7 +2168,9 @@ func ScanConflictingIntentsForDroppingLatchesEarly(
 		if ltKey.Strength != lock.Intent {
 			return false, errors.AssertionFailedf("unexpected strength for LockTableKey %s", ltKey.Strength)
 		}
-		*intents = append(*intents, roachpb.MakeIntent(meta.Txn, ltKey.Key))
+		conflictingIntent := roachpb.MakeIntent(meta.Txn, ltKey.Key)
+		intentSize += int64(conflictingIntent.Size())
+		*intents = append(*intents, conflictingIntent)
 	}
 	if err != nil {
 		return false, err
@@ -2148,69 +2179,4 @@ func ScanConflictingIntentsForDroppingLatchesEarly(
 		return false, err
 	}
 	return needIntentHistory, nil /* err */
-}
-
-// ReadCategory is used to export metrics and maps to a QoS understood by
-// Pebble. Categories are being introduced lazily, since more categories
-// result in more metrics.
-type ReadCategory int8
-
-const (
-	// UnknownReadCategory are requests that are not categorized. If the metric
-	// for this category becomes a high fraction of reads, we will need to
-	// investigate and break out more categories.
-	UnknownReadCategory ReadCategory = iota
-	// BatchEvalReadCategory includes evaluation of most BatchRequests. It
-	// excludes scans and reverse scans. If scans and reverse scans are mixed
-	// with other requests in a batch, we may currently assign the category
-	// based on the first request.
-	BatchEvalReadCategory
-	// ScanRegularBatchEvalReadCategory are BatchRequest (reverse) scans that
-	// have admission priority NormalPri or higher.
-	ScanRegularBatchEvalReadCategory
-	// ScanBackgroundBatchEvalReadCategory are BatchRequest (reverse) scans that
-	// have admission priority lower than NormalPri. This includes backfill
-	// scans for changefeeds (see changefeedccl/kvfeed/scanner.go, which sends
-	// ScanRequests).
-	ScanBackgroundBatchEvalReadCategory
-	// MVCCGCReadCategory are reads for MVCC GC.
-	MVCCGCReadCategory
-	// RangeSnapshotReadCategory are reads for sending range snapshots.
-	RangeSnapshotReadCategory
-	// RangefeedReadCategory are reads for rangefeeds, including catchup scans.
-	RangefeedReadCategory
-	// ReplicationReadCategory are reads related to Raft replication.
-	ReplicationReadCategory
-	// IntentResolutionReadCategory are reads for intent resolution.
-	IntentResolutionReadCategory
-	// BackupReadCategory are reads for backups.
-	BackupReadCategory
-)
-
-var readCategoryMap = map[ReadCategory]sstable.CategoryAndQoS{
-	UnknownReadCategory: {Category: "crdb-unknown", QoSLevel: sstable.LatencySensitiveQoSLevel},
-	// TODO(sumeer): consider splitting batch-eval into two categories, for
-	// latency sensitive and non latency sensitive.
-	BatchEvalReadCategory: {Category: "batch-eval", QoSLevel: sstable.LatencySensitiveQoSLevel},
-	ScanRegularBatchEvalReadCategory: {
-		Category: "scan-regular", QoSLevel: sstable.LatencySensitiveQoSLevel},
-	ScanBackgroundBatchEvalReadCategory: {Category: "scan-background", QoSLevel: sstable.NonLatencySensitiveQoSLevel},
-	MVCCGCReadCategory:                  {Category: "mvcc-gc", QoSLevel: sstable.NonLatencySensitiveQoSLevel},
-	RangeSnapshotReadCategory: {
-		Category: "range-snap", QoSLevel: sstable.NonLatencySensitiveQoSLevel},
-	RangefeedReadCategory: {
-		Category: "rangefeed", QoSLevel: sstable.LatencySensitiveQoSLevel},
-	ReplicationReadCategory: {Category: "replication", QoSLevel: sstable.LatencySensitiveQoSLevel},
-	IntentResolutionReadCategory: {
-		Category: "intent-resolution", QoSLevel: sstable.LatencySensitiveQoSLevel},
-	BackupReadCategory: {
-		Category: "backup", QoSLevel: sstable.NonLatencySensitiveQoSLevel},
-}
-
-func getCategoryAndQoS(c ReadCategory) sstable.CategoryAndQoS {
-	categoryAndQoS, ok := readCategoryMap[c]
-	if !ok {
-		panic(errors.AssertionFailedf("unknown category %d", c))
-	}
-	return categoryAndQoS
 }

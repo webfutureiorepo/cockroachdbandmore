@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -15,9 +10,11 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -49,18 +46,35 @@ func (i *immediateVisitor) MakeAbsentColumnDeleteOnly(
 	return nil
 }
 
-func (i *immediateVisitor) SetAddedColumnType(
-	ctx context.Context, op scop.SetAddedColumnType,
-) error {
+func (i *immediateVisitor) UpsertColumnType(ctx context.Context, op scop.UpsertColumnType) error {
 	tbl, err := i.checkOutTable(ctx, op.ColumnType.TableID)
 	if err != nil {
 		return err
 	}
-	mut, err := FindMutation(tbl, MakeColumnIDMutationSelector(op.ColumnType.ColumnID))
+
+	catCol, err := catalog.MustFindColumnByID(tbl, op.ColumnType.ColumnID)
 	if err != nil {
 		return err
 	}
-	col := mut.AsColumn().ColumnDesc()
+	col := catCol.ColumnDesc()
+
+	// This can be called when adding a new column or for an update to existing
+	// column. If the column type is set, then this implies we are updating the
+	// type of an existing column.
+	if catCol.HasType() {
+		i.updateExistingColumnType(op, col)
+		return nil
+	}
+	return i.addNewColumnType(ctx, op, tbl, col)
+}
+
+// addNewColumnType is called when adding a ColumnType for a new column.
+func (i *immediateVisitor) addNewColumnType(
+	ctx context.Context,
+	op scop.UpsertColumnType,
+	tbl *tabledesc.Mutable,
+	col *descpb.ColumnDescriptor,
+) error {
 	col.Type = op.ColumnType.Type
 	if op.ColumnType.ElementCreationMetadata.In_23_1OrLater {
 		col.Nullable = true
@@ -68,15 +82,37 @@ func (i *immediateVisitor) SetAddedColumnType(
 		col.Nullable = op.ColumnType.IsNullable
 	}
 	col.Virtual = op.ColumnType.IsVirtual
-	if ce := op.ColumnType.ComputeExpr; ce != nil {
-		expr := string(ce.Expr)
-		col.ComputeExpr = &expr
-		col.UsesSequenceIds = ce.UsesSequenceIDs
+	// ComputeExpr is deprecated in favor of a separate element
+	// (ColumnComputeExpression). Any changes in this if block
+	// should also be made in the AddColumnComputeExpression function.
+	if !op.ColumnType.ElementCreationMetadata.In_24_3OrLater {
+		if ce := op.ColumnType.ComputeExpr; ce != nil {
+			expr := string(ce.Expr)
+			col.ComputeExpr = &expr
+			col.UsesSequenceIds = ce.UsesSequenceIDs
+		}
 	}
-	if col.ComputeExpr == nil || !col.Virtual {
+	if !col.Virtual {
 		for i := range tbl.Families {
 			fam := &tbl.Families[i]
 			if fam.ID == op.ColumnType.FamilyID {
+				// If the column family order was specified, find the spot in the column
+				// family we will insert the new column at.
+				if op.ColumnType.ColumnFamilyOrderFollowsColumnID != 0 {
+					var foundColumnID bool
+					for j, id := range fam.ColumnIDs {
+						if id == op.ColumnType.ColumnFamilyOrderFollowsColumnID {
+							foundColumnID = true
+							fam.ColumnIDs = append(fam.ColumnIDs[:j+1], append([]catid.ColumnID{col.ID}, fam.ColumnIDs[j+1:]...)...)
+							fam.ColumnNames = append(fam.ColumnNames[:j+1], append([]string{col.Name}, fam.ColumnNames[j+1:]...)...)
+							break
+						}
+					}
+					// If the column ID wasn't found, we fall through and just append to the end.
+					if foundColumnID {
+						break
+					}
+				}
 				fam.ColumnIDs = append(fam.ColumnIDs, col.ID)
 				fam.ColumnNames = append(fam.ColumnNames, col.Name)
 				break
@@ -85,7 +121,49 @@ func (i *immediateVisitor) SetAddedColumnType(
 	}
 	// Empty names are allowed for families, in which case AllocateIDs will assign
 	// one.
-	return tbl.AllocateIDsWithoutValidation(ctx)
+	return tbl.AllocateIDsWithoutValidation(ctx, false /* createMissingPrimaryKey */)
+}
+
+// AddColumnComputeExpression will set a compute expression to a column.
+func (i *immediateVisitor) AddColumnComputeExpression(
+	ctx context.Context, op scop.AddColumnComputeExpression,
+) error {
+	return i.updateColumnComputeExpression(ctx, op.ComputeExpression.TableID, op.ComputeExpression.ColumnID,
+		&op.ComputeExpression.Expr)
+}
+
+// RemoveColumnComputeExpression will drop a compute expression from a column.
+func (i *immediateVisitor) RemoveColumnComputeExpression(
+	ctx context.Context, op scop.RemoveColumnComputeExpression,
+) error {
+	return i.updateColumnComputeExpression(ctx, op.TableID, op.ColumnID, nil)
+}
+
+// updateColumnComputeExpression will handle add or removal of a compute expression.
+func (i *immediateVisitor) updateColumnComputeExpression(
+	ctx context.Context, tableID descpb.ID, columnID descpb.ColumnID, expr *catpb.Expression,
+) error {
+	tbl, err := i.checkOutTable(ctx, tableID)
+	if err != nil {
+		return err
+	}
+
+	catCol, err := catalog.MustFindColumnByID(tbl, columnID)
+	if err != nil {
+		return err
+	}
+
+	col := catCol.ColumnDesc()
+	if expr == nil {
+		clearComputedExpr(col)
+	} else {
+		expr := string(*expr)
+		col.ComputeExpr = &expr
+	}
+	if err := updateColumnExprSequenceUsage(col); err != nil {
+		return err
+	}
+	return updateColumnExprFunctionsUsage(col)
 }
 
 func (i *immediateVisitor) MakeDeleteOnlyColumnWriteOnly(
@@ -188,13 +266,7 @@ func (i *immediateVisitor) RemoveDroppedColumnType(
 	col := mut.AsColumn().ColumnDesc()
 	col.Type = types.Any
 	if col.IsComputed() {
-		// This operation needs to zero the computed column expression to remove
-		// any references to sequences and whatnot but it can't simply remove the
-		// expression entirely, otherwise in the case of virtual computed columns
-		// the column descriptor will then be interpreted as a virtual non-computed
-		// column, which doesn't make any sense.
-		null := tree.Serialize(tree.DNull)
-		col.ComputeExpr = &null
+		clearComputedExpr(col)
 	}
 	return nil
 }
@@ -277,14 +349,24 @@ func (i *immediateVisitor) AddColumnDefaultExpression(
 	d := col.ColumnDesc()
 	expr := string(op.Default.Expr)
 	d.DefaultExpr = &expr
-	refs := catalog.MakeDescriptorIDSet(d.UsesSequenceIds...)
+	seqRefs := catalog.MakeDescriptorIDSet(d.UsesSequenceIds...)
 	for _, seqID := range op.Default.UsesSequenceIDs {
-		if refs.Contains(seqID) {
+		if seqRefs.Contains(seqID) {
 			continue
 		}
 		d.UsesSequenceIds = append(d.UsesSequenceIds, seqID)
-		refs.Add(seqID)
+		seqRefs.Add(seqID)
 	}
+
+	fnRefs := catalog.MakeDescriptorIDSet(d.UsesFunctionIds...)
+	for _, fnID := range op.Default.UsesFunctionIDs {
+		if fnRefs.Contains(fnID) {
+			continue
+		}
+		d.UsesFunctionIds = append(d.UsesFunctionIds, fnID)
+		fnRefs.Add(fnID)
+	}
+
 	return nil
 }
 
@@ -346,4 +428,30 @@ func (i *immediateVisitor) RemoveColumnOnUpdateExpression(
 	d := col.ColumnDesc()
 	d.OnUpdateExpr = nil
 	return updateColumnExprSequenceUsage(d)
+}
+
+// updateExistingColumnType will handle data type changes to existing columns.
+func (i *immediateVisitor) updateExistingColumnType(
+	op scop.UpsertColumnType, desc *descpb.ColumnDescriptor,
+) {
+	// This operation is only called when a type change doesn’t require a
+	// backfill. When a backfill is required, a new column is created instead.
+	// Therefore, simply update the metadata for the type.
+	desc.Type = op.ColumnType.Type
+}
+
+func clearComputedExpr(col *descpb.ColumnDescriptor) {
+	// This operation zeros out the computed column expression to remove references
+	// to sequences or other dependencies, but it can't always remove the expression entirely.
+	//
+	// For virtual computed columns, removing the expression would turn the column
+	// into a virtual non-computed column, which doesn't make sense. When dropping
+	// the expression for a column that still exists (e.g., a stored column), we do
+	// want to remove the expression.
+	if col.Virtual {
+		null := tree.Serialize(tree.DNull)
+		col.ComputeExpr = &null
+	} else {
+		col.ComputeExpr = nil
+	}
 }

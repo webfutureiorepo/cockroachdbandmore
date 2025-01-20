@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package resolver_test
 
@@ -71,6 +66,7 @@ func BenchmarkResolveExistingObject(b *testing.B) {
 		},
 	} {
 		b.Run(tc.testName, func(b *testing.B) {
+			tc.flags.DesiredObjectKind = tree.TableObject
 			ctx := context.Background()
 			s, sqlDB, kvDB := serverutils.StartServer(b, base.TestServerArgs{})
 			defer s.Stopper().Stop(ctx)
@@ -90,7 +86,7 @@ func BenchmarkResolveExistingObject(b *testing.B) {
 
 			execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 			txn := kvDB.NewTxn(ctx, "test")
-			p, cleanup := sql.NewInternalPlanner("asdf", txn, username.RootUserName(), &sql.MemoryMetrics{}, &execCfg, sd)
+			p, cleanup := sql.NewInternalPlanner("asdf", txn, username.NodeUserName(), &sql.MemoryMetrics{}, &execCfg, sd)
 			defer cleanup()
 
 			// The internal planner overrides the database to "system", here we
@@ -182,7 +178,7 @@ func BenchmarkResolveFunction(b *testing.B) {
 
 			execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 			txn := kvDB.NewTxn(ctx, "test")
-			p, cleanup := sql.NewInternalPlanner("asdf", txn, username.RootUserName(), &sql.MemoryMetrics{}, &execCfg, sd)
+			p, cleanup := sql.NewInternalPlanner("asdf", txn, username.NodeUserName(), &sql.MemoryMetrics{}, &execCfg, sd)
 			defer cleanup()
 
 			// The internal planner overrides the database to "system", here we

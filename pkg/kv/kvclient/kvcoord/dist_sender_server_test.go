@@ -1,18 +1,14 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord_test
 
 import (
 	"bytes"
 	"context"
+	gosql "database/sql"
 	"fmt"
 	"reflect"
 	"sort"
@@ -22,22 +18,28 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/isolation"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
+	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/kvclientutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
+	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -2032,6 +2034,10 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 					}
 					return true
 				},
+				// Disable randomization of the transaction's anchor key so that we can
+				// predictably make assertions that rely on the transaction record being
+				// on a specific range.
+				DisableTxnAnchorKeyRandomization: true,
 			}}})
 
 	disableCondensingRefreshSpans := func() bool { return false }
@@ -2128,30 +2134,6 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 			},
 		},
 		{
-			name: "forwarded timestamp with get and initput",
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				_, err := db.Get(ctx, "a") // read key to set ts cache
-				return err
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "a", "put", false /* failOnTombstones */) // put to advance txn ts
-			},
-			perIsoLevel: map[isolation.Level]*expect{
-				// No retry, preemptive (no-op) refresh before commit.
-				isolation.Serializable: {
-					expClientRefreshSuccess:        true,
-					expClientAutoRetryAfterRefresh: false,
-				},
-				// No retry, preemptive (no-op) refresh before commit.
-				isolation.Snapshot: {
-					expClientRefreshSuccess:        true,
-					expClientAutoRetryAfterRefresh: false,
-				},
-				// No refresh, no retry. New read snapshot established before commit.
-				isolation.ReadCommitted: {},
-			},
-		},
-		{
 			name: "forwarded timestamp with get and cput",
 			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
 				return db.Put(ctx, "a", "put")
@@ -2222,6 +2204,9 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 		},
 		{
 			name: "forwarded timestamp with delete range",
+			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
+				return db.Put(ctx, "a", "put") // ensure DeleteRange is not a no-op
+			},
 			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
 				_, err := db.Get(ctx, "a") // read key to set ts cache
 				return err
@@ -2546,6 +2531,9 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 			name: "forwarded timestamp with too many refreshes in batch commit " +
 				"with refresh",
 			refreshSpansCondenseFilter: disableCondensingRefreshSpans,
+			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
+				return db.Put(ctx, "a", "put") // ensure DeleteRange is not a no-op
+			},
 			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
 				_, err := db.Get(ctx, "a") // set ts cache
 				return err
@@ -2876,158 +2864,6 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 				isolation.ReadCommitted: {
 					expServerRefresh: true,
 				},
-			},
-		},
-		{
-			name: "write too old with initput",
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put", false)
-			},
-			allIsoLevels: &expect{
-				expServerRefresh: true,
-			},
-		},
-		{
-			name: "write too old with initput after prior read",
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put", false)
-			},
-			priorReads: true,
-			perIsoLevel: map[isolation.Level]*expect{
-				// Client-side refresh of prior reads after write-write conflict.
-				isolation.Serializable: {
-					expClientRefreshSuccess:        true,
-					expClientAutoRetryAfterRefresh: true,
-				},
-				// Client-side refresh of prior reads after write-write conflict.
-				isolation.Snapshot: {
-					expClientRefreshSuccess:        true,
-					expClientAutoRetryAfterRefresh: true,
-				},
-				// Server-side refresh after write-write conflict. Prior reads performed
-				// in earlier batches (from earlier read snapshots) are not refreshed.
-				isolation.ReadCommitted: {
-					expServerRefresh: true,
-				},
-			},
-		},
-		{
-			name: "write too old with initput matching older and newer values",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put", false)
-			},
-			allIsoLevels: &expect{
-				expServerRefresh: true,
-			},
-		},
-		{
-			name: "write too old with initput matching older and newer values after prior read",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put", false)
-			},
-			priorReads: true,
-			perIsoLevel: map[isolation.Level]*expect{
-				// Client-side refresh of prior reads after write-write conflict.
-				isolation.Serializable: {
-					expClientRefreshSuccess:        true,
-					expClientAutoRetryAfterRefresh: true,
-				},
-				// Client-side refresh of prior reads after write-write conflict.
-				isolation.Snapshot: {
-					expClientRefreshSuccess:        true,
-					expClientAutoRetryAfterRefresh: true,
-				},
-				// Server-side refresh after write-write conflict. Prior reads performed
-				// in earlier batches (from earlier read snapshots) are not refreshed.
-				isolation.ReadCommitted: {
-					expServerRefresh: true,
-				},
-			},
-		},
-		{
-			name: "write too old with initput matching older value",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put1")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put2")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put1", false)
-			},
-			allIsoLevels: &expect{
-				expServerRefresh: true,               // non-matching value means we perform server-side refresh but then fail
-				expFailure:       "unexpected value", // the failure we get is a condition failed error
-			},
-		},
-		{
-			name: "write too old with initput matching newer value",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put1")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put2")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put2", false)
-			},
-			// The transaction performs a server-side refresh due to the write-write
-			// conflict and then succeeds during its InitPut.
-			allIsoLevels: &expect{
-				expServerRefresh: true,
-			},
-		},
-		{
-			name: "write too old with initput failing on tombstone before",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				_, err := db.Del(ctx, "iput")
-				return err
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put2")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put2", true)
-			},
-			// The transaction performs a server-side refresh due to the write-write
-			// conflict and then succeeds during its InitPut.
-			allIsoLevels: &expect{
-				expServerRefresh: true,
-			},
-		},
-		{
-			name: "write too old with initput failing on tombstone after",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "iput", "put")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				_, err := db.Del(ctx, "iput")
-				return err
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				return txn.InitPut(ctx, "iput", "put", true)
-			},
-			allIsoLevels: &expect{
-				expServerRefresh: true,               // non-matching value means we perform server-side refresh but then fail
-				expFailure:       "unexpected value", // condition failed error when failing on tombstones
 			},
 		},
 		{
@@ -4661,5 +4497,284 @@ func TestRefreshFailureIncludesConflictingTxn(t *testing.T) {
 				require.Equal(t, int32(1), tErr.ConflictingTxn.CoordinatorNodeID)
 			}
 		})
+	})
+}
+
+// TestPartialPartition verifies various complex success/failure scenarios.
+// The leaseholder is always on n2(idx 1) and the client is on n1(idx 0).
+// Additionally validate that a rangefeed sees the update.
+func TestPartialPartition(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	skip.UnderRace(t, "times out with 5 nodes")
+	ctx := context.Background()
+
+	testCases := []struct {
+		useProxy   bool
+		numServers int
+		partition  [][2]roachpb.NodeID
+	}{
+		// --- Success scenarios ---
+		{true, 5, [][2]roachpb.NodeID{{1, 2}}},
+		{true, 3, [][2]roachpb.NodeID{{1, 2}}},
+		// --- Failure scenarios ---
+		{false, 5, [][2]roachpb.NodeID{{1, 2}}},
+		{false, 3, [][2]roachpb.NodeID{{1, 2}}},
+	}
+	for _, test := range testCases {
+		t.Run(fmt.Sprintf("%t-%d", test.useProxy, test.numServers), func(t *testing.T) {
+			testutils.RunValues(t, "lease-type", roachpb.TestingAllLeaseTypes(), func(t *testing.T, leaseType roachpb.LeaseType) {
+				if leaseType == roachpb.LeaseEpoch {
+					// With epoch leases this test doesn't work reliably. It passes
+					// in cases where it should fail and fails in cases where it
+					// should pass.
+					// TODO(baptist): Attempt to pin the liveness leaseholder to
+					// node 3 to make epoch leases reliable.
+					skip.IgnoreLint(t, "flaky with epoch leases")
+				}
+
+				st := cluster.MakeTestingClusterSettings()
+				kvcoord.ProxyBatchRequest.Override(ctx, &st.SV, test.useProxy)
+				kvserver.OverrideDefaultLeaseType(ctx, &st.SV, leaseType)
+				kvserver.RangefeedEnabled.Override(ctx, &st.SV, true)
+				kvserver.RangeFeedRefreshInterval.Override(ctx, &st.SV, 10*time.Millisecond)
+				closedts.TargetDuration.Override(ctx, &st.SV, 10*time.Millisecond)
+				closedts.SideTransportCloseInterval.Override(ctx, &st.SV, 10*time.Millisecond)
+				// Configure the number of replicas and voters to have a replica on every node.
+				zoneConfig := zonepb.DefaultZoneConfig()
+				numNodes := int32(test.numServers)
+				zoneConfig.NumReplicas = &numNodes
+				zoneConfig.NumVoters = &numNodes
+
+				var p rpc.Partitioner
+				tc := testcluster.StartTestCluster(t, test.numServers, base.TestClusterArgs{
+					ServerArgsPerNode: func() map[int]base.TestServerArgs {
+						perNode := make(map[int]base.TestServerArgs)
+						for i := 0; i < test.numServers; i++ {
+							ctk := rpc.ContextTestingKnobs{}
+							p.RegisterTestingKnobs(roachpb.NodeID(i+1), test.partition, &ctk)
+							perNode[i] = base.TestServerArgs{
+								Settings:         st,
+								DisableSQLServer: true,
+								Knobs: base.TestingKnobs{
+									Server: &server.TestingKnobs{
+										DefaultZoneConfigOverride: &zoneConfig,
+										ContextTestingKnobs:       ctk,
+									},
+								},
+							}
+						}
+						return perNode
+					}(),
+				})
+
+				// Set up the mapping after the nodes have started and we have their
+				// addresses.
+				for i := 0; i < test.numServers; i++ {
+					g := tc.Servers[i].StorageLayer().GossipI().(*gossip.Gossip)
+					addr := g.GetNodeAddr().String()
+					nodeID := g.NodeID.Get()
+					p.RegisterNodeAddr(addr, nodeID)
+				}
+
+				scratchKey := tc.ScratchRange(t)
+				// We want all ranges to have full replication to be available through partitions.
+				require.NoError(t, tc.WaitForFullReplication())
+
+				desc := tc.LookupRangeOrFatal(t, scratchKey)
+				tc.TransferRangeLeaseOrFatal(t, desc, tc.Target(1))
+
+				// TODO(baptist): This test should work without this block.
+				// After the lease is transferred, the lease might still be on
+				// the n1. Eventually n2 will fail to become leader, and the
+				// lease will expire and n1 will reacquire the lease. DistSender
+				// doesn't correctly handle this case today, but will in the
+				// future. Today, if we partition in a split leader/leaseholder
+				// split, a request will sit waiting for the proposal buffer on
+				// n1 and and never return to DistSender without success or
+				// failure. Without a timeout or other circuit breaker in
+				// DistSender we will never succeed once we partition. Remove
+				// this block once #118943 is fixed.
+				testutils.SucceedsSoon(t, func() error {
+					sl := tc.StorageLayer(1)
+					store, err := sl.GetStores().(*kvserver.Stores).GetStore(sl.GetFirstStoreID())
+					require.NoError(t, err)
+					status := store.LookupReplica(roachpb.RKey(scratchKey)).RaftStatus()
+					if status == nil || status.RaftState != raftpb.StateLeader {
+						return errors.Newf("Leader leaseholder split %v", status)
+					}
+					return nil
+				})
+
+				p.EnablePartition(true)
+
+				txn := tc.ApplicationLayer(0).DB().NewTxn(ctx, "test")
+				// DistSender will retry forever. For the failure cases we want
+				// to fail faster.
+				cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				err := txn.Put(cancelCtx, scratchKey, "abc")
+				if test.useProxy {
+					require.NoError(t, err)
+					require.NoError(t, txn.Commit(cancelCtx))
+				} else {
+					require.Error(t, err)
+					require.NoError(t, txn.Rollback(cancelCtx))
+				}
+
+				// Stop all the clients first to avoid getting stuck on failing tests.
+				for i := 0; i < test.numServers; i++ {
+					tc.ApplicationLayer(i).AppStopper().Stop(ctx)
+				}
+
+				tc.Stopper().Stop(ctx)
+			})
+		})
+	}
+}
+
+// TestProxyTracing asserts when enabling a partial partition between two
+// nodes, the request is proxied via a third node and that tracing captures
+// the relevant event.
+func TestProxyTracing(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+
+	testutils.RunValues(t, "lease-type", roachpb.TestingAllLeaseTypes(), func(t *testing.T, leaseType roachpb.LeaseType) {
+		if leaseType == roachpb.LeaseExpiration {
+			skip.UnderRace(t, "too slow")
+			skip.UnderDeadlock(t, "too slow")
+		} else if leaseType == roachpb.LeaseEpoch {
+			// With epoch leases this test doesn't work reliably. It passes
+			// in cases where it should fail and fails in cases where it
+			// should pass.
+			// TODO(baptist): Attempt to pin the liveness leaseholder to
+			// node 3 to make epoch leases reliable.
+			skip.IgnoreLint(t, "flaky with epoch leases")
+		}
+
+		const numServers = 3
+		const numRanges = 3
+		st := cluster.MakeTestingClusterSettings()
+		kvserver.OverrideDefaultLeaseType(ctx, &st.SV, leaseType)
+		kvserver.RangefeedEnabled.Override(ctx, &st.SV, true)
+		kvserver.RangeFeedRefreshInterval.Override(ctx, &st.SV, 10*time.Millisecond)
+		// Disable follower reads to ensure that the request is proxied, and not
+		// answered locally due to follower reads.
+		kvserver.FollowerReadsEnabled.Override(ctx, &st.SV, false)
+		closedts.TargetDuration.Override(ctx, &st.SV, 10*time.Millisecond)
+		closedts.SideTransportCloseInterval.Override(ctx, &st.SV, 10*time.Millisecond)
+
+		var p rpc.Partitioner
+		tc := testcluster.StartTestCluster(t, numServers, base.TestClusterArgs{
+			ServerArgsPerNode: func() map[int]base.TestServerArgs {
+				perNode := make(map[int]base.TestServerArgs)
+				for i := 0; i < numServers; i++ {
+					ctk := rpc.ContextTestingKnobs{}
+					// Partition between n1 and n3.
+					p.RegisterTestingKnobs(roachpb.NodeID(i+1), [][2]roachpb.NodeID{{1, 3}}, &ctk)
+					perNode[i] = base.TestServerArgs{
+						Settings: st,
+						Knobs: base.TestingKnobs{
+							Server: &server.TestingKnobs{
+								ContextTestingKnobs: ctk,
+							},
+						},
+					}
+				}
+				return perNode
+			}(),
+		})
+		defer tc.Stopper().Stop(ctx)
+
+		// Set up the mapping after the nodes have started and we have their
+		// addresses.
+		for i := 0; i < numServers; i++ {
+			g := tc.Servers[i].StorageLayer().GossipI().(*gossip.Gossip)
+			addr := g.GetNodeAddr().String()
+			nodeID := g.NodeID.Get()
+			p.RegisterNodeAddr(addr, nodeID)
+		}
+
+		conn := tc.Conns[0]
+
+		// Create a table and pin the leaseholder replicas to n3. The partition
+		// between n1 and n3 will lead to re-routing via n2, which we expect captured
+		// in the trace.
+		_, err := conn.Exec("CREATE TABLE t (i INT)")
+		require.NoError(t, err)
+		_, err = conn.Exec("ALTER TABLE t CONFIGURE ZONE USING num_replicas=3, lease_preferences='[[+dc=dc3]]', constraints='[]'")
+		require.NoError(t, err)
+		_, err = conn.Exec(
+			fmt.Sprintf("INSERT INTO t(i) select generate_series(1,%d)", numRanges-1))
+		require.NoError(t, err)
+		_, err = conn.Exec("ALTER TABLE t SPLIT AT SELECT i FROM t")
+		require.NoError(t, err)
+		require.NoError(t, tc.WaitForFullReplication())
+
+		leaseCount := func(node int) int {
+			var count int
+			err := conn.QueryRow(fmt.Sprintf(
+				"SELECT count(*) FROM [SHOW RANGES FROM TABLE t WITH DETAILS] WHERE lease_holder = %d", node),
+			).Scan(&count)
+			require.NoError(t, err)
+			return count
+		}
+
+		checkLeaseCount := func(node, expectedLeaseCount int) error {
+			if count := leaseCount(node); count != expectedLeaseCount {
+				require.NoError(t, tc.GetFirstStoreFromServer(t, 0).
+					ForceLeaseQueueProcess())
+				return errors.Errorf("expected %d leases on node %d, found %d",
+					expectedLeaseCount, node, count)
+			}
+			return nil
+		}
+
+		printTrace := func() {
+			t.Log("started printing a trace")
+			rows, err := conn.QueryContext(ctx, "SELECT message, tag, location FROM [SHOW TRACE FOR SESSION]")
+			require.NoError(t, err)
+			defer rows.Close()
+
+			// Iterate over the results and print them
+			for rows.Next() {
+				var msg, tag, loc string
+				err := rows.Scan(&msg, &tag, &loc)
+				require.NoError(t, err)
+				t.Logf("msg: %s, tag: %s, loc: %s", msg, tag, loc)
+			}
+			require.NoError(t, rows.Err())
+		}
+
+		// Wait until the leaseholder for the test table ranges are on n3.
+		testutils.SucceedsSoon(t, func() error {
+			return checkLeaseCount(3, numRanges)
+		})
+
+		p.EnablePartition(true)
+
+		_, err = conn.Exec("SET TRACING = on; SELECT FROM t where i = 987654321; SET TRACING = off")
+		require.NoError(t, err)
+		// Expect the "proxy request complete" message to be in the trace and that it
+		// comes from the proxy node n2.
+		var msg, tag, loc string
+		if err = conn.QueryRowContext(ctx, `SELECT message, tag, location
+			FROM [SHOW TRACE FOR SESSION]
+			WHERE message LIKE '%proxy request complete%'
+			AND location LIKE '%server/node%'
+			AND tag LIKE '%n2%'`,
+		).Scan(&msg, &tag, &loc); err != nil {
+			// If we fail for any reason, print the trace to help debugging.
+			printTrace()
+			// Make sure that node 3 still holds the leases.
+			require.NoError(t, checkLeaseCount(3, numRanges))
+			if errors.Is(err, gosql.ErrNoRows) {
+				t.Fatalf("request succeeded without proxying")
+			}
+			t.Fatal(err)
+		}
+		t.Logf("found trace event; msg=%s, tag=%s, loc=%s", msg, tag, loc)
 	})
 }

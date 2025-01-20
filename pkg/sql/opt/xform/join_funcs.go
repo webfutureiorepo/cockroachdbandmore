@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -371,6 +366,7 @@ func (c *CustomFuncs) generateLookupJoinsImpl(
 
 	// Initialize the constraint builder.
 	c.cb.Init(
+		c.e.ctx,
 		c.e.f,
 		c.e.mem.Metadata(),
 		c.e.evalCtx,
@@ -411,7 +407,8 @@ func (c *CustomFuncs) generateLookupJoinsImpl(
 	var pkCols opt.ColList
 	var newScanPrivate *memo.ScanPrivate
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, on, rejectInvertedIndexes)
+	reject := rejectInvertedIndexes | rejectVectorIndexes
+	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, on, reject)
 	iter.ForEach(func(index cat.Index, onFilters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
 		// Skip indexes that do not cover all virtual projection columns, if
 		// there are any. This can happen when there are multiple virtual
@@ -810,7 +807,7 @@ func (c *CustomFuncs) GenerateInvertedJoins(
 	iter.Init(c.e.evalCtx, c.e, c.e.mem, &c.im, scanPrivate, on, rejectNonInvertedIndexes)
 	iter.ForEach(func(index cat.Index, onFilters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
 		invertedJoin := memo.InvertedJoinExpr{Input: input}
-		numPrefixCols := index.NonInvertedPrefixColumnCount()
+		numPrefixCols := index.PrefixColumnCount()
 
 		var allFilters memo.FiltersExpr
 		if numPrefixCols > 0 {
@@ -858,7 +855,7 @@ func (c *CustomFuncs) GenerateInvertedJoins(
 			}
 
 			// Try to constrain prefixCol to constant, non-ranging values.
-			foundVals, allIdx, ok := lookupjoin.FindJoinFilterConstants(allFilters, prefixCol, c.e.evalCtx)
+			foundVals, allIdx, ok := lookupjoin.FindJoinFilterConstants(c.e.ctx, allFilters, prefixCol, c.e.evalCtx)
 			if !ok {
 				// Cannot constrain prefix column and therefore cannot generate
 				// an inverted join.
@@ -930,7 +927,7 @@ func (c *CustomFuncs) GenerateInvertedJoins(
 		// doesn't actually, and it is only valid to extract the primary key
 		// columns and non-inverted prefix columns from it.
 		indexCols = pkCols.ToSet()
-		for i, n := 0, index.NonInvertedPrefixColumnCount(); i < n; i++ {
+		for i, n := 0, index.PrefixColumnCount(); i < n; i++ {
 			prefixCol := scanPrivate.Table.IndexColumnID(index, i)
 			indexCols.Add(prefixCol)
 		}
@@ -1053,7 +1050,7 @@ func (c *CustomFuncs) mapInvertedJoin(
 	// columns and non-inverted prefix columns from it.
 	newPkCols := c.getPkCols(newTabID)
 	newIndexCols := newPkCols.ToSet()
-	for i, n := 0, index.NonInvertedPrefixColumnCount(); i < n; i++ {
+	for i, n := 0, index.PrefixColumnCount(); i < n; i++ {
 		prefixCol := newTabID.IndexColumnID(index, i)
 		newIndexCols.Add(prefixCol)
 	}
@@ -1145,7 +1142,7 @@ func (c *CustomFuncs) ShouldReorderJoins(root memo.RelExpr) bool {
 // first expression of the memo group is used for construction of the join
 // graph. For more information, see the comment in join_order_builder.go.
 func (c *CustomFuncs) ReorderJoins(grp memo.RelExpr, required *physical.Required) memo.RelExpr {
-	c.e.o.JoinOrderBuilder().Init(c.e.f, c.e.evalCtx)
+	c.e.o.JoinOrderBuilder().Init(c.e.ctx, c.e.f, c.e.evalCtx)
 	c.e.o.JoinOrderBuilder().Reorder(grp.FirstExpr())
 	return grp
 }
@@ -1232,7 +1229,7 @@ func (c *CustomFuncs) FindLeftJoinCanaryColumn(
 	// Find any column from the right which is null-rejected by the ON condition.
 	// right rows where such a column is NULL will never contribute to the join
 	// result.
-	nullRejectedCols := memo.NullColsRejectedByFilter(c.e.evalCtx, on)
+	nullRejectedCols := memo.NullColsRejectedByFilter(c.e.ctx, c.e.evalCtx, on)
 	nullRejectedCols.IntersectionWith(right.Relational().OutputCols)
 
 	canaryCol, ok = nullRejectedCols.Next(0)
@@ -1414,7 +1411,7 @@ func (c *CustomFuncs) GetLocalityOptimizedLookupJoinExprs(
 	// can target a local partition and one can target a remote partition.
 	idx := md.Table(private.Table).Index(private.Index)
 	firstCol := private.Table.ColumnID(idx.Column(0).Ordinal())
-	vals, ok := filter.ScalarProps().Constraints.ExtractSingleColumnNonNullConstValues(c.e.evalCtx, firstCol)
+	vals, ok := filter.ScalarProps().Constraints.ExtractSingleColumnNonNullConstValues(c.e.ctx, c.e.evalCtx, firstCol)
 	if !ok || len(vals) < 2 {
 		return nil, nil, false
 	}
@@ -1535,6 +1532,35 @@ func (c *CustomFuncs) makeFilteredSelectForJoin(
 	return newSelect
 }
 
+// CanSplitJoinWithDisjuncts returns true if the given join can be split into a
+// union of two joins. See SplitJoinWithDisjuncts for more details.
+func (c *CustomFuncs) CanSplitJoinWithDisjuncts(
+	joinRel memo.RelExpr, joinFilters memo.FiltersExpr,
+) (firstOnClause, secondOnClause opt.ScalarExpr, itemToReplace *memo.FiltersItem, ok bool) {
+	leftInput := joinRel.Child(0).(memo.RelExpr)
+	rightInput := joinRel.Child(1).(memo.RelExpr)
+
+	switch joinRel.Op() {
+	case opt.InnerJoinOp, opt.SemiJoinOp, opt.AntiJoinOp:
+		// Do nothing
+	default:
+		panic(errors.AssertionFailedf("expected joinRel to be inner, semi, or anti-join"))
+	}
+
+	origLeftScan, _, ok := c.getfilteredCanonicalScan(leftInput)
+	if !ok {
+		return nil, nil, nil, false
+	}
+
+	origRightScan, _, ok := c.getfilteredCanonicalScan(rightInput)
+	if !ok {
+		return nil, nil, nil, false
+	}
+
+	// Look for a disjunction of equijoin predicates.
+	return c.splitDisjunctionForJoin(joinRel, joinFilters, origLeftScan, origRightScan)
+}
+
 // SplitJoinWithDisjuncts checks a join relation for a disjunction of predicates
 // in an InnerJoin, SemiJoin or AntiJoin. If present, and the inputs to the join
 // are canonical scans, or Selects from canonical scans, it builds two new join
@@ -1554,27 +1580,20 @@ func (c *CustomFuncs) makeFilteredSelectForJoin(
 // If there is no disjunction of predicates, or the join type is not one of the
 // supported join types listed above, ok=false is returned.
 func (c *CustomFuncs) SplitJoinWithDisjuncts(
-	joinRel memo.RelExpr, joinFilters memo.FiltersExpr,
+	joinRel memo.RelExpr,
+	joinFilters memo.FiltersExpr,
+	firstOnClause, secondOnClause opt.ScalarExpr,
+	itemToReplace *memo.FiltersItem,
 ) (
 	firstJoin memo.RelExpr,
 	secondJoin memo.RelExpr,
 	newRelationCols opt.ColSet,
 	aggCols opt.ColSet,
 	groupingCols opt.ColSet,
-	ok bool,
 ) {
-	notOkSplitJoin := func() (memo.RelExpr, memo.RelExpr, opt.ColSet, opt.ColSet, opt.ColSet, bool) {
-		emptyColSet := opt.ColSet{}
-		return nil, nil, emptyColSet, emptyColSet, emptyColSet, false
-	}
-
-	var joinPrivate *memo.JoinPrivate
-	var leftInput memo.RelExpr
-	var rightInput memo.RelExpr
-
-	joinPrivate = joinRel.Private().(*memo.JoinPrivate)
-	leftInput = joinRel.Child(0).(memo.RelExpr)
-	rightInput = joinRel.Child(1).(memo.RelExpr)
+	joinPrivate := joinRel.Private().(*memo.JoinPrivate)
+	leftInput := joinRel.Child(0).(memo.RelExpr)
+	rightInput := joinRel.Child(1).(memo.RelExpr)
 
 	switch joinRel.Op() {
 	case opt.InnerJoinOp, opt.SemiJoinOp, opt.AntiJoinOp:
@@ -1585,21 +1604,14 @@ func (c *CustomFuncs) SplitJoinWithDisjuncts(
 
 	origLeftScan, leftFilters, ok := c.getfilteredCanonicalScan(leftInput)
 	if !ok {
-		return notOkSplitJoin()
+		panic(errors.AssertionFailedf("expected join left input to have canonical scan"))
 	}
 	origLeftScanPrivate := &origLeftScan.ScanPrivate
 	origRightScan, rightFilters, ok := c.getfilteredCanonicalScan(rightInput)
 	if !ok {
-		return notOkSplitJoin()
+		panic(errors.AssertionFailedf("expected join right input to have canonical scan"))
 	}
 	origRightScanPrivate := &origRightScan.ScanPrivate
-
-	// Look for a disjunction of equijoin predicates.
-	firstOnClause, secondOnClause, itemToReplace, ok :=
-		c.splitDisjunctionForJoin(joinRel, joinFilters, origLeftScan, origRightScan)
-	if !ok {
-		return notOkSplitJoin()
-	}
 
 	// Add in the primary key columns so the caller can group by them to
 	// deduplicate results.
@@ -1735,7 +1747,7 @@ func (c *CustomFuncs) SplitJoinWithDisjuncts(
 		panic(errors.AssertionFailedf("Unexpected join type while splitting disjuncted join predicates: %v",
 			joinRel.Op()))
 	}
-	return firstJoin, secondJoin, newRelationCols, aggCols, groupingCols, true
+	return firstJoin, secondJoin, newRelationCols, aggCols, groupingCols
 }
 
 // getfilteredCanonicalScan looks at a *ScanExpr or *SelectExpr "relation" and

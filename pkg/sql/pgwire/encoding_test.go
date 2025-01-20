@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgwire
 
@@ -32,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/lib/pq/oid"
 )
 
@@ -58,7 +52,7 @@ func readEncodingTests(t testing.TB) []*encodingTest {
 	f.Close()
 
 	ctx := context.Background()
-	sema := tree.MakeSemaContext()
+	sema := tree.MakeSemaContext(nil /* resolver */)
 	evalCtx := eval.MakeTestingEvalContext(nil)
 
 	for _, tc := range tests {
@@ -133,7 +127,7 @@ func TestEncodings(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	tests := readEncodingTests(t)
-	buf := newWriteBuffer(metric.NewCounter(metric.Metadata{}))
+	buf := newWriteBuffer(nilStat)
 
 	verifyLen := func(t *testing.T) []byte {
 		t.Helper()
@@ -154,6 +148,7 @@ func TestEncodings(t *testing.T) {
 	conv, loc := makeTestingConvCfg()
 	ctx := context.Background()
 	evalCtx := eval.MakeTestingEvalContext(nil)
+	var da tree.DatumAlloc
 
 	type writeFunc func(tree.Datum, *types.T)
 	type testCase struct {
@@ -277,6 +272,7 @@ func TestEncodings(t *testing.T) {
 					types.OidToType[tc.Oid],
 					code,
 					value,
+					&da,
 				)
 				if err != nil {
 					t.Fatal(err)
@@ -290,7 +286,9 @@ func TestEncodings(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if d.Compare(&evalCtx, tc.Datum) != 0 {
+				if cmp, err := d.Compare(ctx, &evalCtx, tc.Datum); err != nil {
+					t.Fatal(err)
+				} else if cmp != 0 {
 					t.Fatalf("%v != %v", d, tc.Datum)
 				}
 			}
@@ -332,22 +330,20 @@ func TestExoticNumericEncodings(t *testing.T) {
 		{apd.New(1234123400, -2), []byte{0, 4, 0, 1, 0, 0, 0, 2, 0x4, 0xd2, 0x4, 0xd2, 0, 0, 0, 0}},
 	}
 
+	ctx := context.Background()
 	evalCtx := eval.MakeTestingEvalContext(nil)
+	var da tree.DatumAlloc
 	for i, c := range testCases {
 		t.Run(fmt.Sprintf("%d_%s", i, c.Value), func(t *testing.T) {
-			d, err := pgwirebase.DecodeDatum(
-				context.Background(),
-				&evalCtx,
-				types.Decimal,
-				pgwirebase.FormatBinary,
-				c.Encoding,
-			)
+			d, err := pgwirebase.DecodeDatum(ctx, &evalCtx, types.Decimal, pgwirebase.FormatBinary, c.Encoding, &da)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			expected := &tree.DDecimal{Decimal: *c.Value}
-			if d.Compare(&evalCtx, expected) != 0 {
+			if cmp, err := d.Compare(ctx, &evalCtx, expected); err != nil {
+				t.Fatal(err)
+			} else if cmp != 0 {
 				t.Fatalf("%v != %v", d, expected)
 			}
 		})
@@ -356,7 +352,7 @@ func TestExoticNumericEncodings(t *testing.T) {
 
 func BenchmarkEncodings(b *testing.B) {
 	tests := readEncodingTests(b)
-	buf := newWriteBuffer(metric.NewCounter(metric.Metadata{}))
+	buf := newWriteBuffer(nilStat)
 	conv, loc := makeTestingConvCfg()
 	ctx := context.Background()
 

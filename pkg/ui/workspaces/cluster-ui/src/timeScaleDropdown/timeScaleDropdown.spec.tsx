@@ -1,15 +1,20 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useState } from "react";
+import { render } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { assert } from "chai";
 import { mount } from "enzyme";
+import moment from "moment-timezone";
+import React, { useState } from "react";
+import { MemoryRouter } from "react-router";
+
+import { timeFormat as customMenuTimeFormat } from "../dateRangeMenu";
+
+import RangeSelect from "./rangeSelect";
+import { TimeFrameControls } from "./timeFrameControls";
 import {
   formatRangeSelectSelected,
   generateDisabledArrows,
@@ -19,15 +24,7 @@ import {
   TimeScaleDropdown,
 } from "./timeScaleDropdown";
 import * as timescale from "./timeScaleTypes";
-import moment from "moment-timezone";
-import { MemoryRouter } from "react-router";
-import TimeFrameControls from "./timeFrameControls";
-import RangeSelect from "./rangeSelect";
-import { timeFormat as customMenuTimeFormat } from "../dateRangeMenu";
-import { assert } from "chai";
 import { TimeWindow, ArrowDirection, TimeScale } from "./timeScaleTypes";
-import { render } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 
 /**
  * This wrapper holds the time scale state to allow tests to render a stateful, functional component,
@@ -89,9 +86,9 @@ describe("<TimeScaleDropdown> component", function () {
     jest.setSystemTime(getNow().toDate());
   });
 
-  it("updates as different preset options are selected", () => {
+  it("updates as different preset options are selected", async () => {
     const mockSetTimeScale = jest.fn();
-    const { getByText, queryByText } = render(
+    const { getByText, queryByText, getByTestId, baseElement } = render(
       <MemoryRouter>
         <TimeScaleDropdownWrapper
           currentScale={new timescale.TimeScaleState().scale}
@@ -106,9 +103,16 @@ describe("<TimeScaleDropdown> component", function () {
     expect(queryByText("Past 6 Hours")).toBeNull();
 
     // Select a different preset option.
-    userEvent.click(getByText("Past Hour"));
-    userEvent.click(getByText("Past 6 Hours"));
-
+    userEvent.click(getByTestId("dropdown-button"));
+    // Dropdown menu is attached to <body> element (it is not a child of the component)
+    // and needs to be queried within Body element (baseElement).
+    const pastSixHoursOption = Array.from(
+      baseElement.querySelectorAll<HTMLButtonElement>(
+        ".range-selector.__options button",
+      ),
+    ).find(el => el.textContent.includes("Past 6 Hours"));
+    expect(pastSixHoursOption).toBeDefined();
+    pastSixHoursOption.click();
     expect(mockSetTimeScale).toHaveBeenCalledTimes(1);
     expect(queryByText("Past Hour")).toBeNull();
     getByText("Past 6 Hours");
@@ -149,7 +153,12 @@ describe("<TimeScaleDropdown> component", function () {
         name: "next time interval",
       }),
     );
-    expect(mockSetTimeScale).toHaveBeenCalledTimes(2);
+    userEvent.click(
+      getByRole("button", {
+        name: "next time interval",
+      }),
+    );
+    expect(mockSetTimeScale).toHaveBeenCalledTimes(3);
     getByText("Past Hour");
   });
 
@@ -186,9 +195,9 @@ describe("<TimeScaleDropdown> component", function () {
     // start and end dropdowns; for an attempt see: https://github.com/jocrl/cockroach/commit/a15ac08b3ed0515a4c4910396e32dc8712cc86ec#diff-491a1b9fd6a93863973c270c8c05ab0d28e0a41f616ecd2222df9fab327806f2R196.
   });
 
-  it("opens directly to the custom menu when a custom time interval is currently selected", () => {
+  it("opens directly to the custom menu when a custom time interval is currently selected", async () => {
     const mockSetTimeScale = jest.fn();
-    const { getAllByText, getByText, getByRole } = render(
+    const { getByText, getByRole, baseElement } = render(
       <MemoryRouter>
         <TimeScaleDropdownWrapper
           currentScale={new timescale.TimeScaleState().scale}
@@ -215,14 +224,37 @@ describe("<TimeScaleDropdown> component", function () {
       getNow().subtract(moment.duration(1 * 2, "h")),
       "1h",
     );
-    userEvent.click(getByText(expectedText[0]));
-    getAllByText("Start (UTC)");
-    getAllByText("End (UTC)");
+    getByText(expectedText[0]);
+    const customTimeIntervalMenu = baseElement.querySelector<HTMLDivElement>(
+      ".range-selector.__custom",
+    );
+    expect(
+      customTimeIntervalMenu.textContent.includes("Start (UTC)"),
+    ).toBeTruthy();
+    expect(
+      customTimeIntervalMenu.textContent.includes("End (UTC)"),
+    ).toBeTruthy();
 
+    const presetButtons = Array.from(
+      baseElement.querySelectorAll<HTMLButtonElement>(
+        ".range-selector.__options button",
+      ),
+    );
+    const backTimeIntervalsButton = Array.from(
+      baseElement.querySelectorAll<HTMLButtonElement>(
+        ".range-selector.__custom span",
+      ),
+    ).find(el => el.textContent.includes("Preset time intervals"));
+    expect(backTimeIntervalsButton).toBeDefined();
     // Clicking "Preset time intervals" should bring the dropdown back to the preset options.
-    userEvent.click(getByText("Preset time intervals"));
-    getByText("Past 30 Minutes");
-    getByText("Past 6 Hours");
+    backTimeIntervalsButton.click();
+
+    expect(
+      presetButtons.find(el => el.textContent.includes("Past 30 Minutes")),
+    ).toBeUndefined();
+    expect(
+      presetButtons.find(el => el.textContent.includes("Past 6 Hours")),
+    ).toBeUndefined();
   });
 });
 

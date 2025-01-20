@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scdeps
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
+	"github.com/cockroachdb/redact"
 )
 
 // ValidateForwardIndexesFn callback function for validating forward indexes.
@@ -66,7 +62,7 @@ type ValidateConstraintFn func(
 
 // NewFakeSessionDataFn callback function used to create session data
 // for the internal executor.
-type NewFakeSessionDataFn func(ctx context.Context, settings *cluster.Settings, opName string) *sessiondata.SessionData
+type NewFakeSessionDataFn func(ctx context.Context, settings *cluster.Settings, opName redact.SafeString) *sessiondata.SessionData
 
 type validator struct {
 	db                         *kv.DB

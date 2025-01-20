@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -129,6 +125,18 @@ func TestVirtualTableGenerators(t *testing.T) {
 		require.NoError(t, err)
 		cancel()
 		cleanup(ctx)
+	})
+
+	t.Run("test worker panic", func(t *testing.T) {
+		worker := func(ctx context.Context, pusher rowPusher) error {
+			panic(errors.New("worker panic"))
+		}
+		next, cleanup, setupError := setupGenerator(ctx, worker, stopper)
+		require.NoError(t, setupError)
+		defer cleanup(ctx)
+		_, err := next()
+		require.Error(t, err)
+		require.True(t, testutils.IsError(err, "worker panic"))
 	})
 }
 

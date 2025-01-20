@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstatsutil
 
@@ -50,6 +45,7 @@ var (
 	_ jsonMarshaler = (*jsonInt)(nil)
 	_ jsonMarshaler = (*stmtFingerprintID)(nil)
 	_ jsonMarshaler = (*int64Array)(nil)
+	_ jsonMarshaler = (*int32Array)(nil)
 	_ jsonMarshaler = &latencyInfo{}
 )
 
@@ -97,7 +93,6 @@ func (s *stmtStatsMetadata) jsonFields() jsonFields {
 		{"querySummary", (*jsonString)(&s.Key.QuerySummary)},
 		{"db", (*jsonString)(&s.Key.Database)},
 		{"distsql", (*jsonBool)(&s.Key.DistSQL)},
-		{"failed", (*jsonBool)(&s.Key.Failed)},
 		{"implicitTxn", (*jsonBool)(&s.Key.ImplicitTxn)},
 		{"vec", (*jsonBool)(&s.Key.Vec)},
 		{"fullScan", (*jsonBool)(&s.Key.FullScan)},
@@ -108,7 +103,6 @@ func (s *stmtStatsMetadata) jsonFlagsOnlyFields() jsonFields {
 	return jsonFields{
 		{"db", (*jsonString)(&s.Key.Database)},
 		{"distsql", (*jsonBool)(&s.Key.DistSQL)},
-		{"failed", (*jsonBool)(&s.Key.Failed)},
 		{"implicitTxn", (*jsonBool)(&s.Key.ImplicitTxn)},
 		{"vec", (*jsonBool)(&s.Key.Vec)},
 		{"fullScan", (*jsonBool)(&s.Key.FullScan)},
@@ -122,7 +116,6 @@ func (s *aggregatedMetadata) jsonFields() jsonFields {
 		{"db", (*stringArray)(&s.Databases)},
 		{"appNames", (*stringArray)(&s.AppNames)},
 		{"distSQLCount", (*jsonInt)(&s.DistSQLCount)},
-		{"failedCount", (*jsonInt)(&s.FailedCount)},
 		{"fullScanCount", (*jsonInt)(&s.FullScanCount)},
 		{"implicitTxn", (*jsonBool)(&s.ImplicitTxn)},
 		{"query", (*jsonString)(&s.Query)},
@@ -132,6 +125,18 @@ func (s *aggregatedMetadata) jsonFields() jsonFields {
 		{"vecCount", (*jsonInt)(&s.VecCount)},
 		{"totalCount", (*jsonInt)(&s.TotalCount)},
 		{"fingerprintID", (*jsonString)(&s.FingerprintID)},
+	}
+}
+
+func (s *aggregatedMetadata) jsonAggregatedFields() jsonFields {
+	return jsonFields{
+		{"db", (*stringArray)(&s.Databases)},
+		{"appNames", (*stringArray)(&s.AppNames)},
+		{"distSQLCount", (*jsonInt)(&s.DistSQLCount)},
+		{"fullScanCount", (*jsonInt)(&s.FullScanCount)},
+		{"implicitTxn", (*jsonBool)(&s.ImplicitTxn)},
+		{"vecCount", (*jsonInt)(&s.VecCount)},
+		{"totalCount", (*jsonInt)(&s.TotalCount)},
 	}
 }
 
@@ -165,6 +170,32 @@ func (a *int64Array) encodeJSON() (json.JSON, error) {
 		builder.Add(jsVal)
 	}
 
+	return builder.Build(), nil
+}
+
+type int32Array []int32
+
+func (a *int32Array) decodeJSON(js json.JSON) error {
+	arrLen := js.Len()
+	for i := 0; i < arrLen; i++ {
+		var value jsonInt
+		valJSON, err := js.FetchValIdx(i)
+		if err != nil {
+			return err
+		}
+		if err := value.decodeJSON(valJSON); err != nil {
+			return err
+		}
+		*a = append(*a, int32(value))
+	}
+	return nil
+}
+
+func (a *int32Array) encodeJSON() (json.JSON, error) {
+	builder := json.NewArrayBuilder(len(*a))
+	for _, value := range *a {
+		builder.Add(json.FromInt64(int64(value)))
+	}
 	return builder.Build(), nil
 }
 
@@ -305,11 +336,14 @@ func (s *innerStmtStats) jsonFields() jsonFields {
 		{"rowsRead", (*numericStats)(&s.RowsRead)},
 		{"rowsWritten", (*numericStats)(&s.RowsWritten)},
 		{"nodes", (*int64Array)(&s.Nodes)},
+		{"kvNodeIds", (*int32Array)(&s.KVNodeIDs)},
 		{"regions", (*stringArray)(&s.Regions)},
+		{"usedFollowerRead", (*jsonBool)(&s.UsedFollowerRead)},
 		{"planGists", (*stringArray)(&s.PlanGists)},
 		{"indexes", (*stringArray)(&s.Indexes)},
 		{"latencyInfo", (*latencyInfo)(&s.LatencyInfo)},
 		{"lastErrorCode", (*jsonString)(&s.LastErrorCode)},
+		{"failureCount", (*jsonInt)(&s.FailureCount)},
 	}
 }
 

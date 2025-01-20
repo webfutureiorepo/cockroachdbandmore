@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package floatcmp
 
@@ -159,7 +154,7 @@ func TestEqualClose(t *testing.T) {
 	}
 }
 
-// TestFloatsMatch is a unit test for floatsMatch() and floatsMatchApprox()
+// TestFloatsMatch is a unit test for FloatsMatch() and FloatsMatchApprox()
 // functions.
 func TestFloatsMatch(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -187,7 +182,7 @@ func TestFloatsMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		if match != tc.match {
-			t.Fatalf("floatsMatch: wrong result on %v", tc)
+			t.Fatalf("FloatsMatch: wrong result on %v", tc)
 		}
 
 		match, err = FloatsMatchApprox(tc.f1, tc.f2)
@@ -195,7 +190,47 @@ func TestFloatsMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		if match != tc.match {
-			t.Fatalf("floatsMatchApprox: wrong result on %v", tc)
+			t.Fatalf("FloatsMatchApprox: wrong result on %v", tc)
+		}
+	}
+}
+
+// TestFloatArraysMatch is a unit test for FloatArraysMatch() and
+// FloatArraysMatchApprox() functions.
+//
+// Note that since these functions use FloatsMatch and FloatsMatchApprox
+// internally, some edge cases like NaN and infinities aren't tested here.
+func TestFloatArraysMatch(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	for _, tc := range []struct {
+		arr1, arr2 string
+		match      bool
+	}{
+		{arr1: "NULL", arr2: "NULL", match: true},
+		{arr1: "NULL", arr2: "{NULL}", match: false},
+		{arr1: "{NULL}", arr2: "NULL", match: false},
+		{arr1: "{NULL}", arr2: "{NULL}", match: true},
+		{arr1: "NULL", arr2: "{0}", match: false},
+		{arr1: "{0}", arr2: "NULL", match: false},
+		{arr1: "{NULL,NULL}", arr2: "{NULL,NULL}", match: true},
+		{arr1: "{NULL,NULL,NULL}", arr2: "{NULL,NULL}", match: false},
+		{arr1: "{-0.0,0.0}", arr2: "{0.0,-0.0}", match: true},
+		{arr1: "{0.1,0.2,0.3}", arr2: "{0.1,0.2,0.3}", match: true},
+	} {
+		match, err := FloatArraysMatch(tc.arr1, tc.arr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if match != tc.match {
+			t.Fatalf("FloatArraysMatch: wrong result on %v", tc)
+		}
+
+		match, err = FloatArraysMatchApprox(tc.arr1, tc.arr2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if match != tc.match {
+			t.Fatalf("FloatArraysMatchApprox: wrong result on %v", tc)
 		}
 	}
 }

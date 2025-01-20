@@ -1,10 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package engineccl
 
@@ -95,7 +92,8 @@ func encryptManySubBlocks(
 // Running non-fips mode:
 // ./dev test pkg/ccl/storageccl/engineccl -f CTRStreamDataDriven  --rewrite --stream-output
 // Running fips mode:
-// ./dev test-binaries --cross=crosslinuxfips pkg/ccl/storageccl/engineccl && mkdir -p fipsbin && tar xf bin/test_binaries.tar.gz -C fipsbin && docker run -v $PWD/fipsbin:/fipsbin -it redhat/ubi9 bash -c 'cd /fipsbin/pkg/ccl/storageccl/engineccl/bin && ./run.sh -test.run CTRStreamDataDriven'
+// ./dev test-binaries --cross=crosslinuxfips pkg/ccl/storageccl/engineccl && mkdir -p fipsbin && tar xf bin/test_binaries.tar.gz -C fipsbin && docker run -v
+// $PWD/fipsbin:/fipsbin -it redhat/ubi9 bash -c 'cd /fipsbin/pkg/ccl/storageccl/engineccl/bin && ./run.sh -test.run CTRStreamDataDriven'
 func TestCTRStreamDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	for _, impl := range []string{"v1", "v2"} {
@@ -155,8 +153,8 @@ func TestCTRStreamDataDriven(t *testing.T) {
 						d.MaybeScanArgs(t, "key", &keyName)
 						ivName := "default"
 						d.MaybeScanArgs(t, "iv", &ivName)
-						skipV1 := false
-						d.MaybeScanArgs(t, "skip-v1", &skipV1)
+						var onlyVersion string
+						d.MaybeScanArgs(t, "only-version", &onlyVersion)
 						iv := ivs[ivName]
 						var fcs FileStream
 						if impl == "v1" {
@@ -178,7 +176,7 @@ func TestCTRStreamDataDriven(t *testing.T) {
 						}
 
 						outputString := string(output)
-						if skipV1 && impl == "v1" {
+						if onlyVersion != "" && impl != onlyVersion {
 							return d.Expected
 						}
 						_, isDuplicate := seenCiphertexts[outputString]
@@ -242,10 +240,21 @@ type testKeyManager struct {
 	activeID string
 }
 
-func (m *testKeyManager) ActiveKey(ctx context.Context) (*enginepbccl.SecretKey, error) {
+var _ PebbleKeyManager = &testKeyManager{}
+
+func (m *testKeyManager) ActiveKeyForWriter(ctx context.Context) (*enginepbccl.SecretKey, error) {
 	key, _ := m.GetKey(m.activeID)
 	return key, nil
 }
+
+func (m *testKeyManager) ActiveKeyInfoForStats() *enginepbccl.KeyInfo {
+	key, _ := m.GetKey(m.activeID)
+	if key != nil {
+		return key.Info
+	}
+	return nil
+}
+
 func (m *testKeyManager) GetKey(id string) (*enginepbccl.SecretKey, error) {
 	key, found := m.keys[id]
 	if !found {
@@ -320,9 +329,9 @@ func TestFileCipherStreamCreator(t *testing.T) {
 	// Make the active key = nil, so encryption/decryption is a noop.
 	km.activeID = "bar"
 	encSettings, fs5, err := fcs.CreateNew(context.Background())
+	require.NoError(t, err)
 	require.Equal(t, "", encSettings.KeyId)
 	require.Equal(t, enginepbccl.EncryptionType_Plaintext, encSettings.EncryptionType)
-	require.NoError(t, err)
 	fs5.Encrypt(5, data)
 	if diff := pretty.Diff(data, testData); diff != nil {
 		t.Fatalf("%s\n%s", strings.Join(diff, "\n"), data)
@@ -332,7 +341,8 @@ func TestFileCipherStreamCreator(t *testing.T) {
 // Running non-fips mode:
 // ./dev bench pkg/ccl/storageccl/engineccl -f FileCipherStream --stream-output --ignore-cache
 // Running fips mode (be sure to look for fips=true in the output):
-// ./dev test-binaries --cross=crosslinuxfips pkg/ccl/storageccl/engineccl && mkdir -p fipsbin && tar xf bin/test_binaries.tar.gz -C fipsbin && docker run -v $PWD/fipsbin:/fipsbin -it redhat/ubi9 /fipsbin/pkg/ccl/storageccl/engineccl/bin/engineccl_test -test.run '^$' -test.bench FileCipherStream
+// ./dev test-binaries --cross=crosslinuxfips pkg/ccl/storageccl/engineccl && mkdir -p fipsbin && tar xf bin/test_binaries.tar.gz -C fipsbin && docker run -v
+// $PWD/fipsbin:/fipsbin -it redhat/ubi9 /fipsbin/pkg/ccl/storageccl/engineccl/bin/engineccl_test -test.run '^$' -test.bench FileCipherStream
 func BenchmarkFileCipherStream(b *testing.B) {
 	isFips := fipsccl.IsFIPSReady()
 	for _, impl := range []string{"v1", "v2"} {

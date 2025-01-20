@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -15,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -451,12 +447,12 @@ func TestUserFileUploadRecursive(t *testing.T) {
 					dstDir = tc.destination + "/" + filepath.Base(testDir)
 				}
 
-				err = filepath.Walk(testDir,
-					func(path string, info os.FileInfo, err error) error {
+				err = filepath.WalkDir(testDir,
+					func(path string, d fs.DirEntry, err error) error {
 						if err != nil {
 							return err
 						}
-						if info.IsDir() {
+						if d.IsDir() {
 							return nil
 						}
 						relPath := strings.TrimPrefix(path, testDir+"/")
@@ -888,7 +884,7 @@ func TestUsernameUserfileInteraction(t *testing.T) {
 
 			userURL, cleanup2 := sqlutils.PGUrlWithOptionalClientCerts(t,
 				c.Server.AdvSQLAddr(), t.Name(),
-				url.UserPassword(tc.username, "a"), false)
+				url.UserPassword(tc.username, "a"), false, "")
 			defer cleanup2()
 
 			_, err := c.RunWithCapture(fmt.Sprintf("userfile upload %s %s --url=%s",

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 
 package kvserver_test
@@ -63,6 +58,10 @@ func TestReplicaRaftOverload(t *testing.T) {
 
 	{
 		_, err := tc.ServerConn(0).Exec(`SET CLUSTER SETTING admission.kv.pause_replication_io_threshold = 1.0`)
+		require.NoError(t, err)
+		// Replica pausing is disabled in apply_to_all mode, so make sure the
+		// cluster is running with a setting where replica pausing is enabled.
+		_, err = tc.ServerConn(0).Exec(`SET CLUSTER SETTING kvadmission.flow_control.mode = "apply_to_elastic"`)
 		require.NoError(t, err)
 	}
 	k := tc.ScratchRange(t)

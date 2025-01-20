@@ -1,21 +1,18 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import Long from "long";
 import moment from "moment-timezone";
+
+import { RequestError } from "../util";
+
 import {
   executeInternalSql,
   SqlExecutionRequest,
   sqlResultsAreEmpty,
 } from "./sqlApi";
-import { RequestError } from "../util";
 
 type ScheduleColumns = {
   id: string;
@@ -79,13 +76,13 @@ export function getSchedules(req: {
     execute: true,
   };
   return executeInternalSql<ScheduleColumns>(request).then(result => {
-    const txn_results = result.execution.txn_results;
+    const txnResults = result.execution.txn_results;
     if (sqlResultsAreEmpty(result)) {
       // No data.
       return [];
     }
 
-    return txn_results[0].rows.map(row => {
+    return txnResults[0].rows.map(row => {
       return {
         id: Long.fromString(row.id),
         label: row.label,
@@ -123,24 +120,16 @@ export function getSchedule(id: Long): Promise<Schedule> {
     execute: true,
   };
   return executeInternalSql<ScheduleColumns>(request).then(result => {
-    const txn_results = result.execution.txn_results;
-    if (txn_results.length === 0 || !txn_results[0].rows) {
+    const txnResults = result.execution.txn_results;
+    if (txnResults.length === 0 || !txnResults[0].rows) {
       // No data.
-      throw new RequestError(
-        "Bad Request",
-        400,
-        "No schedule found with this ID.",
-      );
+      throw new RequestError(400, "No schedule found with this ID.");
     }
 
-    if (txn_results[0].rows.length > 1) {
-      throw new RequestError(
-        "Internal Server Error",
-        500,
-        "Multiple schedules found for ID.",
-      );
+    if (txnResults[0].rows.length > 1) {
+      throw new RequestError(500, "Multiple schedules found for ID.");
     }
-    const row = txn_results[0].rows[0];
+    const row = txnResults[0].rows[0];
     return {
       id: Long.fromString(row.id),
       label: row.label,

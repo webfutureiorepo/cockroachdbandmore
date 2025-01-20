@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecovery
 
@@ -15,6 +10,7 @@ import (
 	"os"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/loqrecovery/loqrecoverypb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/vfs"
@@ -54,7 +50,7 @@ func (s PlanStore) SavePlan(plan loqrecoverypb.ReplicaUpdatePlan) error {
 	defer func() { _ = s.fs.Remove(tmpFileName) }()
 
 	if err := func() error {
-		outFile, err := s.fs.Create(tmpFileName)
+		outFile, err := s.fs.Create(tmpFileName, fs.UnspecifiedWriteCategory)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create file %q", tmpFileName)
 		}

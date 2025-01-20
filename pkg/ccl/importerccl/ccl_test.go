@@ -1,10 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // importerccl is a package where we can write tests of IMPORT that require that
 // ccl-only functionality be enabled as well.
@@ -13,9 +10,11 @@ package importerccl
 import (
 	"context"
 	gosql "database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -38,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -153,6 +153,7 @@ DROP VIEW IF EXISTS v`,
 			table     string
 			sql       string
 			create    string
+			unsafe    string
 			args      []interface{}
 			errString string
 			data      string
@@ -193,6 +194,17 @@ DROP VIEW IF EXISTS v`,
 				args:      []interface{}{srv.URL},
 				data:      "1,us-east1\n",
 				errString: `failed to validate unique constraint`,
+			},
+			{
+				name:  "import-into-multi-region-regional-by-row-dupes-no-validate",
+				db:    "multi_region",
+				table: "mr_regional_by_row",
+				create: "CREATE TABLE mr_regional_by_row (i INT8 PRIMARY KEY) LOCALITY REGIONAL BY ROW;" +
+					"INSERT INTO mr_regional_by_row (i, crdb_region) VALUES (1, 'us-east2')",
+				unsafe: "SET CLUSTER SETTING bulkio.import.constraint_validation.unsafe.enabled=false",
+				sql:    "IMPORT INTO mr_regional_by_row (i, crdb_region) CSV DATA ($1)",
+				args:   []interface{}{srv.URL},
+				data:   "1,us-east1\n",
 			},
 			{
 				name:   "import-into-multi-region-regional-by-row-to-multi-region-database-concurrent-table-add",
@@ -265,6 +277,29 @@ CREATE TABLE mr_regional_by_row (i INT8 PRIMARY KEY, s typ, b bytea) LOCALITY RE
 				}
 				tdb.Exec(t, fmt.Sprintf(`SET DATABASE = %q`, test.db))
 				tdb.Exec(t, fmt.Sprintf("DROP TABLE IF EXISTS %q CASCADE", test.table))
+
+				if test.unsafe != "" {
+					// We need to first try and set the cluster setting, and
+					// then parse the error to get the unsafe override key.
+					_, err := sqlDB.Exec(test.unsafe)
+					require.Error(t, err)
+
+					getKey := func(err error) string {
+						require.Contains(t, err.Error(), "may cause cluster instability")
+						var pqErr *pq.Error
+						ok := errors.As(err, &pqErr)
+						require.True(t, ok)
+						require.True(t, strings.HasPrefix(pqErr.Detail, "key:"), pqErr.Detail)
+						return strings.TrimPrefix(pqErr.Detail, "key: ")
+					}
+					key := getKey(err)
+
+					// Now set the key and try again. We're not expecting an error any more.
+					_, err = sqlDB.Exec("SET unsafe_setting_interlock_key = $1", key)
+					require.NoError(t, err)
+					_, err = sqlDB.Exec(test.unsafe)
+					require.NoError(t, err)
+				}
 
 				if test.data != "" {
 					data = test.data

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2023 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname "${0}"))))"
@@ -8,8 +14,8 @@ source "$dir/teamcity-support.sh"
 exit_status=0
 
 
-bazel build //pkg/cmd/bazci --config=ci
-BAZEL_BIN=$(bazel info bazel-bin --config=ci)
+bazel build //pkg/cmd/bazci
+BAZEL_BIN=$(bazel info bazel-bin)
 
 # Run schema changer comparator test.
 $BAZEL_BIN/pkg/cmd/bazci/bazci_/bazci test -- --config=ci \

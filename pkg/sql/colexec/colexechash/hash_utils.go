@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexechash
 
@@ -176,12 +171,12 @@ func (d *TupleHashDistributor) Distribute(b coldata.Batch, hashCols []uint32) []
 
 	// Check if we received a batch with more tuples than the current
 	// allocation size and increase it if so.
-	if n > d.datumAlloc.AllocSize {
-		d.datumAlloc.AllocSize = n
+	if n > d.datumAlloc.DefaultAllocSize {
+		d.datumAlloc.DefaultAllocSize = n
 	}
 
 	for _, i := range hashCols {
-		rehash64(d.buckets, b.ColVec(int(i)), n, b.Selection(), d.cancelChecker, &d.datumAlloc)
+		rehash(d.buckets, b.ColVec(int(i)), n, b.Selection(), d.cancelChecker, &d.datumAlloc)
 	}
 
 	finalizeHash(d.buckets, n, uint64(len(d.selections)))

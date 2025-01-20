@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 dir="$(dirname $(dirname $(dirname $(dirname "${0}"))))"
 source "$dir/teamcity-support.sh"
 
-bazel build //pkg/cmd/bazci --config=ci
-BAZEL_BIN=$(bazel info bazel-bin --config=ci)
+bazel build //pkg/cmd/bazci
+BAZEL_BIN=$(bazel info bazel-bin)
 google_credentials="$GOOGLE_EPHEMERAL_CREDENTIALS"
 
 log_into_gcloud
@@ -75,7 +81,7 @@ if [ $exit_status = 0 ]; then
 fi
 
 # Generate a corpus for all mixed version variants
-for config in local-mixed-23.1; do
+for config in local-mixed-24.3; do
   $BAZEL_BIN/pkg/cmd/bazci/bazci_/bazci test -- --config=ci \
       //pkg/sql/logictest/tests/$config/... \
       --test_arg=--declarative-corpus=$ARTIFACTS_DIR/corpus-mixed \

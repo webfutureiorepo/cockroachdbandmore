@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
@@ -127,8 +122,8 @@ func DeleteOldStatsForOtherColumns(
 
 // deleteStatsForDroppedTables deletes all statistics for at most 'limit' number
 // of dropped tables.
-func deleteStatsForDroppedTables(ctx context.Context, ex isql.Executor, limit int64) error {
-	_, err := ex.Exec(
+func deleteStatsForDroppedTables(ctx context.Context, db isql.DB, limit int64) error {
+	_, err := db.Executor().Exec(
 		ctx, "delete-statistics-for-dropped-tables", nil, /* txn */
 		fmt.Sprintf(`DELETE FROM system.table_statistics
                             WHERE "tableID" NOT IN (SELECT table_id FROM crdb_internal.tables)

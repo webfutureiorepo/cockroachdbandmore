@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
@@ -28,14 +24,14 @@ import (
 // mutations are applied, or the order of any returned rows (i.e. it won't
 // become a physical property required of the Delete operator).
 func (b *Builder) buildDelete(del *tree.Delete, inScope *scope) (outScope *scope) {
-	// UX friendliness safeguard.
-	if del.Where == nil && b.evalCtx.SessionData().SafeUpdates {
-		panic(pgerror.DangerousStatementf("DELETE without WHERE clause"))
-	}
-
 	if del.OrderBy != nil && del.Limit == nil {
 		panic(pgerror.Newf(pgcode.Syntax,
 			"DELETE statement requires LIMIT when ORDER BY is used"))
+	}
+
+	// UX friendliness safeguard.
+	if del.Where == nil && del.Limit == nil && b.evalCtx.SessionData().SafeUpdates {
+		panic(pgerror.DangerousStatementf("DELETE without WHERE or LIMIT clause"))
 	}
 
 	batch := del.Batch
@@ -92,6 +88,9 @@ func (b *Builder) buildDelete(del *tree.Delete, inScope *scope) (outScope *scope
 	// All columns from the delete table will be projected.
 	mb.buildInputForDelete(inScope, del.Table, del.Where, del.Using, del.Limit, del.OrderBy)
 
+	// Project row-level BEFORE triggers for DELETE.
+	mb.buildRowLevelBeforeTriggers(tree.TriggerEventDelete, false /* cascade */)
+
 	// Build the final delete statement, including any returned expressions.
 	if resultsNeeded(del.Returning) {
 		mb.buildDelete(del.Returning.(*tree.ReturningExprs))
@@ -107,8 +106,13 @@ func (b *Builder) buildDelete(del *tree.Delete, inScope *scope) (outScope *scope
 func (mb *mutationBuilder) buildDelete(returning *tree.ReturningExprs) {
 	mb.buildFKChecksAndCascadesForDelete()
 
+	mb.buildRowLevelAfterTriggers(opt.DeleteOp)
+
 	// Project partial index DEL boolean columns.
 	mb.projectPartialIndexDelCols()
+
+	// Project vector index DEL columns.
+	mb.projectVectorIndexColsForDelete()
 
 	private := mb.makeMutationPrivate(returning != nil)
 	for _, col := range mb.extraAccessibleCols {

@@ -1,46 +1,42 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useCallback, useState } from "react";
+import CopyOutlined from "@ant-design/icons/CopyOutlined";
+import { InlineAlert } from "@cockroachlabs/ui-components";
+import { message } from "antd";
+import classNames from "classnames/bind";
 import copy from "copy-to-clipboard";
-import { message, Icon } from "antd";
-import "antd/lib/message/style";
-import "antd/lib/icon/style";
-import { Modal } from "../modal";
-import { Text, TextTypes } from "../text";
-import { Button } from "../button";
+import React, { useCallback, useState } from "react";
+
+import { Anchor } from "../anchor";
 import {
   executeIndexRecAction,
   IndexActionResponse,
 } from "../api/indexActionsApi";
+import { Button } from "../button";
+import { Modal } from "../modal";
+import { Text, TextTypes } from "../text";
 import {
   alterIndex,
   createIndex,
   dropIndex,
   onlineSchemaChanges,
 } from "../util";
-import { Anchor } from "../anchor";
-import { InlineAlert } from "@cockroachlabs/ui-components";
-import classNames from "classnames/bind";
+
 import styles from "./indexActionBtn.module.scss";
 import { InsightType } from "./types";
 
 const cx = classNames.bind(styles);
 
-interface idxRecProps {
+interface IdxRecProps {
   actionQuery: string;
   actionType: InsightType;
   database: string;
 }
 
-const IdxRecAction = (props: idxRecProps): React.ReactElement => {
+const IdxRecAction = (props: IdxRecProps): React.ReactElement => {
   const [visible, setVisible] = useState(false);
   const [applying, setApplying] = useState(false);
   const [btnOkLabel, setBtnOkLabel] = useState("Apply");
@@ -171,7 +167,7 @@ const IdxRecAction = (props: idxRecProps): React.ReactElement => {
             type={"unstyled-link"}
             size={"small"}
             className={cx("bottom-corner")}
-            icon={<Icon type="copy" className={cx("copy-icon")} />}
+            icon={<CopyOutlined className={cx("copy-icon")} />}
             onClick={onCopyClick}
           >
             Copy
@@ -264,7 +260,9 @@ export function createIdxName(statement: string): string {
   // The table name is fully qualified at this point, but we don't need the full name,
   // so just use the last value (also an index name can't have ".")
   const idxNameArr = idxName.split(".");
-  idxName = idxNameArr[idxNameArr.length - 1].replace(/\s/g, "_") + suffix;
+  idxName =
+    idxNameArr[idxNameArr.length - 1].replace(/"/g, "").replace(/\s/g, "_") +
+    suffix;
 
   return statement.replace(
     "CREATE INDEX ON ",

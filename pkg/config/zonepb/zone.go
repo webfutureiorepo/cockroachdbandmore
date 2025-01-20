@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package zonepb
 
@@ -15,12 +10,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -152,7 +150,8 @@ func ResolveZoneSpecifier(
 		if id, ok := NamedZones[NamedZone(zs.NamedZone)]; ok {
 			return id, nil
 		}
-		return 0, fmt.Errorf("%q is not a built-in zone", string(zs.NamedZone))
+		return 0, pgerror.Newf(pgcode.InvalidName, "%q is not a built-in zone",
+			string(zs.NamedZone))
 	}
 
 	if zs.Database != "" {
@@ -343,10 +342,16 @@ func (z *ZoneConfig) ValidateTandemFields() error {
 	return nil
 }
 
-// MinRangeMaxBytes is the minimum value for range max bytes.
+// minRangeMaxBytes is the minimum value for range max bytes.
 // The default, 64 MiB, is half of the default range_min_bytes
 var minRangeMaxBytes = envutil.EnvOrDefaultInt64("COCKROACH_MIN_RANGE_MAX_BYTES",
 	64<<20 /* 64 MiB */)
+
+// maxRangeMaxBytes is the maximum value for range max bytes. The default, 8
+// GiB, is sixteen times the default range_max_bytes. Also see
+// kv.range.range_size_hard_cap.
+var maxRangeMaxBytes = envutil.EnvOrDefaultInt64("COCKROACH_MAX_RANGE_MAX_BYTES",
+	8<<30 /* 8 GiB */)
 
 func TestingSetMinRangeMaxBytes(v int64) func() {
 	old := minRangeMaxBytes
@@ -398,6 +403,12 @@ func (z *ZoneConfig) Validate() error {
 	if z.RangeMaxBytes != nil && *z.RangeMaxBytes < minRangeMaxBytes {
 		return fmt.Errorf("RangeMaxBytes %d less than minimum allowed %d",
 			*z.RangeMaxBytes, minRangeMaxBytes)
+	}
+
+	if z.RangeMaxBytes != nil && *z.RangeMaxBytes > maxRangeMaxBytes {
+		return fmt.Errorf("RangeMaxBytes %d greater than maximum allowed %d",
+			*z.RangeMaxBytes, maxRangeMaxBytes,
+		)
 	}
 
 	if z.RangeMinBytes != nil && *z.RangeMinBytes < 0 {
@@ -1104,6 +1115,21 @@ func (z *ZoneConfig) GetSubzoneExact(indexID uint32, partition string) *Subzone 
 	return nil
 }
 
+// GetSubzoneIndex returns the index of the most specific Subzone that applies
+// to the specified index ID and partition, if any exists. The partition can be
+// left unspecified to get the Subzone for an entire index, if it exists. The
+// index ID, however, must always be provided -- even when looking for a
+// partition's Subzone. If nothing exists in z for the provided index ID and
+// partition, this method returns -1.
+func (z *ZoneConfig) GetSubzoneIndex(indexID uint32, partition string) int32 {
+	for i, s := range z.Subzones {
+		if s.IndexID == indexID && s.PartitionName == partition {
+			return int32(i)
+		}
+	}
+	return -1
+}
+
 // GetSubzoneForKeySuffix returns the ZoneConfig for the subzone that contains
 // keySuffix, if it exists and its position in the subzones slice.
 func (z ZoneConfig) GetSubzoneForKeySuffix(keySuffix []byte) (*Subzone, int32) {
@@ -1142,6 +1168,58 @@ func (z *ZoneConfig) DeleteSubzone(indexID uint32, partition string) bool {
 		}
 	}
 	return false
+}
+
+// DeleteSubzoneSpansForSubzoneIndex removes all subzoneSpans with the given
+// subzoneIndex from z, if any exist.
+func (z *ZoneConfig) DeleteSubzoneSpansForSubzoneIndex(subzoneIndex int32) {
+	filteredSpans := make([]SubzoneSpan, 0, len(z.SubzoneSpans))
+	for _, s := range z.SubzoneSpans {
+		if s.SubzoneIndex != subzoneIndex {
+			filteredSpans = append(filteredSpans, s)
+		}
+	}
+	z.SubzoneSpans = filteredSpans
+}
+
+// DeleteSubzoneSpans deletes all given SubzoneSpan from z.
+func (z *ZoneConfig) DeleteSubzoneSpans(spansToDelete []SubzoneSpan) {
+	toDeleteMap := make(map[string]struct{}, len(spansToDelete))
+	for _, span := range spansToDelete {
+		key := span.Key.String() + span.EndKey.String()
+		toDeleteMap[key] = struct{}{}
+	}
+
+	filteredSpans := make([]SubzoneSpan, 0, len(z.SubzoneSpans))
+	for _, s := range z.SubzoneSpans {
+		key := s.Key.String() + s.EndKey.String()
+		if _, found := toDeleteMap[key]; !found {
+			filteredSpans = append(filteredSpans, s)
+		}
+	}
+
+	z.SubzoneSpans = filteredSpans
+}
+
+// MergeSubzoneSpans merges the given subzoneSpans into z.
+func (z *ZoneConfig) MergeSubzoneSpans(subzoneSpans []SubzoneSpan) {
+	z.SubzoneSpans = append(z.SubzoneSpans, subzoneSpans...)
+	slices.SortFunc(z.SubzoneSpans, func(a, b SubzoneSpan) int {
+		// Our spans are non-overlapping; comparing `EndKey`s is not necessary.
+		return a.Key.Compare(b.Key)
+	})
+}
+
+// FilterSubzoneSpansByIdx retrieves all subzone spans with the given
+// subzoneIndex.
+func (z *ZoneConfig) FilterSubzoneSpansByIdx(subzoneIndex int32) []SubzoneSpan {
+	filteredSpans := make([]SubzoneSpan, 0, len(z.SubzoneSpans))
+	for _, s := range z.SubzoneSpans {
+		if s.SubzoneIndex == subzoneIndex {
+			filteredSpans = append(filteredSpans, s)
+		}
+	}
+	return filteredSpans
 }
 
 // DeleteIndexSubzones deletes all subzones that refer to the index with the
@@ -1312,4 +1390,63 @@ func init() {
 			len(NamedZonesList),
 		))
 	}
+}
+
+// ValidateNoRepeatKeysInZone checks that there are not duplicated values for a
+// particular constraint. For example, constraints
+// [+region=us-east1,+region=us-east2] will be rejected. Additionally, invalid
+// constraints such as [+region=us-east1, -region=us-east1] will also be
+// rejected.
+func ValidateNoRepeatKeysInZone(zone *ZoneConfig) error {
+	for _, leasePreference := range zone.LeasePreferences {
+		if err := validateNoRepeatKeysInConstraints(leasePreference.Constraints); err != nil {
+			return err
+		}
+	}
+	if err := validateNoRepeatKeysInConjunction(zone.Constraints); err != nil {
+		return err
+	}
+	return validateNoRepeatKeysInConjunction(zone.VoterConstraints)
+}
+
+func validateNoRepeatKeysInConjunction(conjunctions []ConstraintsConjunction) error {
+	for _, constraints := range conjunctions {
+		if err := validateNoRepeatKeysInConstraints(constraints.Constraints); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateNoRepeatKeysInConstraints(constraints []Constraint) error {
+	// Because we expect to have a small number of constraints, a nested
+	// loop is probably better than allocating a map.
+	for i, curr := range constraints {
+		for _, other := range constraints[i+1:] {
+			// We don't want to enter the other validation logic if both of the constraints
+			// are attributes, due to the keys being the same for attributes.
+			if curr.Key == "" && other.Key == "" {
+				if curr.Value == other.Value {
+					return pgerror.Newf(pgcode.CheckViolation,
+						"incompatible zone constraints: %q and %q", curr, other)
+				}
+			} else {
+				if curr.Type == Constraint_REQUIRED {
+					if other.Type == Constraint_REQUIRED && other.Key == curr.Key ||
+						other.Type == Constraint_PROHIBITED && other.Key == curr.Key && other.Value == curr.Value {
+						return pgerror.Newf(pgcode.CheckViolation,
+							"incompatible zone constraints: %q and %q", curr, other)
+					}
+				} else if curr.Type == Constraint_PROHIBITED {
+					// If we have a -k=v pair, verify that there are not any
+					// +k=v pairs in the constraints.
+					if other.Type == Constraint_REQUIRED && other.Key == curr.Key && other.Value == curr.Value {
+						return pgerror.Newf(pgcode.CheckViolation,
+							"incompatible zone constraints: %q and %q", curr, other)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }

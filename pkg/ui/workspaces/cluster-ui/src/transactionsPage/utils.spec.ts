@@ -1,24 +1,21 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import * as protos from "@cockroachlabs/crdb-protobuf-client";
 import { assert } from "chai";
+import Long from "long";
+
+import { Filters } from "../queryFilter";
+
+import { data, nodeRegions } from "./transactions.fixture";
 import {
   filterTransactions,
   generateRegion,
   getStatementsByFingerprintId,
   statementFingerprintIdsToText,
 } from "./utils";
-import { Filters } from "../queryFilter";
-import { data, nodeRegions } from "./transactions.fixture";
-import Long from "long";
-import * as protos from "@cockroachlabs/crdb-protobuf-client";
 
 type Statement =
   protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
@@ -28,15 +25,18 @@ type Transaction =
 describe("getStatementsByFingerprintId", () => {
   it("filters statements by fingerprint id", () => {
     const selectedStatements = getStatementsByFingerprintId(
-      [Long.fromInt(4104049045071304794), Long.fromInt(3334049045071304794)],
       [
-        { id: Long.fromInt(4104049045071304794) },
-        { id: Long.fromInt(5554049045071304794) },
+        Long.fromString("4104049045071304794"),
+        Long.fromString("3334049045071304794"),
+      ],
+      [
+        { id: Long.fromString("4104049045071304794") },
+        { id: Long.fromString("5554049045071304794") },
       ],
     );
     assert.lengthOf(selectedStatements, 1);
     assert.isTrue(
-      selectedStatements[0].id.eq(Long.fromInt(4104049045071304794)),
+      selectedStatements[0].id.eq(Long.fromString("4104049045071304794")),
     );
   });
 });
@@ -259,7 +259,7 @@ describe("statementFingerprintIdsToText", () => {
   it("translate statement fingerprint IDs into queries", () => {
     const statements = [
       {
-        id: Long.fromInt(4104049045071304794),
+        id: Long.fromString("4104049045071304794"),
         key: {
           key_data: {
             query: "SELECT _",
@@ -267,7 +267,7 @@ describe("statementFingerprintIdsToText", () => {
         },
       },
       {
-        id: Long.fromInt(5104049045071304794),
+        id: Long.fromString("5104049045071304794"),
         key: {
           key_data: {
             query: "SELECT _, _",
@@ -276,10 +276,10 @@ describe("statementFingerprintIdsToText", () => {
       },
     ];
     const statementFingerprintIds = [
-      Long.fromInt(4104049045071304794),
-      Long.fromInt(5104049045071304794),
-      Long.fromInt(4104049045071304794),
-      Long.fromInt(4104049045071304794),
+      Long.fromString("4104049045071304794"),
+      Long.fromString("5104049045071304794"),
+      Long.fromString("4104049045071304794"),
+      Long.fromString("4104049045071304794"),
     ];
 
     assert.equal(

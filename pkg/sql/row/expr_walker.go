@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package row
 
@@ -279,7 +274,7 @@ func importGenUUID(
 		c.randSource = makeImportRand(c)
 	}
 	gen := c.randSource.Int63(c)
-	id := uuid.MakeV4()
+	id := uuid.UUID{}
 	id.DeterministicV4(uint64(gen), uint64(1<<63))
 	return tree.NewDUuid(tree.DUuid{UUID: id}), nil
 }
@@ -803,7 +798,7 @@ func (v *importDefaultExprVisitor) VisitPost(expr tree.Expr) (newExpr tree.Expr)
 func sanitizeExprsForImport(
 	ctx context.Context, evalCtx *eval.Context, expr tree.Expr, targetType *types.T,
 ) (tree.TypedExpr, overrideVolatility, error) {
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 
 	// If we have immutable expressions, then we can just return it right away.
 	typedExpr, err := schemaexpr.SanitizeVarFreeExpr(

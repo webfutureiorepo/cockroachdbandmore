@@ -8,10 +8,6 @@ go_test(
         "main_test.go",
     ],
     data = ["//pkg/sql/sem/eval:testdata"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/build/bazel",
@@ -27,7 +23,6 @@ go_test(
         "//pkg/sql/execinfra",
         "//pkg/sql/execinfrapb",
         "//pkg/sql/parser",
-        "//pkg/sql/rowenc",
         "//pkg/sql/rowexec",
         "//pkg/sql/sem/builtins",
         "//pkg/sql/sem/eval",

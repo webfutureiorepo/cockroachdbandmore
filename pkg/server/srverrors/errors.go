@@ -1,18 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package srverrors
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -30,8 +24,7 @@ func ServerError(ctx context.Context, err error) error {
 	// Include the PGCode in the message for easier troubleshooting
 	errCode := pgerror.GetPGCode(err).String()
 	if errCode != pgcode.Uncategorized.String() {
-		errMessage := fmt.Sprintf("%s Error Code: %s", ErrAPIInternalErrorString, errCode)
-		return grpcstatus.Errorf(codes.Internal, errMessage)
+		return grpcstatus.Errorf(codes.Internal, "%s Error Code: %s", ErrAPIInternalErrorString, errCode)
 	}
 
 	// The error is already grpcstatus formatted error.
@@ -56,7 +49,7 @@ func ServerErrorf(ctx context.Context, format string, args ...interface{}) error
 var ErrAPIInternalErrorString = "An internal server error has occurred. Please check your CockroachDB logs for more details."
 
 // ErrAPIInternalError is the gRPC status error returned when an internal error was encountered.
-var ErrAPIInternalError = grpcstatus.Errorf(
+var ErrAPIInternalError = grpcstatus.Error(
 	codes.Internal,
 	ErrAPIInternalErrorString,
 )

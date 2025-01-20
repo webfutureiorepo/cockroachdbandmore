@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package nstree
 
@@ -175,8 +170,8 @@ func (c Catalog) LookupZoneConfig(id descpb.ID) catalog.ZoneConfig {
 }
 
 // LookupNamespaceEntry looks up a descriptor ID by name.
-func (c Catalog) LookupNamespaceEntry(key catalog.NameKey) NamespaceEntry {
-	if !c.IsInitialized() || key == nil {
+func (c Catalog) LookupNamespaceEntry(key descpb.NameInfo) NamespaceEntry {
+	if !c.IsInitialized() {
 		return nil
 	}
 	e := c.byName.getByName(key.GetParentID(), key.GetParentSchemaID(), key.GetName())
@@ -262,7 +257,7 @@ func (c Catalog) Validate(
 // ValidateNamespaceEntry returns an error if the specified namespace entry
 // is invalid.
 func (c Catalog) ValidateNamespaceEntry(key catalog.NameKey) error {
-	ne := c.LookupNamespaceEntry(key)
+	ne := c.LookupNamespaceEntry(catalog.MakeNameInfo(key))
 	if ne == nil {
 		return errors.AssertionFailedf("invalid namespace entry")
 	}
@@ -365,12 +360,13 @@ func (c Catalog) FilterByNames(nameInfos []descpb.NameInfo) Catalog {
 		return Catalog{}
 	}
 	var ret MutableCatalog
-	for _, ni := range nameInfos {
+	for i := range nameInfos {
+		ni := &nameInfos[i]
 		found := c.byName.getByName(ni.ParentID, ni.ParentSchemaID, ni.Name)
 		if found == nil {
 			continue
 		}
-		e := ret.ensureForName(&ni)
+		e := ret.ensureForName(ni)
 		*e = *found.(*byNameEntry)
 		if foundByID := c.byID.get(e.id); foundByID != nil {
 			e := ret.ensureForID(e.id)

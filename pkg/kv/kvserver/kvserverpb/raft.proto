@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.kv.kvserver.kvserverpb;
@@ -18,9 +13,10 @@ import "roachpb/metadata.proto";
 import "kv/kvserver/liveness/livenesspb/liveness.proto";
 import "kv/kvserver/kvserverpb/state.proto";
 import "kv/kvserver/kvflowcontrol/kvflowcontrolpb/kvflowcontrol.proto";
-import "raft/v3/raftpb/raft.proto";
-import "gogoproto/gogo.proto";
+import "raft/raftpb/raft.proto";
+import "util/hlc/timestamp.proto";
 import "util/tracing/tracingpb/recorded_span.proto";
+import "gogoproto/gogo.proto";
 
 // RaftHeartbeat is a request that contains the barebones information for a
 // raftpb.MsgHeartbeat raftpb.Message. RaftHeartbeats are coalesced and sent
@@ -50,6 +46,16 @@ message RaftHeartbeat {
   // v22.1: Keep sending. Stop consulting.
   // v22.2: Remove field.
   bool lagging_followers_on_quiesce_accurate = 10;
+}
+
+// The traced entry from the leader along with the trace and span ID.
+message TracedEntry {
+  uint64 index = 1 [(gogoproto.nullable) = false,
+      (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/kv/kvpb.RaftIndex"];
+  uint64 trace_id = 2 [(gogoproto.nullable) = false, (gogoproto.customname) = "TraceID",
+      (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb.TraceID"];
+  uint64 span_id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "SpanID",
+      (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb.SpanID"];
 }
 
 // RaftMessageRequest is the request used to send raft messages using our
@@ -92,8 +98,26 @@ message RaftMessageRequest {
   repeated RaftHeartbeat heartbeat_resps = 7 [(gogoproto.nullable) = false];
 
   // AdmittedRaftLogEntries is coalesced information about all raft log entries
-  // that were admitted below raft.
+  // that were admitted below raft. Used only in RACv1.
   repeated kv.kvserver.kvflowcontrol.kvflowcontrolpb.AdmittedRaftLogEntries admitted_raft_log_entries = 11 [(gogoproto.nullable) = false];
+
+  // UsingRAC2Protocol is set to true iff the leader is using the RACv2
+  // protocol.
+  bool using_rac2_protocol = 12;
+  // LowPriorityOverride is read only when UsingRAC2Protocol is true, and is
+  // set only if Message is a MsgApp. When true, it specifies that the
+  // priority of the Entries in the Message that are subject to replication
+  // admission control are overridden to be raftpb.LowPri.
+  bool low_priority_override = 13;
+  // AdmittedState annotates a MsgAppResp message with a vector of admitted log
+  // indices. Used only with RACv2.
+  kv.kvserver.kvflowcontrol.kvflowcontrolpb.AdmittedState admitted_state = 14 [(gogoproto.nullable) = false];
+
+  // TracedEntry is a mapping from Raft index to trace and span ids for this
+  // request. They are set by the leaseholder and begin tracing on all
+  // replicas. Currently, traces are not returned to the leaseholder, but
+  // instead logged to a local log file.
+  repeated TracedEntry traced_entries = 15 [(gogoproto.nullable) = false];
 
   reserved 10;
 }
@@ -101,6 +125,8 @@ message RaftMessageRequest {
 message RaftMessageRequestBatch {
   repeated RaftMessageRequest requests = 1 [(gogoproto.nullable) = false];
 
+  // StoreIDs is used only in RACv1.
+  //
   // StoreIDs identifies all the stores on the client node. It's populated on
   // the first RaftMessageRequestBatch sent along MultiRaft.RaftMessageBatch
   // gRPC stream identifying at least one store, and the populated once more
@@ -129,6 +155,19 @@ message RaftMessageRequestBatch {
   //       RaftMessageRequest.
   // [^3]: See I1 from kvflowcontrol/doc.go.
   repeated uint64 store_ids = 2 [(gogoproto.customname) = "StoreIDs", (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID"];
+
+  // now is a clock reading from the sender of the batch. It must be used by
+  // the receiver to update its local HLC, which provides causality tracking.
+  //
+  // One way in which this is used is to update the clock of a raft candidate
+  // to the clock of all followers that have voted for it, which is used to
+  // provide a disjointness guarantee to leader leases.
+  util.hlc.Timestamp now = 3 [(gogoproto.nullable) = false,
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/util/hlc.ClockTimestamp"];
+
+  // AdmittedStates contains admitted vector messages addressed to replicas
+  // located on the receiver node of this batch.
+  repeated kv.kvserver.kvflowcontrol.kvflowcontrolpb.PiggybackedAdmittedState admitted_states = 4 [(gogoproto.nullable) = false];
 }
 
 message RaftMessageResponseUnion {
@@ -196,6 +235,17 @@ message SnapshotRequest {
     // metadata present in the snapshot, but not file contents.
     bool shared_replicate = 12;
 
+    // If true, the snapshot could contain external files. Such files
+    // will have their metadata present in the snapshot but not the
+    // file contents.
+    bool external_replicate = 13;
+
+    // If true, the snapshot is iterating over range keys and point
+    // keys in key order, as opposed to iterating over point keys first
+    // and range keys second. The receiver can take advantage of this
+    // to split points/range keys into multiple sstables for ingestion.
+    bool range_keys_in_order = 14;
+
     reserved 1, 4, 6, 7, 8, 9;
   }
 
@@ -242,6 +292,54 @@ message SnapshotRequest {
     uint64 size = 10;
   }
 
+  // ExternalTable represents one SSTable present in external storage.
+  // Intended to be the protobuf version of pebble.ExternalFile.
+  message ExternalTable {
+    // Used by the Pebble objstorage package to generate new blob storage drivers.
+    // Reserved for future use.
+    bytes locator = 1;
+
+    // ObjName is the unique name of this sstable on Locator.
+    string object_name = 2;
+
+    // Physical size of the sstable in bytes.
+    uint64 size = 3;
+
+    // StartKey is the loose, inclusive start key of the sstable.
+    bytes StartKey = 4;
+    // EndKey is the loose, end key of the sstable. Whether it is
+    // inclusive or exclusive is controlled by EndKeyIsInclusive.
+    bytes EndKey = 5;
+
+    // EndKeyIsInclusive is true if the EndKey is inclusive.
+    bool EndKeyIsInclusive = 6;
+
+    // HasPointKey denote whether this file contains point keys.
+    bool has_point_key = 7;
+
+    // HasRangeKey denote whether this file contains range keys.
+    bool has_range_key = 8;
+
+    // SyntheticPrefix will prepend this suffix to all keys in the file during
+    // iteration. Note that the backing file itself is not modified.
+    bytes synthetic_prefix = 9;
+
+    // SyntheticSuffix will replace the suffix of every key in the file during
+    // iteration. Note that the file itself is not modified, rather, every key
+    // returned by an iterator will have the synthetic suffix.
+    //
+    // SyntheticSuffix can only be used under the following conditions:
+    //  - the synthetic suffix must sort before any non-empty suffixes in the
+    //    backing sst (the entire sst, not just the part restricted to Bounds).
+    //  - the backing sst must not contain multiple keys with the same prefix.
+    bytes synthetic_suffix = 10;
+
+    // LSM level of the original sstable. This sstable will go into the same
+    // level in the destination LSM.
+    int32 level = 11;
+
+  }
+
   Header header = 1;
 
   // A BatchRepr. Multiple kv_batches may be sent across multiple request messages.
@@ -258,6 +356,8 @@ message SnapshotRequest {
   // the end of the snapshot (i.e. before the final = true request), and this
   // flag must be set to true before any user keys are streamed.
   bool transition_from_shared_to_regular_replicate = 6;
+
+  repeated ExternalTable external_tables = 7 [(gogoproto.nullable) = false];
 
   reserved 3;
 }

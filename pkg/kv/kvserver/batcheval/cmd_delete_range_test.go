@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -70,9 +65,9 @@ func TestDeleteRangeTombstone(t *testing.T) {
 		require.NoError(t, err)
 		_, err = storage.MVCCPut(ctx, rw, roachpb.Key("i"), hlc.Timestamp{WallTime: 5e9}, roachpb.MakeValueFromString("i5"), storage.MVCCWriteOptions{Txn: &txn})
 		require.NoError(t, err)
-		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(ctx, rw, nil, roachpb.Key("f"), roachpb.Key("h"), hlc.Timestamp{WallTime: 3e9}, localTS, nil, nil, false, 0, nil))
-		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(ctx, rw, nil, roachpb.Key("Z"), roachpb.Key("a"), hlc.Timestamp{WallTime: 100e9}, localTS, nil, nil, false, 0, nil))
-		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(ctx, rw, nil, roachpb.Key("z"), roachpb.Key("|"), hlc.Timestamp{WallTime: 100e9}, localTS, nil, nil, false, 0, nil))
+		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(ctx, rw, nil, roachpb.Key("f"), roachpb.Key("h"), hlc.Timestamp{WallTime: 3e9}, localTS, nil, nil, false, 0, 0, nil))
+		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(ctx, rw, nil, roachpb.Key("Z"), roachpb.Key("a"), hlc.Timestamp{WallTime: 100e9}, localTS, nil, nil, false, 0, 0, nil))
+		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(ctx, rw, nil, roachpb.Key("z"), roachpb.Key("|"), hlc.Timestamp{WallTime: 100e9}, localTS, nil, nil, false, 0, 0, nil))
 	}
 
 	now := hlc.ClockTimestamp{Logical: 9}
@@ -202,10 +197,12 @@ func TestDeleteRangeTombstone(t *testing.T) {
 
 					writeInitialData(t, ctx, engine)
 
+					ts := hlc.Timestamp{WallTime: tc.ts}
 					rangeKey := storage.MVCCRangeKey{
-						StartKey:  roachpb.Key(tc.start),
-						EndKey:    roachpb.Key(tc.end),
-						Timestamp: hlc.Timestamp{WallTime: tc.ts},
+						StartKey:               roachpb.Key(tc.start),
+						EndKey:                 roachpb.Key(tc.end),
+						Timestamp:              ts,
+						EncodedTimestampSuffix: storage.EncodeMVCCTimestampSuffix(ts),
 					}
 
 					// Prepare the request and environment.

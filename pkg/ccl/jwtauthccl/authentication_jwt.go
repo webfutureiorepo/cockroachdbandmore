@@ -1,16 +1,16 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jwtauthccl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -18,12 +18,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/identmap"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/lestrrat-go/jwx/jwk"
-	"github.com/lestrrat-go/jwx/jwt"
+	"github.com/cockroachdb/redact"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
 const (
@@ -61,11 +64,14 @@ type jwtAuthenticator struct {
 // jwtAuthenticatorConf contains all the values to configure JWT authentication. These values are copied from
 // the matching cluster settings.
 type jwtAuthenticatorConf struct {
-	audience []string
-	enabled  bool
-	issuers  []string
-	jwks     jwk.Set
-	claim    string
+	audience             []string
+	enabled              bool
+	issuersConf          issuerURLConf
+	issuerCA             string
+	jwks                 jwk.Set
+	claim                string
+	jwksAutoFetchEnabled bool
+	httpClient           *httputil.Client
 }
 
 // reloadConfig locks mutex and then refreshes the values in conf from the cluster settings.
@@ -79,12 +85,20 @@ func (authenticator *jwtAuthenticator) reloadConfig(ctx context.Context, st *clu
 func (authenticator *jwtAuthenticator) reloadConfigLocked(
 	ctx context.Context, st *cluster.Settings,
 ) {
+	clientTimeout := JWTAuthClientTimeout.Get(&st.SV)
 	conf := jwtAuthenticatorConf{
-		audience: mustParseValueOrArray(JWTAuthAudience.Get(&st.SV)),
-		enabled:  JWTAuthEnabled.Get(&st.SV),
-		issuers:  mustParseValueOrArray(JWTAuthIssuers.Get(&st.SV)),
-		jwks:     mustParseJWKS(JWTAuthJWKS.Get(&st.SV)),
-		claim:    JWTAuthClaim.Get(&st.SV),
+		audience:             mustParseValueOrArray(JWTAuthAudience.Get(&st.SV)),
+		enabled:              JWTAuthEnabled.Get(&st.SV),
+		issuersConf:          mustParseJWTIssuersConf(JWTAuthIssuersConfig.Get(&st.SV)),
+		issuerCA:             JWTAuthIssuerCustomCA.Get(&st.SV),
+		jwks:                 mustParseJWKS(JWTAuthJWKS.Get(&st.SV)),
+		claim:                JWTAuthClaim.Get(&st.SV),
+		jwksAutoFetchEnabled: JWKSAutoFetchEnabled.Get(&st.SV),
+		httpClient: httputil.NewClient(
+			httputil.WithClientTimeout(clientTimeout),
+			httputil.WithDialerTimeout(clientTimeout),
+			httputil.WithCustomCAPEM(JWTAuthIssuerCustomCA.Get(&st.SV)),
+		),
 	}
 
 	if !authenticator.mu.conf.enabled && conf.enabled {
@@ -120,45 +134,121 @@ func (authenticator *jwtAuthenticator) mapUsername(
 // * the audience field matches the audience cluster setting.
 // * the issuer field is one of the values in the issuer cluster setting.
 // * the cluster has an enterprise license.
+// It returns authError (which is the error sql clients will see in case of
+// failures) and detailedError (which is the internal error from http clients
+// that might contain sensitive information we do not want to send to sql
+// clients but still want to log it). We do not want to send any information
+// back to client which was not provided by the client.
 func (authenticator *jwtAuthenticator) ValidateJWTLogin(
-	st *cluster.Settings, user username.SQLUsername, tokenBytes []byte, identMap *identmap.Conf,
-) error {
+	ctx context.Context,
+	st *cluster.Settings,
+	user username.SQLUsername,
+	tokenBytes []byte,
+	identMap *identmap.Conf,
+) (detailedErrorMsg redact.RedactableString, authError error) {
 	authenticator.mu.Lock()
 	defer authenticator.mu.Unlock()
 
 	if !authenticator.mu.enabled {
-		return errors.Newf("JWT authentication: not enabled")
+		return "", errors.Newf("JWT authentication: not enabled")
 	}
 
 	telemetry.Inc(beginAuthUseCounter)
 
-	parsedToken, err := jwt.Parse(tokenBytes, jwt.WithKeySet(authenticator.mu.conf.jwks), jwt.WithValidate(true), jwt.InferAlgorithmFromKey(true))
+	// Validate the token as below:
+	// 1. Check the token format and extract issuer
+	// jwx/v2 library mandates signature verification with Parse,
+	// so use ParseInsecure instead
+	// 2. Fetch JWKS corresponding to the issuer
+	// 3. Use Parse for signature verification
+	unverifiedToken, err := jwt.ParseInsecure(tokenBytes)
 	if err != nil {
-		return errors.Newf("JWT authentication: invalid token")
+		return "", errors.WithDetailf(
+			errors.Newf("JWT authentication: invalid token"),
+			"token parsing failed: %v", err)
 	}
 
-	issuerMatch := false
-	for _, issuer := range authenticator.mu.conf.issuers {
-		if issuer == parsedToken.Issuer() {
-			issuerMatch = true
-			break
+	// Check for issuer match against configured issuers.
+	tokenIssuer := unverifiedToken.Issuer()
+	if err = authenticator.mu.conf.issuersConf.checkIssuerConfigured(tokenIssuer); err != nil {
+		return "", errors.WithDetailf(err, "token issued by %s", tokenIssuer)
+	}
+
+	var jwkSet jwk.Set
+	// If auto-fetch is enabled, fetch the JWKS remotely from the issuer's well known jwks URI.
+	if authenticator.mu.conf.jwksAutoFetchEnabled {
+		jwkSet, err = authenticator.remoteFetchJWKS(ctx, tokenIssuer)
+		if err != nil {
+			return redact.Sprintf("unable to fetch jwks: %v", err),
+				errors.Newf("JWT authentication: unable to validate token")
+		}
+	} else {
+		jwkSet = authenticator.mu.conf.jwks
+	}
+
+	// Now that both the issuer and key-id are matched, parse the token again to validate the signature.
+	parsedToken, err := jwt.Parse(tokenBytes, jwt.WithKeySet(jwkSet, jws.WithInferAlgorithmFromKey(true)), jwt.WithValidate(true))
+	if err != nil {
+		return "", errors.WithDetailf(
+			errors.Newf("JWT authentication: invalid token"),
+			"unable to parse token: %v", err)
+	}
+
+	// Match the input user identity against the user identities mapped within the JWT.
+	user, authError = authenticator.RetrieveIdentity(ctx, user, tokenBytes, identMap)
+	if authError != nil {
+		return
+	}
+
+	if user.IsRootUser() || user.IsReserved() {
+		return "", errors.WithDetailf(
+			errors.Newf("JWT authentication: invalid identity"),
+			"cannot use JWT auth to login to a reserved user %s", user.Normalized())
+	}
+
+	audienceMatch := false
+	for _, tokenAudience := range parsedToken.Audience() {
+		for _, crdbAudience := range authenticator.mu.conf.audience {
+			if crdbAudience == tokenAudience {
+				audienceMatch = true
+				break
+			}
 		}
 	}
-	if !issuerMatch {
-		return errors.WithDetailf(
-			errors.Newf("JWT authentication: invalid issuer"),
-			"token issued by %s", parsedToken.Issuer())
+	if !audienceMatch {
+		return "", errors.WithDetailf(
+			errors.Newf("JWT authentication: invalid audience"),
+			"token issued with an audience of %s", parsedToken.Audience())
 	}
 
-	// Extract all requested principals from the token. By default, we take it from the subject unless they specify
-	// an alternate claim to pull from.
+	if err = utilccl.CheckEnterpriseEnabled(st, "JWT authentication"); err != nil {
+		return "", err
+	}
+
+	telemetry.Inc(loginSuccessUseCounter)
+	return "", nil
+}
+
+// RetrieveIdentity is part of the JWTVerifier interface in pgwire.
+func (authenticator *jwtAuthenticator) RetrieveIdentity(
+	ctx context.Context, user username.SQLUsername, tokenBytes []byte, identMap *identmap.Conf,
+) (retrievedUser username.SQLUsername, authError error) {
+	unverifiedToken, err := jwt.ParseInsecure(tokenBytes)
+	if err != nil {
+		return user, errors.WithDetailf(
+			errors.Newf("JWT authentication: invalid token"),
+			"token parsing failed: %v", err)
+	}
+
+	// Extract all requested principals from the token. By default, we take it
+	// from the subject unless they specify an alternate claim to pull from.
 	var tokenPrincipals []string
 	if authenticator.mu.conf.claim == "" || authenticator.mu.conf.claim == "sub" {
-		tokenPrincipals = []string{parsedToken.Subject()}
+		tokenPrincipals = []string{unverifiedToken.Subject()}
 	} else {
-		claimValue, ok := parsedToken.Get(authenticator.mu.conf.claim)
+		claimValue, ok := unverifiedToken.Get(authenticator.mu.conf.claim)
 		if !ok {
-			return errors.WithDetailf(
+			return user, errors.WithDetailf(
 				errors.Newf("JWT authentication: missing claim"),
 				"token does not contain a claim for %s", authenticator.mu.conf.claim)
 		}
@@ -172,68 +262,126 @@ func (authenticator *jwtAuthenticator) ValidateJWTLogin(
 				tokenPrincipals = append(tokenPrincipals, fmt.Sprint(maybePrincipal))
 			}
 		case []string:
-			// This case never seems to happen but is included in case an implementation detail changes in the library.
+			// This case never seems to happen but is included in case an
+			// implementation detail changes in the library.
 			tokenPrincipals = castClaimValue
 		default:
 			tokenPrincipals = []string{fmt.Sprint(castClaimValue)}
 		}
 	}
 
-	// Take the principals from the token and send each of them through the identity map to generate the
-	// list of usernames that this token is valid authentication for.
+	// Take the principals from the token and send each of them through the
+	// identity map to generate the list of usernames that this token is valid
+	// authentication for.
+	issuer := unverifiedToken.Issuer()
 	var acceptedUsernames []username.SQLUsername
 	for _, tokenPrincipal := range tokenPrincipals {
-		mappedUsernames, err := authenticator.mapUsername(tokenPrincipal, parsedToken.Issuer(), identMap)
+		mappedUsernames, err := authenticator.mapUsername(tokenPrincipal, issuer, identMap)
 		if err != nil {
-			return errors.WithDetailf(
+			return user, errors.WithDetailf(
 				errors.Newf("JWT authentication: invalid claim value"),
-				"the value %s for the issuer %s is invalid", tokenPrincipal, parsedToken.Issuer())
+				"the value %s for the issuer %s is invalid", tokenPrincipal, issuer)
 		}
 		acceptedUsernames = append(acceptedUsernames, mappedUsernames...)
 	}
 	if len(acceptedUsernames) == 0 {
-		return errors.WithDetailf(
+		return user, errors.WithDetailf(
 			errors.Newf("JWT authentication: invalid principal"),
-			"the value %s for the issuer %s is invalid", tokenPrincipals, parsedToken.Issuer())
+			"the value %s for the issuer %s is invalid", tokenPrincipals, issuer)
 	}
+
 	principalMatch := false
-	for _, username := range acceptedUsernames {
-		if username.Normalized() == user.Normalized() {
+	for _, userName := range acceptedUsernames {
+		if userName.Normalized() == user.Normalized() {
 			principalMatch = true
 			break
 		}
 	}
 	if !principalMatch {
-		return errors.WithDetailf(
+		// If the username is not provided, and we match it to a single user,
+		// then use that user identity.
+		if user.IsEmptyRole() && len(acceptedUsernames) == 1 {
+			return acceptedUsernames[0], nil
+		}
+		return user, errors.WithDetailf(
 			errors.Newf("JWT authentication: invalid principal"),
 			"token issued for %s and login was for %s", tokenPrincipals, user.Normalized())
 	}
-	if user.IsRootUser() || user.IsReserved() {
-		return errors.WithDetailf(
-			errors.Newf("JWT authentication: invalid identity"),
-			"cannot use JWT auth to login to a reserved user %s", user.Normalized())
-	}
-	audienceMatch := false
-	for _, tokenAudience := range parsedToken.Audience() {
-		for _, crdbAudience := range authenticator.mu.conf.audience {
-			if crdbAudience == tokenAudience {
-				audienceMatch = true
-				break
-			}
+
+	return user, nil
+}
+
+// remoteFetchJWKS fetches the JWKS URI from the provided issuer URL.
+func (authenticator *jwtAuthenticator) remoteFetchJWKS(
+	ctx context.Context, issuerURL string,
+) (jwk.Set, error) {
+	var jwksURI string
+	// if JWKS URI is configured in JWTAuthIssuersConfig use that instead of URL
+	// from issuer's well-known endpoint
+	err := authenticator.mu.conf.issuersConf.checkJWKSConfigured()
+	if err != nil {
+		jwksURI, err = authenticator.getJWKSURI(ctx, issuerURL)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		jwksURI, err = authenticator.mu.conf.issuersConf.getJWKSURI(issuerURL)
+		if err != nil {
+			return nil, err
 		}
 	}
-	if !audienceMatch {
-		return errors.WithDetailf(
-			errors.Newf("JWT authentication: invalid audience"),
-			"token issued with an audience of %s", parsedToken.Audience())
-	}
 
-	if err = utilccl.CheckEnterpriseEnabled(st, "JWT authentication"); err != nil {
-		return err
+	body, err := getHttpResponse(ctx, jwksURI, authenticator)
+	if err != nil {
+		return nil, err
 	}
+	jwkSet, err := jwk.Parse(body)
+	if err != nil {
+		return nil, err
+	}
+	return jwkSet, nil
+}
 
-	telemetry.Inc(loginSuccessUseCounter)
-	return nil
+// getJWKSURI returns the JWKS URI from the OpenID configuration endpoint.
+func (authenticator *jwtAuthenticator) getJWKSURI(
+	ctx context.Context, issuerUrl string,
+) (string, error) {
+	type OIDCConfigResponse struct {
+		JWKSUri string `json:"jwks_uri"`
+	}
+	openIdConfigEndpoint := getOpenIdConfigEndpoint(issuerUrl)
+	body, err := getHttpResponse(ctx, openIdConfigEndpoint, authenticator)
+	if err != nil {
+		return "", err
+	}
+	var config OIDCConfigResponse
+	if err = json.Unmarshal(body, &config); err != nil {
+		return "", err
+	}
+	if config.JWKSUri == "" {
+		return "", errors.Newf("no JWKS URI found in OpenID configuration")
+	}
+	return config.JWKSUri, nil
+}
+
+// getOpenIdConfigEndpoint returns the OpenID configuration endpoint by appending standard open-id url.
+func getOpenIdConfigEndpoint(issuerUrl string) string {
+	openIdConfigEndpoint := strings.TrimSuffix(issuerUrl, "/") + "/.well-known/openid-configuration"
+	return openIdConfigEndpoint
+}
+
+var getHttpResponse = func(ctx context.Context, url string, authenticator *jwtAuthenticator) ([]byte, error) {
+	resp, err := authenticator.mu.conf.httpClient.Get(context.Background(), url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 // ConfigureJWTAuth initializes and returns a jwtAuthenticator. It also sets up listeners so
@@ -253,13 +401,19 @@ var ConfigureJWTAuth = func(
 	JWTAuthEnabled.SetOnChange(&st.SV, func(ctx context.Context) {
 		authenticator.reloadConfig(ambientCtx.AnnotateCtx(ctx), st)
 	})
-	JWTAuthIssuers.SetOnChange(&st.SV, func(ctx context.Context) {
+	JWTAuthIssuersConfig.SetOnChange(&st.SV, func(ctx context.Context) {
+		authenticator.reloadConfig(ambientCtx.AnnotateCtx(ctx), st)
+	})
+	JWTAuthIssuerCustomCA.SetOnChange(&st.SV, func(ctx context.Context) {
 		authenticator.reloadConfig(ambientCtx.AnnotateCtx(ctx), st)
 	})
 	JWTAuthJWKS.SetOnChange(&st.SV, func(ctx context.Context) {
 		authenticator.reloadConfig(ambientCtx.AnnotateCtx(ctx), st)
 	})
 	JWTAuthClaim.SetOnChange(&st.SV, func(ctx context.Context) {
+		authenticator.reloadConfig(ambientCtx.AnnotateCtx(ctx), st)
+	})
+	JWKSAutoFetchEnabled.SetOnChange(&st.SV, func(ctx context.Context) {
 		authenticator.reloadConfig(ambientCtx.AnnotateCtx(ctx), st)
 	})
 	return &authenticator

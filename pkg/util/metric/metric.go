@@ -1,30 +1,31 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metric
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"math"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/axiomhq/hyperloglog"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/metric/tick"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	prometheusgo "github.com/prometheus/client_model/go"
-	"github.com/rcrowley/go-metrics"
 )
 
 const (
@@ -34,6 +35,8 @@ const (
 	// WindowedHistogramWrapNum is the number of histograms to keep in rolling
 	// window.
 	WindowedHistogramWrapNum = 2
+	// CardinalityLimit is the max number of distinct label values combinations for any given MetricVec.
+	CardinalityLimit = 2000
 )
 
 // Iterable provides a method for synchronized access to interior objects.
@@ -54,9 +57,7 @@ type Iterable interface {
 	Inspect(func(interface{}))
 }
 
-// PrometheusExportable is the standard interface for an individual metric
-// that can be exported to prometheus.
-type PrometheusExportable interface {
+type PrometheusCompatible interface {
 	// GetName is a method on Metadata
 	GetName() string
 	// GetHelp is a method on Metadata
@@ -65,12 +66,23 @@ type PrometheusExportable interface {
 	GetType() *prometheusgo.MetricType
 	// GetLabels is a method on Metadata
 	GetLabels() []*prometheusgo.LabelPair
+}
+
+// PrometheusExportable is the standard interface for an individual metric
+// that can be exported to prometheus.
+type PrometheusExportable interface {
+	PrometheusCompatible
 	// ToPrometheusMetric returns a filled-in prometheus metric of the right type
 	// for the given metric. It does not fill in labels.
 	// The implementation must return thread-safe data to the caller, i.e.
 	// usually a copy of internal state.
 	// NB: For histogram metrics, ToPrometheusMetric should return the cumulative histogram.
 	ToPrometheusMetric() *prometheusgo.Metric
+}
+
+type PrometheusVector interface {
+	PrometheusCompatible
+	ToPrometheusMetrics() []*prometheusgo.Metric
 }
 
 // PrometheusIterable is an extension of PrometheusExportable to indicate that
@@ -169,18 +181,28 @@ func (m *Metadata) AddLabel(name, value string) {
 var _ Iterable = &Gauge{}
 var _ Iterable = &GaugeFloat64{}
 var _ Iterable = &Counter{}
+var _ Iterable = &UniqueCounter{}
 var _ Iterable = &CounterFloat64{}
+var _ Iterable = &GaugeVec{}
+var _ Iterable = &CounterVec{}
+var _ Iterable = &HistogramVec{}
 
 var _ json.Marshaler = &Gauge{}
 var _ json.Marshaler = &GaugeFloat64{}
 var _ json.Marshaler = &Counter{}
+var _ json.Marshaler = &UniqueCounter{}
 var _ json.Marshaler = &CounterFloat64{}
 var _ json.Marshaler = &Registry{}
 
 var _ PrometheusExportable = &Gauge{}
 var _ PrometheusExportable = &GaugeFloat64{}
 var _ PrometheusExportable = &Counter{}
+var _ PrometheusExportable = &UniqueCounter{}
 var _ PrometheusExportable = &CounterFloat64{}
+
+var _ PrometheusVector = &GaugeVec{}
+var _ PrometheusVector = &CounterVec{}
+var _ PrometheusVector = &HistogramVec{}
 
 var now = timeutil.Now
 
@@ -205,7 +227,7 @@ func TestingSetNow(f func() time.Time) func() {
 // like Prometheus.
 const useHdrHistogramsEnvVar = "COCKROACH_ENABLE_HDR_HISTOGRAMS"
 
-var hdrEnabled = util.ConstantWithMetamorphicTestBool(useHdrHistogramsEnvVar, envutil.EnvOrDefaultBool(useHdrHistogramsEnvVar, false))
+var hdrEnabled = metamorphic.ConstantWithTestBool(useHdrHistogramsEnvVar, envutil.EnvOrDefaultBool(useHdrHistogramsEnvVar, false))
 
 // HdrEnabled returns whether or not the HdrHistogram model is enabled
 // in the metric package. Primarily useful in tests where we want to validate
@@ -722,22 +744,60 @@ func deepCopy(source prometheusgo.Histogram) *prometheusgo.Histogram {
 // A Counter holds a single mutable atomic value.
 type Counter struct {
 	Metadata
-	metrics.Counter
+
+	count atomic.Int64
 }
 
 // NewCounter creates a counter.
 func NewCounter(metadata Metadata) *Counter {
-	return &Counter{metadata, metrics.NewCounter()}
+	return &Counter{Metadata: metadata}
 }
 
-// Dec overrides the metric.Counter method. This method should NOT be
-// used and serves only to prevent misuse of the metric type.
-func (c *Counter) Dec(int64) {
-	// From https://prometheus.io/docs/concepts/metric_types/#counter
-	// > Counters should not be used to expose current counts of items
-	// > whose number can also go down, e.g. the number of currently
-	// > running goroutines. Use gauges for this use case.
-	panic("Counter should not be decremented, use a Gauge instead")
+// Clear resets the counter to zero.
+func (c *Counter) Clear() {
+	c.count.Store(0)
+}
+
+// Inc atomically increments the counter by the given value.
+func (c *Counter) Inc(v int64) {
+	if buildutil.CrdbTestBuild && v < 0 {
+		panic("Counters should not be decremented")
+	}
+	c.count.Add(v)
+}
+
+// Update atomically sets the current value of the counter. The value must not
+// be smaller than the existing value.
+//
+// Update is intended to be used when the counter itself is not the source of
+// truth; instead it is a (periodically updated) copy of a counter that is
+// maintained elsewhere.
+func (c *Counter) Update(val int64) {
+	if buildutil.CrdbTestBuild {
+		if prev := c.count.Load(); val < prev {
+			panic(fmt.Sprintf("Counters should not decrease, prev: %d, new: %d.", prev, val))
+		}
+	}
+	c.count.Store(val)
+}
+
+// UpdateIfHigher atomically sets the current value of the counter, unless the
+// current value is already greater.
+func (c *Counter) UpdateIfHigher(val int64) {
+	for {
+		old := c.count.Load()
+		if old > val {
+			return
+		}
+		if c.count.CompareAndSwap(old, val) {
+			return
+		}
+	}
+}
+
+// Count returns the current value of the counter.
+func (c *Counter) Count() int64 {
+	return c.count.Load()
 }
 
 // GetType returns the prometheus type enum for this metric.
@@ -745,24 +805,94 @@ func (c *Counter) GetType() *prometheusgo.MetricType {
 	return prometheusgo.MetricType_COUNTER.Enum()
 }
 
-// Inspect calls the given closure with the empty string and itself.
+// Inspect calls the given closure with itself.
 func (c *Counter) Inspect(f func(interface{})) { f(c) }
 
 // MarshalJSON marshals to JSON.
 func (c *Counter) MarshalJSON() ([]byte, error) {
-	return json.Marshal(c.Counter.Count())
+	return json.Marshal(c.Count())
 }
 
 // ToPrometheusMetric returns a filled-in prometheus metric of the right type.
 func (c *Counter) ToPrometheusMetric() *prometheusgo.Metric {
 	return &prometheusgo.Metric{
-		Counter: &prometheusgo.Counter{Value: proto.Float64(float64(c.Counter.Count()))},
+		Counter: &prometheusgo.Counter{Value: proto.Float64(float64(c.Count()))},
 	}
 }
 
 // GetMetadata returns the metric's metadata including the Prometheus
 // MetricType.
 func (c *Counter) GetMetadata() Metadata {
+	baseMetadata := c.Metadata
+	baseMetadata.MetricType = prometheusgo.MetricType_COUNTER
+	return baseMetadata
+}
+
+// UniqueCounter performs set cardinality estimation. You feed keys,
+// and it produces an estimate of how many unique keys its has seen.
+type UniqueCounter struct {
+	Metadata
+
+	mu struct {
+		syncutil.Mutex
+		sketch *hyperloglog.Sketch
+	}
+}
+
+// NewUniqueCounter creates a counter.
+func NewUniqueCounter(metadata Metadata) *UniqueCounter {
+	ret := &UniqueCounter{
+		Metadata: metadata,
+	}
+	ret.Clear()
+	return ret
+}
+
+// Clear resets the counter to zero.
+func (c *UniqueCounter) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mu.sketch, _ = hyperloglog.NewSketch(14, true)
+}
+
+// Add a value to the set
+func (c *UniqueCounter) Add(v []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mu.sketch.Insert(v)
+}
+
+// Count returns the current value of the counter.
+func (c *UniqueCounter) Count() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return int64(c.mu.sketch.Estimate())
+}
+
+// GetType returns the prometheus type enum for this metric.
+func (c *UniqueCounter) GetType() *prometheusgo.MetricType {
+	return prometheusgo.MetricType_COUNTER.Enum()
+}
+
+// Inspect calls the given closure with itself.
+func (c *UniqueCounter) Inspect(f func(interface{})) { f(c) }
+
+// MarshalJSON marshals to JSON.
+func (c *UniqueCounter) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.Count())
+}
+
+// ToPrometheusMetric returns a filled-in prometheus metric of the right type.
+func (c *UniqueCounter) ToPrometheusMetric() *prometheusgo.Metric {
+	return &prometheusgo.Metric{
+		Counter: &prometheusgo.Counter{Value: proto.Float64(float64(c.Count()))},
+	}
+}
+
+// GetMetadata returns the metric's metadata including the Prometheus
+// MetricType.
+func (c *UniqueCounter) GetMetadata() Metadata {
 	baseMetadata := c.Metadata
 	baseMetadata.MetricType = prometheusgo.MetricType_COUNTER
 	return baseMetadata
@@ -782,24 +912,44 @@ func (c *CounterFloat64) GetMetadata() Metadata {
 }
 
 func (c *CounterFloat64) Clear() {
-	syncutil.StoreFloat64(&c.count, 0)
+	c.count.Store(0)
 }
 
 func (c *CounterFloat64) Count() float64 {
-	return syncutil.LoadFloat64(&c.count)
+	return c.count.Load()
 }
 
 func (c *CounterFloat64) Inc(i float64) {
-	syncutil.AddFloat64(&c.count, i)
+	if buildutil.CrdbTestBuild && i < 0 {
+		panic("Counters should not be decremented")
+	}
+	c.count.Add(i)
 }
 
+// Update atomically sets the current value of the counter. The value must not
+// be smaller than the existing value.
+//
+// Update is intended to be used when the counter itself is not the source of
+// truth; instead it is a (periodically updated) copy of a counter that is
+// maintained elsewhere.
+func (c *CounterFloat64) Update(val float64) {
+	if buildutil.CrdbTestBuild {
+		if prev := c.count.Load(); val < prev {
+			panic(fmt.Sprintf("Counters should not decrease, prev: %f, new: %f.", prev, val))
+		}
+	}
+	c.count.Store(val)
+}
+
+// UpdateIfHigher atomically sets the current value of the counter, unless the
+// current value is already greater.
 func (c *CounterFloat64) UpdateIfHigher(i float64) {
-	syncutil.StoreFloat64IfHigher(&c.count, i)
+	c.count.StoreIfHigher(i)
 }
 
 func (c *CounterFloat64) Snapshot() *CounterFloat64 {
 	newCounter := NewCounterFloat64(c.Metadata)
-	syncutil.StoreFloat64(&newCounter.count, c.Count())
+	newCounter.count.Store(c.Count())
 	return newCounter
 }
 
@@ -831,13 +981,13 @@ func NewCounterFloat64(metadata Metadata) *CounterFloat64 {
 // A Gauge atomically stores a single integer value.
 type Gauge struct {
 	Metadata
-	value *int64
+	value atomic.Int64
 	fn    func() int64
 }
 
 // NewGauge creates a Gauge.
 func NewGauge(metadata Metadata) *Gauge {
-	return &Gauge{metadata, new(int64), nil}
+	return &Gauge{Metadata: metadata}
 }
 
 // NewFunctionalGauge creates a Gauge metric whose value is determined when
@@ -845,17 +995,12 @@ func NewGauge(metadata Metadata) *Gauge {
 // Note that Update, Inc, and Dec should NOT be called on a Gauge returned
 // from NewFunctionalGauge.
 func NewFunctionalGauge(metadata Metadata, f func() int64) *Gauge {
-	return &Gauge{metadata, nil, f}
-}
-
-// Snapshot returns a read-only copy of the gauge.
-func (g *Gauge) Snapshot() metrics.Gauge {
-	return metrics.GaugeSnapshot(g.Value())
+	return &Gauge{Metadata: metadata, fn: f}
 }
 
 // Update updates the gauge's value.
 func (g *Gauge) Update(v int64) {
-	atomic.StoreInt64(g.value, v)
+	g.value.Store(v)
 }
 
 // Value returns the gauge's current value.
@@ -863,17 +1008,17 @@ func (g *Gauge) Value() int64 {
 	if g.fn != nil {
 		return g.fn()
 	}
-	return atomic.LoadInt64(g.value)
+	return g.value.Load()
 }
 
 // Inc increments the gauge's value.
 func (g *Gauge) Inc(i int64) {
-	atomic.AddInt64(g.value, i)
+	g.value.Add(i)
 }
 
 // Dec decrements the gauge's value.
 func (g *Gauge) Dec(i int64) {
-	atomic.AddInt64(g.value, -i)
+	g.value.Add(-i)
 }
 
 // GetType returns the prometheus type enum for this metric.
@@ -907,43 +1052,32 @@ func (g *Gauge) GetMetadata() Metadata {
 // A GaugeFloat64 atomically stores a single float64 value.
 type GaugeFloat64 struct {
 	Metadata
-	bits *uint64
+	value syncutil.AtomicFloat64
 }
 
 // NewGaugeFloat64 creates a GaugeFloat64.
 func NewGaugeFloat64(metadata Metadata) *GaugeFloat64 {
-	return &GaugeFloat64{metadata, new(uint64)}
-}
-
-// Snapshot returns a read-only copy of the gauge.
-func (g *GaugeFloat64) Snapshot() metrics.GaugeFloat64 {
-	return metrics.GaugeFloat64Snapshot(g.Value())
+	return &GaugeFloat64{Metadata: metadata}
 }
 
 // Update updates the gauge's value.
 func (g *GaugeFloat64) Update(v float64) {
-	atomic.StoreUint64(g.bits, math.Float64bits(v))
+	g.value.Store(v)
 }
 
 // Value returns the gauge's current value.
 func (g *GaugeFloat64) Value() float64 {
-	return math.Float64frombits(atomic.LoadUint64(g.bits))
+	return g.value.Load()
 }
 
 // Inc increments the gauge's value.
 func (g *GaugeFloat64) Inc(delta float64) {
-	for {
-		oldBits := atomic.LoadUint64(g.bits)
-		newBits := math.Float64bits(math.Float64frombits(oldBits) + delta)
-		if atomic.CompareAndSwapUint64(g.bits, oldBits, newBits) {
-			return
-		}
-	}
+	g.value.Add(delta)
 }
 
 // Dec decrements the gauge's value.
 func (g *GaugeFloat64) Dec(delta float64) {
-	g.Inc(-delta)
+	g.value.Add(-delta)
 }
 
 // GetType returns the prometheus type enum for this metric.
@@ -989,22 +1123,435 @@ func MergeWindowedHistogram(cur *prometheusgo.Histogram, prev *prometheusgo.Hist
 	*cur.SampleSum = sampleSum
 }
 
-// Quantile is a quantile along with a string suffix to be attached to the metric
-// name upon recording into the internal TSDB.
-type Quantile struct {
-	Suffix   string
-	Quantile float64
+// HistogramMetricComputer is the computation function used to compute and
+// store histogram metrics into the internal TSDB, along with the suffix
+// to be attached to the metric.
+type HistogramMetricComputer struct {
+	Suffix          string
+	IsSummaryMetric bool
+	ComputedMetric  func(h HistogramSnapshot) float64
 }
 
-// RecordHistogramQuantiles are the quantiles at which (windowed) histograms
-// are recorded into the internal TSDB.
-var RecordHistogramQuantiles = []Quantile{
-	{"-max", 100},
-	{"-p99.999", 99.999},
-	{"-p99.99", 99.99},
-	{"-p99.9", 99.9},
-	{"-p99", 99},
-	{"-p90", 90},
-	{"-p75", 75},
-	{"-p50", 50},
+// HistogramMetricComputers is a slice of all the HistogramMetricComputer
+// that are used to record (windowed) histogram metrics into TSDB.
+var HistogramMetricComputers = []HistogramMetricComputer{
+	{
+		Suffix:          "-max",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(100)
+		},
+	},
+	{
+		Suffix:          "-p99.999",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(99.999)
+		},
+	},
+	{
+		Suffix:          "-p99.99",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(99.99)
+		},
+	},
+	{
+		Suffix:          "-p99.9",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(99.9)
+		},
+	},
+	{
+		Suffix:          "-p99",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(99)
+		},
+	},
+	{
+		Suffix:          "-p90",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(90)
+		},
+	},
+	{
+		Suffix:          "-p75",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(75)
+		},
+	},
+	{
+		Suffix:          "-p50",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			return h.ValueAtQuantile(50)
+		},
+	},
+	{
+		Suffix:          "-avg",
+		IsSummaryMetric: true,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			avg := h.Mean()
+			if math.IsNaN(avg) || math.IsInf(avg, +1) || math.IsInf(avg, -1) {
+				avg = 0
+			}
+			return avg
+		},
+	},
+	{
+		Suffix:          "-count",
+		IsSummaryMetric: false,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			count, _ := h.Total()
+			return float64(count)
+		},
+	},
+	{
+		Suffix:          "-sum",
+		IsSummaryMetric: false,
+		ComputedMetric: func(h HistogramSnapshot) float64 {
+			_, sum := h.Total()
+			return sum
+		},
+	},
+}
+
+// vector holds the base vector implementation. This is meant to be embedded
+// by metric types that require a variable set of labels. Implements
+// PrometheusVector.
+type vector struct {
+	*syncutil.RWMutex
+	encounteredLabelsLookup map[string]struct{}
+	encounteredLabelValues  [][]string
+	orderedLabelNames       []string
+}
+
+func newVector(labelNames []string) vector {
+	sort.Strings(labelNames)
+
+	return vector{
+		RWMutex:                 &syncutil.RWMutex{},
+		encounteredLabelsLookup: make(map[string]struct{}),
+		encounteredLabelValues:  [][]string{},
+		orderedLabelNames:       labelNames,
+	}
+}
+
+func (v *vector) getOrderedValues(labels map[string]string) []string {
+	labelValues := make([]string, 0, len(labels))
+	for _, labelName := range v.orderedLabelNames {
+		labelValues = append(labelValues, labels[labelName])
+	}
+
+	return labelValues
+}
+
+// recordLabels records the given combination of label values if they haven't
+// been seen before. This is used to iterate over all the counters created
+// based on unique label combinations. recordLabels will return an error if the
+// labelValues are novel, and the cardinality limit has been reached.
+func (v *vector) recordLabels(labelValues []string) error {
+	v.RLock()
+	lookupKey := strings.Join(labelValues, "_")
+	if _, ok := v.encounteredLabelsLookup[lookupKey]; ok {
+		v.RUnlock()
+		return nil
+	}
+	if len(v.encounteredLabelsLookup) >= CardinalityLimit {
+		v.RUnlock()
+		return fmt.Errorf("metric cardinality limit reached")
+	}
+	v.RUnlock()
+
+	v.Lock()
+	defer v.Unlock()
+	v.encounteredLabelsLookup[lookupKey] = struct{}{}
+	v.encounteredLabelValues = append(v.encounteredLabelValues, labelValues)
+	return nil
+}
+
+// clear flushes the labels from the vector.
+func (v *vector) clear() {
+	v.Lock()
+	defer v.Unlock()
+	v.encounteredLabelsLookup = make(map[string]struct{})
+	v.encounteredLabelValues = [][]string{}
+}
+
+// GaugeVec is a collector for gauges that have a variable set of labels.
+// This uses the prometheus.GaugeVec under the hood. The contained gauges are
+// not persisted by the internal TSDB, nor are they aggregated; see aggmetric
+// for a metric that allows keeping labeled submetrics while recording their
+// aggregation in the tsdb.
+type GaugeVec struct {
+	Metadata
+	vector
+	promVec *prometheus.GaugeVec
+}
+
+// NewExportedGaugeVec creates a new GaugeVec containing labeled gauges to be
+// exported to an external collector, but is not persisted by the internal TSDB,
+// nor are the metrics in the vector aggregated in any way.
+func NewExportedGaugeVec(metadata Metadata, labelSchema []string) *GaugeVec {
+	vec := newVector(labelSchema)
+
+	promVec := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: metadata.Name,
+		Help: metadata.Help,
+	}, vec.orderedLabelNames)
+
+	return &GaugeVec{
+		Metadata: metadata,
+		vector:   vec,
+		promVec:  promVec,
+	}
+}
+
+// Update updates the gauge value for the given combination of labels.
+func (gv *GaugeVec) Update(labels map[string]string, v int64) {
+	labelValues := gv.getOrderedValues(labels)
+	if err := gv.recordLabels(labelValues); err != nil {
+		return
+	}
+	gv.promVec.WithLabelValues(labelValues...).Set(float64(v))
+}
+
+// Inc increments the gauge value for the given combination of labels.
+func (gv *GaugeVec) Inc(labels map[string]string, v int64) {
+	labelValues := gv.getOrderedValues(labels)
+	if err := gv.recordLabels(labelValues); err != nil {
+		return
+	}
+	gv.promVec.WithLabelValues(labelValues...).Add(float64(v))
+}
+
+// Dec decrements the gauge value for the given combination of labels.
+func (gv *GaugeVec) Dec(labels map[string]string, v int64) {
+	labelValues := gv.getOrderedValues(labels)
+	if err := gv.recordLabels(labelValues); err != nil {
+		return
+	}
+	gv.promVec.WithLabelValues(labelValues...).Sub(float64(v))
+}
+
+// GetMetadata implements Iterable.
+func (gv *GaugeVec) GetMetadata() Metadata {
+	md := gv.Metadata
+	md.MetricType = prometheusgo.MetricType_GAUGE
+	return md
+}
+
+// Inspect implements Iterable.
+func (gv *GaugeVec) Inspect(f func(interface{})) { f(gv) }
+
+// GetType implements PrometheusExportable.
+func (gv *GaugeVec) GetType() *prometheusgo.MetricType {
+	return prometheusgo.MetricType_GAUGE.Enum()
+}
+
+// ToPrometheusMetrics implements PrometheusExportable.
+func (gv *GaugeVec) ToPrometheusMetrics() []*prometheusgo.Metric {
+	gv.RLock()
+	defer gv.RUnlock()
+	metrics := make([]*prometheusgo.Metric, 0, len(gv.encounteredLabelValues))
+
+	for _, labels := range gv.encounteredLabelValues {
+		m := &prometheusgo.Metric{}
+		g := gv.promVec.WithLabelValues(labels...)
+
+		if err := g.Write(m); err != nil {
+			panic(err)
+		}
+
+		metrics = append(metrics, m)
+	}
+
+	return metrics
+}
+
+// CounterVec wraps a prometheus.CounterVec; it is not aggregated or persisted.
+type CounterVec struct {
+	Metadata
+	vector
+	promVec *prometheus.CounterVec
+}
+
+// NewExportedCounterVec creates a new CounterVec containing labeled counters to
+// be exported to an external collector; the contained counters are not
+// aggregated or persisted to the tsdb (see aggmetric.Counter for a counter that
+// persists the aggregation of n labeled child metrics).
+func NewExportedCounterVec(metadata Metadata, labelNames []string) *CounterVec {
+	vec := newVector(labelNames)
+
+	promVec := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: metadata.Name,
+		Help: metadata.Help,
+	}, vec.orderedLabelNames)
+
+	return &CounterVec{
+		Metadata: metadata,
+		vector:   vec,
+		promVec:  promVec,
+	}
+}
+
+// Update updates the counter value for the given combination of labels.
+// prometheus.CounterVec does not support an Update method, so we have to
+// implement it ourselves by getting the current counter value and adding the
+// difference. This panics if the current value is greater than the new value.
+func (cv *CounterVec) Update(labels map[string]string, v int64) {
+	labelValues := cv.getOrderedValues(labels)
+	if err := cv.recordLabels(labelValues); err != nil {
+		return
+	}
+
+	currentValue := cv.Count(labels)
+	if currentValue > v {
+		panic(fmt.Sprintf("Counters should not decrease, prev: %d, new: %d.", currentValue, v))
+	}
+
+	cv.promVec.WithLabelValues(labelValues...).Add(float64(v - currentValue))
+}
+
+// Inc increments the value for the given combination of labels.
+func (cv *CounterVec) Inc(labels map[string]string, v int64) {
+	labelValues := cv.getOrderedValues(labels)
+	if err := cv.recordLabels(labelValues); err != nil {
+		return
+	}
+	cv.promVec.WithLabelValues(labelValues...).Add(float64(v))
+}
+
+// Count returns the current value of the counter for the given combination of
+// labels.
+func (cv *CounterVec) Count(labels map[string]string) int64 {
+	m := prometheusgo.Metric{}
+	labelValues := cv.getOrderedValues(labels)
+	if err := cv.promVec.WithLabelValues(labelValues...).Write(&m); err != nil {
+		panic(err)
+	}
+
+	return int64(m.Counter.GetValue())
+}
+
+// GetMetadata implements Iterable.
+func (cv *CounterVec) GetMetadata() Metadata {
+	md := cv.Metadata
+	md.MetricType = prometheusgo.MetricType_COUNTER
+	return md
+}
+
+// Inspect implements Iterable.
+func (cv *CounterVec) Inspect(f func(interface{})) { f(cv) }
+
+// GetType implements PrometheusExportable.
+func (cv *CounterVec) GetType() *prometheusgo.MetricType {
+	return prometheusgo.MetricType_COUNTER.Enum()
+}
+
+// ToPrometheusMetrics implements PrometheusExportable.
+func (cv *CounterVec) ToPrometheusMetrics() []*prometheusgo.Metric {
+	cv.RLock()
+	defer cv.RUnlock()
+	metrics := make([]*prometheusgo.Metric, 0, len(cv.encounteredLabelValues))
+
+	for _, labels := range cv.encounteredLabelValues {
+		m := &prometheusgo.Metric{}
+		c := cv.promVec.WithLabelValues(labels...)
+
+		if err := c.Write(m); err != nil {
+			panic(err)
+		}
+
+		metrics = append(metrics, m)
+	}
+
+	return metrics
+}
+
+// HistogramVec wraps a prometheus.HistogramVec; it is not aggregated or persisted.
+type HistogramVec struct {
+	Metadata
+	vector
+	promVec *prometheus.HistogramVec
+}
+
+// NewExportedHistogramVec creates a new HistogramVec containing labeled counters to
+// be exported to an external collector; the contained histograms are not
+// aggregated or persisted to the tsdb (see aggmetric.Histogram for a counter that
+// persists the aggregation of n labeled child metrics).
+func NewExportedHistogramVec(
+	metadata Metadata, bucketConfig staticBucketConfig, labelNames []string,
+) *HistogramVec {
+	vec := newVector(labelNames)
+	opts := prometheus.HistogramOpts{
+		Buckets: bucketConfig.GetBucketsFromBucketConfig(),
+		Name:    metadata.Name,
+		Help:    metadata.Help,
+	}
+	promVec := prometheus.NewHistogramVec(opts, vec.orderedLabelNames)
+	return &HistogramVec{
+		Metadata: metadata,
+		vector:   vec,
+		promVec:  promVec,
+	}
+}
+
+// Observe adds invokes prometheus.Observer Observe function for the given
+// combination of labels.
+func (hv *HistogramVec) Observe(labels map[string]string, v float64) {
+	labelValues := hv.getOrderedValues(labels)
+	if err := hv.recordLabels(labelValues); err != nil {
+		return
+	}
+	hv.promVec.WithLabelValues(labelValues...).Observe(v)
+}
+
+// Clear removes all the metrics and the label vector, preserving the metadata and configuration.
+func (hv *HistogramVec) Clear() {
+	hv.vector.clear()
+	hv.promVec.Reset()
+}
+
+// GetMetadata implements Iterable.
+func (hv *HistogramVec) GetMetadata() Metadata {
+	md := hv.Metadata
+	md.MetricType = prometheusgo.MetricType_HISTOGRAM
+	return md
+}
+
+// Inspect implements Iterable.
+func (hv *HistogramVec) Inspect(f func(interface{})) { f(hv) }
+
+// GetType implements PrometheusExportable.
+func (hv *HistogramVec) GetType() *prometheusgo.MetricType {
+	return prometheusgo.MetricType_HISTOGRAM.Enum()
+}
+
+// ToPrometheusMetrics implements PrometheusExportable.
+func (hv *HistogramVec) ToPrometheusMetrics() []*prometheusgo.Metric {
+	hv.RLock()
+	defer hv.RUnlock()
+	metrics := make([]*prometheusgo.Metric, 0, len(hv.encounteredLabelValues))
+
+	for _, labels := range hv.encounteredLabelValues {
+		m := &prometheusgo.Metric{}
+		o := hv.promVec.WithLabelValues(labels...)
+		histogram, ok := o.(prometheus.Histogram)
+		if !ok {
+			log.Errorf(context.TODO(), "Unable to convert Observer to prometheus.Histogram. Metric name=%s", hv.Name)
+			continue
+		}
+		if err := histogram.Write(m); err != nil {
+			panic(err)
+		}
+
+		metrics = append(metrics, m)
+	}
+
+	return metrics
 }

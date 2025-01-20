@@ -1,37 +1,28 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
 import (
-	"bytes"
 	"context"
-	gojson "encoding/json"
 	"fmt"
 	"reflect"
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
-	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -40,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"github.com/gogo/protobuf/jsonpb"
 )
 
 // Job manages logging the progress of long-running system processes, like
@@ -59,7 +49,6 @@ type Job struct {
 		payload  jobspb.Payload
 		progress jobspb.Progress
 		status   Status
-		runStats *RunStats
 	}
 }
 
@@ -161,16 +150,19 @@ func init() {
 // Status represents the status of a job in the system.jobs table.
 type Status string
 
-// SafeFormat implements redact.SafeFormatter.
-func (s Status) SafeFormat(sp redact.SafePrinter, verb rune) {
-	sp.SafeString(redact.SafeString(s))
-}
+// SafeValue implements redact.SafeValue.
+func (s Status) SafeValue() {}
 
-var _ redact.SafeFormatter = Status("")
+var _ redact.SafeValue = Status("")
 
 // RunningStatus represents the more detailed status of a running job in
 // the system.jobs table.
 type RunningStatus string
+
+// SafeValue implements redact.SafeValue.
+func (s RunningStatus) SafeValue() {}
+
+var _ redact.SafeValue = RunningStatus("")
 
 const (
 	// StatusPending is `for jobs that have been created but on which work has
@@ -240,8 +232,9 @@ func (j *Job) CreatedBy() *CreatedByInfo {
 
 // taskName is the name for the async task on the registry stopper that will
 // execute this job.
-func (j *Job) taskName() string {
-	return fmt.Sprintf(`job-%d`, j.ID())
+func (j *Job) taskName() redact.SafeString {
+	// JobID is not sensitive.
+	return redact.SafeString(fmt.Sprintf(`job-%d`, j.ID()))
 }
 
 // Started marks the tracked job as started by updating status to running in
@@ -260,16 +253,6 @@ func (u Updater) started(ctx context.Context) error {
 			ju.UpdateStatus(StatusRunning)
 			md.Payload.StartedMicros = timeutil.ToUnixMicros(u.now())
 			ju.UpdatePayload(md.Payload)
-		}
-		// md.RunStats can be nil because of the timing of version-update when exponential-backoff
-		// gets activated. It may happen that backoff is not activated when Update() function was
-		// called, which will cause to not populate md.RunStats. However, when the code reaches this
-		// point, version update may have been updated to enable backoff. In this case, we can skip
-		// updating num_runs and last_run, treating this job run as if backoff was not activated.
-		//
-		// TODO (sajjad): Update this comment after version 22.2 has been released.
-		if md.RunStats != nil {
-			ju.UpdateRunStats(md.RunStats.NumRuns+1, u.now())
 		}
 		if traceID != 0 && md.Progress != nil && md.Progress.TraceID != traceID {
 			md.Progress.TraceID = traceID
@@ -329,67 +312,34 @@ func (u Updater) FractionProgressed(ctx context.Context, progressedFn FractionPr
 			return err
 		}
 		fractionCompleted := progressedFn(ctx, md.Progress.Details)
-		// allow for slight floating-point rounding inaccuracies
-		if fractionCompleted > 1.0 && fractionCompleted < 1.01 {
+
+		if !build.IsRelease() {
+			// We allow for slight floating-point rounding
+			// inaccuracies. We only want to error in non-release
+			// builds because in large production installations the
+			// method at least one job uses to calculate process can
+			// result in substantial floating point inaccuracy.
+			if fractionCompleted < 0.0 || fractionCompleted > 1.01 {
+				return errors.Errorf(
+					"fraction completed %f is outside allowable range [0.0, 1.01]",
+					fractionCompleted,
+				)
+			}
+		}
+
+		// Clamp to [0.0, 1.0].
+		if fractionCompleted > 1.0 {
+			log.VInfof(ctx, 1, "clamping fraction completed %f to [0.0, 1.0]", fractionCompleted)
 			fractionCompleted = 1.0
+		} else if fractionCompleted < 0.0 {
+			log.VInfof(ctx, 1, "clamping fraction completed %f to [0.0, 1.0]", fractionCompleted)
+			fractionCompleted = 0
 		}
-		if fractionCompleted < 0.0 || fractionCompleted > 1.0 {
-			return errors.Errorf(
-				"job %d: fractionCompleted %f is outside allowable range [0.0, 1.0]",
-				u.j.ID(), fractionCompleted,
-			)
-		}
+
 		md.Progress.Progress = &jobspb.Progress_FractionCompleted{
 			FractionCompleted: fractionCompleted,
 		}
 		ju.UpdateProgress(md.Progress)
-		return nil
-	})
-}
-
-// paused sets the status of the tracked job to paused. It is called by the
-// registry adoption loop by the node currently running a job to move it from
-// PauseRequested to paused.
-func (u Updater) paused(ctx context.Context, fn func(context.Context, isql.Txn) error) error {
-	return u.Update(ctx, func(txn isql.Txn, md JobMetadata, ju *JobUpdater) error {
-		if md.Status == StatusPaused {
-			// Already paused - do nothing.
-			return nil
-		}
-		if md.Status != StatusPauseRequested {
-			return fmt.Errorf("job with status %s cannot be set to paused", md.Status)
-		}
-		if fn != nil {
-			if err := fn(ctx, txn); err != nil {
-				return err
-			}
-		}
-		ju.UpdateStatus(StatusPaused)
-		return nil
-	})
-}
-
-// Unpaused sets the status of the tracked job to running or reverting iff the
-// job is currently paused. It does not directly resume the job; rather, it
-// expires the job's lease so that a Registry adoption loop detects it and
-// resumes it.
-func (u Updater) Unpaused(ctx context.Context) error {
-	return u.Update(ctx, func(txn isql.Txn, md JobMetadata, ju *JobUpdater) error {
-		if md.Status == StatusRunning || md.Status == StatusReverting {
-			// Already resumed - do nothing.
-			return nil
-		}
-		if md.Status != StatusPaused {
-			return fmt.Errorf("job with status %s cannot be resumed", md.Status)
-		}
-		// We use the absence of error to determine what state we should
-		// resume into.
-		if md.Payload.FinalResumeError == nil {
-			ju.UpdateStatus(StatusRunning)
-		} else {
-			ju.UpdateStatus(StatusReverting)
-		}
-		ju.UpdatePayload(md.Payload)
 		return nil
 	})
 }
@@ -401,45 +351,14 @@ func (u Updater) Unpaused(ctx context.Context) error {
 // that it is in state StatusCancelRequested and will move it to state
 // StatusReverting.
 func (u Updater) CancelRequested(ctx context.Context) error {
-	return u.CancelRequestedWithReason(ctx, errJobCanceled)
-}
-
-// CancelRequestedWithReason sets the status of the tracked job to cancel-requested. It
-// does not directly cancel the job; like job.Paused, it expects the job to call
-// job.Progressed soon, observe a "job is cancel-requested" error, and abort.
-// Further the node the runs the job will actively cancel it when it notices
-// that it is in state StatusCancelRequested and will move it to state
-// StatusReverting.
-func (u Updater) CancelRequestedWithReason(ctx context.Context, reason error) error {
 	return u.Update(ctx, func(txn isql.Txn, md JobMetadata, ju *JobUpdater) error {
-		if md.Payload.Noncancelable {
-			return errors.Newf("job %d: not cancelable", md.ID)
-		}
-		if md.Status == StatusCancelRequested || md.Status == StatusCanceled {
-			return nil
-		}
-		if md.Status != StatusPending && md.Status != StatusRunning && md.Status != StatusPaused {
-			return fmt.Errorf("job with status %s cannot be requested to be canceled", md.Status)
-		}
-		if md.Status == StatusPaused && md.Payload.FinalResumeError != nil {
-			decodedErr := errors.DecodeError(ctx, *md.Payload.FinalResumeError)
-			return errors.Wrapf(decodedErr, "job %d is paused and has non-nil FinalResumeError "+
-				"hence cannot be canceled and should be reverted", md.ID)
-		}
-		if !errors.Is(reason, errJobCanceled) {
-			md.Payload.Error = reason.Error()
-			ju.UpdatePayload(md.Payload)
-		}
-		ju.UpdateStatus(StatusCancelRequested)
-		return nil
+		return ju.CancelRequestedWithReason(ctx, md, errJobCanceled)
 	})
 }
 
 // onPauseRequestFunc is a function used to perform action on behalf of a job
 // implementation when a pause is requested.
-type onPauseRequestFunc func(
-	ctx context.Context, planHookState interface{}, txn isql.Txn, progress *jobspb.Progress,
-) error
+type onPauseRequestFunc func(ctx context.Context, md JobMetadata, ju *JobUpdater) error
 
 // PauseRequestedWithFunc sets the status of the tracked job to pause-requested.
 // It does not directly pause the job; it expects the node that runs the job will
@@ -451,41 +370,8 @@ func (u Updater) PauseRequestedWithFunc(
 	ctx context.Context, fn onPauseRequestFunc, reason string,
 ) error {
 	return u.Update(ctx, func(txn isql.Txn, md JobMetadata, ju *JobUpdater) error {
-		if md.Status == StatusPauseRequested || md.Status == StatusPaused {
-			return nil
-		}
-		if md.Status != StatusPending && md.Status != StatusRunning && md.Status != StatusReverting {
-			return fmt.Errorf("job with status %s cannot be requested to be paused", md.Status)
-		}
-		if fn != nil {
-			execCtx, cleanup := u.j.registry.execCtx(ctx, "pause request", md.Payload.UsernameProto.Decode())
-			defer cleanup()
-			if err := fn(ctx, execCtx, txn, md.Progress); err != nil {
-				return err
-			}
-			ju.UpdateProgress(md.Progress)
-		}
-		ju.UpdateStatus(StatusPauseRequested)
-		md.Payload.PauseReason = reason
-		ju.UpdatePayload(md.Payload)
-		log.Infof(ctx, "job %d: pause requested recorded with reason %s", md.ID, reason)
-		return nil
+		return ju.PauseRequestedWithFunc(ctx, txn, md, fn, reason)
 	})
-}
-
-// PauseRequested is like PausedRequestedWithFunc but uses the default
-// implementation of OnPauseRequested if the underlying job is a
-// PauseRequester.
-func (u Updater) PauseRequested(ctx context.Context, reason string) error {
-	resumer, err := u.j.registry.createResumer(u.j, u.j.registry.settings)
-	if err != nil {
-		return err
-	}
-	var fn onPauseRequestFunc
-	if pr, ok := resumer.(PauseRequester); ok {
-		fn = pr.OnPauseRequest
-	}
-	return u.PauseRequestedWithFunc(ctx, fn, reason)
 }
 
 // reverted sets the status of the tracked job to reverted.
@@ -524,23 +410,6 @@ func (u Updater) reverted(
 			}
 			ju.UpdateStatus(StatusReverting)
 		}
-		// md.RunStats will be nil if clusterversion.RetryJobsWithExponentialBackoff
-		// was not active when Update was called above. In this case, we skip updating
-		// the runStats, treating this job run as if backoff is not active.
-		//
-		// TODO (sajjad): Update this comment after version 22.2 has been released.
-		if md.RunStats != nil {
-			// We can reach here due to a failure or due to the job being canceled.
-			// We should reset the exponential backoff parameters if the job was not
-			// canceled. Note that md.Status will be StatusReverting if the job
-			// was canceled.
-			numRuns := md.RunStats.NumRuns + 1
-			if md.Status != StatusReverting {
-				// Reset the number of runs to speed up reverting.
-				numRuns = 1
-			}
-			ju.UpdateRunStats(numRuns, u.now())
-		}
 		if traceID != 0 && md.Progress != nil && md.Progress.TraceID != traceID {
 			md.Progress.TraceID = traceID
 			ju.UpdateProgress(md.Progress)
@@ -559,7 +428,13 @@ func (u Updater) canceled(ctx context.Context) error {
 			return fmt.Errorf("job with status %s cannot be requested to be canceled", md.Status)
 		}
 		ju.UpdateStatus(StatusCanceled)
-		md.Payload.FinishedMicros = timeutil.ToUnixMicros(u.j.registry.clock.Now().GoTime())
+		var now time.Time
+		if u.j.registry.knobs.StubTimeNow != nil {
+			now = u.j.registry.knobs.StubTimeNow()
+		} else {
+			now = u.j.registry.clock.Now().GoTime()
+		}
+		md.Payload.FinishedMicros = timeutil.ToUnixMicros(now)
 		ju.UpdatePayload(md.Payload)
 		return nil
 	})
@@ -716,12 +591,24 @@ type JobNotFoundError struct {
 	sessionID sqlliveness.SessionID
 }
 
+func NewJobNotFoundError(jobID jobspb.JobID) *JobNotFoundError {
+	return &JobNotFoundError{jobID: jobID}
+}
+
+var _ errors.SafeFormatter = &JobNotFoundError{}
+
+func (e *JobNotFoundError) SafeFormatError(p errors.Printer) (next error) {
+	if e.sessionID != "" {
+		p.Printf("job with ID %d does not exist with claim session id %q", e.jobID, e.sessionID.String())
+	} else {
+		p.Printf("job with ID %d does not exist", e.jobID)
+	}
+	return nil
+}
+
 // Error makes JobNotFoundError an error.
 func (e *JobNotFoundError) Error() string {
-	if e.sessionID != "" {
-		return fmt.Sprintf("job with ID %d does not exist with claim session id %q", e.jobID, e.sessionID.String())
-	}
-	return fmt.Sprintf("job with ID %d does not exist", e.jobID)
+	return redact.Sprint(e).StripMarkers()
 }
 
 // HasJobNotFoundError returns true if the error contains a JobNotFoundError.
@@ -740,7 +627,7 @@ func (j *Job) loadJobPayloadAndProgress(
 	progress := &jobspb.Progress{}
 	infoStorage := j.InfoStorage(txn)
 
-	payloadBytes, exists, err := infoStorage.GetLegacyPayload(ctx)
+	payloadBytes, exists, err := infoStorage.GetLegacyPayload(ctx, "loadJobPayloadAndProgress")
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "failed to get payload for job %d", j.ID())
 	}
@@ -751,7 +638,7 @@ func (j *Job) loadJobPayloadAndProgress(
 		return nil, nil, err
 	}
 
-	progressBytes, exists, err := infoStorage.GetLegacyProgress(ctx)
+	progressBytes, exists, err := infoStorage.GetLegacyProgress(ctx, "loadJobPayloadAndProgress")
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "failed to get progress for job %d", j.ID())
 	}
@@ -798,7 +685,7 @@ func (u Updater) load(ctx context.Context) (retErr error) {
 		queryNoSessionID   = "SELECT created_by_type, created_by_id, status FROM system.jobs WHERE id = $1"
 		queryWithSessionID = queryNoSessionID + " AND claim_session_id = $2"
 	)
-	sess := sessiondata.RootUserSessionDataOverride
+	sess := sessiondata.NodeUserSessionDataOverride
 
 	var err error
 	var row tree.Datums
@@ -883,17 +770,6 @@ func unmarshalStatus(datum tree.Datum) (Status, error) {
 	return Status(*statusString), nil
 }
 
-// getRunStats returns the RunStats for a job. If they are not set, it will
-// return a zero-value.
-func (j *Job) getRunStats() (rs RunStats) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.mu.runStats != nil {
-		rs = *j.mu.runStats
-	}
-	return rs
-}
-
 // Start will resume the job. The transaction used to create the StartableJob
 // must be committed. If a non-nil error is returned, the job was not started
 // and nothing will be send on errCh. Clients must not start jobs more than
@@ -918,7 +794,7 @@ func (sj *StartableJob) Start(ctx context.Context) (err error) {
 		return fmt.Errorf("cannot resume %T job which is not committed", sj.resumer)
 	}
 
-	if err := sj.registry.stopper.RunAsyncTask(ctx, sj.taskName(), func(_ context.Context) {
+	if err := sj.registry.stopper.RunAsyncTask(ctx, string(sj.taskName()), func(_ context.Context) {
 		resumeCtx, cancel := sj.registry.stopper.WithCancelOnQuiesce(sj.resumerCtx)
 		defer cancel()
 		sj.execErr = sj.registry.runJob(resumeCtx, sj.resumer, sj.Job, StatusRunning, sj.taskName())
@@ -1010,96 +886,12 @@ func (sj *StartableJob) recordStart() (alreadyStarted bool) {
 	return atomic.AddInt64(&sj.starts, 1) != 1
 }
 
-// ParseRetriableExecutionErrorLogFromJSON inverts the output of
-// FormatRetriableExecutionErrorLogToJSON.
-func ParseRetriableExecutionErrorLogFromJSON(
-	log []byte,
-) ([]*jobspb.RetriableExecutionFailure, error) {
-	var jsonArr []gojson.RawMessage
-	if err := gojson.Unmarshal(log, &jsonArr); err != nil {
-		return nil, errors.Wrap(err, "failed to decode json array for execution log")
-	}
-	ret := make([]*jobspb.RetriableExecutionFailure, len(jsonArr))
-
-	json := jsonpb.Unmarshaler{AllowUnknownFields: true}
-	var reader bytes.Reader
-	for i, data := range jsonArr {
-		msgI, err := protoreflect.NewMessage("cockroach.sql.jobs.jobspb.RetriableExecutionFailure")
-		if err != nil {
-			return nil, errors.WithAssertionFailure(err)
-		}
-		msg := msgI.(*jobspb.RetriableExecutionFailure)
-		reader.Reset(data)
-		if err := json.Unmarshal(&reader, msg); err != nil {
-			return nil, err
-		}
-		ret[i] = msg
-	}
-	return ret, nil
-}
-
-// FormatRetriableExecutionErrorLogToJSON extracts the events
-// stored in the payload, formats them into a json array. This function
-// is intended for use with crdb_internal.jobs. Note that the error will
-// be flattened into a string and stored in the TruncatedError field.
-func FormatRetriableExecutionErrorLogToJSON(
-	ctx context.Context, log []*jobspb.RetriableExecutionFailure,
-) (*tree.DJSON, error) {
-	ab := json.NewArrayBuilder(len(log))
-	for i := range log {
-		ev := *log[i]
-		if ev.Error != nil {
-			ev.TruncatedError = errors.DecodeError(ctx, *ev.Error).Error()
-			ev.Error = nil
-		}
-		msg, err := protoreflect.MessageToJSON(&ev, protoreflect.FmtFlags{
-			EmitDefaults: false,
-		})
-		if err != nil {
-			return nil, err
-		}
-		ab.Add(msg)
-	}
-	return tree.NewDJSON(ab.Build()), nil
-}
-
-// FormatRetriableExecutionErrorLogToStringArray extracts the events
-// stored in the payload, formats them into strings and returns them as an
-// array of strings. This function is intended for use with crdb_internal.jobs.
-func FormatRetriableExecutionErrorLogToStringArray(
-	ctx context.Context, log []*jobspb.RetriableExecutionFailure,
-) *tree.DArray {
-	arr := tree.NewDArray(types.String)
-	for _, ev := range log {
-		if ev == nil { // no reason this should happen, but be defensive
-			continue
-		}
-		var cause error
-		if ev.Error != nil {
-			cause = errors.DecodeError(ctx, *ev.Error)
-		} else {
-			cause = fmt.Errorf("(truncated) %s", ev.TruncatedError)
-		}
-		msg := formatRetriableExecutionFailure(
-			ev.InstanceID,
-			Status(ev.Status),
-			timeutil.FromUnixMicros(ev.ExecutionStartMicros),
-			timeutil.FromUnixMicros(ev.ExecutionEndMicros),
-			cause,
-		)
-		// We really don't care about errors here. I'd much rather see nothing
-		// in my log than crash.
-		_ = arr.Append(tree.NewDString(msg))
-	}
-	return arr
-}
-
 // GetJobTraceID returns the current trace ID of the job from the job progress.
 func GetJobTraceID(ctx context.Context, db isql.DB, jobID jobspb.JobID) (tracingpb.TraceID, error) {
 	var traceID tracingpb.TraceID
 	if err := db.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		jobInfo := InfoStorageForJob(txn, jobID)
-		progressBytes, exists, err := jobInfo.GetLegacyProgress(ctx)
+		progressBytes, exists, err := jobInfo.GetLegacyProgress(ctx, "GetJobTraceID")
 		if err != nil {
 			return err
 		}
@@ -1131,7 +923,7 @@ func LoadJobProgress(
 	if err := db.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := InfoStorageForJob(txn, jobID)
 		var err error
-		progressBytes, exists, err = infoStorage.GetLegacyProgress(ctx)
+		progressBytes, exists, err = infoStorage.GetLegacyProgress(ctx, "LoadJobProgress")
 		return err
 	}); err != nil || !exists {
 		return nil, err

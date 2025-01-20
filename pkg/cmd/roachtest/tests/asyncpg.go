@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
@@ -22,11 +18,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 )
 
-const asyncpgRunTestCmd = `
-source venv/bin/activate && 
-cd /mnt/data1/asyncpg && 
-PGPORT={pgport:1} PGHOST=localhost PGUSER=test_admin PGDATABASE=defaultdb python3 setup.py test > asyncpg.stdout
-`
+var asyncpgRunTestCmd = fmt.Sprintf(`
+source venv/bin/activate &&
+cd /mnt/data1/asyncpg &&
+PGPORT={pgport:1} PGHOST=localhost PGUSER=%s PGPASSWORD=%s PGSSLROOTCERT=$HOME/%s/ca.crt PGSSLMODE=require PGDATABASE=defaultdb python3 setup.py test > asyncpg.stdout
+`, install.DefaultUser, install.DefaultPassword, install.CockroachNodeCertsDir)
 
 var asyncpgReleaseTagRegex = regexp.MustCompile(`^(?P<major>v\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
 
@@ -46,7 +42,7 @@ func registerAsyncpg(r registry.Registry) {
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -77,6 +73,13 @@ func registerAsyncpg(r registry.Registry) {
 			"/mnt/data1/asyncpg",
 			asyncpgSupportedTag,
 			node,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := repeatRunE(
+			ctx, t, c, node, "patch test to workaround flaky cleanup logic",
+			`sed -e "s/CREATE TYPE enum_t AS ENUM ('abc', 'def', 'ghi');/CREATE TYPE IF NOT EXISTS enum_t AS ENUM ('abc', 'def', 'ghi');/g" -i /mnt/data1/asyncpg/tests/test_codecs.py`,
 		); err != nil {
 			t.Fatal(err)
 		}

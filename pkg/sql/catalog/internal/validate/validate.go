@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package validate contains all the descriptor validation logic.
 package validate
@@ -85,7 +80,7 @@ func Validate(
 	// Collect descriptors referenced by the validated descriptors.
 	// These are their immediate neighbors in the reference graph, and in some
 	// special cases those neighbors' immediate neighbors also.
-	vdg, descGetterErr := collectDescriptorsForValidation(ctx, vd, version, descriptors)
+	vdg, descGetterErr := collectDescriptorsForValidation(ctx, targetLevel, vd, version, descriptors)
 	if descGetterErr != nil {
 		vea.reportDescGetterError(collectingReferencedDescriptors, descGetterErr)
 		return vea.errors
@@ -386,12 +381,13 @@ func (vdg *validationDescGetterImpl) addNamespaceEntries(
 type collectorState struct {
 	vdg          validationDescGetterImpl
 	referencedBy catalog.DescriptorIDSet
+	level        catalog.ValidationLevel
 }
 
 // addDirectReferences adds all immediate neighbors of desc to the state.
 func (cs *collectorState) addDirectReferences(desc catalog.Descriptor) error {
 	cs.vdg.descriptors[desc.GetID()] = desc
-	idSet, err := desc.GetReferencedDescIDs()
+	idSet, err := desc.GetReferencedDescIDs(cs.level)
 	if err != nil {
 		return err
 	}
@@ -437,6 +433,7 @@ func (cs *collectorState) getMissingDescs(
 // possible descriptors required for validation.
 func collectDescriptorsForValidation(
 	ctx context.Context,
+	level catalog.ValidationLevel,
 	vd ValidationDereferencer,
 	version clusterversion.ClusterVersion,
 	descriptors []catalog.Descriptor,
@@ -447,6 +444,7 @@ func collectDescriptorsForValidation(
 			namespace:   make(map[descpb.NameInfo]descpb.ID, len(descriptors)),
 		},
 		referencedBy: catalog.MakeDescriptorIDSet(),
+		level:        level,
 	}
 	for _, desc := range descriptors {
 		if desc == nil || desc.Dropped() {

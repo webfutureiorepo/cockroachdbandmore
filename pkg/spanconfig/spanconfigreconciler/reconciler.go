@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigreconciler
 
@@ -252,7 +247,7 @@ func (f *fullReconciler) reconcile(
 		updates[i] = spanconfig.Update(record)
 	}
 
-	toDelete, toUpsert := storeWithExistingSpanConfigs.Apply(ctx, false /* dryrun */, updates...)
+	toDelete, toUpsert := storeWithExistingSpanConfigs.Apply(ctx, updates...)
 	if len(toDelete) != 0 || len(toUpsert) != 0 {
 		if err := updateSpanConfigRecords(
 			ctx, f.kvAccessor, toDelete, toUpsert, f.session,
@@ -281,7 +276,7 @@ func (f *fullReconciler) reconcile(
 			if err != nil {
 				return nil, hlc.Timestamp{}, err
 			}
-			storeWithExistingSpanConfigs.Apply(ctx, false /* dryrun */, del)
+			storeWithExistingSpanConfigs.Apply(ctx, del)
 		}
 		storeWithExtraneousSpanConfigs = storeWithExistingSpanConfigs
 	}
@@ -299,7 +294,7 @@ func (f *fullReconciler) reconcile(
 		if err != nil {
 			return nil, hlc.Timestamp{}, err
 		}
-		storeWithLatestSpanConfigs.Apply(ctx, false /* dryrun */, del)
+		storeWithLatestSpanConfigs.Apply(ctx, del)
 	}
 
 	if !f.codec.ForSystemTenant() {
@@ -401,7 +396,7 @@ func (f *fullReconciler) fetchExistingSpanConfigs(
 		}
 
 		for _, record := range records {
-			store.Apply(ctx, false /* dryrun */, spanconfig.Update(record))
+			store.Apply(ctx, spanconfig.Update(record))
 		}
 	}
 	return store, nil
@@ -465,6 +460,10 @@ func updateSpanConfigRecords(
 				continue
 			}
 			return err // not a retryable error, bubble up
+		}
+
+		if log.V(3) {
+			log.Infof(ctx, "successfully updated span config records: deleted = %+#v; upserted = %+#v", toDelete, toUpsert)
 		}
 		return nil // we performed the update; we're done here
 	}
@@ -572,7 +571,7 @@ func (r *incrementalReconciler) reconcile(
 				updates = append(updates, del)
 			}
 
-			toDelete, toUpsert := r.storeWithKVContents.Apply(ctx, false /* dryrun */, updates...)
+			toDelete, toUpsert := r.storeWithKVContents.Apply(ctx, updates...)
 			if len(toDelete) != 0 || len(toUpsert) != 0 {
 				if err := updateSpanConfigRecords(
 					ctx, r.kvAccessor, toDelete, toUpsert, r.session,
@@ -685,7 +684,7 @@ func (r *incrementalReconciler) filterForMissingTableIDs(
 			continue // nothing to do
 		}
 
-		desc, err := descsCol.ByID(txn).Get().Desc(ctx, descriptorUpdate.ID)
+		desc, err := descsCol.ByIDWithoutLeased(txn).Get().Desc(ctx, descriptorUpdate.ID)
 
 		considerAsMissing := false
 		if errors.Is(err, catalog.ErrDescriptorNotFound) {

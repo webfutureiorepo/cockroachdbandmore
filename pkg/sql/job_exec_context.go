@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -20,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
+	"github.com/cockroachdb/redact"
 )
 
 // plannerJobExecContext is a wrapper to implement JobExecContext with a planner
@@ -33,7 +29,7 @@ type plannerJobExecContext struct {
 // MakeJobExecContext makes a JobExecContext.
 func MakeJobExecContext(
 	ctx context.Context,
-	opName string,
+	opName redact.SafeString,
 	user username.SQLUsername,
 	memMetrics *MemoryMetrics,
 	execCfg *ExecutorConfig,
@@ -76,7 +72,7 @@ func (e *plannerJobExecContext) SpanStatsConsumer() keyvisualizer.SpanStatsConsu
 }
 
 // JobExecContext provides the execution environment for a job. It is what is
-// passed to the Resume/OnFailOrCancel/OnPauseRequested methods of a jobs's
+// passed to the Resume/OnFailOrCancel methods of a jobs's
 // Resumer to give that resumer access to things like ExecutorCfg, LeaseMgr,
 // etc -- the kinds of things that would usually be on planner or similar during
 // a non-job SQL statement's execution. Unlike a planner however, or planner-ish

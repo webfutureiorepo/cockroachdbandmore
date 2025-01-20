@@ -15,7 +15,10 @@ go_library(
         "//pkg/clusterversion",
         "//pkg/keys",
         "//pkg/roachpb",
+        "//pkg/sql/pgwire/pgcode",
+        "//pkg/sql/pgwire/pgerror",
         "//pkg/sql/sem/tree",
+        "//pkg/util/debugutil",
         "//pkg/util/envutil",
         "//pkg/util/log",
         "@com_github_cockroachdb_errors//:errors",
@@ -29,10 +32,6 @@ go_test(
     size = "small",
     srcs = ["zone_test.go"],
     embed = [":zonepb"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/keys",
         "//pkg/roachpb",

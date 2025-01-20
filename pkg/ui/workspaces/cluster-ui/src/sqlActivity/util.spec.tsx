@@ -1,22 +1,19 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import Long from "long";
+
+import { mockStmtStats, Stmt } from "src/api/testUtils";
+import { Filters } from "src/queryFilter/filter";
 import {
   convertRawStmtsToAggregateStatistics,
   filterStatementsData,
   getAppsFromStmtsResponse,
 } from "src/sqlActivity/util";
-import { mockStmtStats, Stmt } from "src/api/testUtils";
-import { Filters } from "src/queryFilter/filter";
-import Long from "long";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+
 import { INTERNAL_APP_NAME_PREFIX, unset } from "../util";
 
 describe("filterStatementsData", () => {

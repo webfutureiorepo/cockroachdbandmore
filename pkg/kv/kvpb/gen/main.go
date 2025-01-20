@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -372,12 +367,48 @@ func (ba *BatchRequest) WriteSummary(b *strings.Builder) {
 	}
 
 	fmt.Fprint(f, `
+func allocBatchResponse(nResps int) *BatchResponse {
+	if nResps <= 1 {
+		alloc := new(struct {
+			br    BatchResponse
+			resps [1]ResponseUnion
+		})
+		alloc.br.Responses = alloc.resps[:nResps]
+		return &alloc.br
+	} else if nResps <= 2 {
+		alloc := new(struct {
+			br    BatchResponse
+			resps [2]ResponseUnion
+		})
+		alloc.br.Responses = alloc.resps[:nResps]
+		return &alloc.br
+	} else if nResps <= 4 {
+		alloc := new(struct {
+			br    BatchResponse
+			resps [4]ResponseUnion
+		})
+		alloc.br.Responses = alloc.resps[:nResps]
+		return &alloc.br
+	} else if nResps <= 8 {
+		alloc := new(struct {
+			br    BatchResponse
+			resps [8]ResponseUnion
+		})
+		alloc.br.Responses = alloc.resps[:nResps]
+		return &alloc.br
+	}
+	br := &BatchResponse{}
+	br.Responses = make([]ResponseUnion, nResps)
+	return br
+}
+`)
+
+	fmt.Fprint(f, `
 // CreateReply creates replies for each of the contained requests, wrapped in a
 // BatchResponse. The response objects are batch allocated to minimize
 // allocation overhead.
 func (ba *BatchRequest) CreateReply() *BatchResponse {
-	br := &BatchResponse{}
-	br.Responses = make([]ResponseUnion, len(ba.Requests))
+	br := allocBatchResponse(len(ba.Requests))
 
 	counts := ba.getReqCounts()
 

@@ -1,16 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import Long from "long";
-import { StatementStatistics } from "./appStats";
-import { ExecStats } from ".";
+
+import { ExecStats, StatementStatistics } from "./appStats";
 
 interface AggregateStatistics {
   label: string;
@@ -47,8 +43,8 @@ const execStats: ExecStats = {
   },
 };
 
-const statementStats: any = {
-  count: 36958,
+const statementStats: cockroach.sql.IStatementStatistics = {
+  count: Long.fromNumber(36958),
   first_attempt_count: Long.fromNumber(36958),
   max_retries: Long.fromNumber(0),
   num_rows: {

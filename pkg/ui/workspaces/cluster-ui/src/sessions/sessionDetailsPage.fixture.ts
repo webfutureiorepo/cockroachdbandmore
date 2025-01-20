@@ -1,14 +1,16 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createMemoryHistory } from "history";
+
+import {
+  CancelSessionRequestMessage,
+  CancelQueryRequestMessage,
+} from "src/api/terminateQueryApi";
+import { sessionAttr } from "src/util/constants";
+
 import { SessionDetailsProps } from "./sessionDetails";
 import {
   activeSession,
@@ -16,11 +18,6 @@ import {
   idleSession,
   idleTransactionSession,
 } from "./sessionsPage.fixture";
-import { sessionAttr } from "src/util/constants";
-import {
-  CancelSessionRequestMessage,
-  CancelQueryRequestMessage,
-} from "src/api/terminateQueryApi";
 
 const history = createMemoryHistory({ initialEntries: ["/sessions"] });
 

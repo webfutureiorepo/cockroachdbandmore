@@ -53,6 +53,42 @@
 =>
 (GenerateInvertedIndexScans $scanPrivate $filters)
 
+# GenerateMinimalInvertedIndexScans is similar to GenerateInvertedIndexScans. It
+# differs by trying to generate an inverted index scan that spans the fewest
+# index keys, rather than generating scans that span all index keys in the
+# expression and performing set operations on them before an index-join.
+[GenerateMinimalInvertedIndexScans, Explore]
+(Select
+    $input:(Scan
+        $scanPrivate:* &
+            (IsCanonicalScan $scanPrivate) &
+            (HasInvertedIndexes $scanPrivate)
+    )
+    $filters:*
+)
+=>
+(GenerateMinimalInvertedIndexScans $input $scanPrivate $filters)
+
+# GenerateTrigramSimilarityInvertedIndexScans generates scans on inverted
+# trigram indexes that are constrained by similarity filters (e.g.,
+# `s & % 'foo'`). It is similar conceptually to GenerateInvertedIndexScans, but
+# it produces expression trees optimized specially for similarity filters. See
+# the GenerateSimilarityInvertedIndexScans custom function for more details.
+[GenerateTrigramSimilarityInvertedIndexScans, Explore]
+(Select
+    (Scan
+        $scanPrivate:* &
+            (IsCanonicalScan $scanPrivate) &
+            (HasInvertedIndexes $scanPrivate)
+    )
+    $filters:*
+)
+=>
+(GenerateTrigramSimilarityInvertedIndexScans
+    $scanPrivate
+    $filters
+)
+
 # GenerateZigzagJoins creates ZigzagJoin operators for all index pairs (of the
 # Scan table) where the prefix column(s) of both indexes is/are fixed to
 # constant values in the filters. See comments in GenerateZigzagJoin and

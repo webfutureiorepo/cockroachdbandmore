@@ -1,10 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package serverccl
 
@@ -228,6 +225,12 @@ func TestTenantProcessDebugging(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
+	// External service tenants are allowed to debug their own processes without
+	// capabilities and shared service tenants implicitly have all capabilities,
+	// so we currently never expect a tenant hitting their admin server -- whether
+	// that is their own process or the system one.
+	const expectDebugToRequireCap = false
+
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
 		DefaultTestTenant: base.TestControlsTenantsExplicitly,
 	})
@@ -271,25 +274,26 @@ func TestTenantProcessDebugging(t *testing.T) {
 		q.Add("debug", "2")
 		url.RawQuery = q.Encode()
 
+		if expectDebugToRequireCap {
+			resp, err := httpClient.Get(url.String())
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			require.Contains(t, string(body), "tenant does not have capability to debug the running process")
+
+			_, err = db.Exec(`ALTER TENANT processdebug GRANT CAPABILITY can_debug_process=true`)
+			require.NoError(t, err)
+
+			serverutils.WaitForTenantCapabilities(t, s, serverutils.TestTenantID(), map[tenantcapabilities.ID]string{
+				tenantcapabilities.CanDebugProcess: "true",
+			}, "")
+		}
 		resp, err := httpClient.Get(url.String())
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusForbidden, resp.StatusCode)
-		require.Contains(t, string(body), "tenant does not have capability to debug the running process")
-
-		_, err = db.Exec(`ALTER TENANT processdebug GRANT CAPABILITY can_debug_process=true`)
-		require.NoError(t, err)
-
-		serverutils.WaitForTenantCapabilities(t, s, serverutils.TestTenantID(), map[tenantcapabilities.ID]string{
-			tenantcapabilities.CanDebugProcess: "true",
-		}, "")
-
-		resp, err = httpClient.Get(url.String())
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		body, err = io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Contains(t, string(body), "goroutine")
@@ -313,25 +317,26 @@ func TestTenantProcessDebugging(t *testing.T) {
 		q.Add("vmodule", "exec_log=3")
 		url.RawQuery = q.Encode()
 
+		if expectDebugToRequireCap {
+			resp, err := httpClient.Get(url.String())
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			require.Contains(t, string(body), "tenant does not have capability to debug the running process")
+
+			_, err = db.Exec(`ALTER TENANT processdebug GRANT CAPABILITY can_debug_process=true`)
+			require.NoError(t, err)
+
+			serverutils.WaitForTenantCapabilities(t, s, serverutils.TestTenantID(), map[tenantcapabilities.ID]string{
+				tenantcapabilities.CanDebugProcess: "true",
+			}, "")
+		}
 		resp, err := httpClient.Get(url.String())
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusForbidden, resp.StatusCode)
-		require.Contains(t, string(body), "tenant does not have capability to debug the running process")
-
-		_, err = db.Exec(`ALTER TENANT processdebug GRANT CAPABILITY can_debug_process=true`)
-		require.NoError(t, err)
-
-		serverutils.WaitForTenantCapabilities(t, s, serverutils.TestTenantID(), map[tenantcapabilities.ID]string{
-			tenantcapabilities.CanDebugProcess: "true",
-		}, "")
-
-		resp, err = httpClient.Get(url.String())
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		body, err = io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		require.Contains(t, string(body), "previous vmodule configuration: \nnew vmodule configuration: exec_log=3\n")

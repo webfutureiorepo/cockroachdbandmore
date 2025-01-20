@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package logstore
 
@@ -16,11 +11,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 var errSideloadedFileNotFound = errors.New("sideloaded file not found")
@@ -56,8 +51,8 @@ type SideloadStorage interface {
 	// files that remain, or an error.
 	TruncateTo(_ context.Context, index kvpb.RaftIndex) (freed, retained int64, _ error)
 	// BytesIfTruncatedFromTo returns the number of bytes that would be freed,
-	// if one were to truncate [from, to). Additionally, it returns the the
-	// number of bytes that would be retained >= to.
+	// if one were to truncate [from, to). Additionally, it returns the number
+	// of bytes that would be retained >= to.
 	BytesIfTruncatedFromTo(_ context.Context, from kvpb.RaftIndex, to kvpb.RaftIndex) (freed, retained int64, _ error)
 	// Returns an absolute path to the file that Get() would return the contents
 	// of. Does not check whether the file actually exists.
@@ -88,7 +83,7 @@ func MaybeSideloadEntries(
 ) {
 	var output []raftpb.Entry
 	for i := range input {
-		typ, err := raftlog.EncodingOf(input[i])
+		typ, pri, err := raftlog.EncodingOf(input[i])
 		if err != nil {
 			return nil, 0, 0, 0, err
 		}
@@ -130,7 +125,7 @@ func MaybeSideloadEntries(
 		// TODO(tbg): this should be supported by a method as well.
 		{
 			data := make([]byte, raftlog.RaftCommandPrefixLen+e.Cmd.Size())
-			raftlog.EncodeRaftCommandPrefix(data[:raftlog.RaftCommandPrefixLen], typ, e.ID)
+			raftlog.EncodeRaftCommandPrefix(data[:raftlog.RaftCommandPrefixLen], typ, e.ID, pri)
 			_, err := protoutil.MarshalToSizedBuffer(&e.Cmd, data[raftlog.RaftCommandPrefixLen:])
 			if err != nil {
 				return nil, 0, 0, 0, errors.Wrap(err, "while marshaling stripped sideloaded command")
@@ -171,7 +166,7 @@ func MaybeInlineSideloadedRaftCommand(
 	sideloaded SideloadStorage,
 	entryCache *raftentry.Cache,
 ) (*raftpb.Entry, error) {
-	typ, err := raftlog.EncodingOf(ent)
+	typ, pri, err := raftlog.EncodingOf(ent)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +218,7 @@ func MaybeInlineSideloadedRaftCommand(
 	// the EntryEncoding.
 	{
 		data := make([]byte, raftlog.RaftCommandPrefixLen+e.Cmd.Size())
-		raftlog.EncodeRaftCommandPrefix(data[:raftlog.RaftCommandPrefixLen], typ, e.ID)
+		raftlog.EncodeRaftCommandPrefix(data[:raftlog.RaftCommandPrefixLen], typ, e.ID, pri)
 		_, err := protoutil.MarshalToSizedBuffer(&e.Cmd, data[raftlog.RaftCommandPrefixLen:])
 		if err != nil {
 			return nil, err
@@ -238,7 +233,7 @@ func MaybeInlineSideloadedRaftCommand(
 // requires unmarshalling the raft command, so this assertion should be kept out
 // of performance critical paths.
 func AssertSideloadedRaftCommandInlined(ctx context.Context, ent *raftpb.Entry) {
-	typ, err := raftlog.EncodingOf(*ent)
+	typ, _, err := raftlog.EncodingOf(*ent)
 	if err != nil {
 		log.Fatalf(ctx, "%v", err)
 	}

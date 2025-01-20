@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package systemconfigwatcher
 
@@ -31,7 +26,7 @@ import (
 // cache provides a consistent snapshot when available, but the snapshot
 // may be stale.
 type Cache struct {
-	w                   *rangefeedcache.Watcher
+	w                   *rangefeedcache.Watcher[*kvpb.RangeFeedValue]
 	defaultZoneConfig   *zonepb.ZoneConfig
 	additionalKVsSource config.SystemConfigProvider
 	mu                  struct {
@@ -90,14 +85,8 @@ func NewWithAdditionalProvider(
 	c.additionalKVsSource = additional
 
 	spans := []roachpb.Span{
-		{
-			Key:    append(codec.TenantPrefix(), keys.SystemDescriptorTableSpan.Key...),
-			EndKey: append(codec.TenantPrefix(), keys.SystemDescriptorTableSpan.EndKey...),
-		},
-		{
-			Key:    append(codec.TenantPrefix(), keys.SystemZonesTableSpan.Key...),
-			EndKey: append(codec.TenantPrefix(), keys.SystemZonesTableSpan.EndKey...),
-		},
+		codec.TableSpan(keys.DescriptorTableID),
+		codec.TableSpan(keys.ZonesTableID),
 	}
 	c.w = rangefeedcache.NewWatcher(
 		"system-config-cache", clock, f,
@@ -222,7 +211,9 @@ func (k keyValues) Less(i, j int) bool { return k[i].Key.Compare(k[j].Key) < 0 }
 
 var _ sort.Interface = (keyValues)(nil)
 
-func (c *Cache) handleUpdate(_ context.Context, update rangefeedcache.Update) {
+func (c *Cache) handleUpdate(
+	_ context.Context, update rangefeedcache.Update[*kvpb.RangeFeedValue],
+) {
 	updateKVs := rangefeedbuffer.EventsToKVs(update.Events,
 		rangefeedbuffer.RangeFeedValueEventToKV)
 	c.mu.Lock()
@@ -256,8 +247,10 @@ func (c *Cache) setUpdatedConfigLocked(updated *config.SystemConfig) {
 	}
 }
 
-func passThroughTranslation(ctx context.Context, value *kvpb.RangeFeedValue) rangefeedbuffer.Event {
-	return value
+func passThroughTranslation(
+	ctx context.Context, value *kvpb.RangeFeedValue,
+) (*kvpb.RangeFeedValue, bool) {
+	return value, value != nil
 }
 
 var _ config.SystemConfigProvider = (*Cache)(nil)

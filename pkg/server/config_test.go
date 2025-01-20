@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -23,12 +18,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base/serverident"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage/disk"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,6 +50,36 @@ func TestParseInitNodeAttributes(t *testing.T) {
 	if a, e := cfg.NodeAttributes.Attrs, []string{"attr1=val1", "attr2=val2"}; !reflect.DeepEqual(a, e) {
 		t.Fatalf("expected attributes: %v, found: %v", e, a)
 	}
+}
+
+// TestCreateEnginesWithMultipleStores creates multiple engines and verifies
+// that the correct number of vfs.DiskWriteStatsCollector were initialized.
+func TestCreateEnginesWithMultipleStores(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	cfg := MakeConfig(context.Background(), cluster.MakeTestingClusterSettings())
+	// Override with TestStatsManager
+	cfg.DiskWriteStats = disk.NewTestingStatsManager(vfs.Default)
+	tmpDir1, cleanup := testutils.TempDir(t)
+	defer cleanup()
+	tmpDir2, cleanup2 := testutils.TempDir(t)
+	defer cleanup2()
+	cfg.Stores = base.StoreSpecList{Specs: []base.StoreSpec{
+		{Size: base.SizeSpec{InBytes: base.MinimumStoreSize}, Path: tmpDir1},
+		{Size: base.SizeSpec{InBytes: base.MinimumStoreSize}, Path: tmpDir2},
+		{InMemory: true, Size: base.SizeSpec{InBytes: base.MinimumStoreSize * 100}},
+	}}
+	engines, err := cfg.CreateEngines(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to initialize stores: %s", err)
+	}
+	defer engines.Close()
+	if err := cfg.InitNode(context.Background()); err != nil {
+		t.Fatalf("Failed to initialize node: %s", err)
+	}
+	// In-memory stores should not create a stats collector.
+	require.Len(t, cfg.DiskWriteStats.GetAllStatsCollectors(), 2,
+		"Incorrect number of stats collectors")
 }
 
 // TestParseJoinUsingAddrs verifies that JoinList is parsed
@@ -127,11 +155,16 @@ func TestReadEnvironmentVariables(t *testing.T) {
 	cfg.AmbientCtx.Tracer = nil
 	cfgExpected.Tracer = nil
 	cfgExpected.AmbientCtx.Tracer = nil
+	cfg.CidrLookup = nil
+	cfgExpected.CidrLookup = nil
 	cfg.EarlyBootExternalStorageAccessor = nil
 	cfgExpected.EarlyBootExternalStorageAccessor = nil
 	// Temp storage disk monitors will have slightly different names, so we
 	// override them to point to the same one.
 	cfgExpected.TempStorageConfig.Mon = cfg.TempStorageConfig.Mon
+	// The LicenseEnforcer initializes a start time, which can vary between runs,
+	// so we ensure they are the same for comparison.
+	cfgExpected.LicenseEnforcer = cfg.LicenseEnforcer
 	require.Equal(t, cfgExpected, cfg)
 
 	// Set all the environment variables to valid values and ensure they are set

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package integration_tests
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/listenerutil"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -35,6 +31,7 @@ const intKey = "testing.int"
 const durationKey = "testing.duration"
 const byteSizeKey = "testing.bytesize"
 const enumKey = "testing.enum"
+const enum2Key = "testing.enum-2"
 
 var strA = settings.RegisterStringSetting(
 	settings.ApplicationLevel, strKey, "desc", "<default>",
@@ -65,6 +62,11 @@ var byteSizeA = settings.RegisterByteSizeSetting(
 )
 var enumA = settings.RegisterEnumSetting(
 	settings.ApplicationLevel, enumKey, "desc", "foo", map[int64]string{1: "foo", 2: "bar"})
+
+type enumBType uint8
+
+var enumB = settings.RegisterEnumSetting(
+	settings.ApplicationLevel, enum2Key, "desc", "foo", map[enumBType]string{1: "foo", 2: "bar"})
 
 func TestSettingsRefresh(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -242,11 +244,27 @@ func TestSettingsSetAndShow(t *testing.T) {
 		t.Fatalf("expected %v, got %v", expected, actual)
 	}
 
+	db.Exec(t, fmt.Sprintf(setQ, enum2Key, "2"))
+	if expected, actual := enumBType(2), enumB.Get(&st.SV); expected != actual {
+		t.Fatalf("expected %v, got %v", expected, actual)
+	}
+	if expected, actual := "bar", db.QueryStr(t, fmt.Sprintf(showQ, enum2Key))[0][0]; expected != actual {
+		t.Fatalf("expected %v, got %v", expected, actual)
+	}
+
 	db.Exec(t, fmt.Sprintf(setQ, enumKey, "'foo'"))
 	if expected, actual := int64(1), enumA.Get(&st.SV); expected != actual {
 		t.Fatalf("expected %v, got %v", expected, actual)
 	}
 	if expected, actual := "foo", db.QueryStr(t, fmt.Sprintf(showQ, enumKey))[0][0]; expected != actual {
+		t.Fatalf("expected %v, got %v", expected, actual)
+	}
+
+	db.Exec(t, fmt.Sprintf(setQ, enum2Key, "'foo'"))
+	if expected, actual := enumBType(1), enumB.Get(&st.SV); expected != actual {
+		t.Fatalf("expected %v, got %v", expected, actual)
+	}
+	if expected, actual := "foo", db.QueryStr(t, fmt.Sprintf(showQ, enum2Key))[0][0]; expected != actual {
 		t.Fatalf("expected %v, got %v", expected, actual)
 	}
 
@@ -303,7 +321,7 @@ func TestSettingsPersistenceEndToEnd(t *testing.T) {
 
 	// We're going to restart the test server, but expecting storage to
 	// persist. Define a sticky VFS for this purpose.
-	stickyVFSRegistry := server.NewStickyVFSRegistry()
+	stickyVFSRegistry := fs.NewStickyRegistry()
 	// We'll also need stable listeners to enable port reuse across restarts.
 	lisReg := listenerutil.NewListenerRegistry()
 	defer lisReg.Close()

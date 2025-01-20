@@ -12,6 +12,7 @@ go_library(
         "//pkg/clusterversion",
         "//pkg/jobs/jobspb",
         "//pkg/keys",
+        "//pkg/roachpb",
         "//pkg/security/username",
         "//pkg/sql/catalog",
         "//pkg/sql/catalog/catpb",
@@ -35,10 +36,6 @@ go_test(
     size = "small",
     srcs = ["database_test.go"],
     embed = [":dbdesc"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/clusterversion",
         "//pkg/jobs/jobspb",

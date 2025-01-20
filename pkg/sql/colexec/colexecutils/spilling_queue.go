@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecutils
 
@@ -18,8 +13,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
 	"github.com/marusama/semaphore"
@@ -88,12 +83,12 @@ type SpillingQueue struct {
 	}
 
 	diskAcc         *mon.BoundAccount
-	converterMemAcc *mon.BoundAccount
+	diskQueueMemAcc *mon.BoundAccount
 }
 
 // spillingQueueInitialItemsLen is the initial capacity of the in-memory buffer
 // of the spilling queues (memory limit permitting).
-var spillingQueueInitialItemsLen = int64(util.ConstantWithMetamorphicTestRange(
+var spillingQueueInitialItemsLen = int64(metamorphic.ConstantWithTestRange(
 	"spilling-queue-initial-len",
 	64 /* defaultValue */, 1 /* min */, 16, /* max */
 ))
@@ -106,7 +101,7 @@ type NewSpillingQueueArgs struct {
 	DiskQueueCfg       colcontainer.DiskQueueCfg
 	FDSemaphore        semaphore.Semaphore
 	DiskAcc            *mon.BoundAccount
-	ConverterMemAcc    *mon.BoundAccount
+	DiskQueueMemAcc    *mon.BoundAccount
 }
 
 // NewSpillingQueue creates a new SpillingQueue. An unlimited allocator must be
@@ -115,6 +110,11 @@ type NewSpillingQueueArgs struct {
 // If fdSemaphore is nil, no Acquire or Release calls will happen. The caller
 // may want to do this if requesting FDs up front.
 func NewSpillingQueue(args *NewSpillingQueueArgs) *SpillingQueue {
+	if args.UnlimitedAllocator.Acc() == args.DiskQueueMemAcc {
+		colexecerror.InternalError(errors.AssertionFailedf(
+			"memory accounts for allocator and disk queue must be different",
+		))
+	}
 	var items []coldata.Batch
 	if args.MemoryLimit > 0 {
 		items = make([]coldata.Batch, spillingQueueInitialItemsLen)
@@ -127,7 +127,7 @@ func NewSpillingQueue(args *NewSpillingQueueArgs) *SpillingQueue {
 		diskQueueCfg:       args.DiskQueueCfg,
 		fdSemaphore:        args.FDSemaphore,
 		diskAcc:            args.DiskAcc,
-		converterMemAcc:    args.ConverterMemAcc,
+		diskQueueMemAcc:    args.DiskQueueMemAcc,
 	}
 }
 
@@ -158,7 +158,7 @@ func NewRewindableSpillingQueue(args *NewSpillingQueueArgs) *SpillingQueue {
 // spilling queue will account for memory used by the in-memory copies).
 func (q *SpillingQueue) Enqueue(ctx context.Context, batch coldata.Batch) {
 	if q.rewindable && q.rewindableState.numItemsDequeued > 0 {
-		colexecerror.InternalError(errors.Errorf("attempted to Enqueue to rewindable SpillingQueue after Dequeue has been called"))
+		colexecerror.InternalError(errors.AssertionFailedf("attempted to Enqueue to rewindable SpillingQueue after Dequeue has been called"))
 	}
 
 	n := batch.Length()
@@ -441,9 +441,9 @@ func (q *SpillingQueue) maybeSpillToDisk(ctx context.Context) error {
 	log.VEvent(ctx, 1, "spilled to disk")
 	var diskQueue colcontainer.Queue
 	if q.rewindable {
-		diskQueue, err = colcontainer.NewRewindableDiskQueue(ctx, q.typs, q.diskQueueCfg, q.diskAcc, q.converterMemAcc)
+		diskQueue, err = colcontainer.NewRewindableDiskQueue(ctx, q.typs, q.diskQueueCfg, q.diskAcc, q.diskQueueMemAcc)
 	} else {
-		diskQueue, err = colcontainer.NewDiskQueue(ctx, q.typs, q.diskQueueCfg, q.diskAcc, q.converterMemAcc)
+		diskQueue, err = colcontainer.NewDiskQueue(ctx, q.typs, q.diskQueueCfg, q.diskAcc, q.diskQueueMemAcc)
 	}
 	if err != nil {
 		return err
@@ -556,7 +556,7 @@ func (q *SpillingQueue) Close(ctx context.Context) error {
 // Rewind rewinds the spilling queue.
 func (q *SpillingQueue) Rewind(ctx context.Context) error {
 	if !q.rewindable {
-		return errors.Newf("unexpectedly Rewind() called when spilling queue is not rewindable")
+		return errors.AssertionFailedf("unexpectedly Rewind() called when spilling queue is not rewindable")
 	}
 	if q.diskQueue != nil {
 		if err := q.diskQueue.(colcontainer.RewindableQueue).Rewind(ctx); err != nil {

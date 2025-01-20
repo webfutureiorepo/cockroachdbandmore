@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -54,7 +49,9 @@ func TestServerController(t *testing.T) {
 	require.Nil(t, d)
 	require.Error(t, err, `no tenant found with name "somename"`)
 
-	_, err = db.Exec("CREATE TENANT hello; ALTER TENANT hello START SERVICE SHARED")
+	_, err = db.Exec("CREATE TENANT hello")
+	require.NoError(t, err)
+	_, err = db.Exec("ALTER TENANT hello START SERVICE SHARED")
 	require.NoError(t, err)
 
 	_, _, err = sc.getServer(ctx, "hello")
@@ -164,7 +161,7 @@ func TestSQLErrorUponInvalidTenant(t *testing.T) {
 
 	ctx := context.Background()
 
-	s := serverutils.StartServerOnly(t, base.TestServerArgs{
+	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
 		DefaultTestTenant: base.TestControlsTenantsExplicitly,
 	})
 	defer s.Stopper().Stop(ctx)
@@ -177,6 +174,19 @@ func TestSQLErrorUponInvalidTenant(t *testing.T) {
 	err = db.Ping()
 	require.NotNil(t, err)
 	require.Regexp(t, `service unavailable for target tenant \(nonexistent\)`, err.Error())
+
+	// Regression test for CRDB-40449; make sure pre-conn memory is freed.
+	testutils.SucceedsSoon(t, func() error {
+		var usedPreConnMemory int
+		err = sqlDB.QueryRow("select used from crdb_internal.node_memory_monitors where name='pre-conn'").Scan(&usedPreConnMemory)
+		if err != nil {
+			return err
+		}
+		if usedPreConnMemory != 0 {
+			return errors.Errorf("expected 0 bytes used, got %d", usedPreConnMemory)
+		}
+		return nil
+	})
 }
 
 func TestSharedProcessServerInheritsTempStorageLimit(t *testing.T) {

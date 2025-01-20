@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -95,6 +91,7 @@ func runTest(ctx context.Context, t test.Test, c cluster.Cluster, pg string) {
 			break
 		}
 		if pgerror.GetPGCode(err) != pgcode.SerializationFailure {
+			t.L().Printf("err: %v\n", err)
 			t.L().Printf("stdout:\n%v\n", det.Stdout)
 			t.L().Printf("stderr:\n%v\n", det.Stderr)
 			t.Fatal(err)
@@ -140,12 +137,14 @@ func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int
 	// Enable the verbose logging on relevant files to have better understanding
 	// in case the test fails.
 	startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs, "--vmodule=copy_from=2,insert=2")
-	c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
+	// roachtest frequently runs on overloaded instances and can timeout as a result
+	clusterSettings := install.MakeClusterSettings(install.ClusterSettingsOption{"kv.closed_timestamp.target_duration": "60s"})
+	c.Start(ctx, t.L(), startOpts, clusterSettings, c.All())
 	initTest(ctx, t, c, sf)
 	db, err := c.ConnE(ctx, t.L(), 1)
 	require.NoError(t, err)
 	stmts := []string{
-		"CREATE USER importer",
+		"CREATE USER importer WITH PASSWORD '123'",
 		fmt.Sprintf("ALTER ROLE importer SET copy_from_atomic_enabled = %t", atomic),
 	}
 	for _, stmt := range stmts {
@@ -154,7 +153,7 @@ func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int
 			t.Fatal(err)
 		}
 	}
-	urls, err := c.InternalPGUrl(ctx, t.L(), c.Node(1), "" /* tenant */, 0 /* sqlInstance */)
+	urls, err := c.InternalPGUrl(ctx, t.L(), c.Node(1), roachprod.PGURLOptions{Auth: install.AuthUserPassword})
 	require.NoError(t, err)
 	m := c.NewMonitor(ctx, c.All())
 	m.Go(func(ctx context.Context) error {
@@ -162,10 +161,10 @@ func runCopyFromCRDB(ctx context.Context, t test.Test, c cluster.Cluster, sf int
 		urlstr := strings.Replace(urls[0], "?", "/defaultdb?", 1)
 		u, err := url.Parse(urlstr)
 		require.NoError(t, err)
-		u.User = url.User("importer")
+		u.User = url.UserPassword("importer", "123")
 		urlstr = u.String()
-		c.Run(ctx, option.WithNodes(c.Node(1)), fmt.Sprintf("psql %s -c 'SELECT 1'", urlstr))
-		c.Run(ctx, option.WithNodes(c.Node(1)), fmt.Sprintf("psql %s -c '%s'", urlstr, lineitemSchema))
+		c.Run(ctx, option.WithNodes(c.Node(1)), fmt.Sprintf("psql '%s' -c 'SELECT 1'", urlstr))
+		c.Run(ctx, option.WithNodes(c.Node(1)), fmt.Sprintf("psql '%s' -c '%s'", urlstr, lineitemSchema))
 		runTest(ctx, t, c, fmt.Sprintf("psql '%s'", urlstr))
 		return nil
 	})

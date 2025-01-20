@@ -28,10 +28,6 @@ go_test(
     srcs = ["authorizer_test.go"],
     data = glob(["testdata/**"]),
     embed = [":tenantcapabilitiesauthorizer"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/kv/kvpb",
         "//pkg/multitenant/tenantcapabilities",

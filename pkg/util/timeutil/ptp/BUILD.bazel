@@ -47,7 +47,13 @@ go_library(
         "@io_bazel_rules_go//go/platform:openbsd": [
             "@com_github_cockroachdb_errors//:errors",
         ],
+        "@io_bazel_rules_go//go/platform:osx": [
+            "@com_github_cockroachdb_errors//:errors",
+        ],
         "@io_bazel_rules_go//go/platform:plan9": [
+            "@com_github_cockroachdb_errors//:errors",
+        ],
+        "@io_bazel_rules_go//go/platform:qnx": [
             "@com_github_cockroachdb_errors//:errors",
         ],
         "@io_bazel_rules_go//go/platform:solaris": [
@@ -64,10 +70,6 @@ go_test(
     name = "ptp_test",
     srcs = ["ptp_clock_linux_test.go"],
     embed = [":ptp"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = select({
         "@io_bazel_rules_go//go/platform:android": [
             "//pkg/util/timeutil",

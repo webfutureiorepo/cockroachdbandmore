@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bank
 
@@ -107,6 +102,9 @@ func (*bank) Meta() workload.Meta { return bankMeta }
 // Flags implements the Flagser interface.
 func (b *bank) Flags() workload.Flags { return b.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (b *bank) ConnFlags() *workload.ConnFlags { return b.connFlags }
+
 // Hooks implements the Hookser interface.
 func (b *bank) Hooks() workload.Hooks {
 	return workload.Hooks{
@@ -179,10 +177,6 @@ func (b *bank) Tables() []workload.Table {
 func (b *bank) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(b, b.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -202,7 +196,6 @@ func (b *bank) Ops(
 	}
 
 	ql := workload.QueryLoad{
-		SQLDatabase: sqlDatabase,
 		Close: func(_ context.Context) error {
 			return db.Close()
 		},

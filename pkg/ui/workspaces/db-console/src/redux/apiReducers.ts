@@ -1,23 +1,31 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
-import { Action, combineReducers } from "redux";
-import { ThunkAction, ThunkDispatch } from "redux-thunk";
-import moment from "moment-timezone";
 import {
   api as clusterUiApi,
   util,
   StmtInsightEvent,
   TxnInsightEvent,
 } from "@cockroachlabs/cluster-ui";
+import isEmpty from "lodash/isEmpty";
+import isNil from "lodash/isNil";
+import map from "lodash/map";
+import sortby from "lodash/sortBy";
+import Long from "long";
+import moment from "moment-timezone";
+import { RouteComponentProps } from "react-router";
+import { Action, combineReducers } from "redux";
+import { ThunkAction, ThunkDispatch } from "redux-thunk";
+import { createSelector, ParametricSelector } from "reselect";
+
+import { VersionList } from "src/interfaces/cockroachlabs";
+import * as protos from "src/js/protos";
+import * as api from "src/util/api";
+import { versionCheck } from "src/util/cockroachlabsAPI";
+import { INodeStatus, RollupStoreMetrics } from "src/util/proto";
+
 import {
   CachedDataReducer,
   CachedDataReducerState,
@@ -26,15 +34,7 @@ import {
   PaginatedCachedDataReducer,
   PaginatedCachedDataReducerState,
 } from "./cachedDataReducer";
-import * as api from "src/util/api";
-import { VersionList } from "src/interfaces/cockroachlabs";
-import { versionCheck } from "src/util/cockroachlabsAPI";
-import { INodeStatus, RollupStoreMetrics } from "src/util/proto";
-import * as protos from "src/js/protos";
-import Long from "long";
-import { createSelector, ParametricSelector } from "reselect";
 import { AdminUIState } from "./state";
-import { RouteComponentProps } from "react-router";
 
 const { generateStmtDetailsToID, HexStringToInt64String, generateTableID } =
   util;
@@ -70,7 +70,7 @@ export const refreshHealth = healthReducerObj.refresh;
 function rollupStoreMetrics(
   res: api.NodesResponseExternalMessage,
 ): INodeStatus[] {
-  return _.map(res.nodes, node => {
+  return map(res.nodes, node => {
     RollupStoreMetrics(node);
     return node;
   });
@@ -78,7 +78,15 @@ function rollupStoreMetrics(
 
 export const nodesReducerObj = new CachedDataReducer(
   (req: api.NodesRequestMessage, timeout?: moment.Duration) =>
-    api.getNodesUI(req, timeout).then(rollupStoreMetrics),
+    api
+      .getNodesUI(req, timeout)
+      .then(rollupStoreMetrics)
+      .then(nodeStatuses => {
+        nodeStatuses.forEach(ns => {
+          ns.store_statuses = sortby(ns.store_statuses, ss => ss.desc.store_id);
+        });
+        return nodeStatuses;
+      }),
   "nodes",
   moment.duration(10, "s"),
 );
@@ -109,29 +117,6 @@ const databasesReducerObj = new CachedDataReducer(
 );
 export const refreshDatabases = databasesReducerObj.refresh;
 
-export const databaseRequestPayloadToID = (
-  params: clusterUiApi.DatabaseDetailsReqParams,
-): string => params.database;
-
-const databaseDetailsReducerObj = new KeyedCachedDataReducer(
-  clusterUiApi.getDatabaseDetails,
-  "databaseDetails",
-  databaseRequestPayloadToID,
-  null,
-  moment.duration(10, "m"),
-);
-
-const databaseDetailsSpanStatsReducerObj = new KeyedCachedDataReducer(
-  clusterUiApi.getDatabaseDetailsSpanStats,
-  "databaseDetailsSpanStats",
-  databaseRequestPayloadToID,
-  null,
-  moment.duration(10, "m"),
-);
-
-export const refreshDatabaseDetailsSpanStats =
-  databaseDetailsSpanStatsReducerObj.refresh;
-
 const hotRangesRequestToID = (req: api.HotRangesRequestMessage) =>
   req.page_token;
 
@@ -144,25 +129,10 @@ export const hotRangesReducerObj = new PaginatedCachedDataReducer(
   moment.duration(30, "minutes"),
 );
 
-export const refreshDatabaseDetails = databaseDetailsReducerObj.refresh;
-
 export const refreshHotRanges = hotRangesReducerObj.refresh;
 
-export const tableRequestToID = (
-  req:
-    | api.TableStatsRequestMessage
-    | api.IndexStatsRequestMessage
-    | clusterUiApi.TableDetailsReqParams,
-): string => generateTableID(req.database, req.table);
-
-const tableDetailsReducerObj = new KeyedCachedDataReducer(
-  clusterUiApi.getTableDetails,
-  "tableDetails",
-  tableRequestToID,
-  null,
-  moment.duration(10, "m"),
-);
-export const refreshTableDetails = tableDetailsReducerObj.refresh;
+export const tableRequestToID = (req: api.IndexStatsRequestMessage): string =>
+  generateTableID(req.database, req.table);
 
 const indexStatsReducerObj = new KeyedCachedDataReducer(
   api.getIndexStats,
@@ -252,7 +222,7 @@ export const refreshQueryPlan = queryPlanReducerObj.refresh;
 
 export const problemRangesRequestKey = (
   req: api.ProblemRangesRequestMessage,
-): string => (_.isEmpty(req.node_id) ? "all" : req.node_id);
+): string => (isEmpty(req.node_id) ? "all" : req.node_id);
 
 const problemRangesReducerObj = new KeyedCachedDataReducer(
   api.getProblemRanges,
@@ -265,7 +235,7 @@ export const refreshProblemRanges = problemRangesReducerObj.refresh;
 
 export const certificatesRequestKey = (
   req: api.CertificatesRequestMessage,
-): string => (_.isEmpty(req.node_id) ? "none" : req.node_id);
+): string => (isEmpty(req.node_id) ? "none" : req.node_id);
 
 const certificatesReducerObj = new KeyedCachedDataReducer(
   api.getCertificates,
@@ -276,7 +246,7 @@ const certificatesReducerObj = new KeyedCachedDataReducer(
 export const refreshCertificates = certificatesReducerObj.refresh;
 
 export const rangeRequestKey = (req: api.RangeRequestMessage): string =>
-  _.isNil(req.range_id) ? "none" : req.range_id.toString();
+  isNil(req.range_id) ? "none" : req.range_id.toString();
 
 const rangeReducerObj = new KeyedCachedDataReducer(
   api.getRange,
@@ -289,7 +259,7 @@ export const refreshRange = rangeReducerObj.refresh;
 
 export const allocatorRangeRequestKey = (
   req: api.AllocatorRangeRequestMessage,
-): string => (_.isNil(req.range_id) ? "none" : req.range_id.toString());
+): string => (isNil(req.range_id) ? "none" : req.range_id.toString());
 
 const allocatorRangeReducerObj = new KeyedCachedDataReducer(
   api.getAllocatorRange,
@@ -301,7 +271,7 @@ const allocatorRangeReducerObj = new KeyedCachedDataReducer(
 export const refreshAllocatorRange = allocatorRangeReducerObj.refresh;
 
 export const rangeLogRequestKey = (req: api.RangeLogRequestMessage): string =>
-  _.isNil(req.range_id) ? "none" : req.range_id.toString();
+  isNil(req.range_id) ? "none" : req.range_id.toString();
 
 const rangeLogReducerObj = new KeyedCachedDataReducer(
   api.getRangeLog,
@@ -331,7 +301,7 @@ export const invalidateSessions = sessionsReducerObj.invalidateData;
 export const refreshSessions = sessionsReducerObj.refresh;
 
 export const storesRequestKey = (req: api.StoresRequestMessage): string =>
-  _.isEmpty(req.node_id) ? "none" : req.node_id;
+  isEmpty(req.node_id) ? "none" : req.node_id;
 
 const storesReducerObj = new KeyedCachedDataReducer(
   api.getStores,
@@ -580,15 +550,6 @@ export interface APIReducersState {
   version: CachedDataReducerState<VersionList>;
   locations: CachedDataReducerState<api.LocationsResponseMessage>;
   databases: CachedDataReducerState<clusterUiApi.DatabasesListResponse>;
-  databaseDetails: KeyedCachedDataReducerState<
-    clusterUiApi.SqlApiResponse<clusterUiApi.DatabaseDetailsResponse>
-  >;
-  databaseDetailsSpanStats: KeyedCachedDataReducerState<
-    clusterUiApi.SqlApiResponse<clusterUiApi.DatabaseDetailsSpanStatsResponse>
-  >;
-  tableDetails: KeyedCachedDataReducerState<
-    clusterUiApi.SqlApiResponse<clusterUiApi.TableDetailsResponse>
-  >;
   indexStats: KeyedCachedDataReducerState<api.IndexStatsResponseMessage>;
   nonTableStats: CachedDataReducerState<api.NonTableStatsResponseMessage>;
   logs: CachedDataReducerState<api.LogEntriesResponseMessage>;
@@ -649,11 +610,6 @@ export const apiReducersReducer = combineReducers<APIReducersState>({
   [versionReducerObj.actionNamespace]: versionReducerObj.reducer,
   [locationsReducerObj.actionNamespace]: locationsReducerObj.reducer,
   [databasesReducerObj.actionNamespace]: databasesReducerObj.reducer,
-  [databaseDetailsReducerObj.actionNamespace]:
-    databaseDetailsReducerObj.reducer,
-  [databaseDetailsSpanStatsReducerObj.actionNamespace]:
-    databaseDetailsSpanStatsReducerObj.reducer,
-  [tableDetailsReducerObj.actionNamespace]: tableDetailsReducerObj.reducer,
   [indexStatsReducerObj.actionNamespace]: indexStatsReducerObj.reducer,
   [nonTableStatsReducerObj.actionNamespace]: nonTableStatsReducerObj.reducer,
   [logsReducerObj.actionNamespace]: logsReducerObj.reducer,
@@ -773,7 +729,7 @@ export function createSelectorForKeyedCachedDataField<
     APIReducersState,
     KeyedCachedDataReducerState<RespType>
   >,
-  selectKey: ParametricSelector<unknown, RouteComponentProps, string>,
+  selectKey: ParametricSelector<AdminUIState, RouteComponentProps, string>,
 ) {
   return createSelector<
     AdminUIState,

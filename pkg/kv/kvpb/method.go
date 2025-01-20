@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvpb
 
@@ -139,8 +134,10 @@ const (
 	// AdminScatter moves replicas and leaseholders for a selection of ranges.
 	// Best-effort.
 	AdminScatter
-	// AddSSTable links a file into the RocksDB log-structured merge-tree.
+	// AddSSTable links a file into pebble.
 	AddSSTable
+	// LinkExternallSSTable links an external sst into pebble.
+	LinkExternalSSTable
 	// Migrate updates the range state to conform to a specified cluster
 	// version. It is our main mechanism for phasing out legacy code below Raft.
 	Migrate

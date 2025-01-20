@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -16,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/gen"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/history"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/scheduled"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/state"
 )
 
 // OutputFlags sets flags for what to output in tests. If you want to add a flag
@@ -60,22 +55,23 @@ func (o OutputFlags) set(f OutputFlags) OutputFlags {
 	return o | f
 }
 
-// Has returns true if this flag has the given f OutputFlags on.
+// Has returns true if this flag has all of the given f OutputFlags on.
 func (o OutputFlags) Has(f OutputFlags) bool {
-	return o&f != 0
+	return o&f == f
 }
 
 type testResult struct {
-	seed          int64
-	failed        bool
-	reason        string
-	clusterGen    gen.ClusterGen
-	rangeGen      gen.RangeGen
-	loadGen       gen.LoadGen
-	eventGen      gen.EventGen
-	initialTime   time.Time
-	initialState  state.State
-	eventExecutor scheduled.EventExecutor
+	seed            int64
+	failed          bool
+	reason          string
+	clusterGen      gen.ClusterGen
+	rangeGen        gen.RangeGen
+	loadGen         gen.LoadGen
+	eventGen        gen.EventGen
+	initialTime     time.Time
+	initialStateStr string
+	eventExecutor   scheduled.EventExecutor
+	history         history.History
 }
 
 type testResultsReport struct {
@@ -159,10 +155,10 @@ func (tr testResultsReport) String() string {
 		}
 		if failed || tr.flags.Has(OutputInitialState) {
 			buf.WriteString(fmt.Sprintf("initial state at %s:\n", output.initialTime.Format("2006-01-02 15:04:05")))
-			buf.WriteString(fmt.Sprintf("\t%v\n", output.initialState.PrettyPrint()))
+			buf.WriteString(fmt.Sprintf("\t%v\n", output.initialStateStr))
 		}
 		if failed || tr.flags.Has(OutputTopology) {
-			topology := output.initialState.Topology()
+			topology := output.history.S.Topology()
 			buf.WriteString(fmt.Sprintf("topology:\n%s", topology.String()))
 		}
 		if failed || tr.flags.Has(OutputEvents) {

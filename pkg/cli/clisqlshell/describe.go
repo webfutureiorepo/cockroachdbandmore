@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlshell
 
@@ -305,8 +300,7 @@ LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 		// Do noting.
 	} else if showNormal {
 		if !showAggregate {
-			// TODO(sql-sessions): Use prokind here.
-			buf.WriteString(` AND NOT p.proisagg`)
+			buf.WriteString(` AND p.prokind != 'a'`)
 		}
 		if !showProcedure {
 			buf.WriteString(` AND (p.prokind IS NULL OR p.prokind <> 'p')`)
@@ -316,15 +310,13 @@ LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 			_ = 0 // disable lint SA9003
 		}
 		if !showWindow {
-			// TODO(sql-sessions): Use prokind here.
-			buf.WriteString(` AND NOT p.proiswindow`)
+			buf.WriteString(` AND p.prokind != 'w'`)
 		}
 	} else {
 		buf.WriteString(` AND (FALSE`)
 		// Note: at least one of these must be true.
 		if showAggregate {
-			// TODO(sql-sessions): Use prokind here.
-			buf.WriteString(` OR p.proisagg`)
+			buf.WriteString(` OR p.prokind = 'a'`)
 		}
 		if showTrigger {
 			// TODO(sql-sessions): Use prorettype here.
@@ -334,7 +326,7 @@ LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 			buf.WriteString(` OR (p.prokind IS NOT NULL AND p.prokind = 'p')`)
 		}
 		if showWindow {
-			buf.WriteString(` OR p.proiswindow`)
+			buf.WriteString(` OR p.prokind = 'w'`)
 		}
 		buf.WriteByte(')')
 	}
@@ -374,7 +366,6 @@ func listTables(tabTypes string, hasPattern bool, verbose, showSystem bool) (str
 
 	if !(showTables || showIndexes || showViews || showMatViews || showSeq || showForeign) {
 		showTables = true
-		showIndexes = true
 		showViews = true
 		showMatViews = true
 		showSeq = true

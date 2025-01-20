@@ -1,18 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package codeowners
 
 import (
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -77,14 +72,14 @@ func LintEverythingIsOwned(
 
 	walkRoot := filepath.Join(repoRoot, walkDir)
 
-	unownedWalkFn := func(path string, info os.FileInfo) error {
+	unownedWalkFn := func(path string, d fs.DirEntry) error {
 		teams := co.Match(path)
 		if len(teams) > 0 {
 			// The file has an owner, so nothing to report.
 			debug("%s <- has team(s) %v", path, teams)
 			return nil
 		}
-		if !info.IsDir() {
+		if !d.IsDir() {
 			// We're looking at a file that has no owner.
 			//
 			// Let's say `path = ./pkg/foo/bar/baz.go`.
@@ -118,7 +113,7 @@ func LintEverythingIsOwned(
 	for len(dirsToWalk) != 0 {
 		// We first visit each directory's files, and then the subdirectories.
 		// See TestLintEverythingIsOwned for details.
-		require.NoError(t, filepath.Walk(dirsToWalk[0], func(path string, info os.FileInfo, err error) error {
+		require.NoError(t, filepath.WalkDir(dirsToWalk[0], func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -137,7 +132,7 @@ func LintEverythingIsOwned(
 
 				if _, ok := skip[relPath]; ok {
 					debug("skipping %s", relPath)
-					if info.IsDir() {
+					if d.IsDir() {
 						return filepath.SkipDir
 					}
 					return nil
@@ -149,7 +144,7 @@ func LintEverythingIsOwned(
 					}
 					if ok {
 						debug("skipping %s", relPath)
-						if info.IsDir() {
+						if d.IsDir() {
 							return filepath.SkipDir
 						}
 						return nil
@@ -158,21 +153,21 @@ func LintEverythingIsOwned(
 				fname := filepath.Base(relPath)
 				if _, ok := skip[fname]; ok {
 					debug("skipping %s", relPath)
-					if info.IsDir() {
+					if d.IsDir() {
 						return filepath.SkipDir
 					}
 					return nil
 				}
 			}
 
-			if info.IsDir() {
+			if d.IsDir() {
 				if path == dirsToWalk[0] {
 					return nil
 				}
 				dirsToWalk = append(dirsToWalk, path)
 				return filepath.SkipDir
 			}
-			return unownedWalkFn(filepath.Join(walkDir, relPath), info)
+			return unownedWalkFn(filepath.Join(walkDir, relPath), d)
 		}))
 		dirsToWalk = dirsToWalk[1:]
 	}

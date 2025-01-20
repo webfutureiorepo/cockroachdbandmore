@@ -1,18 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
 import (
 	"context"
-	"math"
 	"os"
 	"runtime/pprof"
 	"time"
@@ -41,7 +35,8 @@ var cpuUsageCombined = settings.RegisterIntSetting(
 		"the profiler will never take a profile and conversely, if a value"+
 		"of 0 is set, a profile will be taken every time the cpu profile"+
 		"interval has passed or the provided usage is increasing",
-	math.MaxInt64,
+	65,
+	settings.NonNegativeInt,
 )
 
 var cpuProfileInterval = settings.RegisterDurationSetting(
@@ -51,14 +46,16 @@ var cpuProfileInterval = settings.RegisterDurationSetting(
 	// account the high water mark seen. Without this, if CPU ever reaches 100%,
 	// we'll never take another profile.
 	"duration after which the high water mark resets and a new cpu profile can be taken",
-	5*time.Minute, settings.PositiveDuration,
+	20*time.Minute,
+	settings.PositiveDuration,
 )
 
 var cpuProfileDuration = settings.RegisterDurationSetting(
 	settings.ApplicationLevel,
 	"server.cpu_profile.duration",
 	"the duration for how long a cpu profile is taken",
-	10*time.Second, settings.PositiveDuration,
+	10*time.Second,
+	settings.PositiveDuration,
 )
 
 const cpuProfFileNamePrefix = "cpuprof"

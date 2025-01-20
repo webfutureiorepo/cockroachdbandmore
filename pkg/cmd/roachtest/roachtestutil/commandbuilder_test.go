@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package roachtestutil
 
@@ -32,6 +27,10 @@ func TestCommand(t *testing.T) {
 	c = clone(baseCommand)
 	c.Flag("max-ops", 10).Flag("path", "/some/path")
 	require.Equal(t, "./cockroach workload run bank {pgurl:1} --max-ops 10 --path /some/path", c.String())
+
+	c = clone(baseCommand).WithEqualsSyntax()
+	c.Flag("max-ops", 10).Flag("path", "/some/path")
+	require.Equal(t, "./cockroach workload run bank {pgurl:1} --max-ops=10 --path=/some/path", c.String())
 
 	c = clone(baseCommand)
 	c.MaybeFlag(true, "max-ops", 10)     // included
@@ -73,5 +72,6 @@ func clone(cmd *Command) *Command {
 		Binary:    cmd.Binary,
 		Arguments: append([]string{}, cmd.Arguments...),
 		Flags:     flags,
+		UseEquals: cmd.UseEquals,
 	}
 }

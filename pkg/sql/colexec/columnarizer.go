@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -26,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
 )
 
@@ -57,12 +53,15 @@ type Columnarizer struct {
 	execinfra.ProcessorBaseNoHelper
 	colexecop.NonExplainable
 
-	mode              columnarizerMode
-	initialized       bool
-	helper            colmem.SetAccountingHelper
-	metadataAllocator *colmem.Allocator
-	input             execinfra.RowSource
-	da                tree.DatumAlloc
+	mode            columnarizerMode
+	initialized     bool
+	helper          colmem.SetAccountingHelper
+	streamingMemAcc *mon.BoundAccount
+	// metadataAccountedFor tracks how much memory has been reserved in the
+	// streamingMemAcc for the metadata.
+	metadataAccountedFor int64
+	input                execinfra.RowSource
+	da                   tree.DatumAlloc
 	// getWrappedExecStats, if non-nil, is the function to get the execution
 	// statistics of the wrapped row-by-row processor. We store it separately
 	// from execinfra.ProcessorBaseNoHelper.ExecStatsForTrace so that the
@@ -87,16 +86,16 @@ var _ execreleasable.Releasable = &Columnarizer{}
 
 // NewBufferingColumnarizer returns a new Columnarizer that will be buffering up
 // rows before emitting them as output batches.
-// - batchAllocator and metadataAllocator must use memory accounts that are not
-// shared with any other user.
+// - batchAllocator must use the memory account that is not shared with any
+// other user.
 func NewBufferingColumnarizer(
 	batchAllocator *colmem.Allocator,
-	metadataAllocator *colmem.Allocator,
+	streamingMemAcc *mon.BoundAccount,
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	input execinfra.RowSource,
 ) *Columnarizer {
-	return newColumnarizer(batchAllocator, metadataAllocator, flowCtx, processorID, input, columnarizerBufferingMode)
+	return newColumnarizer(batchAllocator, streamingMemAcc, flowCtx, processorID, input, columnarizerBufferingMode)
 }
 
 // NewBufferingColumnarizerForTests is a convenience wrapper around
@@ -108,21 +107,21 @@ func NewBufferingColumnarizerForTests(
 	processorID int32,
 	input execinfra.RowSource,
 ) *Columnarizer {
-	return NewBufferingColumnarizer(allocator, allocator, flowCtx, processorID, input)
+	return NewBufferingColumnarizer(allocator, allocator.Acc(), flowCtx, processorID, input)
 }
 
 // NewStreamingColumnarizer returns a new Columnarizer that emits every input
 // row as a separate batch.
-// - batchAllocator and metadataAllocator must use memory accounts that are not
-// shared with any other user.
+// - batchAllocator must use the memory account that is not shared with any
+// other user.
 func NewStreamingColumnarizer(
 	batchAllocator *colmem.Allocator,
-	metadataAllocator *colmem.Allocator,
+	streamingMemAcc *mon.BoundAccount,
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	input execinfra.RowSource,
 ) *Columnarizer {
-	return newColumnarizer(batchAllocator, metadataAllocator, flowCtx, processorID, input, columnarizerStreamingMode)
+	return newColumnarizer(batchAllocator, streamingMemAcc, flowCtx, processorID, input, columnarizerStreamingMode)
 }
 
 var columnarizerPool = sync.Pool{
@@ -134,7 +133,7 @@ var columnarizerPool = sync.Pool{
 // newColumnarizer returns a new Columnarizer.
 func newColumnarizer(
 	batchAllocator *colmem.Allocator,
-	metadataAllocator *colmem.Allocator,
+	streamingMemAcc *mon.BoundAccount,
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	input execinfra.RowSource,
@@ -148,17 +147,13 @@ func newColumnarizer(
 	c := columnarizerPool.Get().(*Columnarizer)
 	*c = Columnarizer{
 		ProcessorBaseNoHelper: c.ProcessorBaseNoHelper,
-		metadataAllocator:     metadataAllocator,
+		streamingMemAcc:       streamingMemAcc,
 		input:                 input,
 		mode:                  mode,
 	}
 	c.ProcessorBaseNoHelper.Init(
 		nil, /* self */
 		flowCtx,
-		// The columnarizer will update the eval context when closed, so we give
-		// it a copy of the eval context to preserve the "global" eval context
-		// from being mutated.
-		flowCtx.NewEvalCtx(),
 		processorID,
 		execinfra.ProcStateOpts{
 			// We append input to inputs to drain below in order to reuse the same
@@ -216,6 +211,20 @@ func (c *Columnarizer) GetStats() *execinfrapb.ComponentStats {
 	return s
 }
 
+// IsFastPathNode returns true if the provided RowSource is the
+// planNodeToRowSource wrapper with "fast-path" enabled. The logic is injected
+// in the sql package to avoid an import cycle.
+var IsFastPathNode func(source execinfra.RowSource) bool
+
+// IsColumnarizerAroundFastPathNode returns true if the provided Operator is a
+// Columnarizer that has "fast-path" enabled planNodeToRowSource wrapper as the
+// input.
+func IsColumnarizerAroundFastPathNode(o colexecop.Operator) bool {
+	o = MaybeUnwrapInvariantsChecker(o)
+	c, ok := o.(*Columnarizer)
+	return ok && IsFastPathNode(c.input)
+}
+
 // Next is part of the colexecop.Operator interface.
 func (c *Columnarizer) Next() coldata.Batch {
 	if c.removedFromFlow {
@@ -243,7 +252,7 @@ func (c *Columnarizer) Next() coldata.Batch {
 				colexecerror.ExpectedError(meta.Err)
 			}
 			c.accumulatedMeta = append(c.accumulatedMeta, *meta)
-			colexecutils.AccountForMetadata(c.metadataAllocator, c.accumulatedMeta[len(c.accumulatedMeta)-1:])
+			c.metadataAccountedFor += colexecutils.AccountForMetadata(c.Ctx(), c.streamingMemAcc, c.accumulatedMeta[len(c.accumulatedMeta)-1:])
 			continue
 		}
 		if row == nil {
@@ -270,9 +279,10 @@ func (c *Columnarizer) DrainMeta() []execinfrapb.ProducerMetadata {
 	// Eagerly lose the reference to the metadata since it might be of
 	// non-trivial footprint.
 	c.accumulatedMeta = nil
-	// When this method returns, we no longer will have the reference to the
-	// metadata, so we can release all memory from the metadata allocator.
-	defer c.metadataAllocator.ReleaseAll()
+	defer func() {
+		c.streamingMemAcc.Shrink(c.Ctx(), c.metadataAccountedFor)
+		c.metadataAccountedFor = 0
+	}()
 	if !c.initialized {
 		// The columnarizer wasn't initialized, so the wrapped processors might
 		// not have been started leaving them in an unsafe to drain state, so

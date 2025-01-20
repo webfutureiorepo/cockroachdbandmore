@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -21,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -43,6 +37,8 @@ type scanNode struct {
 	// will link to it by reference after checkRenderStar / analyzeExpr.
 	// Enforce this using NoCopy.
 	_ util.NoCopy
+
+	zeroInputPlanNode
 
 	desc  catalog.TableDescriptor
 	index catalog.Index
@@ -136,23 +132,11 @@ func (p *planner) Scan() *scanNode {
 }
 
 // scanNode implements eval.IndexedVarContainer.
-var _ eval.IndexedVarContainer = &scanNode{}
-
-// IndexedVarEval implements the eval.IndexedVarContainer interface.
-func (n *scanNode) IndexedVarEval(
-	ctx context.Context, idx int, e tree.ExprEvaluator,
-) (tree.Datum, error) {
-	panic("scanNode can't be run in local mode")
-}
+var _ tree.IndexedVarContainer = &scanNode{}
 
 // IndexedVarResolvedType implements the tree.IndexedVarContainer interface.
 func (n *scanNode) IndexedVarResolvedType(idx int) *types.T {
 	return n.resultColumns[idx].Typ
-}
-
-// IndexedVarNodeFormatter implements the tree.IndexedVarContainer interface.
-func (n *scanNode) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
-	return n.resultColumns.Name(idx)
 }
 
 func (n *scanNode) startExec(params runParams) error {

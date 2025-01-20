@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -33,7 +28,7 @@ import (
 // common SQL optimizations*. Its use should be limited in clients to
 // situations where the corresponding performance cost is affordable.
 type ordinalityNode struct {
-	source      planNode
+	singleInputPlanNode
 	columns     colinfo.ResultColumns
 	reqOrdering ReqOrdering
 }
@@ -50,4 +45,4 @@ func (o *ordinalityNode) Values() tree.Datums {
 	panic("ordinalityNode can't be run in local mode")
 }
 
-func (o *ordinalityNode) Close(ctx context.Context) { o.source.Close(ctx) }
+func (o *ordinalityNode) Close(ctx context.Context) { o.input.Close(ctx) }

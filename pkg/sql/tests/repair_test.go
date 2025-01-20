@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -58,11 +53,13 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 	// This, due to #51782, leads to the table remaining public but with no
 	// parent database.
 	//
-	// NB: As of 07/15/22 the generated dscriptor was modified to have an ID 105,
+	// NB: As of 07/15/22 the generated descriptor was modified to have an ID 105,
 	// and a parentID 104. This was done to prevent it from colliding with system
 	// tables that can now occupy IDs below 100.
+	// NB: As of 03/07/24 the descriptor was modified to have its constraint IDs
+	// filled in.
 	const (
-		orphanedTable = `0a8f020a03666f6f1869206828013a0042470a016910011a0c08011040180030005014600020002a1d6e65787476616c2827666f6f5f695f736571273a3a3a535452494e4729300050366800700078008001008801009801004802524c0a077072696d61727910011801220169300140004a10080010001a00200028003000380040005a007a0408002000800100880100900101980100a20106080012001800a80100b20100ba010060026a190a090a0561646d696e10020a080a04726f6f74100212001800800101880103980100b201120a077072696d61727910001a016920012800b80101c20100e80100f2010408001200f801008002009202009a0200b20200b80200c0021dc80200e00200f00200`
+		orphanedTable = `0ab5020a03666f6f1869206828013a0042470a016910011a0c08011040180030005014600020002a1d6e65787476616c2827666f6f5f695f736571273a3a3a535452494e472930005036680070007800800100880100980100480252620a077072696d61727910011801220169300140004a10080010001a00200028003000380040005a007a0408002000800100880100900101980100a20106080012001800a80100b20100ba0100c00100c80100d00101e00100e901000000000000000060026a1d0a0b0a0561646d696e100218000a0a0a04726f6f741002180012001800800101880103980100b201120a077072696d61727910001a016920012800b80101c20100e80100f2010408001200f801008002009202009a0200b20200b80200c0021dc80200e00200800300880302a80300b00300d00300`
 	)
 	// We want to inject a descriptor that has no parent. This will block
 	// backups among other things.
@@ -909,8 +906,10 @@ func TestCorruptDescriptorRepair(t *testing.T) {
 	tdb.CheckQueryResults(t, `SELECT * FROM testdb.parent`, [][]string{{"1", "a"}})
 
 	// Dropping the table should fail, because the table descriptor will fail
-	// the validation checks when being read from storage.
-	tdb.ExpectErr(t, "invalid foreign key backreference", `DROP TABLE testdb.parent`)
+	// the validation checks. For the declarative schema changer before the
+	// execution phase the sel validation will fail with a generic error because
+	// all reads are immutable.
+	tdb.ExpectErr(t, "referenced descriptor ID 107: looking up ID 107: descriptor not found", `DROP TABLE testdb.parent`)
 
 	const parentVersion = `SELECT
 				crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', sd.descriptor, false)->'table'->>'version'
@@ -971,4 +970,42 @@ FROM
 	// version.
 	tdb.Exec(t, repair, 12345, true)
 	tdb.Exec(t, `DROP TABLE testdb.parent`)
+}
+
+func TestAlterGCTTLOfDroppedRelations(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
+		DefaultTestTenant: base.TestIsSpecificToStorageLayerAndNeedsASystemTenant,
+	})
+	defer s.Stopper().Stop(ctx)
+	tdb := sqlutils.MakeSQLRunner(db)
+
+	tdb.Exec(t, `CREATE DATABASE db2`)
+	tdb.Exec(t, `CREATE TABLE db2.t2 (i INT PRIMARY KEY);`)
+	tdb.Exec(t, `ALTER DATABASE db2 CONFIGURE ZONE USING gc.ttlseconds = 90001;`)
+	tdb.Exec(t, `CREATE TABLE t3 (x INT PRIMARY KEY)`)
+	tdb.Exec(t, `DROP TABLE t3`)
+	tdb.Exec(t, `DROP TABLE db2.t2`)
+
+	vtableQuery := `SELECT name, ttl FROM crdb_internal.kv_dropped_relations ORDER BY name`
+	spanConfigQuery := `
+SELECT
+  crdb_internal.pretty_key(start_key, -1),
+  crdb_internal.pb_to_json('cockroach.roachpb.SpanConfig', config)->'gcPolicy'->>'ttlSeconds'
+FROM system.span_configurations
+WHERE start_key >= (SELECT crdb_internal.table_span(100)[1])
+ORDER BY start_key`
+
+	tdb.CheckQueryResults(t, vtableQuery, [][]string{{"t2", "25:00:01"}, {"t3", "04:00:00"}})
+	tdb.CheckQueryResultsRetry(t, spanConfigQuery, [][]string{{"/Table/106", "90001"}, {"/Table/107", "14400"}})
+
+	tdb.Exec(t, `
+SELECT crdb_internal.upsert_dropped_relation_gc_ttl(id, '1 second')
+FROM crdb_internal.kv_dropped_relations WHERE name IN ('t2', 't3')`)
+
+	tdb.CheckQueryResults(t, vtableQuery, [][]string{{"t2", "00:00:01"}, {"t3", "00:00:01"}})
+	tdb.CheckQueryResultsRetry(t, spanConfigQuery, [][]string{{"/Table/106", "1"}, {"/Table/107", "1"}})
 }

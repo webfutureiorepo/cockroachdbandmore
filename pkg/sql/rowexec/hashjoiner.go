@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -60,9 +56,12 @@ type hashJoiner struct {
 	// column eqCols[1][i] on the right side.
 	eqCols [2][]uint32
 
+	leftEqColTypes []*types.T
+
 	runningState hashJoinerState
 
-	diskMonitor *mon.BytesMonitor
+	unlimitedMemMonitor *mon.BytesMonitor
+	diskMonitor         *mon.BytesMonitor
 
 	leftSource, rightSource execinfra.RowSource
 
@@ -118,13 +117,18 @@ func newHashJoiner(
 			rightSide: spec.RightEqColumns,
 		},
 	}
+	leftTypes := leftSource.OutputTypes()
+	h.leftEqColTypes = make([]*types.T, len(spec.LeftEqColumns))
+	for i, eqCol := range spec.LeftEqColumns {
+		h.leftEqColTypes[i] = leftTypes[eqCol]
+	}
 
-	if err := h.joinerBase.init(
+	if _, err := h.joinerBase.init(
 		ctx,
 		h,
 		flowCtx,
 		processorID,
-		leftSource.OutputTypes(),
+		leftTypes,
 		rightSource.OutputTypes(),
 		spec.Type,
 		spec.OnExpr,
@@ -144,9 +148,10 @@ func newHashJoiner(
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The hashJoiner will overflow to disk if this limit is not enough.
 	h.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.Mon, flowCtx, "hashjoiner-limited")
+	h.unlimitedMemMonitor = execinfra.NewMonitor(ctx, flowCtx.Mon, "hashjoiner-unlimited")
 	h.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "hashjoiner-disk")
 	h.hashTable = rowcontainer.NewHashDiskBackedRowContainer(
-		h.EvalCtx, h.MemMonitor, h.diskMonitor, h.FlowCtx.Cfg.TempStorage,
+		h.FlowCtx.EvalCtx, h.MemMonitor, h.unlimitedMemMonitor, h.diskMonitor, h.FlowCtx.Cfg.TempStorage,
 	)
 
 	// If the trace is recording, instrument the hashJoiner to collect stats.
@@ -290,7 +295,7 @@ func (h *hashJoiner) readLeftSide() (
 	h.probingRowState.row = row
 	h.probingRowState.matched = false
 	if h.probingRowState.iter == nil {
-		i, err := h.hashTable.NewBucketIterator(h.Ctx(), row, h.eqCols[leftSide])
+		i, err := h.hashTable.NewBucketIterator(h.Ctx(), row, h.eqCols[leftSide], h.leftEqColTypes)
 		if err != nil {
 			h.MoveToDraining(err)
 			return hjStateUnknown, nil, h.DrainHelper()
@@ -456,6 +461,9 @@ func (h *hashJoiner) close() {
 			h.emittingRightUnmatchedState.iter.Close()
 		}
 		h.MemMonitor.Stop(h.Ctx())
+		if h.unlimitedMemMonitor != nil {
+			h.unlimitedMemMonitor.Stop(h.Ctx())
+		}
 		if h.diskMonitor != nil {
 			h.diskMonitor.Stop(h.Ctx())
 		}

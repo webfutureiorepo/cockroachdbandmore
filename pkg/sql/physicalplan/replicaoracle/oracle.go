@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package replicaoracle provides functionality for physicalplan to choose a
 // replica for a range.
@@ -19,6 +14,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
@@ -46,7 +42,7 @@ var (
 
 // Config is used to construct an OracleFactory.
 type Config struct {
-	NodeDescs   kvcoord.NodeDescStore
+	NodeDescs   kvclient.NodeDescStore
 	NodeID      roachpb.NodeID   // current node's ID. 0 for secondary tenants.
 	Locality    roachpb.Locality // current node's locality.
 	Settings    *cluster.Settings
@@ -122,6 +118,8 @@ var oracleFactories = map[Policy]OracleFactory{}
 type QueryState struct {
 	RangesPerNode  util.FastIntMap
 	AssignedRanges map[roachpb.RangeID]ReplicaDescriptorEx
+	LastAssignment roachpb.NodeID
+	NodeStreak     int
 }
 
 // ReplicaDescriptorEx is a small extension of the roachpb.ReplicaDescriptor
@@ -142,7 +140,7 @@ func MakeQueryState() QueryState {
 // randomOracle is a Oracle that chooses the lease holder randomly
 // among the replicas in a range descriptor.
 type randomOracle struct {
-	nodeDescs kvcoord.NodeDescStore
+	nodeDescs kvclient.NodeDescStore
 }
 
 func newRandomOracle(cfg Config) Oracle {
@@ -166,7 +164,7 @@ func (o *randomOracle) ChoosePreferredReplica(
 
 type closestOracle struct {
 	st        *cluster.Settings
-	nodeDescs kvcoord.NodeDescStore
+	nodeDescs kvclient.NodeDescStore
 	// nodeID and locality of the current node. Used to give preference to the
 	// current node and others "close" to it.
 	//
@@ -208,7 +206,7 @@ func (o *closestOracle) ChoosePreferredReplica(
 	if err != nil {
 		return roachpb.ReplicaDescriptor{}, false, err
 	}
-	replicas.OptimizeReplicaOrder(o.st, o.nodeID, o.healthFunc, o.latencyFunc, o.locality)
+	replicas.OptimizeReplicaOrder(ctx, o.st, o.nodeID, o.healthFunc, o.latencyFunc, o.locality)
 	repl := replicas[0].ReplicaDescriptor
 	// There are no "misplanned" ranges if we know the leaseholder, and we're
 	// deliberately choosing non-leaseholder.
@@ -234,7 +232,7 @@ const maxPreferredRangesPerLeaseHolder = 10
 type binPackingOracle struct {
 	st                               *cluster.Settings
 	maxPreferredRangesPerLeaseHolder int
-	nodeDescs                        kvcoord.NodeDescStore
+	nodeDescs                        kvclient.NodeDescStore
 	// nodeID and locality of the current node. Used to give preference to the
 	// current node and others "close" to it.
 	//
@@ -276,7 +274,7 @@ func (o *binPackingOracle) ChoosePreferredReplica(
 	if err != nil {
 		return roachpb.ReplicaDescriptor{}, false, err
 	}
-	replicas.OptimizeReplicaOrder(o.st, o.nodeID, o.healthFunc, o.latencyFunc, o.locality)
+	replicas.OptimizeReplicaOrder(ctx, o.st, o.nodeID, o.healthFunc, o.latencyFunc, o.locality)
 
 	// Look for a replica that has been assigned some ranges, but it's not yet full.
 	minLoad := int(math.MaxInt32)
@@ -303,7 +301,7 @@ func (o *binPackingOracle) ChoosePreferredReplica(
 // RangeUnavailableError is returned.
 func replicaSliceOrErr(
 	ctx context.Context,
-	nodeDescs kvcoord.NodeDescStore,
+	nodeDescs kvclient.NodeDescStore,
 	desc *roachpb.RangeDescriptor,
 	filter kvcoord.ReplicaSliceFilter,
 ) (kvcoord.ReplicaSlice, error) {
@@ -324,7 +322,7 @@ func latencyFunc(rpcCtx *rpc.Context) kvcoord.LatencyFunc {
 }
 
 type preferFollowerOracle struct {
-	nodeDescs kvcoord.NodeDescStore
+	nodeDescs kvclient.NodeDescStore
 }
 
 func newPreferFollowerOracle(cfg Config) Oracle {

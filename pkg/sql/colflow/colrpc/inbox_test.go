@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colrpc
 
@@ -257,10 +252,6 @@ func TestInboxShutdown(t *testing.T) {
 				drainScenario = drainMetaNotCalled
 			}
 			for _, runRunWithStreamGoroutine := range []bool{false, true} {
-				// copy loop variables so they can be safelyreferenced in Go routines
-				cancel, runNextGoroutine, runRunWithStreamGoroutine :=
-					cancel, runNextGoroutine, runRunWithStreamGoroutine
-
 				if runNextGoroutine == false && runRunWithStreamGoroutine == true {
 					// This is sort of like a remote node connecting to the inbox, but the
 					// inbox will never be spawned. This is dealt with by another part of
@@ -309,7 +300,7 @@ func TestInboxShutdown(t *testing.T) {
 									wg.Add(1)
 									go func() {
 										defer wg.Done()
-										defer c.Release(context.Background())
+										defer c.Close(context.Background())
 										arrowData, err := c.BatchToArrow(context.Background(), batch)
 										if err != nil {
 											errCh <- err

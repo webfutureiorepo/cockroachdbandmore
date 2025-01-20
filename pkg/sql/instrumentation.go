@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -14,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -24,13 +18,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxrecommendations"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/indexrec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
@@ -40,8 +34,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
@@ -94,12 +90,6 @@ type instrumentationHelper struct {
 	// statement; it triggers saving of extra information like the plan string.
 	collectBundle bool
 
-	// planGistMatchingBundle is set when the bundle collection was enabled for
-	// a request with plan-gist matching enabled. In particular, such a bundle
-	// will be somewhat incomplete (it'll miss the plan string as well as the
-	// trace will miss all the events that happened in the optimizer).
-	planGistMatchingBundle bool
-
 	// collectExecStats is set when we are collecting execution statistics for a
 	// statement.
 	collectExecStats bool
@@ -145,6 +135,9 @@ type instrumentationHelper struct {
 
 	inFlightTraceCollector
 
+	// topLevelStats are the statistics collected for every query execution.
+	topLevelStats topLevelQueryStats
+
 	queryLevelStatsWithErr *execstats.QueryLevelStatsWithErr
 
 	// If savePlanForStats is true and the explainPlan was collected, the
@@ -155,6 +148,16 @@ type instrumentationHelper struct {
 	distribution     physicalplan.PlanDistribution
 	vectorized       bool
 	containsMutation bool
+	// generic is true if the plan can be fully-optimized once and re-used
+	// without re-optimization. Plans without placeholders and fold-able stable
+	// expressions, and plans utilizing the placeholder fast-path are always
+	// considered "generic". Plans that are fully optimized with placeholders
+	// present via the force_generic_plan or auto settings for plan_cache_mode
+	// are also considered "generic".
+	generic bool
+	// optimized is true if the plan was optimized or re-optimized during the
+	// current execution.
+	optimized bool
 
 	traceMetadata execNodeTraceMetadata
 
@@ -204,18 +207,18 @@ type instrumentationHelper struct {
 	nanosSinceStatsForecasted time.Duration
 
 	// joinTypeCounts records the number of times each type of logical join was
-	// used in the query.
-	joinTypeCounts map[descpb.JoinType]int
+	// used in the query, up to 255.
+	joinTypeCounts [execbuilder.NumRecordedJoinTypes]uint8
 
-	// joinAlgorithmCounts records the number of times each type of join algorithm
-	// was used in the query.
-	joinAlgorithmCounts map[exec.JoinAlgorithm]int
+	// joinAlgorithmCounts records the number of times each type of join
+	// algorithm was used in the query, up to 255.
+	joinAlgorithmCounts [exec.NumJoinAlgorithms]uint8
 
 	// scanCounts records the number of times scans were used in the query.
 	scanCounts [exec.NumScanCountTypes]int
 
 	// indexesUsed list the indexes used in the query with format tableID@indexID.
-	indexesUsed []string
+	indexesUsed execbuilder.IndexesUsed
 
 	// schemachangerMode indicates which schema changer mode was used to execute
 	// the query.
@@ -391,8 +394,6 @@ func (ih *instrumentationHelper) finalizeSetup(ctx context.Context, cfg *Executo
 		// helper setup.
 		ih.traceMetadata = make(execNodeTraceMetadata)
 	}
-	// Make sure that the builtins use the correct context.
-	ih.evalCtx.SetDeprecatedContext(ctx)
 	if ih.collectBundle {
 		if pollInterval := inFlightTraceCollectorPollInterval.Get(cfg.SV()); pollInterval > 0 {
 			ih.startInFlightTraceCollector(ctx, cfg.InternalDB.Executor(), pollInterval)
@@ -407,15 +408,15 @@ func (ih *instrumentationHelper) finalizeSetup(ctx context.Context, cfg *Executo
 func (ih *instrumentationHelper) Setup(
 	ctx context.Context,
 	cfg *ExecutorConfig,
-	statsCollector sqlstats.StatsCollector,
+	statsCollector *sslocal.StatsCollector,
 	p *planner,
 	stmtDiagnosticsRecorder *stmtdiagnostics.Registry,
-	fingerprint string,
+	stmt *Statement,
 	implicitTxn bool,
 	txnPriority roachpb.UserPriority,
 	collectTxnExecStats bool,
 ) (newCtx context.Context) {
-	ih.fingerprint = fingerprint
+	ih.fingerprint = stmt.StmtNoConstants
 	ih.implicitTxn = implicitTxn
 	ih.txnPriority = txnPriority
 	ih.codec = cfg.Codec
@@ -423,6 +424,7 @@ func (ih *instrumentationHelper) Setup(
 	ih.evalCtx = p.EvalContext()
 	ih.isTenant = execinfra.IncludeRUEstimateInExplainAnalyze.Get(cfg.SV()) && cfg.DistSQLSrv != nil &&
 		cfg.DistSQLSrv.TenantCostController != nil
+	ih.topLevelStats = topLevelQueryStats{}
 
 	switch ih.outputMode {
 	case explainAnalyzeDebugOutput:
@@ -438,14 +440,16 @@ func (ih *instrumentationHelper) Setup(
 
 	default:
 		ih.collectBundle, ih.diagRequestID, ih.diagRequest =
-			stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, fingerprint, "" /* planGist */)
+			stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, stmt.StmtNoConstants, "" /* planGist */)
+		// IsRedacted will be false when ih.collectBundle is false.
+		ih.explainFlags.RedactValues = ih.explainFlags.RedactValues || ih.diagRequest.IsRedacted()
 	}
 
 	ih.stmtDiagnosticsRecorder = stmtDiagnosticsRecorder
 	ih.withStatementTrace = cfg.TestingKnobs.WithStatementTrace
 
 	var previouslySampled bool
-	previouslySampled, ih.savePlanForStats = statsCollector.ShouldSample(fingerprint, implicitTxn, p.SessionData().Database)
+	previouslySampled, ih.savePlanForStats = statsCollector.ShouldSample(stmt.StmtNoConstants, implicitTxn, p.SessionData().Database)
 
 	defer func() { ih.finalizeSetup(newCtx, cfg) }()
 
@@ -469,18 +473,29 @@ func (ih *instrumentationHelper) Setup(
 		}
 	}
 
-	ih.collectExecStats = collectTxnExecStats
+	shouldSampleFirstEncounter := func() bool {
+		if stmt.AST.StatementType() == tree.TypeTCL {
+			// We don't collect stats for TCL statements so
+			// there's no need to trace them.
+			return false
+		}
 
-	// Don't collect it if Stats Collection is disabled. If it is disabled the
-	// stats are not stored, so it always returns false for previouslySampled.
-	if !collectTxnExecStats && (!previouslySampled && sqlstats.StmtStatsEnable.Get(&cfg.Settings.SV)) {
-		// We don't collect the execution stats for statements in this txn, but
-		// this is the first time we see this statement ever, so we'll collect
-		// its execution stats anyway (unless the user disabled txn stats
-		// collection entirely).
-		statsCollectionDisabled := collectTxnStatsSampleRate.Get(&cfg.Settings.SV) == 0
-		ih.collectExecStats = !statsCollectionDisabled
+		// If this is the first time we see this statement in the current stats
+		// container, we'll collect its execution stats anyway (unless the user
+		// disabled txn or stmt stats collection entirely).
+		// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
+		if collectTxnStatsSampleRate.Get(&cfg.Settings.SV) == 0 ||
+			!sqlstats.StmtStatsEnable.Get(&cfg.Settings.SV) {
+			return false
+		}
+
+		// We don't want to collect the stats if the stats container is full,
+		// since previouslySampled will always return false for statements
+		// not already in the container.
+		return !previouslySampled && !statsCollector.StatementsContainerFull()
 	}
+
+	ih.collectExecStats = collectTxnExecStats || shouldSampleFirstEncounter()
 
 	if !ih.collectBundle && ih.withStatementTrace == nil && ih.outputMode == unmodifiedOutput {
 		if ih.collectExecStats {
@@ -517,50 +532,79 @@ func (ih *instrumentationHelper) Setup(
 // provided fingerprint and plan gist. It assumes that the bundle is not
 // currently being collected.
 func (ih *instrumentationHelper) setupWithPlanGist(
-	ctx context.Context, cfg *ExecutorConfig, fingerprint, planGist string, plan *planTop,
+	ctx context.Context, p *planner, cfg *ExecutorConfig,
 ) context.Context {
+	planGist := ih.planGist.String()
 	ih.collectBundle, ih.diagRequestID, ih.diagRequest =
-		ih.stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, fingerprint, planGist)
-	if ih.collectBundle {
-		ih.needFinish = true
-		ih.collectExecStats = true
-		ih.planGistMatchingBundle = true
-		if ih.sp == nil || !ih.sp.IsVerbose() {
-			// We will create a verbose span
-			// - if we don't have a span yet, or
-			// - we do have a span, but it's not verbose.
-			//
-			// ih.sp can be non-nil and non-verbose when it was created in Setup
-			// because the stmt got sampled (i.e. ih.collectExecStats was true).
-			// (Note that it couldn't have been EXPLAIN ANALYZE code path in
-			// Setup because it uses a different output mode.) In any case,
-			// we're responsible for finishing this span, so we reassign it to
-			// ih.parentSp to keep track of.
-			//
-			// Note that we don't need to explicitly use ih.sp when creating a
-			// child span because it's implicitly stored in ctx.
-			if ih.sp != nil {
-				ih.parentSp = ih.sp
-			}
-			ctx, ih.sp = tracing.EnsureChildSpan(
-				ctx, cfg.AmbientCtx.Tracer, "plan-gist bundle",
-				tracing.WithRecording(tracingpb.RecordingVerbose),
-			)
-			ih.shouldFinishSpan = true
-			ih.finalizeSetup(ctx, cfg)
-			log.VEventf(ctx, 1, "plan-gist matching bundle collection began after the optimizer finished its part")
+		ih.stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, p.stmt.StmtNoConstants, planGist)
+	if !ih.collectBundle {
+		return ctx
+	}
+	ih.explainFlags.RedactValues = ih.explainFlags.RedactValues || ih.diagRequest.IsRedacted()
+	ih.needFinish = true
+	ih.collectExecStats = true
+	if ih.sp == nil || !ih.sp.IsVerbose() {
+		// We will create a verbose span
+		// - if we don't have a span yet, or
+		// - we do have a span, but it's not verbose.
+		//
+		// ih.sp can be non-nil and non-verbose when it was created in Setup
+		// because the stmt got sampled (i.e. ih.collectExecStats was true).
+		// (Note that it couldn't have been EXPLAIN ANALYZE code path in Setup
+		// because it uses a different output mode.) In any case, we're
+		// responsible for finishing this span, so we reassign it to ih.parentSp
+		// to keep track of.
+		//
+		// Note that we don't need to explicitly use ih.sp when creating a child
+		// span because it's implicitly stored in ctx.
+		if ih.sp != nil {
+			ih.parentSp = ih.sp
+		}
+		ctx, ih.sp = tracing.EnsureChildSpan(
+			ctx, cfg.AmbientCtx.Tracer, "plan-gist bundle",
+			tracing.WithRecording(tracingpb.RecordingVerbose),
+		)
+		ih.shouldFinishSpan = true
+		ih.finalizeSetup(ctx, cfg)
+	}
+	log.VEventf(ctx, 1, "plan-gist matching bundle collection began after the optimizer finished its part")
+	if cfg.TestingKnobs.DeterministicExplain {
+		ih.explainFlags.Deflake = explain.DeflakeAll
+	}
+	// Since we haven't enabled the bundle collection before the optimization,
+	// explain plan wasn't populated. We'll rerun the execbuilder with the
+	// explain factory to get that (the explain factory will be used because we
+	// now have collectBundle set to true).
+	//
+	// Disable telemetry in order to not double count things since we've already
+	// built the plan once.
+	const disableTelemetryAndPlanGists = true
+	// Note that we don't reset the optPlanningCtx because it was already reset
+	// and set up when we created the original optimizer plan - no need to reset
+	// it just for running the execbuild.
+	origPlanComponents := p.curPlan.planComponents
+	err := p.runExecBuild(ctx, p.curPlan.mem, disableTelemetryAndPlanGists)
+	if err != nil {
+		// This seems unexpected, but let's proceed with the original plan.
+		if buildutil.CrdbTestBuild {
+			panic(errors.NewAssertionErrorWithWrappedErrf(err, "unexpectedly got an error when rerun execbuild due to plan-gist match"))
+		} else {
+			log.VEventf(ctx, 1, "hit an error when using explain factory: %v", err)
+			p.curPlan.planComponents = origPlanComponents
 		}
 	} else {
-		// We won't need the memo and the catalog, so free it up.
-		plan.mem = nil
-		plan.catalog = nil
+		// We need to close the original plan since we're going to overwrite it.
+		// Note that the new plan will be closed correctly by the defer in
+		// dispatchToExecutionEngine.
+		origPlanComponents.close(ctx)
 	}
+
 	return ctx
 }
 
 func (ih *instrumentationHelper) Finish(
 	cfg *ExecutorConfig,
-	statsCollector sqlstats.StatsCollector,
+	statsCollector *sslocal.StatsCollector,
 	txnStats *execstats.QueryLevelStats,
 	collectExecStats bool,
 	p *planner,
@@ -626,7 +670,7 @@ func (ih *instrumentationHelper) Finish(
 			ob := ih.emitExplainAnalyzePlanToOutputBuilder(ctx, ih.explainFlags, phaseTimes, queryLevelStats)
 			warnings = ob.GetWarnings()
 			var payloadErr error
-			if pwe, ok := retPayload.(payloadWithError); ok {
+			if pwe, ok2 := retPayload.(payloadWithError); ok2 {
 				payloadErr = pwe.errorCause()
 			}
 			bundleCtx := ctx
@@ -656,13 +700,13 @@ func (ih *instrumentationHelper) Finish(
 				}
 			}
 			planString := ob.BuildString()
-			if ih.planGistMatchingBundle {
-				// We don't have the plan string available since the stmt bundle
-				// collection was enabled _after_ the optimizer was done.
-				planString = "-- plan elided due to gist matching"
+			if planString == "" {
+				// This should only happen with plan-gist matching where we hit
+				// an error when using the explain factory.
+				planString = "-- plan is missing, probably hit an error with gist matching: " + ih.planGist.String()
 			}
 			bundle = buildStatementBundle(
-				bundleCtx, ih.explainFlags, cfg.DB, ie.(*InternalExecutor),
+				bundleCtx, ih.explainFlags, cfg.DB, p, ie.(*InternalExecutor),
 				stmtRawSQL, &p.curPlan, planString, trace, placeholders, res.ErrAllowReleased(),
 				payloadErr, retErr, &p.extendedEvalCtx.Settings.SV, ih.inFlightTraceCollector,
 			)
@@ -753,11 +797,13 @@ func (ih *instrumentationHelper) RecordExplainPlan(explainPlan *explain.Plan) {
 
 // RecordPlanInfo records top-level information about the plan.
 func (ih *instrumentationHelper) RecordPlanInfo(
-	distribution physicalplan.PlanDistribution, vectorized, containsMutation bool,
+	distribution physicalplan.PlanDistribution, vectorized, containsMutation, generic, optimized bool,
 ) {
 	ih.distribution = distribution
 	ih.vectorized = vectorized
 	ih.containsMutation = containsMutation
+	ih.generic = generic
+	ih.optimized = optimized
 }
 
 // PlanForStats returns the plan as an ExplainTreePlanNode tree, if it was
@@ -773,7 +819,19 @@ func (ih *instrumentationHelper) PlanForStats(ctx context.Context) *appstatspb.E
 	})
 	ob.AddDistribution(ih.distribution.String())
 	ob.AddVectorized(ih.vectorized)
-	if err := emitExplain(ctx, ob, ih.evalCtx, ih.codec, ih.explainPlan); err != nil {
+	ob.AddPlanType(ih.generic, ih.optimized)
+	// We cannot allow the creation of post-query plans if they are missing
+	// since PlanForStats() is called after the query execution, so it could hit
+	// problems if we were to try to create some new plans (#135155, #138974).
+	//
+	// This means that the "plan for stats" could change depending on the data
+	// that the query ran over. (For example, in one case the cascade could be
+	// triggered and in another the cascade could be skipped ("short-circuited")
+	// depending on whether the main query modified some rows or not.) This is
+	// unfortunate because we would produce different "plan for stats" even
+	// though the query is the same.
+	const createPostQueryPlanIfMissing = false
+	if err := emitExplain(ctx, ob, ih.evalCtx, ih.codec, ih.explainPlan, createPostQueryPlanIfMissing); err != nil {
 		log.Warningf(ctx, "unable to emit explain plan tree: %v", err)
 		return nil
 	}
@@ -798,6 +856,7 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 	ob.AddExecutionTime(phaseTimes.GetRunLatency())
 	ob.AddDistribution(ih.distribution.String())
 	ob.AddVectorized(ih.vectorized)
+	ob.AddPlanType(ih.generic, ih.optimized)
 
 	if queryStats != nil {
 		if queryStats.KVRowsRead != 0 {
@@ -815,6 +874,9 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 		ob.AddMaxDiskUsage(queryStats.MaxDiskUsage)
 		if len(queryStats.Regions) > 0 {
 			ob.AddRegionsStats(queryStats.Regions)
+		}
+		if queryStats.UsedFollowerRead {
+			ob.AddTopLevelField("used follower read", "")
 		}
 
 		if !ih.containsMutation && ih.vectorized && grunning.Supported() {
@@ -839,13 +901,20 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 
 	qos := sessiondatapb.Normal
 	iso := isolation.Serializable
+	var asOfSystemTime *eval.AsOfSystemTime
 	if ih.evalCtx != nil {
 		qos = ih.evalCtx.QualityOfService()
 		iso = ih.evalCtx.TxnIsoLevel
+		asOfSystemTime = ih.evalCtx.AsOfSystemTime
 	}
-	ob.AddTxnInfo(iso, ih.txnPriority, qos)
+	ob.AddTxnInfo(iso, ih.txnPriority, qos, asOfSystemTime)
 
-	if err := emitExplain(ctx, ob, ih.evalCtx, ih.codec, ih.explainPlan); err != nil {
+	// When building EXPLAIN ANALYZE output we do **not** want to create
+	// post-query plans if they are missing. The fact that they are missing
+	// highlights that they were not executed, so we will only include that into
+	// the output.
+	const createPostQueryPlanIfMissing = false
+	if err := emitExplain(ctx, ob, ih.evalCtx, ih.codec, ih.explainPlan, createPostQueryPlanIfMissing); err != nil {
 		ob.AddField("error emitting plan", fmt.Sprint(err))
 	}
 	return ob
@@ -942,10 +1011,10 @@ func (m execNodeTraceMetadata) annotateExplain(
 	statsMap := execinfrapb.ExtractStatsFromSpans(spans, makeDeterministic)
 
 	// Retrieve which region each node is on.
-	regionsInfo := make(map[int64]string)
+	sqlInstanceIDToRegion := make(map[int64]string)
 	for componentId := range statsMap {
 		if componentId.Region != "" {
-			regionsInfo[int64(componentId.SQLInstanceID)] = componentId.Region
+			sqlInstanceIDToRegion[int64(componentId.SQLInstanceID)] = componentId.Region
 		}
 	}
 
@@ -958,18 +1027,26 @@ func (m execNodeTraceMetadata) annotateExplain(
 			var nodeStats exec.ExecutionStats
 
 			incomplete := false
-			var nodes intsets.Fast
-			regionsMap := make(map[string]struct{})
+			var sqlInstanceIDs, kvNodeIDs intsets.Fast
+			var regions []string
 			for _, c := range components {
 				if c.Type == execinfrapb.ComponentID_PROCESSOR {
-					nodes.Add(int(c.SQLInstanceID))
-					regionsMap[regionsInfo[int64(c.SQLInstanceID)]] = struct{}{}
+					sqlInstanceIDs.Add(int(c.SQLInstanceID))
+					if region := sqlInstanceIDToRegion[int64(c.SQLInstanceID)]; region != "" {
+						// Add only if the region is not an empty string (it
+						// will be an empty string if the region is not setup).
+						regions = util.InsertUnique(regions, region)
+					}
 				}
 				stats := statsMap[c]
 				if stats == nil {
 					incomplete = true
 					break
 				}
+				for _, kvNodeID := range stats.KV.NodeIDs {
+					kvNodeIDs.Add(int(kvNodeID))
+				}
+				regions = util.CombineUnique(regions, stats.KV.Regions)
 				nodeStats.RowCount.MaybeAdd(stats.Output.NumTuples)
 				nodeStats.KVTime.MaybeAdd(stats.KV.KVTime)
 				nodeStats.KVContentionTime.MaybeAdd(stats.KV.ContentionTime)
@@ -995,23 +1072,18 @@ func (m execNodeTraceMetadata) annotateExplain(
 					// component_stats.go.
 					nodeStats.SQLCPUTime.MaybeAdd(stats.Exec.CPUTime)
 				}
+				nodeStats.UsedFollowerRead = nodeStats.UsedFollowerRead || stats.KV.UsedFollowerRead
 			}
 			// If we didn't get statistics for all processors, we don't show the
 			// incomplete results. In the future, we may consider an incomplete flag
 			// if we want to show them with a warning.
 			if !incomplete {
-				for i, ok := nodes.Next(0); ok; i, ok = nodes.Next(i + 1) {
-					nodeStats.Nodes = append(nodeStats.Nodes, fmt.Sprintf("n%d", i))
+				for i, ok := sqlInstanceIDs.Next(0); ok; i, ok = sqlInstanceIDs.Next(i + 1) {
+					nodeStats.SQLNodes = append(nodeStats.SQLNodes, fmt.Sprintf("n%d", i))
 				}
-				regions := make([]string, 0, len(regionsMap))
-				for r := range regionsMap {
-					// Add only if the region is not an empty string (it will be an
-					// empty string if the region is not setup).
-					if r != "" {
-						regions = append(regions, r)
-					}
+				for i, ok := kvNodeIDs.Next(0); ok; i, ok = kvNodeIDs.Next(i + 1) {
+					nodeStats.KVNodes = append(nodeStats.KVNodes, fmt.Sprintf("n%d", i))
 				}
-				sort.Strings(regions)
 				nodeStats.Regions = regions
 				n.Annotate(exec.ExecutionStatsID, &nodeStats)
 			}
@@ -1037,6 +1109,15 @@ func (m execNodeTraceMetadata) annotateExplain(
 	}
 	for i := range plan.Checks {
 		walk(plan.Checks[i])
+	}
+	for _, trigger := range plan.Triggers {
+		// We don't want to create new plans if they haven't been cached - all
+		// necessary plans must have been created during the actual execution of
+		// the query.
+		const createPlanIfMissing = false
+		if tp, _ := trigger.GetExplainPlan(ctx, createPlanIfMissing); tp != nil {
+			m.annotateExplain(ctx, tp.(*explain.Plan), spans, makeDeterministic, p)
+		}
 	}
 }
 

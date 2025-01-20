@@ -1,17 +1,13 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { Button } from "@cockroachlabs/ui-components";
+import moment from "moment-timezone";
 import React, { useCallback, useEffect, useState } from "react";
 import { RouteComponentProps, withRouter } from "react-router-dom";
-import moment from "moment-timezone";
-import { Button } from "@cockroachlabs/ui-components";
+
 import { cockroach } from "src/js/protos";
 import { getHotRanges } from "src/util/api";
 
@@ -48,7 +44,7 @@ const HotRanges = (props: HotRangesProps) => {
     });
     // Avoid dispatching request when `hotRanges` list is updated.
     // This effect should be triggered only when pageToken is changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    /* eslint react-hooks/exhaustive-deps: "off" */
   }, [pageToken]);
 
   useEffect(() => {

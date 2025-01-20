@@ -1,28 +1,27 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { RouteComponentProps, withRouter } from "react-router-dom";
 import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
 import { Dispatch } from "redux";
-import { actions as sessionsActions } from "src/store/sessions";
-import { AppState } from "../store";
-import {
-  ActiveStatementDetails,
-  ActiveStatementDetailsDispatchProps,
-} from "./activeStatementDetails";
-import { ActiveStatementDetailsStateProps } from ".";
+
 import {
   selecteActiveStatement,
   selectContentionDetailsForStatement,
 } from "src/selectors/activeExecutions.selectors";
+import { actions as sessionsActions } from "src/store/sessions";
 import { selectHasAdminRole } from "src/store/uiConfig";
+
+import { AppState } from "../store";
+
+import {
+  ActiveStatementDetails,
+  ActiveStatementDetailsDispatchProps,
+} from "./activeStatementDetails";
+
+import { ActiveStatementDetailsStateProps } from ".";
 
 // For tenant cases, we don't show information about node, regions and
 // diagnostics.

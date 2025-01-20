@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -50,6 +45,11 @@ func (d *DurationSetting) String(sv *Values) string {
 	return EncodeDuration(d.Get(sv))
 }
 
+// DefaultString returns the default value for the setting as a string.
+func (d *DurationSetting) DefaultString() string {
+	return EncodeDuration(d.defaultValue)
+}
+
 // Encoded returns the encoded value of the current value of the setting.
 func (d *DurationSetting) Encoded(sv *Values) string {
 	return d.String(sv)
@@ -66,7 +66,7 @@ func (d *DurationSetting) DecodeToString(encoded string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return EncodeDuration(v), nil
+	return v.String(), nil
 }
 
 // DecodeValue decodes the value into a float.
@@ -82,11 +82,6 @@ func (*DurationSetting) Typ() string {
 // Default returns default value for setting.
 func (d *DurationSetting) Default() time.Duration {
 	return d.defaultValue
-}
-
-// DefaultString returns the default value for the setting as a string.
-func (d *DurationSetting) DefaultString() (string, error) {
-	return d.DecodeToString(d.EncodedDefault())
 }
 
 // Defeat the linter.
@@ -117,6 +112,25 @@ func (d *DurationSetting) set(ctx context.Context, sv *Values, v time.Duration) 
 		return err
 	}
 	sv.setInt64(ctx, d.slot, int64(v))
+	return nil
+}
+
+func (d *DurationSetting) decodeAndSet(ctx context.Context, sv *Values, encoded string) error {
+	v, err := d.DecodeValue(encoded)
+	if err != nil {
+		return err
+	}
+	return d.set(ctx, sv, v)
+}
+
+func (d *DurationSetting) decodeAndSetDefaultOverride(
+	ctx context.Context, sv *Values, encoded string,
+) error {
+	v, err := d.DecodeValue(encoded)
+	if err != nil {
+		return err
+	}
+	sv.setDefaultOverride(d.slot, v)
 	return nil
 }
 

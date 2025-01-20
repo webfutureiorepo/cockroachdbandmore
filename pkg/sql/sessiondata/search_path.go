@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sessiondata
 
@@ -222,7 +217,7 @@ func (s SearchPath) Equals(other *SearchPath) bool {
 		return false
 	}
 	// Fast path: skip the check if it is the same slice.
-	if &s.paths[0] != &other.paths[0] {
+	if len(s.paths) > 0 && &s.paths[0] != &other.paths[0] {
 		for i := range s.paths {
 			if s.paths[i] != other.paths[i] {
 				return false

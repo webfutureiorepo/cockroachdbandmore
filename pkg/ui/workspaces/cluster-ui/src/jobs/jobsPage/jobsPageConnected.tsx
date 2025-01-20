@@ -1,16 +1,13 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { connect } from "react-redux";
 import { RouteComponentProps, withRouter } from "react-router-dom";
+import { Dispatch } from "redux";
 
+import { JobsRequest } from "src/api/jobsApi";
 import { AppState } from "src/store";
 import {
   selectShowSetting,
@@ -21,16 +18,16 @@ import {
   initialState,
   actions as jobsActions,
 } from "src/store/jobs";
+
+import { SortSetting } from "../../sortedtable";
+import { actions as analyticsActions } from "../../store/analytics";
+import { actions as localStorageActions } from "../../store/localStorage";
+
 import {
   JobsPageStateProps,
   JobsPageDispatchProps,
   JobsPage,
 } from "./jobsPage";
-import { JobsRequest } from "src/api/jobsApi";
-import { actions as localStorageActions } from "../../store/localStorage";
-import { Dispatch } from "redux";
-import { SortSetting } from "../../sortedtable";
-import { actions as analyticsActions } from "../../store/analytics";
 
 const mapStateToProps = (
   state: AppState,
@@ -123,7 +120,12 @@ const mapDispatchToProps = (dispatch: Dispatch): JobsPageDispatchProps => ({
 });
 
 export const JobsPageConnected = withRouter(
-  connect<JobsPageStateProps, JobsPageDispatchProps, RouteComponentProps>(
+  connect<
+    JobsPageStateProps,
+    JobsPageDispatchProps,
+    RouteComponentProps,
+    AppState
+  >(
     mapStateToProps,
     mapDispatchToProps,
   )(JobsPage),

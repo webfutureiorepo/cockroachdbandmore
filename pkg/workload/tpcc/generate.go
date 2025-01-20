@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tpcc
 
@@ -306,7 +301,7 @@ var customerTypes = []*types.T{
 	types.Bytes,
 	types.Bytes,
 	types.Bytes,
-	types.Bytes,
+	types.Timestamp,
 	types.Bytes,
 	types.Float,
 	types.Float,
@@ -360,7 +355,7 @@ func (w *tpcc) tpccCustomerInitialRowBatch(
 	cb.ColVec(9).Bytes().Set(0, randStateInitialDataOnly(&l.rng, &lo, a))
 	cb.ColVec(10).Bytes().Set(0, randZipInitialDataOnly(&l.rng, &no, a))
 	cb.ColVec(11).Bytes().Set(0, randNStringInitialDataOnly(&l.rng, &no, a, 16, 16)) // phone number
-	cb.ColVec(12).Bytes().Set(0, w.nowString)
+	cb.ColVec(12).Timestamp()[0] = w.nowTime
 	cb.ColVec(13).Bytes().Set(0, credit)
 	cb.ColVec(14).Float64()[0] = creditLimit
 	cb.ColVec(15).Float64()[0] = float64(randInt(l.rng.Rand, 0, 5000)) / float64(10000.0) // discount
@@ -412,7 +407,7 @@ var historyTypes = []*types.T{
 	types.Int,
 	types.Int,
 	types.Int,
-	types.Bytes,
+	types.Timestamp,
 	types.Float,
 	types.Bytes,
 }
@@ -446,7 +441,7 @@ func (w *tpcc) tpccHistoryInitialRowBatch(rowIdx int, cb coldata.Batch, a *bufal
 	cb.ColVec(3).Int64()[0] = int64(wID)
 	cb.ColVec(4).Int64()[0] = int64(dID)
 	cb.ColVec(5).Int64()[0] = int64(wID)
-	cb.ColVec(6).Bytes().Set(0, w.nowString)
+	cb.ColVec(6).Timestamp()[0] = w.nowTime
 	cb.ColVec(7).Float64()[0] = 10.00
 	cb.ColVec(8).Bytes().Set(0, randAStringInitialDataOnly(&l.rng, &ao, a, 12, 24))
 }
@@ -473,7 +468,7 @@ var orderTypes = []*types.T{
 	types.Int,
 	types.Int,
 	types.Int,
-	types.Bytes,
+	types.Timestamp,
 	types.Int,
 	types.Int,
 	types.Int,
@@ -525,7 +520,7 @@ func (w *tpcc) tpccOrderInitialRowBatch(rowIdx int, cb coldata.Batch, a *bufallo
 	cb.ColVec(1).Int64()[0] = int64(dID)
 	cb.ColVec(2).Int64()[0] = int64(wID)
 	cb.ColVec(3).Int64()[0] = int64(cID)
-	cb.ColVec(4).Bytes().Set(0, w.nowString)
+	cb.ColVec(4).Timestamp()[0] = w.nowTime
 	cb.ColVec(5).Nulls().UnsetNulls()
 	if carrierSet {
 		cb.ColVec(5).Int64()[0] = carrierID
@@ -592,7 +587,7 @@ var orderLineTypes = []*types.T{
 	types.Int,
 	types.Int,
 	types.Int,
-	types.Bytes,
+	types.Timestamp,
 	types.Int,
 	types.Float,
 	types.Bytes,
@@ -624,23 +619,20 @@ func (w *tpcc) tpccOrderLineInitialRowBatch(
 	olSupplyWIDCol := cb.ColVec(5).Int64()
 	olDeliveryD := cb.ColVec(6)
 	olDeliveryD.Nulls().UnsetNulls()
-	olDeliveryDCol := olDeliveryD.Bytes()
+	olDeliveryDCol := olDeliveryD.Timestamp()
 	olQuantityCol := cb.ColVec(7).Int64()
 	olAmountCol := cb.ColVec(8).Float64()
 	olDistInfoCol := cb.ColVec(9).Bytes()
 
-	olDeliveryDCol.Reset()
 	olDistInfoCol.Reset()
 	for rowIdx := 0; rowIdx < numOrderLines; rowIdx++ {
 		olNumber := rowIdx + 1
 
 		var amount float64
 		var deliveryDSet bool
-		var deliveryD []byte
 		if oID < 2101 {
 			amount = 0
 			deliveryDSet = true
-			deliveryD = w.nowString
 		} else {
 			amount = float64(randInt(l.rng.Rand, 1, 999999)) / 100.0
 		}
@@ -652,10 +644,9 @@ func (w *tpcc) tpccOrderLineInitialRowBatch(
 		olIIDCol[rowIdx] = randInt(l.rng.Rand, 1, 100000)
 		olSupplyWIDCol[rowIdx] = int64(wID)
 		if deliveryDSet {
-			olDeliveryDCol.Set(rowIdx, deliveryD)
+			olDeliveryDCol.Set(rowIdx, w.nowTime)
 		} else {
 			olDeliveryD.Nulls().SetNull(rowIdx)
-			olDeliveryDCol.Set(rowIdx, nil)
 		}
 		olQuantityCol[rowIdx] = 5
 		olAmountCol[rowIdx] = amount

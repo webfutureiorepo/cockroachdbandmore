@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -21,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/ui"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -60,6 +56,9 @@ func TestExecSQL(t *testing.T) {
 			if d.HasArg("non-admin") {
 				client = nonAdminClient
 			}
+			if d.HasArg("disable_database_locality_metadata") {
+				ui.DatabaseLocalityMetadataEnabled.Override(ctx, &server.ClusterSettings().SV, false)
+			}
 
 			resp, err := client.Post(
 				server.AdminURL().WithPath("/api/v2/sql/").String(), "application/json",
@@ -72,18 +71,12 @@ func TestExecSQL(t *testing.T) {
 			require.NoError(t, err)
 
 			if d.HasArg("expect-error") {
-				type jsonError struct {
-					Code    string `json:"code"`
-					Message string `json:"message"`
-				}
-				type errorResp struct {
-					Error jsonError `json:"error"`
-				}
-
-				er := errorResp{}
-				err := json.Unmarshal(r, &er)
-				require.NoError(t, err)
-				return fmt.Sprintf("%s|%s", er.Error.Code, er.Error.Message)
+				code, msg := getErrorResponse(t, r)
+				return fmt.Sprintf("%s|%s", code, msg)
+			} else if d.HasArg("expect-no-error") {
+				code, msg := getErrorResponse(t, r)
+				require.True(t, code == "" && msg == "", code, msg)
+				return ""
 			}
 			return getMarshalledResponse(t, r)
 		},
@@ -125,4 +118,57 @@ func getMarshalledResponse(t *testing.T, r []byte) string {
 	s, err := json.MarshalIndent(u, "", " ")
 	require.NoError(t, err)
 	return string(s)
+}
+
+func getErrorResponse(t *testing.T, r []byte) (code, message string) {
+	type jsonError struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	type errorResp struct {
+		Error jsonError `json:"error"`
+	}
+
+	er := errorResp{}
+	err := json.Unmarshal(r, &er)
+	require.NoError(t, err)
+	return er.Error.Code, er.Error.Message
+}
+
+func TestLocalityMetadataEnabledFilter(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	for _, tc := range []struct {
+		name        string
+		query       string
+		expectMatch bool
+	}{
+		{
+			"db query",
+			"SELECT array_agg(DISTINCT unnested_store_ids) AS store_ids" +
+				" FROM [SHOW RANGES FROM DATABASE %1], unnest(replicas) AS unnested_store_ids",
+			true,
+		},
+		{
+			"table query",
+			"SELECT count(unnested) AS replica_count, array_agg(DISTINCT unnested) AS store_ids" +
+				" FROM [SHOW RANGES FROM TABLE %1], unnest(replicas) AS unnested;",
+			true,
+		},
+		{
+			"simpler matching query",
+			"SHOW RANGES FROM DATABASE abc",
+			true,
+		},
+		{
+			"non-matching query",
+			"SHOW RANGE FROM INDEX abc",
+			false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expectMatch, localityMetadataQueryRegexp.Match([]byte(tc.query)))
+		})
+	}
 }

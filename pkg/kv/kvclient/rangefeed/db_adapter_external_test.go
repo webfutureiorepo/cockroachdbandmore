@@ -1,22 +1,19 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed_test
 
 import (
 	"context"
+	"slices"
 	"sync/atomic"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -36,11 +33,12 @@ import (
 )
 
 func startMonitorWithBudget(budget int64) *mon.BytesMonitor {
-	mm := mon.NewMonitorWithLimit(
-		"test-mm", mon.MemoryResource, budget,
-		nil, nil,
-		128 /* small allocation increment */, 100,
-		cluster.MakeTestingClusterSettings())
+	mm := mon.NewMonitor(mon.Options{
+		Name:      mon.MakeMonitorName("test-mm"),
+		Limit:     budget,
+		Increment: 128, /* small allocation increment */
+		Settings:  cluster.MakeTestingClusterSettings(),
+	})
 	mm.Start(context.Background(), nil, mon.NewStandaloneBudget(budget))
 	return mm
 }
@@ -59,8 +57,8 @@ func TestDBClientScan(t *testing.T) {
 
 	beforeAny := db.Clock().Now()
 
-	scratchKey := append(ts.Codec().TenantPrefix(), keys.ScratchRangeMin...)
-	_, _, err := srv.SplitRange(scratchKey)
+	scratchKey := slices.Clip(append(ts.Codec().TenantPrefix(), keys.ScratchRangeMin...))
+	_, _, err := srv.StorageLayer().SplitRange(scratchKey)
 	require.NoError(t, err)
 
 	mkKey := func(k string) roachpb.Key {
@@ -143,13 +141,36 @@ func TestDBClientScan(t *testing.T) {
 			db, ts.Codec(), "defaultdb", "foo")
 		fooSpan := fooDesc.PrimaryIndexSpan(ts.Codec())
 
-		// Refresh the DistSender range cache. ScanWithOptions will split the scan
-		// requests itself based on the range cache and assert on that split, before
-		// sending the requests to the DistSender.
-		_, err := db.Scan(ctx, fooSpan.Key, fooSpan.EndKey, 0)
-		require.NoError(t, err)
+		// Ensure the splits make it into the meta ranges and range cache. Simply
+		// running a DistSender scan does not appear sufficient in rare cases.
+		//
+		// ScanWithOptions will split the scan requests itself based on the range
+		// cache and assert on that split, before sending them to the DistSender.
+		ds := ts.DistSenderI().(*kvcoord.DistSender)
+		testutils.SucceedsSoon(t, func() error {
+			// Flush the cache, and repopulate it via a scan. This looks at the
+			// canonical range descriptors rather than the possibly stale meta ranges.
+			ds.RangeDescriptorCache().Clear()
+			_, err := db.Scan(ctx, fooSpan.Key, fooSpan.EndKey, 0)
+			require.NoError(t, err)
 
-		// We expect 4 splits -- we'll start the scan with parallelism set to 3.
+			var descs []roachpb.RangeDescriptor
+			iter := kvcoord.MakeRangeIterator(ds)
+			for iter.Seek(ctx, roachpb.RKey(fooSpan.Key), kvcoord.Ascending); iter.Valid(); iter.Next(ctx) {
+				desc := iter.Desc()
+				if !fooSpan.Overlaps(desc.KeySpan().AsRawSpanWithNoLocals()) {
+					break
+				}
+				descs = append(descs, *desc)
+			}
+			if len(descs) == 4 {
+				t.Logf("range cache has 4 ranges: %v", descs)
+				return nil
+			}
+			return errors.Errorf("range cache has %d ranges: %v", len(descs), descs)
+		})
+
+		// We have 4 ranges -- we'll start the scan with parallelism set to 3.
 		// We will block these scans from completion until we know that we have 3
 		// concurrently running scan requests.
 		var parallelism = 3
@@ -213,7 +234,6 @@ func TestDBClientScan(t *testing.T) {
 		feed, err := f.RangeFeed(ctx, "foo-feed", []roachpb.Span{fooSpan}, db.Clock().Now(),
 			func(ctx context.Context, value *kvpb.RangeFeedValue) {},
 
-			rangefeed.WithScanRetryBehavior(rangefeed.ScanRetryRemaining),
 			rangefeed.WithInitialScanParallelismFn(func() int { return parallelism }),
 
 			rangefeed.WithInitialScan(func(ctx context.Context) {

@@ -1,20 +1,15 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
 import (
 	"fmt"
 	"os"
-	"runtime/debug"
 
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
@@ -88,7 +83,7 @@ func (l *fileSink) takeOverInternalStderr(logger *loggerT) error {
 
 	// Success: remember who called us, in case the next
 	// caller comes along with the wrong call sequence.
-	takeOverStderrMu.previousStderrTakeover = string(debug.Stack())
+	takeOverStderrMu.previousStderrTakeover = debugutil.Stack()
 	return nil
 }
 
@@ -144,5 +139,5 @@ var takeOverStderrMu struct {
 	// previousStderrTakeover is the stack trace of the previous call to
 	// takeOverStderrInternal(). This can be used to troubleshoot
 	// invalid call sequences.
-	previousStderrTakeover string
+	previousStderrTakeover debugutil.SafeStack
 }

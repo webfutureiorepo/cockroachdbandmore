@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.util.log.eventpb;
@@ -57,6 +52,34 @@ message NodeRestart {
   CommonNodeEventDetails node = 2 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
 }
 
+// NodeShutdownConnectionTimeout is recorded when SQL connections remain open
+// during shutdown, after waiting for the server.shutdown.connections.timeout
+// to transpire.
+message NodeShutdownConnectionTimeout {
+  CommonEventDetails common = 1 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+  CommonNodeEventDetails node = 2 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+  // The detailed message, meant to be a human-understandable explanation.
+  string detail = 3 [(gogoproto.jsontag) = ",omitempty", (gogoproto.nullable) = false, (gogoproto.customtype) = "github.com/cockroachdb/redact.SafeString", (gogoproto.moretags) = "redact:\"nonsensitive\""];
+  // The number of connections still open after waiting for the client to close them.
+  uint32 connections_remaining = 4 [(gogoproto.jsontag) = ",includeempty"];
+  // The amount of time the server waited for the client to close the connections, defined by server.shutdown.connections.timeout.
+  uint32 timeout_millis = 5 [(gogoproto.jsontag) = ",includeempty"];
+}
+
+// NodeShutdownTransactionTimeout is recorded when SQL transactions remain open
+// during shutdown, after waiting for the server.shutdown.transactions.timeout
+// to transpire.
+message NodeShutdownTransactionTimeout {
+  CommonEventDetails common = 1 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+  CommonNodeEventDetails node = 2 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+  // The detailed message, meant to be a human-understandable explanation.
+  string detail = 3 [(gogoproto.jsontag) = ",omitempty", (gogoproto.nullable) = false, (gogoproto.customtype) = "github.com/cockroachdb/redact.SafeString", (gogoproto.moretags) = "redact:\"nonsensitive\""];
+  // The number of connections still running SQL transactions after waiting for the client to end them.
+  uint32 connections_remaining = 4 [(gogoproto.jsontag) = ",includeempty"];
+  // The amount of time the server waited for the client to close the connections, defined by server.shutdown.transactions.timeout.
+  uint32 timeout_millis = 5 [(gogoproto.jsontag) = ",includeempty"];
+}
+
 
 // CommonNodeDecommissionDetails contains the fields common to all
 // node-level decommission/recommission events.
@@ -94,7 +117,38 @@ message NodeRecommissioned {
   CommonNodeDecommissionDetails node = 2 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
 }
 
+// DiskSlownessDetected is recorded when a store observes disk slowness
+// events.
+message DiskSlownessDetected {
+  CommonEventDetails common = 1 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+  // The node ID where the event was originated.
+  int32 node_id = 2 [(gogoproto.customname) = "NodeID", (gogoproto.jsontag) = ",omitempty"];
+  int32 store_id = 3 [(gogoproto.customname) = "StoreID", (gogoproto.jsontag) = ",omitempty"];
+}
 
+// DiskSlownessCleared is recorded when disk slowness in a store has cleared.
+message DiskSlownessCleared {
+  CommonEventDetails common = 1 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+  // The node ID where the event was originated.
+  int32 node_id = 2 [(gogoproto.customname) = "NodeID", (gogoproto.jsontag) = ",omitempty"];
+  int32 store_id = 3 [(gogoproto.customname) = "StoreID", (gogoproto.jsontag) = ",omitempty"];
+}
+
+// LowDiskSpace is emitted when a store is reaching capacity, as we reach
+// certain thresholds. It is emitted periodically while we are in a low disk
+// state.
+message LowDiskSpace {
+  CommonEventDetails common = 1 [(gogoproto.nullable) = false, (gogoproto.jsontag) = "", (gogoproto.embed) = true];
+
+  // The node ID where the event was originated.
+  int32 node_id = 2 [(gogoproto.customname) = "NodeID", (gogoproto.jsontag) = ",omitempty"];
+  int32 store_id = 3 [(gogoproto.customname) = "StoreID", (gogoproto.jsontag) = ",omitempty"];
+
+  // The free space percent threshold that we went under.
+  int32 percent_threshold = 4 [(gogoproto.jsontag) = ",omitempty"];
+  uint64 available_bytes = 5 [(gogoproto.jsontag) = ",omitempty"];
+  uint64 total_bytes = 6 [(gogoproto.jsontag) = ",omitempty"];
+}
 
 // CertsReload is recorded when the TLS certificates are
 // reloaded/rotated from disk.

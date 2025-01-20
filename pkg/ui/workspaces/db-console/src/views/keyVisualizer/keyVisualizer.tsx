@@ -1,14 +1,11 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import throttle from "lodash/throttle";
 import React from "react";
+
 import {
   CanvasHeight,
   CanvasWidth,
@@ -22,7 +19,7 @@ import {
   KeyVisualizerProps,
   SampleBucket,
 } from "src/views/keyVisualizer/interfaces";
-import { throttle } from "lodash";
+
 import { getRequestsAsNumber } from ".";
 
 function drawBucket(
@@ -101,10 +98,13 @@ function filterAxisLabels(
     labelsReduced = labelsInWindow;
   }
 
-  return labelsReduced.reduce((acc, key) => {
-    acc[key] = offsets[key];
-    return acc;
-  }, {} as Record<string, number>);
+  return labelsReduced.reduce(
+    (acc, key) => {
+      acc[key] = offsets[key];
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
 }
 
 interface TooltipProps {
@@ -149,10 +149,10 @@ export default class KeyVisualizer extends React.PureComponent<
 > {
   canvasRef: React.RefObject<HTMLCanvasElement>;
   ctx: CanvasRenderingContext2D;
-  xPanOffset: number = 0;
-  yPanOffset: number = 0;
-  xZoomFactor: number = 1;
-  yZoomFactor: number = 1;
+  xPanOffset = 0;
+  yPanOffset = 0;
+  xZoomFactor = 1;
+  yZoomFactor = 1;
   throttledHandler: (e: React.MouseEvent) => void;
 
   state = {

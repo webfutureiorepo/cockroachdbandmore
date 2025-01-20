@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -12,6 +9,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -64,7 +62,7 @@ func TestAlterChangefeedAddTargetPrivileges(t *testing.T) {
 						if _, ok := s.(*externalConnectionKafkaSink); ok {
 							return s
 						}
-						return &externalConnectionKafkaSink{sink: s}
+						return &externalConnectionKafkaSink{sink: s, ignoreDialError: true}
 					},
 				},
 			},
@@ -239,6 +237,8 @@ func TestAlterChangefeedAddTargetFamily(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	require.NoError(t, log.SetVModule("helpers_test=1"))
+
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING, FAMILY onlya (a), FAMILY onlyb (b))`)
@@ -246,13 +246,30 @@ func TestAlterChangefeedAddTargetFamily(t *testing.T) {
 		testFeed := feed(t, f, `CREATE CHANGEFEED FOR foo FAMILY onlya`)
 		defer closeFeed(t, testFeed)
 
-		sqlDB.Exec(t, `INSERT INTO foo VALUES(1, 'hello')`)
-		assertPayloads(t, testFeed, []string{
-			`foo.onlya: [1]->{"after": {"a": 1}}`,
-		})
-
 		feed, ok := testFeed.(cdctest.EnterpriseTestFeed)
 		require.True(t, ok)
+
+		tsr := sqlDB.QueryRow(t, `INSERT INTO foo VALUES(42, 'hello') RETURNING cluster_logical_timestamp()`)
+		var insertTsDecStr string
+		tsr.Scan(&insertTsDecStr)
+		insertTs := parseTimeToHLC(t, insertTsDecStr)
+		assertPayloads(t, testFeed, []string{
+			`foo.onlya: [42]->{"after": {"a": 42}}`,
+		})
+
+		// Wait for the high water mark (aka resolved ts) to advance past the row we inserted's
+		// mvcc ts. Otherwise, we'd see [42] again due to a catch up scan, and it
+		// would muddy the waters.
+		testutils.SucceedsSoon(t, func() error {
+			registry := s.Server.JobRegistry().(*jobs.Registry)
+			job, err := registry.LoadJob(context.Background(), feed.JobID())
+			require.NoError(t, err)
+			prog := job.Progress()
+			if p := prog.GetHighWater(); p != nil && !p.IsEmpty() && insertTs.Less(*p) {
+				return nil
+			}
+			return errors.New("waiting for highwater")
+		})
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
 		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
@@ -261,12 +278,12 @@ func TestAlterChangefeedAddTargetFamily(t *testing.T) {
 
 		sqlDB.Exec(t, fmt.Sprintf(`RESUME JOB %d`, feed.JobID()))
 		waitForJobStatus(sqlDB, t, feed.JobID(), `running`)
-
-		sqlDB.Exec(t, `INSERT INTO foo VALUES(2, 'goodbye')`)
+		sqlDB.Exec(t, `INSERT INTO foo VALUES(37, 'goodbye')`)
 		assertPayloads(t, testFeed, []string{
-			`foo.onlyb: [1]->{"after": {"b": "hello"}}`,
-			`foo.onlya: [2]->{"after": {"a": 2}}`,
-			`foo.onlyb: [2]->{"after": {"b": "goodbye"}}`,
+			// Note that we don't see foo.onlyb.[42] here, because we're not
+			// doing a catchup scan and we've already processed that tuple.
+			`foo.onlya: [37]->{"after": {"a": 37}}`,
+			`foo.onlyb: [37]->{"after": {"b": "goodbye"}}`,
 		})
 	}
 
@@ -278,6 +295,8 @@ func TestAlterChangefeedSwitchFamily(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	require.NoError(t, log.SetVModule("helpers_test=1"))
+
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING, FAMILY onlya (a), FAMILY onlyb (b))`)
@@ -285,13 +304,31 @@ func TestAlterChangefeedSwitchFamily(t *testing.T) {
 		testFeed := feed(t, f, `CREATE CHANGEFEED FOR foo FAMILY onlya`)
 		defer closeFeed(t, testFeed)
 
-		sqlDB.Exec(t, `INSERT INTO foo VALUES(1, 'hello')`)
+		tsr := sqlDB.QueryRow(t, `INSERT INTO foo VALUES(1, 'hello') RETURNING cluster_logical_timestamp()`)
+		var insertTsDecStr string
+		tsr.Scan(&insertTsDecStr)
+		insertTs := parseTimeToHLC(t, insertTsDecStr)
+
 		assertPayloads(t, testFeed, []string{
 			`foo.onlya: [1]->{"after": {"a": 1}}`,
 		})
 
 		feed, ok := testFeed.(cdctest.EnterpriseTestFeed)
 		require.True(t, ok)
+
+		// Wait for the high water mark (aka resolved ts) to advance past the row we inserted's
+		// mvcc ts. Otherwise, we'd see [1] again due to a catch up scan, and it
+		// would muddy the waters.
+		testutils.SucceedsSoon(t, func() error {
+			registry := s.Server.JobRegistry().(*jobs.Registry)
+			job, err := registry.LoadJob(context.Background(), feed.JobID())
+			require.NoError(t, err)
+			prog := job.Progress()
+			if p := prog.GetHighWater(); p != nil && !p.IsEmpty() && insertTs.Less(*p) {
+				return nil
+			}
+			return errors.New("waiting for highwater")
+		})
 
 		sqlDB.Exec(t, `PAUSE JOB $1`, feed.JobID())
 		waitForJobStatus(sqlDB, t, feed.JobID(), `paused`)
@@ -303,7 +340,8 @@ func TestAlterChangefeedSwitchFamily(t *testing.T) {
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES(2, 'goodbye')`)
 		assertPayloads(t, testFeed, []string{
-			`foo.onlyb: [1]->{"after": {"b": "hello"}}`,
+			// Note that we don't see foo.onlyb.[1] here, because we're not
+			// doing a catchup scan and we've already processed that tuple.
 			`foo.onlyb: [2]->{"after": {"b": "goodbye"}}`,
 		})
 	}
@@ -710,7 +748,11 @@ func TestAlterChangefeedPersistSinkURI(t *testing.T) {
 	const unredactedSinkURI = "null://blah?AWS_ACCESS_KEY_ID=the_secret"
 
 	ctx := context.Background()
-	srv, rawSQLDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	srv, rawSQLDB, _ := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+		},
+	})
 	defer srv.Stopper().Stop(ctx)
 
 	s := srv.ApplicationLayer()
@@ -1213,11 +1255,11 @@ func TestAlterChangefeedAddTargetsDuringSchemaChangeError(t *testing.T) {
 
 		var maxCheckpointSize int64 = 100 << 20
 		// Ensure that checkpoints happen every time by setting a large checkpoint size.
-		// Because setting 0 for the FrontierCheckpointFrequency disables checkpointing,
+		// Because setting 0 for the SpanCheckpointInterval disables checkpointing,
 		// setting 1 nanosecond is the smallest possible value.
-		changefeedbase.FrontierCheckpointFrequency.Override(
+		changefeedbase.SpanCheckpointInterval.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, 1*time.Nanosecond)
-		changefeedbase.FrontierCheckpointMaxBytes.Override(
+		changefeedbase.SpanCheckpointMaxBytes.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, maxCheckpointSize)
 
 		// Note the tableSpan to avoid resolved events that leave no gaps
@@ -1314,8 +1356,11 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rnd, _ := randutil.NewTestRand()
-	var rndMu syncutil.Mutex
+	var rndMu struct {
+		syncutil.Mutex
+		rnd *rand.Rand
+	}
+	rndMu.rnd, _ = randutil.NewTestRand()
 	const maxCheckpointSize = 1 << 20
 	const numRowsPerTable = 1000
 
@@ -1336,11 +1381,19 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 			Changefeed.(*TestingKnobs)
 
 		// Ensure Scan Requests are always small enough that we receive multiple
-		// resolvedFoo events during a backfill
+		// resolvedFoo events during a backfill.
+		const maxBatchSize = numRowsPerTable / 5
 		knobs.FeedKnobs.BeforeScanRequest = func(b *kv.Batch) error {
 			rndMu.Lock()
 			defer rndMu.Unlock()
-			b.Header.MaxSpanRequestKeys = 1 + rnd.Int63n(100)
+			// We don't want batch sizes that are too small because they could cause
+			// the initial scan to take too long, leading to the waitForHighwater
+			// call below to time out. The formula below is completely arbitrary and
+			// was chosen to ensure that the batch sizes aren't too small (i.e. in
+			// the 1-2 digit range) but are still small enough that at least a few
+			// batches will be necessary.
+			b.Header.MaxSpanRequestKeys = maxBatchSize/2 + rndMu.rnd.Int63n(maxBatchSize/2)
+			t.Logf("set max span request keys: %d", b.Header.MaxSpanRequestKeys)
 			return nil
 		}
 
@@ -1361,16 +1414,16 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 				return false, nil
 			}
 			if haveGaps {
-				return rnd.Intn(10) > 7, nil
+				return rndMu.rnd.Intn(10) > 7, nil
 			}
 			haveGaps = true
 			return true, nil
 		}
 
 		// Checkpoint progress frequently, and set the checkpoint size limit.
-		changefeedbase.FrontierCheckpointFrequency.Override(
+		changefeedbase.SpanCheckpointInterval.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, 1)
-		changefeedbase.FrontierCheckpointMaxBytes.Override(
+		changefeedbase.SpanCheckpointMaxBytes.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, maxCheckpointSize)
 
 		registry := s.Server.JobRegistry().(*jobs.Registry)
@@ -1411,13 +1464,12 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 		var checkpoint roachpb.SpanGroup
 		checkpoint.Add(jobCheckpoint.Spans...)
 
-		waitForJobStatus(sqlDB, t, jobFeed.JobID(), `paused`)
-
 		sqlDB.Exec(t, fmt.Sprintf(`ALTER CHANGEFEED %d ADD bar WITH initial_scan`, jobFeed.JobID()))
 
 		// Collect spans we attempt to resolve after when we resume.
 		var resolvedFoo []roachpb.Span
 		knobs.FilterSpanWithMutation = func(r *jobspb.ResolvedSpan) (bool, error) {
+			t.Logf("resolved span: %#v", r)
 			if !r.Span.Equal(fooTableSpan) {
 				resolvedFoo = append(resolvedFoo, r.Span)
 			}
@@ -1426,6 +1478,7 @@ func TestAlterChangefeedAddTargetsDuringBackfill(t *testing.T) {
 
 		require.NoError(t, jobFeed.Resume())
 
+		// Wait for highwater to be set, which signifies that the initial scan is complete.
 		waitForHighwater(t, jobFeed, registry)
 
 		// At this point, highwater mark should be set, and previous checkpoint should be gone.

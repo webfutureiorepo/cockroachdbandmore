@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -20,7 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -43,7 +38,7 @@ func TestHandleTruncatedStateBelowRaft(t *testing.T) {
 	ctx := context.Background()
 	datadriven.Walk(t, datapathutils.TestDataPath(t, "truncated_state"), func(t *testing.T, path string) {
 		const rangeID = 12
-		loader := stateloader.Make(rangeID)
+		loader := logstore.NewStateLoader(rangeID)
 		prefixBuf := &loader.RangeIDPrefixBuf
 		eng := storage.NewDefaultInMemForTesting()
 		defer eng.Close()
@@ -103,7 +98,7 @@ func TestHandleTruncatedStateBelowRaft(t *testing.T) {
 				}
 
 				// Apply truncation.
-				apply, err := handleTruncatedStateBelowRaftPreApply(ctx, &currentTruncatedState, suggestedTruncatedState, loader, eng)
+				apply, err := handleTruncatedStateBelowRaftPreApply(ctx, currentTruncatedState, suggestedTruncatedState, loader, eng)
 				require.NoError(t, err)
 				fmt.Fprintf(&buf, "apply: %t\n", apply)
 

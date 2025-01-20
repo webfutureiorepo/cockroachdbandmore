@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Note that there's also a lease_test.go, in package sql_test.
 
@@ -29,7 +24,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/enum"
+	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
@@ -45,6 +44,7 @@ import (
 func TestTableSet(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
+	ctx := context.Background()
 	type data struct {
 		version    descpb.DescriptorVersion
 		expiration int64
@@ -111,7 +111,7 @@ func TestTableSet(t *testing.T) {
 			}
 			s := "<nil>"
 			if n != nil {
-				s = fmt.Sprintf("%d:%d", n.GetVersion(), n.getExpiration().WallTime)
+				s = fmt.Sprintf("%d:%d", n.GetVersion(), n.getExpiration(ctx).WallTime)
 			}
 			if d.expected != s {
 				t.Fatalf("%d: expected %s, but found %s", i, d.expected, s)
@@ -181,7 +181,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 				t.Fatal(err)
 			}
 			tables = append(tables, table.Underlying().(catalog.TableDescriptor))
-			expiration = table.Expiration()
+			expiration = table.Expiration(context.Background())
 			table.Release(context.Background())
 		}
 	}
@@ -203,8 +203,9 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	if numLeases := getNumVersions(ts); numLeases != 2 {
 		t.Fatalf("found %d versions instead of 2", numLeases)
 	}
+	ctx := context.Background()
 	if err := purgeOldVersions(
-		context.Background(), kvDB, tableDesc.GetID(), false, 2 /* minVersion */, leaseManager); err != nil {
+		ctx, kvDB, tableDesc.GetID(), false, 2 /* minVersion */, leaseManager); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,7 +215,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	ts.mu.Lock()
 	correctLease := ts.mu.active.data[0].GetID() == tables[5].GetID() &&
 		ts.mu.active.data[0].GetVersion() == tables[5].GetVersion()
-	correctExpiration := ts.mu.active.data[0].getExpiration() == expiration
+	correctExpiration := ts.mu.active.data[0].getExpiration(ctx) == expiration
 	ts.mu.Unlock()
 	if !correctLease {
 		t.Fatalf("wrong lease survived purge")
@@ -485,6 +486,11 @@ CREATE TABLE t.%s (k CHAR PRIMARY KEY, v CHAR);
 		t.Fatal(err)
 	}
 
+	// Disable stats collection so that the descriptor isn't modified.
+	if _, err := db.Exec("SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false"); err != nil {
+		t.Fatal(err)
+	}
+
 	// Populate the name cache.
 	if _, err := db.Exec("SELECT * FROM t.test;"); err != nil {
 		t.Fatal(err)
@@ -566,7 +572,7 @@ CREATE TABLE t.%s (k CHAR PRIMARY KEY, v CHAR);
 	if lease == nil {
 		t.Fatalf("name cache has no unexpired entry for (%d, %s)", tableDesc.GetParentID(), tableName)
 	}
-	expiration := lease.Expiration()
+	expiration := lease.Expiration(context.Background())
 	tracker := removalTracker.TrackRemoval(lease.Descriptor)
 
 	// Acquire another lease.
@@ -581,8 +587,8 @@ CREATE TABLE t.%s (k CHAR PRIMARY KEY, v CHAR);
 	if newLease == nil {
 		t.Fatalf("name cache doesn't contain entry for (%d, %s)", tableDesc.GetParentID(), tableName)
 	}
-	if newLease.Expiration() == expiration {
-		t.Fatalf("same lease %s %s", expiration.GoTime(), newLease.Expiration().GoTime())
+	if newLease.Expiration(context.Background()) == expiration {
+		t.Fatalf("same lease %s %s", expiration.GoTime(), newLease.Expiration(context.Background()).GoTime())
 	}
 
 	// TODO(ajwerner): does this matter?
@@ -878,7 +884,7 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 		res := Result{err: err}
 		if table != nil {
 			res.table = table
-			res.exp = table.Expiration()
+			res.exp = table.Expiration(context.Background())
 		}
 		return res
 	}
@@ -1581,21 +1587,139 @@ func TestSessionLeasingClusterSetting(t *testing.T) {
 	defer srv.Stopper().Stop(ctx)
 
 	// Validate all settings can be set and the provider works correctly.
-	for idx, setting := range []string{"off", "dual_write", "drain", "session"} {
+	for setting, sessionMode := range SessionBasedLeasingModeByName {
+		// Automatic mode is based off the version number so the tests below do
+		// not apply.
+		if sessionMode == SessionBasedLeasingAuto {
+			continue
+		}
 		_, err := sqlDB.Exec("SET CLUSTER SETTING sql.catalog.experimental_use_session_based_leasing=$1::STRING", setting)
 		require.NoError(t, err)
 		lm := srv.LeaseManager().(*Manager)
 
 		// Validate that the mode we just set is active and the provider handles
 		// it properly.
-		require.True(t, lm.sessionBasedLeasingModeAtLeast(SessionBasedLeasingMode(idx)))
-		require.Equal(t, lm.getSessionBasedLeasingMode(), SessionBasedLeasingMode(idx))
+		require.True(t, lm.sessionBasedLeasingModeAtLeast(ctx, sessionMode))
+		require.Equal(t, lm.getSessionBasedLeasingMode(ctx), sessionMode)
 		// Validate that the previous minimums are active and forwards ones are not.
-		for mode := SessionBasedLeasingOff; mode <= SessionBasedLeasingMode(idx); mode++ {
-			require.True(t, lm.sessionBasedLeasingModeAtLeast(mode))
+		for mode := SessionBasedLeasingOff; mode <= sessionMode; mode++ {
+			require.True(t, lm.sessionBasedLeasingModeAtLeast(ctx, mode))
 		}
-		for mode := SessionBasedLeasingMode(idx) + 1; mode <= SessionBasedOnly; mode++ {
-			require.False(t, lm.sessionBasedLeasingModeAtLeast(mode))
+		for mode := sessionMode + 1; mode <= SessionBasedOnly; mode++ {
+			require.False(t, lm.sessionBasedLeasingModeAtLeast(ctx, mode))
 		}
 	}
+}
+
+// TestLeaseCountDetailCrossNode will test out the extra debugging info that is
+// emitted from countLeasesWithDetail. This version tests leases that are spread
+// across multiple nodes.
+func TestLeaseCountDetailCrossNode(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	st := cluster.MakeTestingClusterSettings()
+	// We are going to disable session based leasing as its easier to add a lot of
+	// fake leases into system.leases.
+	LeaseEnableSessionBasedLeasing.Override(ctx, &st.SV, SessionBasedLeasingOff)
+	srv := serverutils.StartServerOnly(t, base.TestServerArgs{
+		Settings:          st,
+		DefaultTestTenant: base.TestNeedsTightIntegrationBetweenAPIsAndTestingKnobs,
+		Knobs:             base.TestingKnobs{},
+	})
+	defer srv.Stopper().Stop(ctx)
+
+	s := srv.ApplicationLayer()
+	idb := srv.InternalDB().(isql.DB)
+	executor := idb.Executor()
+
+	// Do cross node lease testing. It is easy to mock this if we use the old
+	// version of the lease table, which lets you insert your own expiration
+	// times.
+	descID := 10 // Descriptor ID that we will insert and query in this test
+	// Insert using a synthetic descriptor.
+	err := executor.WithSyntheticDescriptors(catalog.Descriptors{systemschema.LeaseTable_V23_2()}, func() error {
+		nodeIDs := []string{"2", "2", "8", "3", "2"}
+		for i, nodeID := range nodeIDs {
+			version := i + 1
+			expiration := "2124-06-12-10:10:10" // Choose a long expiration, so they are unexpired when we count
+			region := enum.One
+			_, err := executor.Exec(ctx, "add-rows-for-test", nil,
+				fmt.Sprintf("INSERT INTO system.lease VALUES (%d, %d, %s, '%s', '\\x%x')",
+					descID, version, nodeID, expiration, region))
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	codec := s.Codec()
+	now := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
+
+	// Count leases for any version
+	detail, err := countLeasesWithDetail(ctx, idb, codec, nil, st,
+		[]IDVersion{{ID: descpb.ID(descID), Version: 1}}, now, true)
+	require.NoError(t, err)
+	require.Equal(t, 5, detail.count)
+	require.Equal(t, 3, detail.numSQLInstances)
+	require.Equal(t, 2, detail.sampleSQLInstanceID)
+
+	// Count leases only for a specific version
+	detail, err = countLeasesWithDetail(ctx, idb, codec, nil, st,
+		[]IDVersion{{ID: descpb.ID(descID), Version: 3}}, now, false)
+	require.NoError(t, err)
+	// We should see the fake leases we added plus the one added by the system.
+	require.Equal(t, 1, detail.count)
+	require.Equal(t, 1, detail.numSQLInstances)
+	require.Equal(t, 8, detail.sampleSQLInstanceID)
+}
+
+// TestLeaseCountDetailSessionBased will test out the extra debugging info that
+// comes from countLeasesWithDetail. This version targets session based leasing.
+func TestLeaseCountDetailSessionBased(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	st := cluster.MakeTestingClusterSettings()
+	srv := serverutils.StartServerOnly(t, base.TestServerArgs{
+		Settings:          st,
+		DefaultTestTenant: base.TestNeedsTightIntegrationBetweenAPIsAndTestingKnobs,
+		Knobs:             base.TestingKnobs{},
+	})
+	defer srv.Stopper().Stop(ctx)
+
+	s := srv.ApplicationLayer()
+	idb := srv.InternalDB().(isql.DB)
+	executor := idb.Executor()
+
+	descID := 890 // Descriptor ID that we will insert and query in this test
+	session, err := srv.SQLLivenessProvider().(sqlliveness.Provider).Session(ctx)
+	require.NoError(t, err)
+	err = executor.WithSyntheticDescriptors(catalog.Descriptors{systemschema.LeaseTable()}, func() error {
+		nodeID := "0" // Hard code the node rather than getting it from srv to avoid import cycle
+		version := 1
+		region := enum.One
+		_, err := executor.Exec(ctx, "add-rows-for-test", nil,
+			fmt.Sprintf("INSERT INTO system.lease VALUES (%d, %d, %s, '\\x%x', '\\x%x')",
+				descID, version, nodeID, session.ID().UnsafeBytes(), region))
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	codec := s.Codec()
+	now := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
+
+	detail, err := countLeasesWithDetail(ctx, idb, codec, nil, st,
+		[]IDVersion{{ID: descpb.ID(descID), Version: 1}}, now, true)
+	require.NoError(t, err)
+	require.Equal(t, 1, detail.count)
+	require.Equal(t, 1, detail.numSQLInstances)
+	require.Equal(t, 0, detail.sampleSQLInstanceID)
 }

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package systemschema_test
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
@@ -85,7 +81,7 @@ func runTest(t *testing.T, path string, db *gosql.DB, execCfg *sql.ExecutorConfi
 			return sb.String()
 
 		case "schema_telemetry":
-			snapshotID := uuid.FastMakeV4()
+			snapshotID := uuid.MakeV4()
 			maxRecords := 100000
 			// By default, collect the entirety of the system schema.
 			// In that case, the snapshot ID won't matter.
@@ -116,6 +112,12 @@ func runTest(t *testing.T, path string, db *gosql.DB, execCfg *sql.ExecutorConfi
 			require.EqualValues(t, len(events), 1+meta.NumRecords, "unexpected record count")
 			for _, event := range events[1:] {
 				ev, ok := event.(*eventpb.SchemaDescriptor)
+				// Always clear the modification and creation times for this test.
+				// nolint:descriptormarshal
+				if tbl := ev.Desc.GetTable(); tbl != nil {
+					tbl.ModificationTime = hlc.Timestamp{}
+					tbl.CreateAsOfTime = hlc.Timestamp{}
+				}
 				require.Truef(t, ok, "expected a SchemaDescriptor event, instead got %T", event)
 				require.EqualValues(t, meta.SnapshotID, ev.SnapshotID, "unexpected snapshot ID")
 				if ev.DescID == keys.PublicSchemaID && ev.Desc == nil {

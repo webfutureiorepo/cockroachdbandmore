@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -229,25 +224,55 @@ var retiredSettings = map[InternalKey]struct{}{
 	"bulkio.restore.remove_regions.enabled":                    {},
 
 	// removed as of 24.1
-	"storage.mvcc.range_tombstones.enabled":                {},
-	"changefeed.balance_range_distribution.enable":         {},
-	"changefeed.mux_rangefeed.enabled":                     {},
-	"kv.rangefeed.catchup_scan_concurrency":                {},
-	"kv.rangefeed.scheduler.enabled":                       {},
-	"physical_replication.producer.mux_rangefeeds.enabled": {},
-	"kv.rangefeed.use_dedicated_connection_class.enabled":  {},
-	"sql.trace.session_eventlog.enabled":                   {},
+	"storage.mvcc.range_tombstones.enabled":                  {},
+	"changefeed.balance_range_distribution.enable":           {},
+	"changefeed.mux_rangefeed.enabled":                       {},
+	"kv.rangefeed.catchup_scan_concurrency":                  {},
+	"physical_replication.producer.mux_rangefeeds.enabled":   {},
+	"kv.rangefeed.use_dedicated_connection_class.enabled":    {},
+	"sql.trace.session_eventlog.enabled":                     {},
+	"sql.show_ranges_deprecated_behavior.enabled":            {},
+	"sql.drop_virtual_cluster.enabled":                       {},
+	"cross_cluster_replication.enabled":                      {},
+	"server.controller.default_tenant.check_service.enabled": {},
+
+	// removed as of 24.2
+	"storage.value_blocks.enabled":       {},
+	"kv.gc.sticky_hint.enabled":          {},
+	"kv.rangefeed.range_stuck_threshold": {},
+
+	// removed as of 24.3
+	"bulkio.backup.split_keys_on_timestamps":           {},
+	"sql.create_tenant.default_template":               {},
+	"kvadmission.low_pri_read_elastic_control.enabled": {},
+
+	// removed as of 25.1
+	"sql.auth.resolve_membership_single_scan.enabled":            {},
+	"storage.single_delete.crash_on_invariant_violation.enabled": {},
+	"storage.single_delete.crash_on_ineffectual.enabled":         {},
+	"bulkio.backup.elide_common_prefix.enabled":                  {},
+	"kv.bulkio.write_metadata_sst.enabled":                       {},
+	"jobs.execution_errors.max_entries":                          {},
+	"jobs.execution_errors.max_entry_size":                       {},
 }
 
-// sqlDefaultSettings is the list of "grandfathered" existing sql.defaults
+// grandfatheredDefaultSettings is the list of "grandfathered" existing sql.defaults
 // cluster settings. In 22.2 and later, new session settings do not need an
 // associated sql.defaults cluster setting. Instead they can have their default
 // changed with ALTER ROLE ... SET.
-var sqlDefaultSettings = map[InternalKey]struct{}{
+// Caveat: in some cases, we may still add new sql.defaults cluster settings,
+// but the new ones *must* be marked as non-public. Undocumented settings are
+// excluded from the check that prevents new sql.defaults settings. The
+// reason for this is that the rollout automation framework used in
+// CockroachCloud works by using cluster settings. If we want to slowly roll out
+// a feature that is gated behind a session setting, using a non-public
+// sql.defaults cluster setting is the recommended way to do so.
+var grandfatheredDefaultSettings = map[InternalKey]struct{}{
 	// PLEASE DO NOT ADD NEW SETTINGS TO THIS MAP. THANK YOU.
 	"sql.defaults.cost_scans_with_default_col_size.enabled":                     {},
 	"sql.defaults.datestyle":                                                    {},
 	"sql.defaults.datestyle.enabled":                                            {},
+	"sql.defaults.deadlock_timeout":                                             {},
 	"sql.defaults.default_hash_sharded_index_bucket_count":                      {},
 	"sql.defaults.default_int_size":                                             {},
 	"sql.defaults.disallow_full_table_scans.enabled":                            {},
@@ -306,18 +331,19 @@ func checkNameFound(keyOrName string) {
 	if a, ok := aliasRegistry[SettingName(keyOrName)]; ok {
 		panic(fmt.Sprintf("setting already defined: %s (with key %s)", keyOrName, a.key))
 	}
-	if strings.Contains(keyOrName, "sql.defaults") {
-		if _, ok := sqlDefaultSettings[InternalKey(keyOrName)]; !ok {
-			panic(fmt.Sprintf(
-				"new sql.defaults cluster settings: %s is not needed now that `ALTER ROLE ... SET` syntax "+
-					"is supported; please remove the new sql.defaults cluster setting", keyOrName))
-		}
-	}
 }
 
 // register adds a setting to the registry.
 func register(class Class, key InternalKey, desc string, s internalSetting) {
 	checkNameFound(string(key))
+	if strings.Contains(string(key), "sql.defaults") {
+		_, grandfathered := grandfatheredDefaultSettings[key]
+		if !grandfathered && s.Visibility() != Reserved {
+			panic(fmt.Sprintf(
+				"new sql.defaults cluster settings: %s is not needed now that `ALTER ROLE ... SET` syntax "+
+					"is supported; please remove the new sql.defaults cluster setting or make it non-public", key))
+		}
+	}
 
 	slot := slotIdx(len(registry))
 	s.init(class, key, desc, slot)
@@ -370,12 +396,10 @@ func ConsoleKeys() (res []InternalKey) {
 }
 
 var allConsoleKeys = []InternalKey{
-	"cross_cluster_replication.enabled",
 	"keyvisualizer.enabled",
 	"keyvisualizer.sample_interval",
 	"sql.index_recommendation.drop_unused_duration",
 	"sql.insights.anomaly_detection.latency_threshold",
-	"sql.insights.export.enabled",
 	"sql.insights.high_retry_count.threshold",
 	"sql.insights.latency_threshold",
 	"sql.stats.automatic_collection.enabled",
@@ -511,11 +535,15 @@ var ReadableTypes = map[string]string{
 }
 
 // RedactedValue returns:
-//   - a string representation of the value, if the setting is reportable (or it
-//     is a string setting with an empty value);
-//   - "<redacted>" if the setting is not reportable;
+//   - a string representation of the value, if the setting is reportable;
+//   - "<redacted>" if the setting is not reportable, sensitive, or a string;
 //   - "<unknown>" if there is no setting with this name.
 func RedactedValue(key InternalKey, values *Values, forSystemTenant bool) string {
+	if k, ok := registry[key]; ok {
+		if k.Typ() == "s" || k.isSensitive() || !k.isReportable() {
+			return "<redacted>"
+		}
+	}
 	if setting, ok := LookupForReportingByKey(key, forSystemTenant); ok {
 		return setting.String(values)
 	}

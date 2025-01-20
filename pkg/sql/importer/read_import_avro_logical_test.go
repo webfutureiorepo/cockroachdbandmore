@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer_test
 
@@ -70,7 +65,7 @@ type avroLogicalInfo struct {
 }
 
 func logicalEncoder(datum tree.Datum, avroType string) (ans interface{}, err error) {
-	if datum.ResolvedType() == types.Unknown {
+	if datum.ResolvedType().Family() == types.UnknownFamily {
 		return nil, nil
 	}
 	switch datum.ResolvedType().Family() {
@@ -166,6 +161,14 @@ func (e logicalAvroExec) createAvroDataFromDatums(
 		}
 	}
 	return importer.CreateAvroData(t, e.name, avroField, avroRows), nil
+}
+
+// roundtripStringer pretty prints the datum's value as string, allowing the
+// parser in certain decoders to work.
+func roundtripStringer(d tree.Datum) string {
+	fmtCtx := tree.NewFmtCtx(tree.FmtBareStrings)
+	d.Format(fmtCtx)
+	return fmtCtx.CloseAndGetString()
 }
 
 // TestImportAvroLogicalType tests that an avro file with logical avro types
@@ -296,7 +299,7 @@ func TestImportAvroLogicalTypes(t *testing.T) {
 		"",
 		nil,
 		sessiondata.InternalExecutorOverride{
-			User:     username.RootUserName(),
+			User:     username.NodeUserName(),
 			Database: "log"},
 		fmt.Sprintf("SELECT * FROM %s", origTableName))
 	require.NoError(t, err, "failed to pull datums from table")
@@ -304,7 +307,7 @@ func TestImportAvroLogicalTypes(t *testing.T) {
 	execParams := []logicalAvroExec{{
 		name: "stringed",
 		encoder: func(datum tree.Datum, avroTypes string) (interface{}, error) {
-			val := importer.RoundtripStringer(datum)
+			val := roundtripStringer(datum)
 			if val == "NULL" {
 				return nil, nil
 			}

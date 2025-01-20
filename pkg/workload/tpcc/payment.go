@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tpcc
 
@@ -16,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/errors"
@@ -80,6 +76,8 @@ type payment struct {
 	selectByLastName  workload.StmtHandle
 	updateWithPayment workload.StmtHandle
 	insertHistory     workload.StmtHandle
+	resetWarehouse    workload.StmtHandle
+	resetDistrict     workload.StmtHandle
 
 	a bufalloc.ByteAllocator
 }
@@ -140,6 +138,23 @@ func createPayment(ctx context.Context, config *tpcc, mcp *workload.MultiConnPoo
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 	)
 
+	if p.config.isLongDurationWorkload {
+		p.resetWarehouse = p.sr.Define(`
+		UPDATE warehouse
+		SET w_ytd = $1
+		WHERE w_id >= $2 AND w_id < $3`,
+		)
+
+		p.resetDistrict = p.sr.Define(`
+		UPDATE district
+		SET d_ytd = $1
+		WHERE d_w_id >= $2 AND d_w_id < $3`,
+		)
+
+		// Starting the background goroutine which will reset the w_ytd values periodically in warehouseWytdResetPeriod
+		go p.startResetValueWorker()
+	}
+
 	if err := p.sr.Init(ctx, "payment", mcp); err != nil {
 		return nil, err
 	}
@@ -147,7 +162,47 @@ func createPayment(ctx context.Context, config *tpcc, mcp *workload.MultiConnPoo
 	return p, nil
 }
 
-func (p *payment) run(ctx context.Context, wID int) (interface{}, error) {
+func (p *payment) startResetValueWorker() {
+	p.config.resetTableGrp.GoCtx(func(ctx context.Context) error {
+		ticker := time.NewTicker(warehouseWytdResetPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+
+				// Creating batches of maxRowsToUpdateTxn to avoid long-running txns
+				for startRange := 0; startRange < p.config.warehouses; startRange += maxRowsToUpdateTxn {
+					endRange := min(p.config.warehouses, startRange+maxRowsToUpdateTxn)
+
+					if _, err := p.config.executeTx(
+						ctx, p.mcp.Get(),
+						func(tx pgx.Tx) error {
+							if _, err := p.resetWarehouse.ExecTx(
+								ctx, tx, wYtd, startRange, endRange,
+							); err != nil {
+								return errors.Wrap(err, "reset warehouse failed")
+							}
+
+							if _, err := p.resetDistrict.ExecTx(
+								ctx, tx, ytd, startRange, endRange,
+							); err != nil {
+								return errors.Wrap(err, "reset district failed")
+							}
+
+							return nil
+						}); err != nil {
+						log.Errorf(ctx, "%v", err)
+					}
+				}
+			}
+		}
+	})
+
+}
+
+func (p *payment) run(ctx context.Context, wID int) (interface{}, time.Duration, error) {
 	p.config.auditor.paymentTransactions.Add(1)
 
 	rng := rand.New(rand.NewSource(uint64(timeutil.Now().UnixNano())))
@@ -188,46 +243,48 @@ func (p *payment) run(ctx context.Context, wID int) (interface{}, error) {
 		d.cID = p.config.randCustomerID(rng)
 	}
 
-	if err := p.config.executeTx(
+	onTxnStartDuration, err := p.config.executeTx(
 		ctx, p.mcp.Get(),
 		func(tx pgx.Tx) error {
 			var wName, dName string
+
 			// Update warehouse with payment
 			if err := p.updateWarehouse.QueryRowTx(
 				ctx, tx, d.hAmount, wID,
 			).Scan(&wName, &d.wStreet1, &d.wStreet2, &d.wCity, &d.wState, &d.wZip); err != nil {
-				return err
+				return errors.Wrap(err, "update warehouse failed")
 			}
 
 			// Update district with payment
 			if err := p.updateDistrict.QueryRowTx(
 				ctx, tx, d.hAmount, wID, d.dID,
 			).Scan(&dName, &d.dStreet1, &d.dStreet2, &d.dCity, &d.dState, &d.dZip); err != nil {
-				return err
+				return errors.Wrap(err, "update district failed")
 			}
 
 			// If we are selecting by last name, first find the relevant customer id and
 			// then proceed.
 			if d.cID == 0 {
 				// 2.5.2.2 Case 2: Pick the middle row, rounded up, from the selection by last name.
-				rows, err := p.selectByLastName.QueryTx(ctx, tx, wID, d.dID, d.cLast)
-				if err != nil {
-					return errors.Wrap(err, "select by last name fail")
-				}
 				customers := make([]int, 0, 1)
-				for rows.Next() {
-					var cID int
-					err = rows.Scan(&cID)
+				if err := func() error {
+					rows, err := p.selectByLastName.QueryTx(ctx, tx, wID, d.dID, d.cLast)
 					if err != nil {
-						rows.Close()
 						return err
 					}
-					customers = append(customers, cID)
+					defer rows.Close()
+
+					for rows.Next() {
+						var cID int
+						if err := rows.Scan(&cID); err != nil {
+							return err
+						}
+						customers = append(customers, cID)
+					}
+					return rows.Err()
+				}(); err != nil {
+					return errors.Wrap(err, "select customer failed")
 				}
-				if err := rows.Err(); err != nil {
-					return err
-				}
-				rows.Close()
 				cIdx := (len(customers) - 1) / 2
 				d.cID = customers[cIdx]
 			}
@@ -242,19 +299,23 @@ func (p *payment) run(ctx context.Context, wID int) (interface{}, error) {
 				&d.cCity, &d.cState, &d.cZip, &d.cPhone, &d.cSince, &d.cCredit,
 				&d.cCreditLim, &d.cDiscount, &d.cBalance, &d.cData,
 			); err != nil {
-				return errors.Wrap(err, "select by customer idfail")
+				return errors.Wrap(err, "update customer failed")
 			}
 
 			hData := fmt.Sprintf("%s    %s", wName, dName)
 
 			// Insert history line.
-			_, err := p.insertHistory.ExecTx(
+			if _, err := p.insertHistory.ExecTx(
 				ctx, tx,
 				d.cID, d.cDID, d.cWID, d.dID, wID, d.hAmount, d.hDate.Format("2006-01-02 15:04:05"), hData,
-			)
-			return err
-		}); err != nil {
-		return nil, err
+			); err != nil {
+				return errors.Wrap(err, "insert history failed")
+			}
+
+			return nil
+		})
+	if err != nil {
+		return nil, 0, err
 	}
-	return d, nil
+	return d, onTxnStartDuration, nil
 }

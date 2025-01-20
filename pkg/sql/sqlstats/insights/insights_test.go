@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package insights_test
 
@@ -18,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/obs"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
@@ -46,7 +40,7 @@ func BenchmarkInsights(b *testing.B) {
 	// down, guiding us as we tune buffer sizes, etc.
 	for _, numSessions := range []int{1, 10, 100, 1000, 10000} {
 		b.Run(fmt.Sprintf("numSessions=%d", numSessions), func(b *testing.B) {
-			provider := insights.New(settings, insights.NewMetrics(), obs.NoopEventsExporter{})
+			provider := insights.New(settings, insights.NewMetrics(), nil)
 			provider.Start(ctx, stopper)
 
 			// Spread the b.N work across the simulated SQL sessions, so that we
@@ -56,7 +50,7 @@ func BenchmarkInsights(b *testing.B) {
 			numTransactionsPerSession := b.N / numSessions
 			var sessions sync.WaitGroup
 			sessions.Add(numSessions)
-			writer := provider.Writer(false /* internal */)
+			writer := provider.Writer()
 			statements := make([]insights.Statement, b.N)
 			transactions := make([]insights.Transaction, b.N)
 			for i := 0; i < numSessions; i++ {
@@ -80,7 +74,7 @@ func BenchmarkInsights(b *testing.B) {
 					for j := 0; j < numTransactionsPerSession; j++ {
 						idx := numTransactionsPerSession*i + j
 						writer.ObserveStatement(sessionID, &statements[idx])
-						writer.ObserveTransaction(ctx, sessionID, &transactions[idx])
+						writer.ObserveTransaction(sessionID, &transactions[idx])
 					}
 				}(i)
 			}

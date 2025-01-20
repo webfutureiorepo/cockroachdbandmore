@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -29,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -539,7 +535,7 @@ func TestFullRangeDeleteHeuristic(t *testing.T) {
 
 	deleteWithTombstone := func(rw storage.ReadWriter, delTime hlc.Timestamp, ms *enginepb.MVCCStats) {
 		require.NoError(t, storage.MVCCDeleteRangeUsingTombstone(
-			ctx, rw, ms, localMax, maxKey, delTime, hlc.ClockTimestamp{}, nil, nil, false, 1, nil))
+			ctx, rw, ms, localMax, maxKey, delTime, hlc.ClockTimestamp{}, nil, nil, false, 1, 0, nil))
 	}
 	deleteWithPoints := func(rw storage.ReadWriter, delTime hlc.Timestamp, ms *enginepb.MVCCStats) {
 		for _, key := range keys {
@@ -872,7 +868,7 @@ func testMVCCGCQueueProcessImpl(t *testing.T, useEfos bool) {
 		}
 		defer snap.Close()
 
-		conf, err := cfg.GetSpanConfigForKey(ctx, desc.StartKey)
+		conf, _, err := cfg.GetSpanConfigForKey(ctx, desc.StartKey)
 		if err != nil {
 			t.Fatalf("could not find zone config for range %s: %+v", tc.repl, err)
 		}
@@ -1316,7 +1312,7 @@ func TestMVCCGCQueueIntentResolution(t *testing.T) {
 		// may use an intentInterleavingIter.
 		return tc.store.TODOEngine().MVCCIterate(context.Background(), keys.LocalMax, roachpb.KeyMax,
 			storage.MVCCKeyAndIntentsIterKind, storage.IterKeyTypePointsOnly,
-			storage.UnknownReadCategory, func(kv storage.MVCCKeyValue, _ storage.MVCCRangeKeyStack) error {
+			fs.UnknownReadCategory, func(kv storage.MVCCKeyValue, _ storage.MVCCRangeKeyStack) error {
 				if !kv.Key.IsValue() {
 					if err := protoutil.Unmarshal(kv.Value, meta); err != nil {
 						return err
@@ -1468,7 +1464,7 @@ func TestMVCCGCQueueChunkRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conf, err := confReader.GetSpanConfigForKey(ctx, roachpb.RKey("key"))
+	conf, _, err := confReader.GetSpanConfigForKey(ctx, roachpb.RKey("key"))
 	if err != nil {
 		t.Fatalf("could not find span config for range %s", err)
 	}
@@ -1522,7 +1518,11 @@ func TestMVCCGCQueueGroupsRangeDeletions(t *testing.T) {
 	require.NoError(t, store.AddReplica(r2))
 	r2.RaftStatus()
 	r2.handleGCHintResult(ctx, &roachpb.GCHint{LatestRangeDeleteTimestamp: hlc.Timestamp{WallTime: 1}})
-	r2.SetSpanConfig(roachpb.SpanConfig{GCPolicy: roachpb.GCPolicy{TTLSeconds: 100}})
+	r2.SetSpanConfig(roachpb.SpanConfig{GCPolicy: roachpb.GCPolicy{TTLSeconds: 100}},
+		roachpb.Span{
+			Key:    key("b").AsRawKey(),
+			EndKey: key("c").AsRawKey(),
+		})
 
 	gcQueue := newMVCCGCQueue(store)
 

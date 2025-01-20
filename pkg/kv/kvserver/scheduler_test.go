@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -14,7 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -133,10 +128,12 @@ func TestRangeIDQueue(t *testing.T) {
 type testProcessor struct {
 	mu struct {
 		syncutil.Mutex
-		raftReady   map[roachpb.RangeID]int
-		raftRequest map[roachpb.RangeID]int
-		raftTick    map[roachpb.RangeID]int
-		ready       func(roachpb.RangeID)
+		raftReady               map[roachpb.RangeID]int
+		raftRequest             map[roachpb.RangeID]int
+		raftTick                map[roachpb.RangeID]int
+		rac2PiggybackedAdmitted map[roachpb.RangeID]int
+		rac2RangeController     map[roachpb.RangeID]int
+		ready                   func(roachpb.RangeID)
 	}
 }
 
@@ -145,6 +142,8 @@ func newTestProcessor() *testProcessor {
 	p.mu.raftReady = make(map[roachpb.RangeID]int)
 	p.mu.raftRequest = make(map[roachpb.RangeID]int)
 	p.mu.raftTick = make(map[roachpb.RangeID]int)
+	p.mu.rac2PiggybackedAdmitted = make(map[roachpb.RangeID]int)
+	p.mu.rac2RangeController = make(map[roachpb.RangeID]int)
 	return p
 }
 
@@ -179,6 +178,20 @@ func (p *testProcessor) processTick(_ context.Context, rangeID roachpb.RangeID) 
 	return false
 }
 
+func (p *testProcessor) processRACv2PiggybackedAdmitted(
+	_ context.Context, rangeID roachpb.RangeID,
+) {
+	p.mu.Lock()
+	p.mu.rac2PiggybackedAdmitted[rangeID]++
+	p.mu.Unlock()
+}
+
+func (p *testProcessor) processRACv2RangeController(_ context.Context, rangeID roachpb.RangeID) {
+	p.mu.Lock()
+	p.mu.rac2RangeController[rangeID]++
+	p.mu.Unlock()
+}
+
 func (p *testProcessor) readyCount(rangeID roachpb.RangeID) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -186,11 +199,11 @@ func (p *testProcessor) readyCount(rangeID roachpb.RangeID) int {
 }
 
 func (p *testProcessor) countsLocked(m map[roachpb.RangeID]int) string {
-	var ids roachpb.RangeIDSlice
+	var ids []roachpb.RangeID
 	for id := range m {
 		ids = append(ids, id)
 	}
-	sort.Sort(ids)
+	slices.Sort(ids)
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "[")
 	for i, id := range ids {
@@ -206,10 +219,12 @@ func (p *testProcessor) countsLocked(m map[roachpb.RangeID]int) string {
 func (p *testProcessor) String() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return fmt.Sprintf("ready=%s request=%s tick=%s",
+	return fmt.Sprintf("ready=%s request=%s tick=%s piggybacked-admitted=%s range-controller=%s",
 		p.countsLocked(p.mu.raftReady),
 		p.countsLocked(p.mu.raftRequest),
-		p.countsLocked(p.mu.raftTick))
+		p.countsLocked(p.mu.raftTick),
+		p.countsLocked(p.mu.rac2PiggybackedAdmitted),
+		p.countsLocked(p.mu.rac2RangeController))
 }
 
 // Verify that enqueuing more ranges than the number of workers correctly
@@ -236,7 +251,7 @@ func TestSchedulerLoop(t *testing.T) {
 	s.EnqueueRaftTicks(batch)
 
 	testutils.SucceedsSoon(t, func() error {
-		const expected = "ready=[] request=[] tick=[1:1,2:1,3:1]"
+		const expected = "ready=[] request=[] tick=[1:1,2:1,3:1] piggybacked-admitted=[] range-controller=[]"
 		if s := p.String(); expected != s {
 			return errors.Errorf("expected %s, but got %s", expected, s)
 		}
@@ -270,18 +285,29 @@ func TestSchedulerBuffering(t *testing.T) {
 		ticks int
 		want  string
 	}{
-		{flag: stateRaftReady, want: "ready=[1:1] request=[] tick=[]"},
-		{flag: stateRaftRequest, want: "ready=[1:1] request=[1:1] tick=[]"},
-		{flag: stateRaftTick, want: "ready=[1:1] request=[1:1] tick=[1:5]"},
+		{flag: stateRaftReady,
+			want: "ready=[1:1] request=[] tick=[] piggybacked-admitted=[] range-controller=[]"},
+		{flag: stateRaftRequest,
+			want: "ready=[1:1] request=[1:1] tick=[] piggybacked-admitted=[] range-controller=[]"},
+		{flag: stateRaftTick,
+			want: "ready=[1:1] request=[1:1] tick=[1:5] piggybacked-admitted=[] range-controller=[]"},
 		{flag: stateRaftReady | stateRaftRequest | stateRaftTick,
-			want: "ready=[1:2] request=[1:2] tick=[1:10]"},
-		{flag: stateRaftTick, want: "ready=[1:2] request=[1:2] tick=[1:15]"},
+			want: "ready=[1:2] request=[1:2] tick=[1:10] piggybacked-admitted=[] range-controller=[]"},
+		{flag: stateRaftTick,
+			want: "ready=[1:2] request=[1:2] tick=[1:15] piggybacked-admitted=[] range-controller=[]"},
 		// All 4 ticks are processed.
-		{flag: 0, ticks: 4, want: "ready=[1:2] request=[1:2] tick=[1:19]"},
+		{flag: 0, ticks: 4,
+			want: "ready=[1:2] request=[1:2] tick=[1:19] piggybacked-admitted=[] range-controller=[]"},
 		// Only 5/10 ticks are buffered while Raft processing is slow.
-		{flag: stateRaftReady, slow: true, ticks: 10, want: "ready=[1:3] request=[1:2] tick=[1:24]"},
+		{flag: stateRaftReady, slow: true, ticks: 10,
+			want: "ready=[1:3] request=[1:2] tick=[1:24] piggybacked-admitted=[] range-controller=[]"},
 		// All 3 ticks are processed even if processing is slow.
-		{flag: stateRaftReady, slow: true, ticks: 3, want: "ready=[1:4] request=[1:2] tick=[1:27]"},
+		{flag: stateRaftReady, slow: true, ticks: 3,
+			want: "ready=[1:4] request=[1:2] tick=[1:27] piggybacked-admitted=[] range-controller=[]"},
+		{flag: stateRACv2PiggybackedAdmitted,
+			want: "ready=[1:4] request=[1:2] tick=[1:27] piggybacked-admitted=[1:1] range-controller=[]"},
+		{flag: stateRACv2RangeController,
+			want: "ready=[1:4] request=[1:2] tick=[1:27] piggybacked-admitted=[1:1] range-controller=[1:1]"},
 	}
 
 	for _, c := range testCases {

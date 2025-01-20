@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catalog
 
@@ -14,7 +9,9 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/errors"
 )
@@ -121,6 +118,20 @@ type ValidationDescGetter interface {
 	GetDescriptor(id descpb.ID) (Descriptor, error)
 }
 
+// ValidateOutboundFunctionRef validates outbound reference to a function descriptor
+// depID.
+func ValidateOutboundFunctionRef(depID descpb.ID, vdg ValidationDescGetter) error {
+	referencedFunction, err := vdg.GetFunctionDescriptor(depID)
+	if err != nil {
+		return errors.NewAssertionErrorWithWrappedErrf(err, "invalid depends-on function reference")
+	}
+	if referencedFunction.Dropped() {
+		return errors.AssertionFailedf("depends-on function %q (%d) is dropped",
+			referencedFunction.GetName(), referencedFunction.GetID())
+	}
+	return nil
+}
+
 // ValidateOutboundTableRef validates outbound reference to relation descriptor
 // depID from descriptor selfID.
 func ValidateOutboundTableRef(depID descpb.ID, vdg ValidationDescGetter) error {
@@ -181,4 +192,92 @@ func ValidateOutboundTypeRefBackReference(selfID descpb.ID, typ TypeDescriptor) 
 	}
 	return errors.AssertionFailedf("depends-on type %q (%d) has no corresponding referencing-descriptor back references",
 		typ.GetName(), typ.GetID())
+}
+
+// ValidateRolesInDescriptor validates roles within a descriptor.
+func ValidateRolesInDescriptor(
+	descriptor Descriptor, RoleExists func(username username.SQLUsername) (bool, error),
+) error {
+	// Validate the owner.
+	exists, err := RoleExists(descriptor.GetPrivileges().Owner())
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.AssertionFailedf(
+			"descriptor %q (%d) is owned by a role %q that doesn't exist",
+			descriptor.GetName(), descriptor.GetID(), descriptor.GetPrivileges().Owner(),
+		)
+	}
+	// Validate the privileges.
+	for _, priv := range descriptor.GetPrivileges().Users {
+		exists, err := RoleExists(priv.User())
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errors.AssertionFailedf("descriptor %q (%d) has privilege on a role %q that doesn't exist",
+				descriptor.GetName(),
+				descriptor.GetID(),
+				priv.User())
+		}
+	}
+	// If a table descriptor, validate the roles that are stored in the policies.
+	if tbDesc, isTable := descriptor.(TableDescriptor); isTable {
+		for _, p := range tbDesc.GetPolicies() {
+			for _, r := range p.RoleNames {
+				exists, err := RoleExists(username.MakeSQLUsernameFromPreNormalizedString(r))
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return errors.AssertionFailedf("policy %q on table %q has a role %q that doesn't exist",
+						p.Name, tbDesc.GetName(), r)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateRolesInDefaultPrivilegeDescriptor validates roles within a
+// catalog.DefaultPrivilegeDescriptor.
+func ValidateRolesInDefaultPrivilegeDescriptor(
+	defaultDesc DefaultPrivilegeDescriptor, roleExists func(username.SQLUsername) (bool, error),
+) error {
+	err := defaultDesc.ForEachDefaultPrivilegeForRole(func(defaultPriv catpb.DefaultPrivilegesForRole) error {
+		// If we have a default privilege on a specific role, validate whether the
+		// role exists.
+		if defaultPriv.IsExplicitRole() {
+			user := defaultPriv.GetExplicitRole().UserProto.Decode()
+			exists, err := roleExists(user)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return errors.AssertionFailedf("a default privilege exists on a role %q that doesn't exist",
+					user)
+			}
+		}
+		// Loop through to find which users have a default privilege assigned to
+		// them. If any user does not exist, return an error.
+		for _, privDesc := range defaultPriv.DefaultPrivilegesPerObject {
+			for _, userPriv := range privDesc.Users {
+				user := userPriv.User()
+				exists, err := roleExists(user)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return errors.AssertionFailedf("a default privilege exists for a role %q that doesn't exist",
+						user)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }

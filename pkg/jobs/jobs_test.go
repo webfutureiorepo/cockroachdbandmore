@@ -1,29 +1,25 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs_test
 
 import (
 	"context"
 	gosql "database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"runtime/pprof"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	apd "github.com/cockroachdb/apd/v3"
+	_ "github.com/cockroachdb/cockroach/pkg/backup" // we use backup jobs as placeholders.
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -54,6 +50,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logtestutils"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -151,16 +150,18 @@ type counters struct {
 }
 
 type registryTestSuite struct {
-	ctx            context.Context
-	s              serverutils.TestServerInterface
-	tempDirCleanup func()
-	outerDB        *gosql.DB
-	sqlDB          *sqlutils.SQLRunner
-	registry       *jobs.Registry
-	done           chan struct{}
-	mockJob        jobs.Record
-	job            *jobs.StartableJob
-	mu             struct {
+	ctx                context.Context
+	s                  serverutils.TestServerInterface
+	tempDirCleanup     func()
+	outerDB            *gosql.DB
+	sqlDB              *sqlutils.SQLRunner
+	registry           *jobs.Registry
+	done               chan struct{}
+	mockJob            jobs.Record
+	job                *jobs.StartableJob
+	statusChangeLogSpy *logtestutils.StructuredLogSpy[eventpb.StatusChange]
+	logSpyCleanup      func()
+	mu                 struct {
 		syncutil.Mutex
 		a counters
 		e counters
@@ -170,14 +171,13 @@ type registryTestSuite struct {
 	failOrCancelCh      chan error
 	resumeCheckCh       chan struct{}
 	failOrCancelCheckCh chan struct{}
-	onPauseRequest      jobs.OnPauseRequestFunc
 
 	// beforeUpdate is invoked in the BeforeUpdate testing knob if non-nil.
 	beforeUpdate func(orig, updated jobs.JobMetadata) error
 
 	// afterJobStateMachine is invoked in the AfterJobStateMachine testing knob if
 	// non-nil.
-	afterJobStateMachine func()
+	afterJobStateMachine func(jobspb.JobID)
 
 	// Instead of a ch for success, use a variable because it can retry since it
 	// is in a transaction.
@@ -187,15 +187,9 @@ type registryTestSuite struct {
 	traceRealSpan bool
 }
 
-func noopPauseRequestFunc(
-	ctx context.Context, planHookState interface{}, txn isql.Txn, progress *jobspb.Progress,
-) error {
-	return nil
-}
-
 var _ jobs.TraceableJob = (*jobstest.FakeResumer)(nil)
 
-func (rts *registryTestSuite) setUp(t *testing.T) {
+func (rts *registryTestSuite) setUp(t *testing.T) func() {
 	rts.ctx = context.Background()
 
 	var args base.TestServerArgs
@@ -207,9 +201,9 @@ func (rts *registryTestSuite) setUp(t *testing.T) {
 			}
 			return nil
 		}
-		knobs.AfterJobStateMachine = func() {
+		knobs.AfterJobStateMachine = func(id jobspb.JobID) {
 			if rts.afterJobStateMachine != nil {
-				rts.afterJobStateMachine()
+				rts.afterJobStateMachine(id)
 			}
 		}
 		args.Knobs.JobsTestingKnobs = knobs
@@ -217,11 +211,11 @@ func (rts *registryTestSuite) setUp(t *testing.T) {
 			ManagerDisableJobCreation: true,
 		}
 		args.Knobs.UpgradeManager = &upgradebase.TestingKnobs{
-			DontUseJobs:                       true,
-			SkipJobMetricsPollingJobBootstrap: true,
-			SkipAutoConfigRunnerJobBootstrap:  true,
-			SkipUpdateSQLActivityJobBootstrap: true,
-			SkipMVCCStatisticsJobBootstrap:    true,
+			DontUseJobs:                           true,
+			SkipJobMetricsPollingJobBootstrap:     true,
+			SkipUpdateSQLActivityJobBootstrap:     true,
+			SkipMVCCStatisticsJobBootstrap:        true,
+			SkipUpdateTableMetadataCacheBootstrap: true,
 		}
 		args.Knobs.KeyVisualizer = &keyvisualizer.TestingKnobs{SkipJobBootstrap: true}
 
@@ -233,6 +227,22 @@ func (rts *registryTestSuite) setUp(t *testing.T) {
 		}
 	}
 
+	spy := logtestutils.NewStructuredLogSpy(
+		t,
+		[]logpb.Channel{logpb.Channel_OPS},
+		[]string{"status_change"},
+		func(entry logpb.Entry) (eventpb.StatusChange, error) {
+			var structuredPayload eventpb.StatusChange
+			err := json.Unmarshal([]byte(entry.Message[entry.StructuredStart:entry.StructuredEnd]), &structuredPayload)
+			if err != nil {
+				return structuredPayload, err
+			}
+			return structuredPayload, nil
+		},
+	)
+
+	rts.statusChangeLogSpy = spy
+	rts.logSpyCleanup = log.InterceptWith(rts.ctx, spy)
 	rts.s, rts.outerDB, _ = serverutils.StartServer(t, args)
 	rts.sqlDB = sqlutils.MakeSQLRunner(rts.outerDB)
 	rts.registry = rts.s.JobRegistry().(*jobs.Registry)
@@ -244,9 +254,9 @@ func (rts *registryTestSuite) setUp(t *testing.T) {
 	rts.failOrCancelCh = make(chan error)
 	rts.resumeCheckCh = make(chan struct{})
 	rts.failOrCancelCheckCh = make(chan struct{})
-	rts.onPauseRequest = noopPauseRequestFunc
+	rts.sqlDB.Exec(t, "CREATE USER testuser")
 
-	jobs.RegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	return jobs.TestingRegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			TraceRealSpan: rts.traceRealSpan,
 			OnResume: func(ctx context.Context) error {
@@ -325,9 +335,6 @@ func (rts *registryTestSuite) setUp(t *testing.T) {
 				rts.mu.a.Success = true
 				return rts.successErr
 			},
-			PauseRequest: func(ctx context.Context, execCfg interface{}, txn isql.Txn, progress *jobspb.Progress) error {
-				return rts.onPauseRequest(ctx, execCfg, txn, progress)
-			},
 		}
 	}, jobs.UsesTenantCostControl)
 }
@@ -337,6 +344,7 @@ func (rts *registryTestSuite) tearDown() {
 	close(rts.progressCh)
 	close(rts.resumeCheckCh)
 	close(rts.done)
+	rts.logSpyCleanup()
 	rts.s.Stopper().Stop(rts.ctx)
 	jobs.ResetConstructors()()
 	if rts.tempDirCleanup != nil {
@@ -366,6 +374,24 @@ func (rts *registryTestSuite) check(t *testing.T, expectedStatus jobs.Status) {
 	})
 }
 
+func (rts *registryTestSuite) checkStatusChangeLog(
+	t *testing.T, expectedNewStatus jobs.Status, expectedPrevStatus jobs.Status, expectedError string,
+) {
+	testutils.SucceedsSoon(t, func() error {
+		logs := rts.statusChangeLogSpy.GetUnreadLogs(logpb.Channel_OPS)
+		for i, jobEventsLog := range logs {
+			if jobEventsLog.JobID == int64(rts.job.ID()) &&
+				jobEventsLog.PreviousStatus == string(expectedPrevStatus) &&
+				jobEventsLog.NewStatus == string(expectedNewStatus) &&
+				strings.Contains(jobEventsLog.Error, expectedError) {
+				rts.statusChangeLogSpy.SetLastNLogsAsUnread(logpb.Channel_OPS, len(logs)-i+1)
+				return nil
+			}
+		}
+		return errors.Errorf("expected log for status change from %s to %s", expectedPrevStatus, expectedNewStatus)
+	})
+}
+
 func (rts *registryTestSuite) idb() isql.DB {
 	return rts.s.InternalDB().(isql.DB)
 }
@@ -376,7 +402,7 @@ func TestRegistryLifecycle(t *testing.T) {
 
 	t.Run("normal success", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -388,17 +414,18 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
-
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 		rts.resumeCh <- nil
 		rts.mu.e.ResumeExit++
 		rts.mu.e.Success = true
 		rts.check(t, jobs.StatusSucceeded)
+		rts.checkStatusChangeLog(t, jobs.StatusSucceeded, jobs.StatusRunning, "")
 		t.Log("Done")
 	})
 
 	t.Run("create separately success", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -409,17 +436,19 @@ func TestRegistryLifecycle(t *testing.T) {
 
 		rts.mu.e.ResumeStart = true
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.resumeCheckCh <- struct{}{}
 		rts.resumeCh <- nil
 		rts.mu.e.ResumeExit++
 		rts.mu.e.Success = true
 		rts.check(t, jobs.StatusSucceeded)
+		rts.checkStatusChangeLog(t, jobs.StatusSucceeded, jobs.StatusRunning, "")
 	})
 
 	t.Run("pause running", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -431,15 +460,19 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.sqlDB.Exec(t, "PAUSE JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
+		rts.checkStatusChangeLog(t, jobs.StatusPauseRequested, jobs.StatusRunning, "")
+		rts.checkStatusChangeLog(t, jobs.StatusPaused, jobs.StatusPauseRequested, "")
 
 		rts.sqlDB.Exec(t, "PAUSE JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
 
 		rts.sqlDB.Exec(t, "RESUME JOB $1", j.ID())
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusPaused, "")
 
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
@@ -449,11 +482,12 @@ func TestRegistryLifecycle(t *testing.T) {
 
 		rts.mu.e.Success = true
 		rts.check(t, jobs.StatusSucceeded)
+		rts.checkStatusChangeLog(t, jobs.StatusSucceeded, jobs.StatusRunning, "")
 	})
 
 	t.Run("pause reverting", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -465,6 +499,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		// Make Resume fail.
 		rts.resumeCh <- errors.New("resume failed")
@@ -472,9 +507,12 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.OnFailOrCancelStart = true
 		rts.failOrCancelCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusRunning, "")
 
 		rts.sqlDB.Exec(t, "PAUSE JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
+		rts.checkStatusChangeLog(t, jobs.StatusPauseRequested, jobs.StatusReverting, "")
+		rts.checkStatusChangeLog(t, jobs.StatusPaused, jobs.StatusPauseRequested, "")
 
 		rts.sqlDB.Exec(t, "PAUSE JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
@@ -482,17 +520,19 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.sqlDB.Exec(t, "RESUME JOB $1", j.ID())
 		rts.failOrCancelCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusPaused, "")
 		close(rts.failOrCancelCheckCh)
 
 		rts.failOrCancelCh <- nil
 		close(rts.failOrCancelCh)
 		rts.mu.e.OnFailOrCancelExit = true
 		rts.check(t, jobs.StatusFailed)
+		rts.checkStatusChangeLog(t, jobs.StatusFailed, jobs.StatusReverting, "")
 	})
 
 	t.Run("cancel running", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
 		if err != nil {
@@ -503,10 +543,13 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.sqlDB.Exec(t, "CANCEL JOB $1", j.ID())
 		rts.mu.e.OnFailOrCancelStart = true
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusCancelRequested, jobs.StatusRunning, "")
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusCancelRequested, "")
 
 		rts.failOrCancelCheckCh <- struct{}{}
 		close(rts.failOrCancelCheckCh)
@@ -515,11 +558,12 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.OnFailOrCancelExit = true
 
 		rts.check(t, jobs.StatusCanceled)
+		rts.checkStatusChangeLog(t, jobs.StatusCanceled, jobs.StatusReverting, "")
 	})
 
 	t.Run("cancel reverting", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
 		if err != nil {
@@ -530,6 +574,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.sqlDB.Exec(t, "CANCEL JOB $1", j.ID())
 		rts.mu.e.OnFailOrCancelStart = true
@@ -537,6 +582,8 @@ func TestRegistryLifecycle(t *testing.T) {
 
 		rts.sqlDB.ExpectErr(t, "status reverting cannot be requested to be canceled", "CANCEL JOB $1", j.ID())
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusCancelRequested, jobs.StatusRunning, "")
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusCancelRequested, "")
 
 		close(rts.failOrCancelCheckCh)
 		close(rts.failOrCancelCh)
@@ -544,7 +591,7 @@ func TestRegistryLifecycle(t *testing.T) {
 
 	t.Run("cancel pause running", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -556,25 +603,31 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.sqlDB.Exec(t, "PAUSE JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
+		rts.checkStatusChangeLog(t, jobs.StatusPauseRequested, jobs.StatusRunning, "")
+		rts.checkStatusChangeLog(t, jobs.StatusPaused, jobs.StatusPauseRequested, "")
 
 		rts.sqlDB.Exec(t, "CANCEL JOB $1", j.ID())
 		rts.mu.e.OnFailOrCancelStart = true
 		rts.failOrCancelCheckCh <- struct{}{}
 		close(rts.failOrCancelCheckCh)
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusCancelRequested, jobs.StatusPaused, "")
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusCancelRequested, "")
 
 		rts.failOrCancelCh <- nil
 		rts.mu.e.OnFailOrCancelExit = true
 		close(rts.failOrCancelCh)
 		rts.check(t, jobs.StatusCanceled)
+		rts.checkStatusChangeLog(t, jobs.StatusCanceled, jobs.StatusReverting, "")
 	})
 
 	t.Run("cancel pause reverting", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -586,6 +639,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		// Make Resume fail.
 		rts.resumeCh <- errors.New("resume failed")
@@ -593,9 +647,11 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.OnFailOrCancelStart = true
 		rts.failOrCancelCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusRunning, "")
 
 		rts.sqlDB.Exec(t, "PAUSE JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
+		rts.checkStatusChangeLog(t, jobs.StatusPauseRequested, jobs.StatusReverting, "")
 
 		rts.sqlDB.ExpectErr(t, "paused and has non-nil FinalResumeError .* resume failed", "CANCEL JOB $1", j.ID())
 		rts.check(t, jobs.StatusPaused)
@@ -604,17 +660,19 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.failOrCancelCheckCh <- struct{}{}
 		close(rts.failOrCancelCheckCh)
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusPaused, "")
 
 		rts.failOrCancelCh <- nil
 		close(rts.failOrCancelCh)
 		rts.mu.e.OnFailOrCancelExit = true
 		rts.check(t, jobs.StatusFailed)
+		rts.checkStatusChangeLog(t, jobs.StatusFailed, jobs.StatusReverting, "")
 	})
 
 	// Verify that pause and cancel in a rollback do nothing.
 	t.Run("rollback", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 		job, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
 		if err != nil {
@@ -711,7 +769,7 @@ func TestRegistryLifecycle(t *testing.T) {
 
 	t.Run("failed running", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
@@ -722,6 +780,7 @@ func TestRegistryLifecycle(t *testing.T) {
 
 		rts.mu.e.ResumeStart = true
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.resumeCheckCh <- struct{}{}
 		rts.resumeCh <- errors.New("resume failed")
@@ -730,28 +789,31 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.failOrCancelCheckCh <- struct{}{}
 		close(rts.failOrCancelCheckCh)
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusRunning, "")
 
 		rts.failOrCancelCh <- nil
 		rts.mu.e.OnFailOrCancelExit = true
 		close(rts.failOrCancelCh)
 		rts.check(t, jobs.StatusFailed)
+		rts.checkStatusChangeLog(t, jobs.StatusFailed, jobs.StatusReverting, "")
 	})
 
 	// Attempt to mark success, but fail, but fail that also.
 	t.Run("fail marking success and fail OnFailOrCancel", func(t *testing.T) {
-		var triedToMarkSucceeded atomic.Value
-		triedToMarkSucceeded.Store(false)
+		var triedToMarkSucceeded atomic.Bool
+		var injectFailures atomic.Bool
 		rts := registryTestSuite{beforeUpdate: func(orig, updated jobs.JobMetadata) error {
 			// Fail marking succeeded.
-			if updated.Status == jobs.StatusSucceeded {
+			if updated.Status == jobs.StatusSucceeded && injectFailures.Load() {
 				triedToMarkSucceeded.Store(true)
 				return errors.New("injected failure at marking as succeeded")
 			}
 			return nil
 		}}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
+		injectFailures.Store(true)
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
 		if err != nil {
 			t.Fatal(err)
@@ -761,6 +823,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 		// Let the resumer complete without error.
 		rts.resumeCh <- nil
 		rts.mu.e.ResumeExit++
@@ -780,7 +843,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		// First retry.
 		rts.mu.e.OnFailOrCancelStart = true
 		rts.failOrCancelCheckCh <- struct{}{}
-		require.True(t, triedToMarkSucceeded.Load().(bool))
+		require.True(t, triedToMarkSucceeded.Load())
 		rts.check(t, jobs.StatusReverting)
 		rts.failOrCancelCh <- errors.New("injected failure while blocked in reverting")
 		rts.mu.e.OnFailOrCancelExit = true
@@ -793,6 +856,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.check(t, jobs.StatusReverting)
 		rts.failOrCancelCh <- errors.New("injected failure while blocked in reverting")
 		rts.mu.e.OnFailOrCancelExit = true
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusRunning, "injected error in resume")
 
 		// The job will stay in reverting state. Let it fail to exit the test.
 		rts.mu.e.OnFailOrCancelStart = true
@@ -802,13 +866,14 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.OnFailOrCancelExit = true
 
 		rts.check(t, jobs.StatusFailed)
+		rts.checkStatusChangeLog(t, jobs.StatusFailed, jobs.StatusReverting, "injected error in resume")
 	})
 	// Succeed the job but inject an error actually marking the jobs successful.
 	// This could happen due to a transient network error or something like that.
 	// It would not make sense to revert a job in this scenario.
 	t.Run("fail marking success", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		// Inject an error in the update to move the job to "succeeded" one time.
@@ -832,6 +897,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 		rts.resumeCh <- nil
 		testutils.SucceedsSoon(t, func() error {
 			if !failed.Load().(bool) {
@@ -847,6 +913,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeExit++
 		rts.mu.e.Success = true
 		rts.check(t, jobs.StatusSucceeded)
+		rts.checkStatusChangeLog(t, jobs.StatusSucceeded, jobs.StatusRunning, "")
 	})
 
 	// Fail the job, but also fail to mark it failed.
@@ -863,7 +930,7 @@ func TestRegistryLifecycle(t *testing.T) {
 			}
 			return nil
 		}}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		// Make marking success fail.
@@ -876,6 +943,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
+		rts.checkStatusChangeLog(t, jobs.StatusRunning, jobs.StatusRunning, "")
 
 		rts.resumeCh <- errors.New("resume failed")
 		rts.mu.e.ResumeExit++
@@ -883,6 +951,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.OnFailOrCancelStart = true
 		rts.failOrCancelCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusReverting)
+		rts.checkStatusChangeLog(t, jobs.StatusReverting, jobs.StatusRunning, "resume failed")
 		// The job is now in state reverting and will never resume again.
 		// Let revert complete without error so that the job is attempted to mark as failed.
 		rts.failOrCancelCh <- nil
@@ -897,90 +966,25 @@ func TestRegistryLifecycle(t *testing.T) {
 		close(rts.failOrCancelCh)
 		rts.mu.e.OnFailOrCancelExit = true
 		rts.check(t, jobs.StatusFailed)
-	})
-
-	t.Run("OnPauseRequest", func(t *testing.T) {
-		rts := registryTestSuite{}
-		rts.setUp(t)
-		defer rts.tearDown()
-		madeUpSpans := []roachpb.Span{
-			{Key: roachpb.Key("foo")},
-		}
-		rts.onPauseRequest = func(ctx context.Context, planHookState interface{}, txn isql.Txn, progress *jobspb.Progress) error {
-			progress.GetImport().SpanProgress = madeUpSpans
-			return nil
-		}
-
-		job, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
-		require.NoError(t, err)
-		rts.job = job
-
-		rts.resumeCheckCh <- struct{}{}
-		rts.mu.e.ResumeStart = true
-		rts.check(t, jobs.StatusRunning)
-
-		// Request that the job is paused.
-		pauseErrCh := make(chan error)
-		go func() {
-			_, err := rts.outerDB.Exec("PAUSE JOB $1", job.ID())
-			pauseErrCh <- err
-		}()
-
-		// Ensure that the pause went off without a problem.
-		require.NoError(t, <-pauseErrCh)
-		rts.check(t, jobs.StatusPaused)
-		{
-			// Make sure the side-effects of our pause function occurred.
-			j, err := rts.registry.LoadJob(rts.ctx, job.ID())
-			require.NoError(t, err)
-			progress := j.Progress()
-			require.Equal(t, madeUpSpans, progress.GetImport().SpanProgress)
-		}
-	})
-	t.Run("OnPauseRequest failure does not pause", func(t *testing.T) {
-		rts := registryTestSuite{}
-		rts.setUp(t)
-		defer rts.tearDown()
-
-		rts.onPauseRequest = func(ctx context.Context, planHookState interface{}, txn isql.Txn, progress *jobspb.Progress) error {
-			return errors.New("boom")
-		}
-
-		job, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
-		require.NoError(t, err)
-		rts.job = job
-
-		// Allow the job to start.
-		rts.resumeCheckCh <- struct{}{}
-		rts.mu.e.ResumeStart = true
-		rts.check(t, jobs.StatusRunning)
-
-		// Request that the job is paused and ensure that the pause hit the error
-		// and failed to pause.
-		_, err = rts.outerDB.Exec("PAUSE JOB $1", job.ID())
-		require.Regexp(t, "boom", err)
-
-		// Allow the job to complete.
-		rts.resumeCh <- nil
-		rts.mu.e.Success = true
-		rts.mu.e.ResumeExit++
-		rts.check(t, jobs.StatusSucceeded)
+		rts.checkStatusChangeLog(t, jobs.StatusFailed, jobs.StatusReverting, "resume failed")
 	})
 	t.Run("dump traces on pause-unpause-success", func(t *testing.T) {
 		ctx := context.Background()
 		completeCh := make(chan struct{})
-		rts := registryTestSuite{traceRealSpan: true, afterJobStateMachine: func() {
+		var expectedJobID atomic.Int64
+		rts := registryTestSuite{traceRealSpan: true, afterJobStateMachine: func(id jobspb.JobID) {
+			if int64(id) != expectedJobID.Load() {
+				return
+			}
 			completeCh <- struct{}{}
 		}}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
-
 		pauseUnpauseJob := func(expectedNumFiles int) {
-			j, err := jobs.TestingCreateAndStartJob(context.Background(), rts.registry, rts.idb(), rts.mockJob)
-			if err != nil {
-				t.Fatal(err)
-			}
+			j, err := jobs.TestingCreateAndStartJob(ctx, rts.registry, rts.idb(), rts.mockJob)
+			require.NoError(t, err)
 			rts.job = j
+			expectedJobID.Store(int64(j.ID()))
 
 			rts.mu.e.ResumeStart = true
 			rts.resumeCheckCh <- struct{}{}
@@ -1012,18 +1016,21 @@ func TestRegistryLifecycle(t *testing.T) {
 	t.Run("dump traces on fail", func(t *testing.T) {
 		ctx := context.Background()
 		completeCh := make(chan struct{})
-		rts := registryTestSuite{traceRealSpan: true, afterJobStateMachine: func() {
+		var expectedJobID atomic.Int64
+		rts := registryTestSuite{traceRealSpan: true, afterJobStateMachine: func(id jobspb.JobID) {
+			if int64(id) != expectedJobID.Load() {
+				return
+			}
 			completeCh <- struct{}{}
 		}}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		runJobAndFail := func(expectedNumFiles int) {
 			j, err := jobs.TestingCreateAndStartJob(ctx, rts.registry, rts.idb(), rts.mockJob)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			rts.job = j
+			expectedJobID.Store(int64(j.ID()))
 
 			rts.mu.e.ResumeStart = true
 			rts.resumeCheckCh <- struct{}{}
@@ -1048,17 +1055,20 @@ func TestRegistryLifecycle(t *testing.T) {
 
 	t.Run("dump traces on cancel", func(t *testing.T) {
 		completeCh := make(chan struct{})
-		rts := registryTestSuite{traceRealSpan: true, afterJobStateMachine: func() {
+		var expectedJobID atomic.Int64
+		rts := registryTestSuite{traceRealSpan: true, afterJobStateMachine: func(id jobspb.JobID) {
+			if int64(id) != expectedJobID.Load() {
+				return
+			}
 			completeCh <- struct{}{}
 		}}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
-		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rts.job = j
 
+		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
+		require.NoError(t, err)
+		rts.job = j
+		expectedJobID.Store(int64(j.ID()))
 		rts.mu.e.ResumeStart = true
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
@@ -1084,11 +1094,11 @@ func TestRegistryLifecycle(t *testing.T) {
 	t.Run("job with created by fields", func(t *testing.T) {
 		createdByType := "internal_test"
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 
 		resumerJob := make(chan *jobs.Job, 1)
-		jobs.RegisterConstructor(
+		cleanup := jobs.TestingRegisterConstructor(
 			jobspb.TypeBackup, func(j *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 				return jobstest.FakeResumer{
 					OnResume: func(ctx context.Context) error {
@@ -1097,7 +1107,7 @@ func TestRegistryLifecycle(t *testing.T) {
 					},
 				}
 			}, jobs.UsesTenantCostControl)
-
+		defer cleanup()
 		jobID := rts.registry.MakeJobID()
 		record := jobs.Record{
 			Details:   jobspb.BackupDetails{},
@@ -1105,8 +1115,15 @@ func TestRegistryLifecycle(t *testing.T) {
 			CreatedBy: &jobs.CreatedByInfo{Name: createdByType, ID: 123},
 			Username:  username.TestUserName(),
 		}
-		job, err := rts.registry.CreateAdoptableJobWithTxn(rts.ctx, record, jobID, nil /* txn */)
-		require.NoError(t, err)
+		var job *jobs.Job
+		require.NoError(t, rts.s.InternalDB().(isql.DB).Txn(rts.ctx, func(ctx context.Context, txn isql.Txn) error {
+			txn.SessionData().Location = time.FixedZone("UTC+5", 5*60*60)
+			j, err := rts.registry.CreateAdoptableJobWithTxn(rts.ctx, record, jobID, txn)
+			job = j
+			return err
+		}))
+
+		rts.sqlDB.CheckQueryResults(t, "SELECT created <= now() FROM system.jobs WHERE id = "+jobID.String(), [][]string{{"true"}})
 
 		loadedJob, err := rts.registry.LoadJob(rts.ctx, jobID)
 		require.NoError(t, err)
@@ -1541,7 +1558,7 @@ func TestJobLifecycle(t *testing.T) {
 			}, registry.MakeJobID(), txn)
 			return errors.New("boom")
 		}))
-		if err := job.Started(ctx); !testutils.IsError(err, "not found in system.jobs table") {
+		if err := job.Started(ctx); !testutils.IsError(err, "does not exist") {
 			t.Fatalf("unexpected error %v", err)
 		}
 	})
@@ -1562,26 +1579,6 @@ func TestJobLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("high-water progress works", func(t *testing.T) {
-		job, _ := createDefaultJob()
-		if err := job.Started(ctx); err != nil {
-			t.Fatal(err)
-		}
-		highWaters := []hlc.Timestamp{
-			{WallTime: 1, Logical: 1},
-			{WallTime: 2, Logical: 0},
-		}
-		for _, ts := range highWaters {
-			require.NoError(t, job.NoTxn().Update(ctx, func(_ isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
-				return ju.UpdateHighwaterProgressed(ts, md)
-			}))
-			p := job.Progress()
-			if actual := *p.GetHighWater(); actual != ts {
-				t.Fatalf(`got %s expected %s`, actual, ts)
-			}
-		}
-	})
-
 	t.Run("out of bounds progress fails", func(t *testing.T) {
 		job, _ := createDefaultJob()
 		if err := job.Started(ctx); err != nil {
@@ -1591,11 +1588,6 @@ func TestJobLifecycle(t *testing.T) {
 			t.Fatalf("expected 'outside allowable range' error, but got %v", err)
 		}
 		if err := job.NoTxn().FractionProgressed(ctx, jobs.FractionUpdater(1.1)); !testutils.IsError(err, "outside allowable range") {
-			t.Fatalf("expected 'outside allowable range' error, but got %v", err)
-		}
-		if err := job.NoTxn().Update(ctx, func(_ isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
-			return ju.UpdateHighwaterProgressed(hlc.Timestamp{WallTime: -1}, md)
-		}); !testutils.IsError(err, "outside allowable range") {
 			t.Fatalf("expected 'outside allowable range' error, but got %v", err)
 		}
 	})
@@ -1748,7 +1740,6 @@ func TestShowJobs(t *testing.T) {
 		username          username.SQLUsername
 		err               string
 		created           time.Time
-		started           time.Time
 		finished          time.Time
 		modified          time.Time
 		fractionCompleted float32
@@ -1760,19 +1751,15 @@ func TestShowJobs(t *testing.T) {
 	const instanceID = 7
 	for _, in := range []row{
 		{
-			id:          42,
-			typ:         "SCHEMA CHANGE",
-			status:      "superfailed",
-			description: "failjob",
-			username:    username.MakeSQLUsernameFromPreNormalizedString("failure"),
-			err:         "boom",
-			// lib/pq returns time.Time objects with goofy locations, which breaks
-			// reflect.DeepEqual without this time.FixedZone song and dance.
-			// See: https://github.com/lib/pq/issues/329
-			created:           timeutil.Unix(1, 0).In(time.FixedZone("", 0)),
-			started:           timeutil.Unix(2, 0).In(time.FixedZone("", 0)),
-			finished:          timeutil.Unix(3, 0).In(time.FixedZone("", 0)),
-			modified:          timeutil.Unix(4, 0).In(time.FixedZone("", 0)),
+			id:                42,
+			typ:               "SCHEMA CHANGE",
+			status:            "superfailed",
+			description:       "failjob",
+			username:          username.MakeSQLUsernameFromPreNormalizedString("failure"),
+			err:               "boom",
+			created:           timeutil.Unix(1, 0),
+			finished:          timeutil.Unix(3, 0),
+			modified:          timeutil.Unix(4, 0),
 			fractionCompleted: 0.42,
 			coordinatorID:     instanceID,
 			details:           jobspb.SchemaChangeDetails{},
@@ -1784,13 +1771,9 @@ func TestShowJobs(t *testing.T) {
 			description: "persistent feed",
 			username:    username.MakeSQLUsernameFromPreNormalizedString("persistent"),
 			err:         "",
-			// lib/pq returns time.Time objects with goofy locations, which breaks
-			// reflect.DeepEqual without this time.FixedZone song and dance.
-			// See: https://github.com/lib/pq/issues/329
-			created:  timeutil.Unix(1, 0).In(time.FixedZone("", 0)),
-			started:  timeutil.Unix(2, 0).In(time.FixedZone("", 0)),
-			finished: timeutil.Unix(3, 0).In(time.FixedZone("", 0)),
-			modified: timeutil.Unix(4, 0).In(time.FixedZone("", 0)),
+			created:     timeutil.Unix(1, 0),
+			finished:    timeutil.Unix(3, 0),
+			modified:    timeutil.Unix(4, 0),
 			highWater: hlc.Timestamp{
 				WallTime: 1533143242000000,
 				Logical:  4,
@@ -1804,7 +1787,6 @@ func TestShowJobs(t *testing.T) {
 			// row struct directly.
 			inPayload, err := protoutil.Marshal(&jobspb.Payload{
 				Description:    in.description,
-				StartedMicros:  in.started.UnixNano() / time.Microsecond.Nanoseconds(),
 				FinishedMicros: in.finished.UnixNano() / time.Microsecond.Nanoseconds(),
 				UsernameProto:  in.username.EncodeProto(),
 				Error:          in.err,
@@ -1831,9 +1813,12 @@ func TestShowJobs(t *testing.T) {
 				t.Fatal(err)
 			}
 			sqlDB.Exec(t,
-				`INSERT INTO system.jobs (id, status, created, claim_session_id, claim_instance_id) VALUES ($1, $2, $3, $4, $5)`,
-				in.id, in.status, in.created, session.ID().UnsafeBytes(), instanceID,
+				`INSERT INTO system.jobs (id, status, job_type, owner, description, created, finished, error_msg, claim_session_id, claim_instance_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				in.id, in.status, in.typ, in.username.Normalized(), in.description, in.created, in.finished, in.err, session.ID().UnsafeBytes(), instanceID,
 			)
+			sqlDB.Exec(t, `INSERT INTO system.job_progress (job_id, written, resolved, fraction) VALUES ($1, $2, $3, $4)`, in.id, in.modified, in.highWater.AsOfSystemTime(), in.fractionCompleted)
+
+			// TODO(dt): delete these once sql.jobs.legacy_vtable.enabled is gone.
 			sqlDB.Exec(t, `INSERT INTO system.job_info (job_id, info_key, value) VALUES ($1, $2, $3)`, in.id, jobs.GetLegacyPayloadKey(), inPayload)
 			sqlDB.Exec(t, `INSERT INTO system.job_info (job_id, info_key, value) VALUES ($1, $2, $3)`, in.id, jobs.GetLegacyProgressKey(), inProgress)
 
@@ -1842,10 +1827,10 @@ func TestShowJobs(t *testing.T) {
 			var decimalHighWater *apd.Decimal
 			var resultUsername string
 			sqlDB.QueryRow(t, `
-      SELECT job_id, job_type, status, created, description, started, finished, modified,
+      SELECT job_id, job_type, status, created, description, finished, modified,
              fraction_completed, high_water_timestamp, user_name, ifnull(error, ''), coordinator_id
         FROM crdb_internal.jobs WHERE job_id = $1`, in.id).Scan(
-				&out.id, &out.typ, &out.status, &out.created, &out.description, &out.started,
+				&out.id, &out.typ, &out.status, &out.created, &out.description,
 				&out.finished, &out.modified, &maybeFractionCompleted, &decimalHighWater, &resultUsername,
 				&out.err, &out.coordinatorID,
 			)
@@ -1872,14 +1857,19 @@ func TestShowJobs(t *testing.T) {
 			if out.created.Equal(in.created) {
 				out.created = in.created
 			}
-			if out.started.Equal(in.started) {
-				out.started = in.started
-			}
 			if out.finished.Equal(in.finished) {
 				out.finished = in.finished
 			}
 			if out.modified.Equal(in.modified) {
 				out.modified = in.modified
+			}
+
+			// Locations don't compare well so nuke them.
+			for _, ts := range []*time.Time{&in.created, &in.finished, &in.modified} {
+				*ts = ts.UTC()
+			}
+			for _, ts := range []*time.Time{&out.created, &out.finished, &out.modified} {
+				*ts = ts.UTC()
 			}
 
 			if !reflect.DeepEqual(in, out) {
@@ -1998,152 +1988,6 @@ func TestShowAutomaticJobs(t *testing.T) {
 	}
 }
 
-func createJob(
-	ctx context.Context,
-	t *testing.T,
-	r *jobs.Registry,
-	id jobspb.JobID,
-	payloadBytes, progressBytes []byte,
-) {
-	var payload jobspb.Payload
-	var progress jobspb.Progress
-	require.NoError(t, protoutil.Unmarshal(payloadBytes, &payload))
-	require.NoError(t, protoutil.Unmarshal(progressBytes, &progress))
-	record := jobs.Record{
-		JobID:    id,
-		Username: username.TestUserName(),
-		Details:  payload.UnwrapDetails(),
-		Progress: progress.UnwrapDetails(),
-	}
-
-	_, err := r.CreateJobWithTxn(ctx, record, id, nil /* txn */)
-	require.NoError(t, err)
-}
-
-func TestShowJobsWithError(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	var params base.TestServerArgs
-	params.Knobs.UpgradeManager = &upgradebase.TestingKnobs{
-		DontUseJobs:                       true,
-		SkipJobMetricsPollingJobBootstrap: true,
-	}
-	params.Knobs.KeyVisualizer = &keyvisualizer.TestingKnobs{
-		SkipJobBootstrap: true,
-	}
-	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
-
-	// Ensure there is at least one row in system.job_info.
-	if _, err := sqlDB.Exec(`CREATE TABLE foo(x INT);`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sqlDB.Exec(`ALTER TABLE foo ADD COLUMN y INT;`); err != nil {
-		t.Fatal(err)
-	}
-	// Get the id of the ADD COLUMN job to use later.
-	var jobID jobspb.JobID
-	var payload, progress []byte
-	if err := sqlDB.QueryRow(`
-SELECT id, payload, progress FROM "".crdb_internal.system_jobs ORDER BY id DESC LIMIT 1
-`).Scan(&jobID, &payload, &progress); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create 3 rows from the valid row, one of which is corrupted.
-	createJob(context.Background(), t, s.ApplicationLayer().JobRegistry().(*jobs.Registry), jobID+1, payload, progress)
-
-	// Create the second row with a corrupted progress field.
-	if _, err := sqlDB.Exec(`
-	INSERT INTO system.jobs(id, status) SELECT id+2, status FROM system.jobs WHERE id = $1;
-	`, jobID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sqlDB.Exec(`
-	  -- Create a payload field from the most recent row.
-	  INSERT INTO system.job_info(job_id, info_key, value) SELECT job_id+2, info_key, value FROM system.job_info WHERE job_id = $1 AND info_key = 'legacy_payload';
-	`, jobID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sqlDB.Exec(`
-		  -- Create a corrupted progress field.
-		  INSERT INTO system.job_info(job_id, info_key, value) SELECT job_id+2, info_key, '\xaaaa'::BYTES FROM system.job_info WHERE job_id = $1 AND info_key = 'legacy_progress';
-		`, jobID); err != nil {
-		t.Fatal(err)
-	}
-
-	// Test what happens with a NULL progress field (which is a valid value).
-	if _, err := sqlDB.Exec(`
-	INSERT INTO system.jobs(id, status) SELECT id+4, status FROM system.jobs WHERE id = $1;
-	`, jobID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sqlDB.Exec(`
-	  -- Create a payload field from the most recent row.
-	  INSERT INTO system.job_info(job_id, info_key, value) SELECT job_id+4, info_key, value FROM system.job_info WHERE job_id = $1 AND info_key = 'legacy_payload';
-	`, jobID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sqlDB.Exec(`
-		  INSERT INTO system.job_info(job_id, info_key, value) SELECT job_id+4, info_key, NULL::BYTES FROM system.job_info WHERE job_id = $1 AND info_key = 'legacy_progress';
-		`, jobID); err != nil {
-		t.Fatal(err)
-	}
-
-	// Extract the last 3 rows from the query.
-	rows, err := sqlDB.Query(`
-  WITH a AS (SELECT job_id, description, fraction_completed, error FROM [SHOW JOBS] ORDER BY job_id DESC LIMIT 3)
-  SELECT job_id, ifnull(description, 'NULL'), ifnull(fraction_completed, -1)::string, ifnull(error,'NULL') FROM a ORDER BY job_id ASC`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-
-	var desc, frac, errStr string
-	var readID int64
-
-	// Valid row.
-	rowNum := 0
-	if !rows.Next() {
-		t.Fatalf("%d too few rows", rowNum)
-	}
-	if err := rows.Scan(&readID, &desc, &frac, &errStr); err != nil {
-		t.Fatalf("%d: %v", rowNum, err)
-	}
-	t.Logf("row %d: %d %q %q %v", rowNum, readID, desc, errStr, frac)
-	if desc == "NULL" || errStr != "" || frac[0] == '-' {
-		t.Fatalf("%d: invalid row", rowNum)
-	}
-	rowNum++
-
-	// Corrupted progress but valid payload.
-	if !rows.Next() {
-		t.Fatalf("%d: too few rows", rowNum)
-	}
-	if err := rows.Scan(&readID, &desc, &frac, &errStr); err != nil {
-		t.Fatalf("%d: %v", rowNum, err)
-	}
-	t.Logf("row %d: %d %q %q %v", rowNum, readID, desc, errStr, frac)
-	if desc == "NULL" || !strings.HasPrefix(errStr, "error decoding progress") || frac[0] != '-' {
-		t.Fatalf("%d: invalid row", rowNum)
-	}
-	rowNum++
-
-	// Valid payload and missing progress.
-	if !rows.Next() {
-		t.Fatalf("%d too few rows", rowNum)
-	}
-	if err := rows.Scan(&readID, &desc, &frac, &errStr); err != nil {
-		t.Fatalf("%d: %v", rowNum, err)
-	}
-	t.Logf("row %d: %d %q %q %v", rowNum, readID, desc, errStr, frac)
-	if desc == "NULL" || errStr != "" || frac[0] != '-' {
-		t.Fatalf("%d: invalid row", rowNum)
-	}
-	rowNum++
-}
-
 func TestShowJobWhenComplete(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -2161,9 +2005,11 @@ func TestShowJobWhenComplete(t *testing.T) {
 		Details:  jobspb.ImportDetails{},
 		Progress: jobspb.ImportProgress{},
 	}
+	_, err := db.Exec("CREATE USER testuser")
+	require.NoError(t, err)
 	done := make(chan struct{})
 	defer close(done)
-	jobs.RegisterConstructor(
+	cleanup := jobs.TestingRegisterConstructor(
 		jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 			return jobstest.FakeResumer{
 				OnResume: func(ctx context.Context) error {
@@ -2176,6 +2022,7 @@ func TestShowJobWhenComplete(t *testing.T) {
 				},
 			}
 		}, jobs.UsesTenantCostControl)
+	defer cleanup()
 
 	type row struct {
 		id     jobspb.JobID
@@ -2305,12 +2152,12 @@ func TestJobInTxn(t *testing.T) {
 	sql.AddPlanHook(
 		"test",
 		func(_ context.Context, stmt tree.Statement, execCtx sql.PlanHookState,
-		) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
+		) (sql.PlanHookRowFn, colinfo.ResultColumns, bool, error) {
 			st, ok := stmt.(*tree.Backup)
 			if !ok {
-				return nil, nil, nil, false, nil
+				return nil, nil, false, nil
 			}
-			fn := func(ctx context.Context, _ []sql.PlanNode, _ chan<- tree.Datums) error {
+			fn := func(ctx context.Context, _ chan<- tree.Datums) error {
 				var err error
 				jobID = execCtx.ExtendedEvalContext().QueueJob(&jobs.Record{
 					Description: st.String(),
@@ -2320,7 +2167,7 @@ func TestJobInTxn(t *testing.T) {
 				})
 				return err
 			}
-			return fn, nil, nil, false, nil
+			return fn, nil, false, nil
 		},
 		func(_ context.Context, stmt tree.Statement, execCtx sql.PlanHookState,
 		) (matched bool, _ colinfo.ResultColumns, _ error) {
@@ -2328,7 +2175,7 @@ func TestJobInTxn(t *testing.T) {
 			return matched, nil, nil
 		},
 	)
-	jobs.RegisterConstructor(jobspb.TypeBackup, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	cleanup := jobs.TestingRegisterConstructor(jobspb.TypeBackup, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(ctx context.Context) error {
 				t.Logf("Resuming job: %+v", job.Payload())
@@ -2341,16 +2188,18 @@ func TestJobInTxn(t *testing.T) {
 			},
 		}
 	}, jobs.UsesTenantCostControl)
+	defer cleanup()
+
 	// Piggy back on RESTORE to be able to create a failing test job.
 	sql.AddPlanHook(
 		"test",
 		func(_ context.Context, stmt tree.Statement, execCtx sql.PlanHookState,
-		) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
+		) (sql.PlanHookRowFn, colinfo.ResultColumns, bool, error) {
 			_, ok := stmt.(*tree.Restore)
 			if !ok {
-				return nil, nil, nil, false, nil
+				return nil, nil, false, nil
 			}
-			fn := func(ctx context.Context, _ []sql.PlanNode, _ chan<- tree.Datums) error {
+			fn := func(ctx context.Context, _ chan<- tree.Datums) error {
 				var err error
 				jobID = execCtx.ExtendedEvalContext().QueueJob(&jobs.Record{
 					Description: "RESTORE",
@@ -2360,7 +2209,7 @@ func TestJobInTxn(t *testing.T) {
 				})
 				return err
 			}
-			return fn, nil, nil, false, nil
+			return fn, nil, false, nil
 		},
 		func(_ context.Context, stmt tree.Statement, execCtx sql.PlanHookState,
 		) (matched bool, _ colinfo.ResultColumns, _ error) {
@@ -2368,20 +2217,20 @@ func TestJobInTxn(t *testing.T) {
 			return matched, nil, nil
 		},
 	)
-	jobs.RegisterConstructor(jobspb.TypeRestore, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeRestore, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(_ context.Context) error {
 				return errors.New("RESTORE failed")
 			},
 		}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 
 	t.Run("rollback txn", func(t *testing.T) {
 		start := timeutil.Now()
 
 		txn, err := sqlDB.Begin()
 		require.NoError(t, err)
-		_, err = txn.Exec("BACKUP tobeaborted TO doesnotmattter")
+		_, err = txn.Exec("BACKUP tobeaborted INTO doesnotmattter")
 		require.NoError(t, err)
 
 		// If we rollback then the job should not run
@@ -2406,7 +2255,7 @@ func TestJobInTxn(t *testing.T) {
 		// Now let's actually commit the transaction and check that the job ran.
 		txn, err := sqlDB.Begin()
 		require.NoError(t, err)
-		_, err = txn.Exec("BACKUP tocommit TO foo")
+		_, err = txn.Exec("BACKUP tocommit INTO foo")
 		require.NoError(t, err)
 		// Committing will block and wait for all jobs to run.
 		require.NoError(t, txn.Commit())
@@ -2428,10 +2277,10 @@ func TestJobInTxn(t *testing.T) {
 		require.NoError(t, err)
 
 		// Add a succeeding job.
-		_, err = txn.Exec("BACKUP doesnotmatter TO doesnotmattter")
+		_, err = txn.Exec("BACKUP doesnotmatter INTO doesnotmattter")
 		require.NoError(t, err)
 		// We hooked up a failing test job to RESTORE.
-		_, err = txn.Exec("RESTORE TABLE tbl FROM somewhere")
+		_, err = txn.Exec("RESTORE TABLE tbl FROM LATEST IN somewhere")
 		require.NoError(t, err)
 
 		// Now let's actually commit the transaction and check that there is a
@@ -2456,7 +2305,7 @@ func TestStartableJobMixedVersion(t *testing.T) {
 		Settings: st,
 		Knobs: base.TestingKnobs{
 			Server: &server.TestingKnobs{
-				BinaryVersionOverride:          clusterversion.MinSupported.Version(),
+				ClusterVersionOverride:         clusterversion.MinSupported.Version(),
 				DisableAutomaticVersionUpgrade: make(chan struct{}),
 			},
 		},
@@ -2466,9 +2315,10 @@ func TestStartableJobMixedVersion(t *testing.T) {
 	_, err := sqlDB.Exec("SELECT now()")
 	require.NoError(t, err)
 
-	jobs.RegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
+	cleanup := jobs.TestingRegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{}
 	}, jobs.UsesTenantCostControl)
+	defer cleanup()
 	var j *jobs.StartableJob
 	jobID := jr.MakeJobID()
 	insqlDB := s.InternalDB().(isql.DB)
@@ -2507,13 +2357,14 @@ func TestStartableJob(t *testing.T) {
 		resumeFunc.Store(f)
 		return func() { resumeFunc.Store(prev) }
 	}
-	jobs.RegisterConstructor(jobspb.TypeRestore, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
+	cleanup := jobs.TestingRegisterConstructor(jobspb.TypeRestore, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(ctx context.Context) error {
 				return resumeFunc.Load().(func(ctx context.Context) error)(ctx)
 			},
 		}
 	}, jobs.UsesTenantCostControl)
+	defer cleanup()
 	woodyP, _ := username.MakeSQLUsernameFromUserInput("Woody Pride", username.PurposeValidation)
 	rec := jobs.Record{
 		Description:   "There's a snake in my boot!",
@@ -2693,7 +2544,7 @@ func TestStartableJobTxnRetry(t *testing.T) {
 	s := serverutils.StartServerOnly(t, params)
 	defer s.Stopper().Stop(ctx)
 	jr := s.JobRegistry().(*jobs.Registry)
-	jobs.RegisterConstructor(jobspb.TypeRestore, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
+	cleanup := jobs.TestingRegisterConstructor(jobspb.TypeRestore, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{}
 	}, jobs.UsesTenantCostControl)
 	rec := jobs.Record{
@@ -2701,6 +2552,7 @@ func TestStartableJobTxnRetry(t *testing.T) {
 		Progress: jobspb.RestoreProgress{},
 		Username: username.TestUserName(),
 	}
+	cleanup()
 
 	db := s.InternalDB().(isql.DB)
 	jobID := jr.MakeJobID()
@@ -2735,7 +2587,7 @@ func TestRegistryTestingNudgeAdoptionQueue(t *testing.T) {
 
 	defer jobs.ResetConstructors()()
 	resuming := make(chan struct{})
-	jobs.RegisterConstructor(jobspb.TypeBackup, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	cleanup := jobs.TestingRegisterConstructor(jobspb.TypeBackup, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(ctx context.Context) error {
 				resuming <- struct{}{}
@@ -2743,6 +2595,8 @@ func TestRegistryTestingNudgeAdoptionQueue(t *testing.T) {
 			},
 		}
 	}, jobs.UsesTenantCostControl)
+	defer cleanup()
+
 	before := timeutil.Now()
 	jobID := registry.MakeJobID()
 	_, err := registry.CreateAdoptableJobWithTxn(ctx, rec, jobID, nil /* txn */)
@@ -2820,7 +2674,7 @@ func TestMetrics(t *testing.T) {
 	}
 
 	fakeBackupMetrics := makeFakeMetrics()
-	jobs.RegisterConstructor(jobspb.TypeBackup,
+	defer jobs.TestingRegisterConstructor(jobspb.TypeBackup,
 		func(j *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 			return jobstest.FakeResumer{
 				OnResume: func(ctx context.Context) error {
@@ -2833,9 +2687,9 @@ func TestMetrics(t *testing.T) {
 			}
 		},
 		jobs.UsesTenantCostControl, jobs.WithJobMetrics(fakeBackupMetrics),
-	)
+	)()
 
-	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(ctx context.Context) error {
 				return waitForErr(ctx)
@@ -2844,7 +2698,7 @@ func TestMetrics(t *testing.T) {
 				return waitForErr(ctx)
 			},
 		}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 
 	setup := func(t *testing.T) (
 		s serverutils.TestServerInterface, db *gosql.DB, r *jobs.Registry, cleanup func(),
@@ -3055,7 +2909,7 @@ func TestLoseLeaseDuringExecution(t *testing.T) {
 
 	defer jobs.ResetConstructors()()
 	resumed := make(chan error, 1)
-	jobs.RegisterConstructor(jobspb.TypeBackup, func(j *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeBackup, func(j *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(ctx context.Context) error {
 				defer close(resumed)
@@ -3071,161 +2925,12 @@ func TestLoseLeaseDuringExecution(t *testing.T) {
 				return err
 			},
 		}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 
 	_, err := registry.CreateJobWithTxn(ctx, rec, registry.MakeJobID(), nil)
 	require.NoError(t, err)
 	registry.TestingNudgeAdoptionQueue()
 	require.Regexp(t, `expected session "\w+" but found NULL`, <-resumed)
-}
-
-type resumeStartedSignaler struct {
-	syncutil.Mutex
-	cond      *sync.Cond
-	isStarted bool
-}
-
-func newResumeStartedSignaler() *resumeStartedSignaler {
-	ret := &resumeStartedSignaler{}
-	ret.cond = sync.NewCond(&ret.Mutex)
-	return ret
-
-}
-
-func (r *resumeStartedSignaler) SignalResumeStarted() {
-	r.Lock()
-	r.isStarted = true
-	r.cond.Signal()
-	r.Unlock()
-}
-
-func (r *resumeStartedSignaler) WaitForResumeStarted() {
-	r.Lock()
-	for !r.isStarted {
-		r.cond.Wait()
-	}
-	r.isStarted = false
-	r.Unlock()
-}
-
-// TestPauseReason tests pausing a job with a user specified reason.
-func TestPauseReason(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
-		},
-	})
-	registry := s.JobRegistry().(*jobs.Registry)
-	defer s.Stopper().Stop(ctx)
-
-	done := make(chan struct{})
-	defer close(done)
-	resumeSignaler := newResumeStartedSignaler()
-	jobs.RegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
-		return jobstest.FakeResumer{
-			OnResume: func(ctx context.Context) error {
-				resumeSignaler.SignalResumeStarted()
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-done:
-					return nil
-				}
-			},
-		}
-	}, jobs.UsesTenantCostControl)
-
-	rec := jobs.Record{
-		DescriptorIDs: []descpb.ID{1},
-		Details:       jobspb.ImportDetails{},
-		Progress:      jobspb.ImportProgress{},
-		Username:      username.TestUserName(),
-	}
-	tdb := sqlutils.MakeSQLRunner(db)
-
-	jobID := registry.MakeJobID()
-	_, err := registry.CreateAdoptableJobWithTxn(ctx, rec, jobID, nil /* txn */)
-	require.NoError(t, err)
-
-	countRowsWithClaimInfo := func() int {
-		t.Helper()
-		n := 0
-		tdb.QueryRow(t,
-			"SELECT count(*) FROM system.jobs "+
-				"WHERE id = $1 AND (claim_session_id IS NOT NULL OR claim_instance_id IS NOT NULL)",
-			jobID).Scan(&n)
-		return n
-	}
-	mustNotHaveClaim := func() {
-		t.Helper()
-		testutils.SucceedsSoon(t, func() error {
-			if countRowsWithClaimInfo() == 0 {
-				return nil
-			}
-			return errors.New("still waiting for claim to clear")
-		})
-	}
-	mustHaveClaim := func() {
-		t.Helper()
-		testutils.SucceedsSoon(t, func() error {
-			if countRowsWithClaimInfo() == 1 {
-				return nil
-			}
-			return errors.New("still waiting for claim info")
-		})
-	}
-
-	// First wait until the job is running
-	q := fmt.Sprintf("SELECT status FROM system.jobs WHERE id = %d", jobID)
-	tdb.CheckQueryResultsRetry(t, q, [][]string{{"running"}})
-	mustHaveClaim()
-	resumeSignaler.WaitForResumeStarted()
-
-	getStatusAndPayload := func(t *testing.T, id jobspb.JobID) (string, jobspb.Payload) {
-		var payloadBytes []byte
-		var payload jobspb.Payload
-		var status string
-		tdb.QueryRow(t, "SELECT status, payload FROM crdb_internal.system_jobs where id = $1", jobID).Scan(
-			&status, &payloadBytes)
-		require.NoError(t, protoutil.Unmarshal(payloadBytes, &payload))
-
-		return status, payload
-	}
-
-	checkStatusAndPauseReason := func(t *testing.T, id jobspb.JobID, expStatus, expPauseReason string) {
-		status, payload := getStatusAndPayload(t, id)
-		require.Equal(t, expStatus, status, "status")
-		require.Equal(t, expPauseReason, payload.PauseReason, "pause reason")
-	}
-
-	{
-		// Next, pause the job with a reason. Wait for pause and make sure the pause reason is set.
-		require.NoError(t, registry.PauseRequested(ctx, nil, jobID, "for testing"))
-		tdb.CheckQueryResultsRetry(t, q, [][]string{{"paused"}})
-		checkStatusAndPauseReason(t, jobID, "paused", "for testing")
-		mustNotHaveClaim()
-	}
-
-	{
-		// Now resume the job. Verify that the job is running now, but the pause reason is still there.
-		require.NoError(t, registry.Unpause(ctx, nil, jobID))
-		tdb.CheckQueryResultsRetry(t, q, [][]string{{"running"}})
-
-		checkStatusAndPauseReason(t, jobID, "running", "for testing")
-		mustHaveClaim()
-		resumeSignaler.WaitForResumeStarted()
-	}
-	{
-		// Pause the job again with a different reason. Verify that the job is paused with the reason.
-		require.NoError(t, registry.PauseRequested(ctx, nil, jobID, "second time"))
-		tdb.CheckQueryResultsRetry(t, q, [][]string{{"paused"}})
-		checkStatusAndPauseReason(t, jobID, "paused", "second time")
-		mustNotHaveClaim()
-	}
 }
 
 // TestJobsRetry tests that (1) non-cancelable jobs retry if they fail with an
@@ -3236,7 +2941,7 @@ func TestJobsRetry(t *testing.T) {
 
 	t.Run("retry non-cancelable running", func(t *testing.T) {
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 		// Make mockJob non-cancelable, ensuring that non-cancelable jobs are retried in running state.
 		rts.mockJob.SetNonCancelable(rts.ctx, func(ctx context.Context, nonCancelable bool) bool {
@@ -3281,7 +2986,7 @@ func TestJobsRetry(t *testing.T) {
 		// - Fail the job in revert state using a non-retryable error.
 		// - Make sure that the jobs is retried and is again in the revert state.
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 		j, err := jobs.TestingCreateAndStartJob(rts.ctx, rts.registry, rts.idb(), rts.mockJob)
 		if err != nil {
@@ -3325,7 +3030,7 @@ func TestJobsRetry(t *testing.T) {
 		//   retries with a permanent error as well.
 		// - Make sure that the jobs is retried and is again in the revert state.
 		rts := registryTestSuite{}
-		rts.setUp(t)
+		defer rts.setUp(t)()
 		defer rts.tearDown()
 		// Make mockJob non-cancelable, ensuring that non-cancelable jobs are retried in reverting state.
 		rts.mockJob.SetNonCancelable(rts.ctx, func(ctx context.Context, nonCancelable bool) bool {
@@ -3380,7 +3085,7 @@ func TestPausepoints(t *testing.T) {
 	registry := s.JobRegistry().(*jobs.Registry)
 	defer s.Stopper().Stop(ctx)
 	idb := s.InternalDB().(isql.DB)
-	jobs.RegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
+	defer jobs.TestingRegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(ctx context.Context) error {
 				if err := registry.CheckPausepoint("test_pause_foo"); err != nil {
@@ -3389,7 +3094,7 @@ func TestPausepoints(t *testing.T) {
 				return nil
 			},
 		}
-	}, jobs.UsesTenantCostControl)
+	}, jobs.UsesTenantCostControl)()
 
 	rec := jobs.Record{
 		DescriptorIDs: []descpb.ID{1},
@@ -3455,6 +3160,7 @@ func TestJobTypeMetrics(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	runner := sqlutils.MakeSQLRunner(sqlDB)
+	runner.Exec(t, "CREATE USER testuser")
 	reg := s.JobRegistry().(*jobs.Registry)
 
 	waitForPausedCount := func(typ jobspb.Type, numPaused int64) {
@@ -3520,14 +3226,14 @@ func TestJobTypeMetrics(t *testing.T) {
 	}
 
 	for typ := range typeToRecord {
-		jobs.RegisterConstructor(typ, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+		defer jobs.TestingRegisterConstructor(typ, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 			return jobstest.FakeResumer{
 				OnResume: func(ctx context.Context) error {
 					<-ctx.Done()
 					return ctx.Err()
 				},
 			}
-		}, jobs.UsesTenantCostControl)
+		}, jobs.UsesTenantCostControl)()
 	}
 
 	makeJob := func(ctx context.Context,

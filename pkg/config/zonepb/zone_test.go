@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package zonepb
 
@@ -61,6 +56,13 @@ func TestZoneConfigValidate(t *testing.T) {
 				RangeMaxBytes: proto.Int64(0),
 			},
 			"RangeMaxBytes 0 less than minimum allowed",
+		},
+		{
+			ZoneConfig{
+				NumReplicas:   proto.Int32(1),
+				RangeMaxBytes: proto.Int64(9 << 30 /* 9 GiB */),
+			},
+			"RangeMaxBytes 9663676416 greater than maximum allowed 8589934592",
 		},
 		{
 			ZoneConfig{

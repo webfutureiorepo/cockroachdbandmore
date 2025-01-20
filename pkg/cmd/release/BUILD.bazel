@@ -12,7 +12,6 @@ go_library(
         "orchestration.go",
         "pick_sha.go",
         "sender.go",
-        "sentry.go",
         "set_cockroach_version.go",
         "templates.go",
         "update_brew.go",
@@ -60,10 +59,6 @@ go_test(
         "testdata/**",
     ]),
     embed = [":release_lib"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/testutils/release",
         "@com_github_masterminds_semver_v3//:semver",

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -17,11 +12,17 @@ type targetSpec struct {
 	transitionSpecs []transitionSpec
 }
 
+type RevertibleFn func(scpb.Element, *opGenContext) bool
+
 type transitionSpec struct {
 	from       scpb.Status
 	to         scpb.Status
-	revertible bool
+	revertible RevertibleFn
 	emitFns    []interface{}
+}
+
+func notRevertible(_ scpb.Element, _ *opGenContext) bool {
+	return false
 }
 
 type transitionProperty interface {
@@ -31,12 +32,16 @@ type transitionProperty interface {
 func to(to scpb.Status, properties ...transitionProperty) transitionSpec {
 	ts := transitionSpec{
 		to:         to,
-		revertible: true,
+		revertible: nil, /* revertible */
 	}
 	for _, p := range properties {
 		p.apply(&ts)
 	}
 	return ts
+}
+
+func revertibleFunc(fn RevertibleFn) transitionProperty {
+	return fn
 }
 
 func revertible(b bool) transitionProperty {
@@ -50,7 +55,14 @@ func emit(fn interface{}) transitionProperty {
 type revertibleProperty bool
 
 func (r revertibleProperty) apply(spec *transitionSpec) {
-	spec.revertible = bool(r)
+	spec.revertible = nil /* revertible */
+	if !r {
+		spec.revertible = notRevertible
+	}
+}
+
+func (r RevertibleFn) apply(spec *transitionSpec) {
+	spec.revertible = r
 }
 
 var _ transitionProperty = revertibleProperty(true)

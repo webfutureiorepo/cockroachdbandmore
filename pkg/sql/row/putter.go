@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package row
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -24,16 +20,15 @@ import (
 // encoding logic to kv.Batch.
 type Putter interface {
 	CPut(key, value interface{}, expValue []byte)
+	CPutWithOriginTimestamp(key, value interface{}, expValue []byte, ts hlc.Timestamp, shouldWinTie bool)
 	Put(key, value interface{})
-	InitPut(key, value interface{}, failOnTombstones bool)
 	Del(key ...interface{})
 
+	CPutBytesEmpty(kys []roachpb.Key, values [][]byte)
 	CPutValuesEmpty(kys []roachpb.Key, values []roachpb.Value)
 	CPutTuplesEmpty(kys []roachpb.Key, values [][]byte)
 	PutBytes(kys []roachpb.Key, values [][]byte)
-	InitPutBytes(kys []roachpb.Key, values [][]byte)
 	PutTuples(kys []roachpb.Key, values [][]byte)
-	InitPutTuples(kys []roachpb.Key, values [][]byte)
 }
 
 // TracePutter logs all requests, ie implements kv trace.
@@ -49,18 +44,33 @@ func (t *TracePutter) CPut(key, value interface{}, expValue []byte) {
 	t.Putter.CPut(key, value, expValue)
 }
 
+func (t *TracePutter) CPutWithOriginTimestamp(
+	key, value interface{}, expValue []byte, ts hlc.Timestamp, shouldWinTie bool,
+) {
+	log.VEventfDepth(t.Ctx, 1, 2, "CPutWithOriginTimestamp %v -> %v @ %v", key, value, ts)
+	t.Putter.CPutWithOriginTimestamp(key, value, expValue, ts, shouldWinTie)
+}
+
 func (t *TracePutter) Put(key, value interface{}) {
 	log.VEventfDepth(t.Ctx, 1, 2, "Put %v -> %v", key, value)
 	t.Putter.Put(key, value)
 }
-func (t *TracePutter) InitPut(key, value interface{}, failOnTombstones bool) {
-	log.VEventfDepth(t.Ctx, 1, 2, "InitPut %v -> %v", key, value)
-	t.Putter.Put(key, value)
 
-}
 func (t *TracePutter) Del(key ...interface{}) {
 	log.VEventfDepth(t.Ctx, 1, 2, "Del %v", key...)
 	t.Putter.Del(key...)
+}
+
+func (t *TracePutter) CPutBytesEmpty(kys []roachpb.Key, values [][]byte) {
+	for i, k := range kys {
+		if len(k) == 0 {
+			continue
+		}
+		var v roachpb.Value
+		v.SetBytes(values[i])
+		log.VEventfDepth(t.Ctx, 1, 2, "CPut %s -> %s", k, v.PrettyPrint())
+	}
+	t.Putter.CPutBytesEmpty(kys, values)
 }
 
 func (t *TracePutter) CPutValuesEmpty(kys []roachpb.Key, values []roachpb.Value) {
@@ -97,18 +107,6 @@ func (t *TracePutter) PutBytes(kys []roachpb.Key, values [][]byte) {
 	t.Putter.PutBytes(kys, values)
 }
 
-func (t *TracePutter) InitPutBytes(kys []roachpb.Key, values [][]byte) {
-	for i, k := range kys {
-		if len(k) == 0 {
-			continue
-		}
-		var v roachpb.Value
-		v.SetBytes(values[i])
-		log.VEventfDepth(t.Ctx, 1, 2, "InitPut %s -> %s", k, v.PrettyPrint())
-	}
-	t.Putter.InitPutBytes(kys, values)
-}
-
 func (t *TracePutter) PutTuples(kys []roachpb.Key, values [][]byte) {
 	for i, k := range kys {
 		if len(k) == 0 {
@@ -119,18 +117,6 @@ func (t *TracePutter) PutTuples(kys []roachpb.Key, values [][]byte) {
 		log.VEventfDepth(t.Ctx, 1, 2, "Put %s -> %s", k, v.PrettyPrint())
 	}
 	t.Putter.PutTuples(kys, values)
-}
-
-func (t *TracePutter) InitPutTuples(kys []roachpb.Key, values [][]byte) {
-	for i, k := range kys {
-		if len(k) == 0 {
-			continue
-		}
-		var v roachpb.Value
-		v.SetTuple(values[i])
-		log.VEventfDepth(t.Ctx, 1, 2, "InitPut %s -> %s", k, v.PrettyPrint())
-	}
-	t.Putter.InitPutTuples(kys, values)
 }
 
 type KVBytes struct {
@@ -183,15 +169,24 @@ func (s *SortingPutter) CPut(key, value interface{}, expValue []byte) {
 	s.Putter.CPut(key, value, expValue)
 }
 
+func (s *SortingPutter) CPutWithOriginTimestamp(
+	key, value interface{}, expValue []byte, ts hlc.Timestamp, shouldWinTie bool,
+) {
+	s.Putter.CPutWithOriginTimestamp(key, value, expValue, ts, shouldWinTie)
+}
+
 func (s *SortingPutter) Put(key, value interface{}) {
 	s.Putter.Put(key, value)
 }
-func (s *SortingPutter) InitPut(key, value interface{}, failOnTombstones bool) {
-	s.Putter.InitPut(key, value, failOnTombstones)
 
-}
 func (s *SortingPutter) Del(key ...interface{}) {
 	s.Putter.Del(key...)
+}
+
+func (s *SortingPutter) CPutBytesEmpty(kys []roachpb.Key, values [][]byte) {
+	kvs := KVBytes{Keys: kys, Values: values}
+	sort.Sort(&kvs)
+	s.Putter.CPutBytesEmpty(kvs.Keys, kvs.Values)
 }
 
 func (s *SortingPutter) CPutValuesEmpty(kys []roachpb.Key, values []roachpb.Value) {
@@ -212,22 +207,10 @@ func (s *SortingPutter) PutBytes(kys []roachpb.Key, values [][]byte) {
 	s.Putter.PutBytes(kvs.Keys, kvs.Values)
 }
 
-func (s *SortingPutter) InitPutBytes(kys []roachpb.Key, values [][]byte) {
-	kvs := KVBytes{Keys: kys, Values: values}
-	sort.Sort(&kvs)
-	s.Putter.InitPutBytes(kvs.Keys, kvs.Values)
-}
-
 func (s *SortingPutter) PutTuples(kys []roachpb.Key, values [][]byte) {
 	kvs := KVBytes{Keys: kys, Values: values}
 	sort.Sort(&kvs)
 	s.Putter.PutTuples(kvs.Keys, kvs.Values)
-}
-
-func (s *SortingPutter) InitPutTuples(kys []roachpb.Key, values [][]byte) {
-	kvs := KVBytes{Keys: kys, Values: values}
-	sort.Sort(&kvs)
-	s.Putter.InitPutTuples(kvs.Keys, kvs.Values)
 }
 
 type kvSparseSliceBulkSource[T kv.GValue] struct {
@@ -275,6 +258,12 @@ type KVBatchAdapter struct {
 
 var _ Putter = &KVBatchAdapter{}
 
+func (k *KVBatchAdapter) CPutWithOriginTimestamp(
+	key, value interface{}, expValue []byte, originTimestamp hlc.Timestamp, shouldWinTie bool,
+) {
+	k.Batch.CPutWithOriginTimestamp(key, value, expValue, originTimestamp, shouldWinTie)
+}
+
 func (k *KVBatchAdapter) CPut(key, value interface{}, expValue []byte) {
 	k.Batch.CPut(key, value, expValue)
 }
@@ -282,12 +271,13 @@ func (k *KVBatchAdapter) CPut(key, value interface{}, expValue []byte) {
 func (k *KVBatchAdapter) Put(key, value interface{}) {
 	k.Batch.Put(key, value)
 }
-func (k *KVBatchAdapter) InitPut(key, value interface{}, failOnTombstones bool) {
-	k.Batch.InitPut(key, value, failOnTombstones)
 
-}
 func (k *KVBatchAdapter) Del(key ...interface{}) {
 	k.Batch.Del(key...)
+}
+
+func (k *KVBatchAdapter) CPutBytesEmpty(kys []roachpb.Key, values [][]byte) {
+	k.Batch.CPutBytesEmpty(&kvSparseSliceBulkSource[[]byte]{kys, values})
 }
 
 func (k *KVBatchAdapter) CPutValuesEmpty(kys []roachpb.Key, values []roachpb.Value) {
@@ -302,14 +292,6 @@ func (k *KVBatchAdapter) PutBytes(kys []roachpb.Key, values [][]byte) {
 	k.Batch.PutBytes(&kvSparseSliceBulkSource[[]byte]{kys, values})
 }
 
-func (k *KVBatchAdapter) InitPutBytes(kys []roachpb.Key, values [][]byte) {
-	k.Batch.InitPutBytes(&kvSparseSliceBulkSource[[]byte]{kys, values})
-}
-
 func (k *KVBatchAdapter) PutTuples(kys []roachpb.Key, values [][]byte) {
 	k.Batch.PutTuples(&kvSparseSliceBulkSource[[]byte]{kys, values})
-}
-
-func (k *KVBatchAdapter) InitPutTuples(kys []roachpb.Key, values [][]byte) {
-	k.Batch.InitPutTuples(&kvSparseSliceBulkSource[[]byte]{kys, values})
 }

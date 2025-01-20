@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package filetable
 
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // ChunkDefaultSize is the default size of each chunk a file will be broken into
@@ -47,10 +43,10 @@ type FileToTableExecutorRows struct {
 // FileToTableSystemExecutor is the interface which defines the methods for the
 // SQL query executor used by the FileToTableSystem
 type FileToTableSystemExecutor interface {
-	Query(ctx context.Context, opName, query string,
+	Query(ctx context.Context, opName redact.RedactableString, query string,
 		user username.SQLUsername,
 		qargs ...interface{}) (*FileToTableExecutorRows, error)
-	Exec(ctx context.Context, opName, query string,
+	Exec(ctx context.Context, opName redact.RedactableString, query string,
 		user username.SQLUsername,
 		qargs ...interface{}) error
 }
@@ -72,7 +68,11 @@ func MakeInternalFileToTableExecutor(db isql.DB) *InternalFileToTableExecutor {
 
 // Query implements the FileToTableSystemExecutor interface.
 func (i *InternalFileToTableExecutor) Query(
-	ctx context.Context, opName, query string, user username.SQLUsername, qargs ...interface{},
+	ctx context.Context,
+	opName redact.RedactableString,
+	query string,
+	user username.SQLUsername,
+	qargs ...interface{},
 ) (*FileToTableExecutorRows, error) {
 	result := FileToTableExecutorRows{}
 	var err error
@@ -86,7 +86,11 @@ func (i *InternalFileToTableExecutor) Query(
 
 // Exec implements the FileToTableSystemExecutor interface.
 func (i *InternalFileToTableExecutor) Exec(
-	ctx context.Context, opName, query string, user username.SQLUsername, qargs ...interface{},
+	ctx context.Context,
+	opName redact.RedactableString,
+	query string,
+	user username.SQLUsername,
+	qargs ...interface{},
 ) error {
 	_, err := i.ie.ExecEx(ctx, opName, nil,
 		sessiondata.InternalExecutorOverride{User: user}, query, qargs...)
@@ -109,7 +113,11 @@ func MakeSQLConnFileToTableExecutor(executor cloud.SQLConnI) *SQLConnFileToTable
 
 // Query implements the FileToTableSystemExecutor interface.
 func (i *SQLConnFileToTableExecutor) Query(
-	ctx context.Context, _, query string, _ username.SQLUsername, qargs ...interface{},
+	ctx context.Context,
+	_ redact.RedactableString,
+	query string,
+	_ username.SQLUsername,
+	qargs ...interface{},
 ) (*FileToTableExecutorRows, error) {
 	result := FileToTableExecutorRows{}
 
@@ -123,7 +131,11 @@ func (i *SQLConnFileToTableExecutor) Query(
 
 // Exec implements the FileToTableSystemExecutor interface.
 func (i *SQLConnFileToTableExecutor) Exec(
-	ctx context.Context, _, query string, _ username.SQLUsername, qargs ...interface{},
+	ctx context.Context,
+	_ redact.RedactableString,
+	query string,
+	_ username.SQLUsername,
+	qargs ...interface{},
 ) error {
 	return i.executor.Exec(ctx, query, qargs...)
 }
@@ -807,7 +819,7 @@ func (f *FileToTableSystem) checkIfFileAndPayloadTableExist(
 		`SELECT table_name FROM [SHOW TABLES FROM %s] WHERE table_name=$1 OR table_name=$2`,
 		databaseSchema)
 	numRows, err := txn.ExecEx(ctx, "tables-exist", txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		tableExistenceQuery, fileTableName, payloadTableName)
 	if err != nil {
 		return false, err
@@ -862,7 +874,7 @@ func (f *FileToTableSystem) grantCurrentUserTablePrivileges(
 	grantQuery := fmt.Sprintf(`GRANT SELECT, INSERT, DROP, DELETE ON TABLE %s, %s TO %s`,
 		f.GetFQFileTableName(), f.GetFQPayloadTableName(), f.username.SQLIdentifier())
 	_, err := txn.ExecEx(ctx, "grant-user-file-payload-table-access", txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		grantQuery)
 	if err != nil {
 		return errors.Wrap(err, "failed to grant access privileges to file and payload tables")
@@ -880,7 +892,7 @@ func (f *FileToTableSystem) revokeOtherUserTablePrivileges(
 users WHERE NOT "username" = 'root' AND NOT "username" = 'admin' AND NOT "username" = $1`
 	it, err := txn.QueryIteratorEx(
 		ctx, "get-users", txn.KV(),
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		getUsersQuery, f.username,
 	)
 	if err != nil {
@@ -902,7 +914,7 @@ users WHERE NOT "username" = 'root' AND NOT "username" = 'admin' AND NOT "userna
 		revokeQuery := fmt.Sprintf(`REVOKE ALL ON TABLE %s, %s FROM %s`,
 			f.GetFQFileTableName(), f.GetFQPayloadTableName(), user.SQLIdentifier())
 		_, err = txn.ExecEx(ctx, "revoke-user-privileges", txn.KV(),
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			revokeQuery)
 		if err != nil {
 			return errors.Wrap(err, "failed to revoke privileges")

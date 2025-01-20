@@ -1,19 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // The structure definitions in this file have been cross-checked against go1.19.
 // Before allowing newer versions, please check that the structures
 // still match with those in go/src/runtime.
 
 //go:build gc && go1.19 && !go1.20
-// +build gc,go1.19,!go1.20
 
 package goschedstats
 

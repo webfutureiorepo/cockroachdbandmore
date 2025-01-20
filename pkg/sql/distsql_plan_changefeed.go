@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -85,7 +80,9 @@ func PlanCDCExpression(
 	p.stmt = makeStatement(statements.Statement[tree.Statement]{
 		AST: cdcExpr,
 		SQL: tree.AsString(cdcExpr),
-	}, clusterunique.ID{} /* queryID */)
+	}, clusterunique.ID{}, /* queryID */
+		tree.FmtFlags(queryFormattingForFingerprintsMask.Get(&p.execCfg.Settings.SV)),
+	)
 
 	p.curPlan.init(&p.stmt, &p.instrumentation)
 	opc := &p.optPlanningCtx
@@ -119,8 +116,10 @@ func PlanCDCExpression(
 	}
 
 	const allowAutoCommit = false
+	const disableTelemetryAndPlanGists = false
 	if err := opc.runExecBuilder(
-		ctx, &p.curPlan, &p.stmt, newExecFactory(ctx, p), memo, p.SemaCtx(), p.EvalContext(), allowAutoCommit,
+		ctx, &p.curPlan, &p.stmt, newExecFactory(ctx, p), memo, p.SemaCtx(),
+		p.EvalContext(), allowAutoCommit, disableTelemetryAndPlanGists,
 	); err != nil {
 		return cdcPlan, err
 	}
@@ -168,11 +167,12 @@ func PlanCDCExpression(
 		return cdcPlan, errors.AssertionFailedf("unable to determine result columns")
 	}
 
-	if len(p.curPlan.subqueryPlans) > 0 || len(p.curPlan.cascades) > 0 || len(p.curPlan.checkPlans) > 0 {
+	if len(p.curPlan.subqueryPlans) > 0 || len(p.curPlan.cascades) > 0 ||
+		len(p.curPlan.checkPlans) > 0 || len(p.curPlan.triggers) > 0 {
 		return cdcPlan, errors.AssertionFailedf("unexpected query structure")
 	}
 
-	planCtx := p.DistSQLPlanner().NewPlanningCtx(ctx, &p.extendedEvalCtx, p, p.txn, DistributionTypeNone)
+	planCtx := p.DistSQLPlanner().NewPlanningCtx(ctx, &p.extendedEvalCtx, p, p.txn, LocalDistribution)
 
 	return CDCExpressionPlan{
 		Plan:         p.curPlan.main,
@@ -267,6 +267,7 @@ func (p CDCExpressionPlan) CollectPlanColumns(collector func(column colinfo.Resu
 // datums must match the number of inputs (and types) expected by this flow
 // (verified below).
 type cdcValuesNode struct {
+	zeroInputPlanNode
 	source        execinfra.RowSource
 	datumRow      []tree.Datum
 	colOrd        []int
@@ -379,7 +380,7 @@ func (c *cdcOptCatalog) ResolveDataSource(
 		return nil, cat.DataSourceName{}, err
 	}
 
-	ds, err := c.newCDCDataSource(desc, c.targetFamilyID)
+	ds, err := c.newCDCDataSource(ctx, desc, c.targetFamilyID)
 	if err != nil {
 		return nil, cat.DataSourceName{}, err
 	}
@@ -397,7 +398,7 @@ func (c *cdcOptCatalog) ResolveDataSourceByID(
 		return nil, false, err
 	}
 
-	ds, err := c.newCDCDataSource(desc, c.targetFamilyID)
+	ds, err := c.newCDCDataSource(ctx, desc, c.targetFamilyID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -421,13 +422,13 @@ func (c *cdcOptCatalog) ResolveFunction(
 
 // newCDCDataSource builds an optTable for the target cdc table and family.
 func (c *cdcOptCatalog) newCDCDataSource(
-	original catalog.TableDescriptor, familyID catid.FamilyID,
+	ctx context.Context, original catalog.TableDescriptor, familyID catid.FamilyID,
 ) (cat.DataSource, error) {
 	d, err := newFamilyTableDescriptor(original, familyID, c.extraColumns)
 	if err != nil {
 		return nil, err
 	}
-	return newOptTable(d, c.codec(), nil /* stats */, emptyZoneConfig)
+	return newOptTable(ctx, d, c.codec(), nil /* stats */, emptyZoneConfig)
 }
 
 // familyTableDescriptor wraps underlying catalog.TableDescriptor,
@@ -454,8 +455,9 @@ func newFamilyTableDescriptor(
 	}
 
 	// Add system columns -- those are always available.
-	includeSet.Add(colinfo.MVCCTimestampColumnID)
-	includeSet.Add(colinfo.TableOIDColumnID)
+	for _, col := range colinfo.AllSystemColumnDescs {
+		includeSet.Add(col.ID)
+	}
 
 	return &familyTableDescriptor{
 		TableDescriptor: original,

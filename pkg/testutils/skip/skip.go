@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package skip
 
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic/metamorphicutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
@@ -136,20 +132,11 @@ func UnderStressWithIssue(t SkippableTest, githubIssueID int, args ...interface{
 	}
 }
 
-// UnderStressRace skips this test during stressrace runs, which are tests
-// run under stress with the -race flag.
-func UnderStressRace(t SkippableTest, args ...interface{}) {
-	t.Helper()
-	if Stress() && util.RaceEnabled {
-		maybeSkip(t, "disabled under stressrace", args...)
-	}
-}
-
 // UnderMetamorphic skips this test during metamorphic runs, which are tests
 // run with the metamorphic build tag.
 func UnderMetamorphic(t SkippableTest, args ...interface{}) {
 	t.Helper()
-	if util.IsMetamorphicBuild() {
+	if metamorphicutil.IsMetamorphicBuild {
 		maybeSkip(t, "disabled under metamorphic", args...)
 	}
 }
@@ -159,7 +146,7 @@ func UnderMetamorphic(t SkippableTest, args ...interface{}) {
 // reason.
 func UnderMetamorphicWithIssue(t SkippableTest, githubIssueID int, args ...interface{}) {
 	t.Helper()
-	if util.IsMetamorphicBuild() {
+	if metamorphicutil.IsMetamorphicBuild {
 		maybeSkip(t, withIssue("disabled under metamorphic", githubIssueID), args...)
 	}
 }

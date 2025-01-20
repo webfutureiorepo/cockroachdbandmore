@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -14,6 +11,7 @@ import (
 	"math/rand"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
@@ -43,11 +41,17 @@ func TestCatchupScanOrdering(t *testing.T) {
 			var nowString string
 			require.NoError(t, s.DB.QueryRow("SELECT cluster_logical_timestamp()").Scan(&nowString))
 
+			var numOfTrans atomic.Int32
+			numOfTrans.Store(1)
 			existingChangeCount := 50
+			prevTime := time.Now()
 			for i := 0; i < existingChangeCount; i++ {
 				if err := randomBankTransfer(numRows, maxTransfer, s.DB); err != nil {
 					t.Fatal(err)
 				}
+				t.Logf("time taken to make the %d-th bank transfer: %v", numOfTrans.Load(), time.Since(prevTime))
+				numOfTrans.Add(1)
+				prevTime = time.Now()
 			}
 
 			bankFeed := feed(t, f, `CREATE CHANGEFEED FOR bank WITH updated, cursor=$1`, nowString)
@@ -56,19 +60,24 @@ func TestCatchupScanOrdering(t *testing.T) {
 			var done int64
 			g := ctxgroup.WithContext(ctx)
 			g.GoCtx(func(ctx context.Context) error {
+				prevTimeTransfer := time.Now()
 				for {
 					if atomic.LoadInt64(&done) > 0 {
 						return nil
 					}
-
 					if err := randomBankTransfer(numRows, maxTransfer, s.DB); err != nil {
 						return err
 					}
+					t.Logf("time taken to make the %d-th bank transfer: %v",
+						numOfTrans.Load(), time.Since(prevTimeTransfer))
+					numOfTrans.Add(1)
+					prevTimeTransfer = time.Now()
 				}
 			})
 
 			v := cdctest.NewOrderValidator(`bank`)
 			seenChanges := 0
+			prevTimeCDC := time.Now()
 			for {
 				m, err := bankFeed.Next()
 				if err != nil {
@@ -78,11 +87,14 @@ func TestCatchupScanOrdering(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					err = v.NoteRow(m.Partition, string(m.Key), string(m.Value), updated)
+					err = v.NoteRow(m.Partition, string(m.Key), string(m.Value), updated, m.Topic)
 					if err != nil {
 						t.Fatal(err)
 					}
 					seenChanges++
+					t.Logf("key: %s, value: %s\n", m.Key, m.Value)
+					t.Logf("time taken to see the %d-th changefeed change: %v", seenChanges, time.Since(prevTimeCDC))
+					prevTimeCDC = time.Now()
 					if seenChanges >= 200 {
 						atomic.StoreInt64(&done, 1)
 						break

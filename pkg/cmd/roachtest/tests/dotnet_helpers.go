@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -81,16 +76,29 @@ func extractFailureFromTRX(contents []byte) ([]string, []status, map[string]stri
 		idToFullName[testDef.TestID] = fmt.Sprintf("%s.%s", testDef.TestMethod.ClassName, testDef.TestMethod.Name)
 	}
 
+	npgsqlFlakeErrors := []string{
+		"Received backend message ReadyForQuery while expecting",
+		"Received unexpected backend message ReadyForQuery",
+		"Got idle connector but State is Copy",
+	}
+	isAnyFlakeError := func(s string) bool {
+		for _, e := range npgsqlFlakeErrors {
+			if strings.Contains(s, e) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Check each result.
 	for _, testCase := range testRun.Results.UnitTestResults {
-		const npgsqlFlakeError = "Received backend message ReadyForQuery while expecting"
 		testName := idToFullName[testCase.TestID]
 		tests = append(tests, testName)
 		if testCase.Outcome == "Skipped" || testCase.Outcome == "NotExecuted" {
 			testStatuses = append(testStatuses, statusSkip)
 		} else if testCase.Outcome == "Passed" {
 			testStatuses = append(testStatuses, statusPass)
-		} else if strings.Contains(testCase.Output.ErrorInfo.Message, npgsqlFlakeError) {
+		} else if isAnyFlakeError(testCase.Output.ErrorInfo.Message) {
 			// npgsql tests frequently flake with this error. Until we resolve this
 			// specific error, we will ignore all tests that failed for that reason.
 			// See https://github.com/cockroachdb/cockroach/issues/108414.

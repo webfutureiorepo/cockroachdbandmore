@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gossip
 
@@ -63,6 +58,7 @@ type infoStore struct {
 
 	nodeID  *base.NodeIDContainer
 	stopper *stop.Stopper
+	metrics Metrics
 
 	Infos           infoMap                  `json:"infos,omitempty"` // Map from key to info
 	NodeAddr        util.UnresolvedAddr      `json:"-"`               // Address of node owning this info store: "host:port"
@@ -161,11 +157,13 @@ func newInfoStore(
 	nodeID *base.NodeIDContainer,
 	nodeAddr util.UnresolvedAddr,
 	stopper *stop.Stopper,
+	metrics Metrics,
 ) *infoStore {
 	is := &infoStore{
 		AmbientContext:  ambient,
 		nodeID:          nodeID,
 		stopper:         stopper,
+		metrics:         metrics,
 		Infos:           make(infoMap),
 		NodeAddr:        nodeAddr,
 		highWaterStamps: map[roachpb.NodeID]int64{},
@@ -278,6 +276,23 @@ func (is *infoStore) getHighWaterStamps() map[roachpb.NodeID]int64 {
 	return copy
 }
 
+// getHighWaterStampsWithDiff returns a copy of the high water stamps that are
+// different from the ones provided in prevFull. It also returns a full map of
+// updated high water stamps. The caller should use this in subsequent calls to
+// this method.
+func (is *infoStore) getHighWaterStampsWithDiff(
+	prevFull map[roachpb.NodeID]int64,
+) (newFull, diff map[roachpb.NodeID]int64) {
+	diff = make(map[roachpb.NodeID]int64)
+	for k, hws := range is.highWaterStamps {
+		if prevFull[k] != hws {
+			prevFull[k] = hws
+			diff[k] = hws
+		}
+	}
+	return prevFull, diff
+}
+
 // registerCallback registers a callback for a key pattern to be
 // invoked whenever new info for a gossip key matching pattern is
 // received. The callback method is invoked with the info key which
@@ -335,9 +350,26 @@ func (is *infoStore) processCallbacks(key string, content roachpb.Value, changed
 
 func (is *infoStore) runCallbacks(key string, content roachpb.Value, callbacks ...Callback) {
 	// Add the callbacks to the callback work list.
+	beforeQueue := timeutil.Now()
+	is.metrics.CallbacksPending.Inc(int64(len(callbacks)))
 	f := func() {
+		afterQueue := timeutil.Now()
 		for _, method := range callbacks {
+			queueDur := afterQueue.Sub(beforeQueue)
+			is.metrics.CallbacksPending.Dec(1)
+			if queueDur >= minCallbackDurationToRecord {
+				is.metrics.CallbacksPendingDuration.RecordValue(queueDur.Nanoseconds())
+			}
+
 			method(key, content)
+
+			afterProcess := timeutil.Now()
+			processDur := afterProcess.Sub(afterQueue)
+			is.metrics.CallbacksProcessed.Inc(1)
+			if processDur > minCallbackDurationToRecord {
+				is.metrics.CallbacksProcessingDuration.RecordValue(processDur.Nanoseconds())
+			}
+			afterQueue = afterProcess // update for next iteration
 		}
 	}
 	is.callbackWorkMu.Lock()

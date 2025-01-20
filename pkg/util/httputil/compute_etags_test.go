@@ -1,23 +1,18 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package httputil
 
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"testing"
 	"testing/fstest"
 
-	"github.com/cockroachdb/cockroach/pkg/util/targz"
+	"github.com/cockroachdb/cockroach/pkg/util/assetbundle"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,7 +79,7 @@ func TestComputeEtags_NilMap(t *testing.T) {
 	require.Errorf(t, result, "Unable to hash files without a hash destination")
 }
 
-func TestComputeEtags_TarGzFS(t *testing.T) {
+func TestComputeEtags_TarFS(t *testing.T) {
 	// Build a tar ball
 	var tarContents bytes.Buffer
 	tarWriter := tar.NewWriter(&tarContents)
@@ -101,20 +96,20 @@ func TestComputeEtags_TarGzFS(t *testing.T) {
 
 	require.NoError(t, tarWriter.Close())
 
-	// GZip-compress the tar ball
-	var tarGzContents bytes.Buffer
-	gzipWriter := gzip.NewWriter(&tarGzContents)
-	_, err := gzipWriter.Write(tarContents.Bytes())
+	// Compress the tar ball
+	var compressedTarContents bytes.Buffer
+	writer, _ := zstd.NewWriter(&compressedTarContents)
+	_, err := writer.Write(tarContents.Bytes())
 	require.NoError(t, err)
-	require.NoError(t, gzipWriter.Close())
+	require.NoError(t, writer.Close())
 
-	// Create an io/fs.FS from the .tar.gz file
-	gzfs, err := targz.AsFS(bytes.NewBuffer(tarGzContents.Bytes()))
+	// Create an io/fs.FS from the .tar.zst file
+	fs, err := assetbundle.AsFS(bytes.NewBuffer(compressedTarContents.Bytes()))
 	require.NoError(t, err)
 
-	// Hash the files in that .tar.gz file system
+	// Hash the files in that .tar.zst file system
 	hashes := make(map[string]string)
-	result := ComputeEtags(gzfs, hashes)
+	result := ComputeEtags(fs, hashes)
 	require.NoError(t, result)
 
 	expected := map[string]string{

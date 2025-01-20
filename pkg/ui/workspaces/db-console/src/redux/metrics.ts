@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * This module maintains the state of CockroachDB time series queries needed by
@@ -15,13 +10,16 @@
  * in the reducer by a unique ID.
  */
 
-import _ from "lodash";
+import { util } from "@cockroachlabs/cluster-ui";
+import clone from "lodash/clone";
+import flatMap from "lodash/flatMap";
+import groupBy from "lodash/groupBy";
+import map from "lodash/map";
 import { Action } from "redux";
-import { delay } from "redux-saga/effects";
-import { take, fork, call, all, put } from "redux-saga/effects";
+import { delay, take, fork, call, all, put } from "redux-saga/effects";
 
-import * as protos from "src/js/protos";
 import { PayloadAction } from "src/interfaces/action";
+import * as protos from "src/js/protos";
 import { queryTimeSeries } from "src/util/api";
 
 type TSRequest = protos.cockroach.ts.tspb.TimeSeriesQueryRequest;
@@ -85,7 +83,7 @@ function metricsQueryReducer(state: MetricsQuery, action: Action) {
     // This component has requested a new set of metrics from the server.
     case REQUEST: {
       const { payload: request } = action as PayloadAction<WithID<TSRequest>>;
-      state = _.clone(state);
+      state = clone(state);
       state.nextRequest = request.data;
       return state;
     }
@@ -95,7 +93,7 @@ function metricsQueryReducer(state: MetricsQuery, action: Action) {
         WithID<RequestWithResponse>
       >;
       if (response.data.request === state.nextRequest) {
-        state = _.clone(state);
+        state = clone(state);
         state.data = response.data.response;
         state.request = response.data.request;
         state.error = undefined;
@@ -105,7 +103,7 @@ function metricsQueryReducer(state: MetricsQuery, action: Action) {
     // The previous query for metrics for this component encountered an error.
     case ERROR: {
       const { payload: error } = action as PayloadAction<WithID<Error>>;
-      state = _.clone(state);
+      state = clone(state);
       state.error = error.data;
       return state;
     }
@@ -137,7 +135,7 @@ export function metricQuerySetReducer(
       // All of these requests should be dispatched to a MetricQuery in the
       // collection. If a MetricQuery with that ID does not yet exist, create it.
       const { id } = (action as PayloadAction<WithID<any>>).payload;
-      state = _.clone(state);
+      state = clone(state);
       state[id] = metricsQueryReducer(
         state[id] || new MetricsQuery(id),
         action,
@@ -172,19 +170,19 @@ export function metricsReducer(
   switch (action.type) {
     // A new fetch request to the server is now in flight.
     case FETCH:
-      state = _.clone(state);
+      state = clone(state);
       state.inFlight += 1;
       return state;
 
     // A fetch request to the server has completed.
     case FETCH_COMPLETE:
-      state = _.clone(state);
+      state = clone(state);
       state.inFlight -= 1;
       return state;
 
     // Other actions may be handled by the metricsQueryReducer.
     default:
-      state = _.clone(state);
+      state = clone(state);
       state.queries = metricQuerySetReducer(state.queries, action);
       return state;
   }
@@ -329,11 +327,11 @@ export function* queryMetricsSaga() {
 export function* batchAndSendRequests(requests: WithID<TSRequest>[]) {
   // Construct queryable batches from the set of queued queries. Queries can
   // be dispatched in a batch if they are querying over the same timespan.
-  const batches = _.groupBy(requests, qr => timespanKey(qr.data));
+  const batches = groupBy(requests, qr => timespanKey(qr.data));
   requests = [];
 
   yield put(fetchMetrics());
-  yield all(_.map(batches, batch => call(sendRequestBatch, batch)));
+  yield all(map(batches, batch => call(sendRequestBatch, batch)));
   yield put(fetchMetricsComplete());
 }
 
@@ -342,8 +340,8 @@ export function* batchAndSendRequests(requests: WithID<TSRequest>[]) {
  */
 export function* sendRequestBatch(requests: WithID<TSRequest>[]) {
   // Flatten the queries from the batch into a single request.
-  const unifiedRequest = _.clone(requests[0].data);
-  unifiedRequest.queries = _.flatMap(requests, req => req.data.queries);
+  const unifiedRequest = clone(requests[0].data);
+  unifiedRequest.queries = flatMap(requests, req => req.data.queries);
 
   let response: protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
   try {
@@ -357,7 +355,7 @@ export function* sendRequestBatch(requests: WithID<TSRequest>[]) {
     // Dispatch the error to each individual MetricsQuery which was
     // requesting data.
     for (const request of requests) {
-      yield put(errorMetrics(request.id, e));
+      yield put(errorMetrics(request.id, util.maybeError(e)));
     }
     return;
   }

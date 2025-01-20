@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ts_test
 
@@ -312,11 +307,16 @@ func TestServerQueryTenant(t *testing.T) {
 
 	systemDB := s.SystemLayer().SQLConn(t)
 
+	// This metric exists in the tenant registry since it's SQL-specific.
+	tenantMetricName := "sql.insert.count"
+	// This metric exists only in the host/system registry since it's process-level.
+	hostMetricName := "sys.rss"
+
 	// Populate data directly.
 	tsdb := s.TsDB().(*ts.DB)
 	if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
 		{
-			Name:   "test.metric",
+			Name:   tenantMetricName,
 			Source: "1",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -330,7 +330,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 		},
 		{
-			Name:   "test.metric",
+			Name:   tenantMetricName,
 			Source: "1-2",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -344,7 +344,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 		},
 		{
-			Name:   "test.metric",
+			Name:   tenantMetricName,
 			Source: "10",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -358,7 +358,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 		},
 		{
-			Name:   "test.metric",
+			Name:   tenantMetricName,
 			Source: "10-2",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -371,6 +371,34 @@ func TestServerQueryTenant(t *testing.T) {
 				},
 			},
 		},
+		{
+			Name:   hostMetricName,
+			Source: "1",
+			Datapoints: []tspb.TimeSeriesDatapoint{
+				{
+					TimestampNanos: 400 * 1e9,
+					Value:          13.0,
+				},
+				{
+					TimestampNanos: 500 * 1e9,
+					Value:          27.0,
+				},
+			},
+		},
+		{
+			Name:   hostMetricName,
+			Source: "10",
+			Datapoints: []tspb.TimeSeriesDatapoint{
+				{
+					TimestampNanos: 400 * 1e9,
+					Value:          31.0,
+				},
+				{
+					TimestampNanos: 500 * 1e9,
+					Value:          57.0,
+				},
+			},
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +408,7 @@ func TestServerQueryTenant(t *testing.T) {
 		Results: []tspb.TimeSeriesQueryResponse_Result{
 			{
 				Query: tspb.Query{
-					Name:    "test.metric",
+					Name:    tenantMetricName,
 					Sources: []string{"1"},
 				},
 				Datapoints: []tspb.TimeSeriesDatapoint{
@@ -396,7 +424,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 			{
 				Query: tspb.Query{
-					Name:    "test.metric",
+					Name:    tenantMetricName,
 					Sources: []string{"1", "10"},
 				},
 				Datapoints: []tspb.TimeSeriesDatapoint{
@@ -420,12 +448,12 @@ func TestServerQueryTenant(t *testing.T) {
 		EndNanos:   500 * 1e9,
 		Queries: []tspb.Query{
 			{
-				Name:    "test.metric",
+				Name:    tenantMetricName,
 				Sources: []string{"1"},
 			},
 			{
 				// Not providing a source (nodeID or storeID) will aggregate across all sources.
-				Name: "test.metric",
+				Name: tenantMetricName,
 			},
 		},
 	})
@@ -443,7 +471,7 @@ func TestServerQueryTenant(t *testing.T) {
 		Results: []tspb.TimeSeriesQueryResponse_Result{
 			{
 				Query: tspb.Query{
-					Name:     "test.metric",
+					Name:     tenantMetricName,
 					Sources:  []string{"1"},
 					TenantID: systemID,
 				},
@@ -460,7 +488,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 			{
 				Query: tspb.Query{
-					Name:     "test.metric",
+					Name:     tenantMetricName,
 					Sources:  []string{"1", "10"},
 					TenantID: systemID,
 				},
@@ -483,12 +511,12 @@ func TestServerQueryTenant(t *testing.T) {
 		EndNanos:   500 * 1e9,
 		Queries: []tspb.Query{
 			{
-				Name:     "test.metric",
+				Name:     tenantMetricName,
 				Sources:  []string{"1"},
 				TenantID: systemID,
 			},
 			{
-				Name:     "test.metric",
+				Name:     tenantMetricName,
 				TenantID: systemID,
 			},
 		},
@@ -507,7 +535,7 @@ func TestServerQueryTenant(t *testing.T) {
 		Results: []tspb.TimeSeriesQueryResponse_Result{
 			{
 				Query: tspb.Query{
-					Name:     "test.metric",
+					Name:     tenantMetricName,
 					Sources:  []string{"1"},
 					TenantID: tenantID,
 				},
@@ -524,7 +552,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 			{
 				Query: tspb.Query{
-					Name:     "test.metric",
+					Name:     tenantMetricName,
 					Sources:  []string{"1", "10"},
 					TenantID: tenantID,
 				},
@@ -557,12 +585,12 @@ func TestServerQueryTenant(t *testing.T) {
 		EndNanos:   500 * 1e9,
 		Queries: []tspb.Query{
 			{
-				Name:    "test.metric",
+				Name:    tenantMetricName,
 				Sources: []string{"1"},
 			},
 			{
 				// Not providing a source (nodeID or storeID) will aggregate across all sources.
-				Name: "test.metric",
+				Name: tenantMetricName,
 			},
 		},
 	})
@@ -573,6 +601,62 @@ func TestServerQueryTenant(t *testing.T) {
 		sort.Strings(r.Sources)
 	}
 	require.Equal(t, expectedTenantResponse, tenantResponse)
+
+	// Test that host metrics are inaccessible to tenant without capability.
+	hostMetricsRequest := &tspb.TimeSeriesQueryRequest{
+		StartNanos: 400 * 1e9,
+		EndNanos:   500 * 1e9,
+		Queries: []tspb.Query{
+			{
+				Name:    hostMetricName,
+				Sources: []string{"1"},
+			},
+		},
+	}
+
+	_, err = tenantClient.Query(context.Background(), hostMetricsRequest)
+	require.Error(t, err)
+
+	// Test that after enabling all metrics capability, host metrics are returned.
+	expectedTenantHostMetricsResponse := &tspb.TimeSeriesQueryResponse{
+		Results: []tspb.TimeSeriesQueryResponse_Result{
+			{
+				Query: tspb.Query{
+					Name:    hostMetricName,
+					Sources: []string{"1"},
+				},
+				Datapoints: []tspb.TimeSeriesDatapoint{
+					{
+						TimestampNanos: 400 * 1e9,
+						Value:          13.0,
+					},
+					{
+						TimestampNanos: 500 * 1e9,
+						Value:          27.0,
+					},
+				},
+			},
+		},
+	}
+	_, err = systemDB.Exec("ALTER TENANT [2] GRANT CAPABILITY can_view_all_metrics=true;\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability = map[tenantcapabilities.ID]string{tenantcapabilities.CanViewAllMetrics: "true"}
+	serverutils.WaitForTenantCapabilities(t, s, tenantID, capability, "")
+
+	tenantResponse, err = tenantClient.Query(context.Background(), &tspb.TimeSeriesQueryRequest{
+		StartNanos: 400 * 1e9,
+		EndNanos:   500 * 1e9,
+		Queries: []tspb.Query{
+			{
+				Name:    hostMetricName,
+				Sources: []string{"1"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, expectedTenantHostMetricsResponse, tenantResponse)
 }
 
 // TestServerQueryMemoryManagement verifies that queries succeed under

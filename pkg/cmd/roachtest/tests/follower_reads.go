@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -16,7 +11,6 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"math/rand"
-	"net/http"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -26,7 +20,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/mixedversion"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -35,14 +31,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
+	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgtype"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sync/errgroup"
 )
 
 func registerFollowerReads(r registry.Registry) {
@@ -54,9 +50,8 @@ func registerFollowerReads(r registry.Registry) {
 			name = name + "/insufficient-quorum"
 		}
 		r.Add(registry.TestSpec{
-			Name:            name,
-			Owner:           registry.OwnerKV,
-			RequiresLicense: true,
+			Name:  name,
+			Owner: registry.OwnerKV,
 			Cluster: r.MakeClusterSpec(
 				6, /* nodeCount */
 				spec.CPU(4),
@@ -77,8 +72,33 @@ func registerFollowerReads(r registry.Registry) {
 					survival:          survival,
 					deadPrimaryRegion: insufficientQuorum,
 				}
-				data := initFollowerReadsDB(ctx, t, c, topology)
-				runFollowerReadsTest(ctx, t, c, topology, rc, data)
+				conns := struct {
+					mu      syncutil.Mutex
+					mapping map[int]*gosql.DB
+				}{
+					mapping: make(map[int]*gosql.DB),
+				}
+				connFunc := func(node int) *gosql.DB {
+					conns.mu.Lock()
+					defer conns.mu.Unlock()
+
+					if _, ok := conns.mapping[node]; !ok {
+						conn := c.Conn(ctx, t.L(), node)
+						conns.mapping[node] = conn
+					}
+
+					return conns.mapping[node]
+				}
+
+				defer func() {
+					for _, c := range conns.mapping {
+						c.Close()
+					}
+				}()
+
+				rng, _ := randutil.NewPseudoRand()
+				data := initFollowerReadsDB(ctx, t, t.L(), c, connFunc, connFunc, rng, topology)
+				runFollowerReadsTest(ctx, t, t.L(), c, rng, topology, rc, data)
 			},
 		})
 	}
@@ -99,22 +119,21 @@ func registerFollowerReads(r registry.Registry) {
 	}
 
 	r.Add(registry.TestSpec{
-		Name:            "follower-reads/mixed-version/single-region",
-		Owner:           registry.OwnerKV,
-		RequiresLicense: true,
+		Name:  "follower-reads/mixed-version/single-region",
+		Owner: registry.OwnerKV,
 		Cluster: r.MakeClusterSpec(
 			4, /* nodeCount */
 			spec.CPU(2),
 		),
 		CompatibleClouds: registry.AllExceptAWS,
-		Suites:           registry.Suites(registry.Nightly),
+		Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
+		Randomized:       true,
 		Run:              runFollowerReadsMixedVersionSingleRegionTest,
 	})
 
 	r.Add(registry.TestSpec{
-		Name:            "follower-reads/mixed-version/survival=region/locality=global/reads=strong",
-		Owner:           registry.OwnerKV,
-		RequiresLicense: true,
+		Name:  "follower-reads/mixed-version/survival=region/locality=global/reads=strong",
+		Owner: registry.OwnerKV,
 		Cluster: r.MakeClusterSpec(
 			6, /* nodeCount */
 			spec.CPU(4),
@@ -122,7 +141,8 @@ func registerFollowerReads(r registry.Registry) {
 			spec.GCEZones("us-east1-b,us-east1-b,us-east1-b,us-west1-b,us-west1-b,europe-west2-b"),
 		),
 		CompatibleClouds: registry.OnlyGCE,
-		Suites:           registry.Suites(registry.Nightly),
+		Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
+		Randomized:       true,
 		Run:              runFollowerReadsMixedVersionGlobalTableTest,
 	})
 }
@@ -184,15 +204,36 @@ type topologySpec struct {
 func runFollowerReadsTest(
 	ctx context.Context,
 	t test.Test,
+	l *logger.Logger,
 	c cluster.Cluster,
+	rng *rand.Rand,
 	topology topologySpec,
 	rc readConsistency,
 	data map[int]int64,
 ) {
+	// Set the default_transaction_isolation variable for each connection to a
+	// random isolation level, to ensure that the test exercises all available
+	// isolation levels. These isolation levels may be promoted to different
+	// levels in the mixed-version variant of this test than they are on master.
+	isoLevels := []string{"read committed", "snapshot", "serializable"}
+	require.NoError(t, func() error {
+		db := c.Conn(ctx, l, 1)
+		defer db.Close()
+		err := enableIsolationLevels(ctx, t, db)
+		if err != nil && strings.Contains(err.Error(), "unknown cluster setting") {
+			// v23.1 and below does not have these cluster settings. That's fine, as
+			// all isolation levels will be transparently promoted to "serializable".
+			err = nil
+		}
+		return err
+	}())
+
 	var conns []*gosql.DB
 	for i := 0; i < c.Spec().NodeCount; i++ {
-		conns = append(conns, c.Conn(ctx, t.L(), i+1))
-		defer conns[i].Close()
+		isoLevel := isoLevels[rng.Intn(len(isoLevels))]
+		conn := c.Conn(ctx, l, i+1, option.ConnectionOption("default_transaction_isolation", isoLevel))
+		defer conn.Close()
+		conns = append(conns, conn)
 	}
 	db := conns[0]
 
@@ -238,8 +279,8 @@ func runFollowerReadsTest(
 			return nil
 		}
 	}
-	doSelects := func(ctx context.Context, node int) func() error {
-		return func() error {
+	doSelects := func(node int) task.Func {
+		return func(ctx context.Context, _ *logger.Logger) error {
 			for ctx.Err() == nil {
 				k, v := chooseKV()
 				err := verifySelect(ctx, node, k, v)()
@@ -278,10 +319,7 @@ func runFollowerReadsTest(
 		),
 	)
 	if err != nil {
-		// 20.2 doesn't have this setting.
-		if !strings.Contains(err.Error(), "unknown cluster setting") {
-			t.Fatal(err)
-		}
+		t.Fatal(err)
 	}
 
 	// Read the follower read counts before issuing the follower reads to observe
@@ -296,26 +334,25 @@ func runFollowerReadsTest(
 	// Perform reads on each node and ensure we get the expected value. Do so for
 	// 15 seconds to give closed timestamps a chance to propagate and caches time
 	// to warm up.
-	t.L().Printf("warming up reads")
-	g, gCtx := errgroup.WithContext(ctx)
+	l.Printf("warming up reads")
+	g := t.NewGroup(task.WithContext(ctx))
+
 	k, v := chooseKV()
 	until := timeutil.Now().Add(15 * time.Second)
 	for i := 1; i <= c.Spec().NodeCount; i++ {
-		fn := verifySelect(gCtx, i, k, v)
-		g.Go(func() error {
+		g.Go(func(gCtx context.Context, l *logger.Logger) error {
+			fn := verifySelect(gCtx, i, k, v)
 			for {
 				if timeutil.Now().After(until) {
 					return nil
 				}
 				if err := fn(); err != nil {
-					return err
+					return errors.Wrap(err, "error verifying node values")
 				}
 			}
 		})
 	}
-	if err := g.Wait(); err != nil {
-		t.Fatalf("error verifying node values: %v", err)
-	}
+	g.Wait()
 	// Verify that the follower read count increments on at least two nodes -
 	// which we expect to be in the non-primary regions.
 	expNodesToSeeFollowerReads := 2
@@ -340,38 +377,40 @@ func runFollowerReadsTest(
 		if topology.deadPrimaryRegion && i <= 3 {
 			stopOpts := option.DefaultStopOpts()
 			stopOpts.RoachprodOpts.Sig = 9
-			c.Stop(ctx, t.L(), stopOpts, c.Node(i))
+			c.Stop(ctx, l, stopOpts, c.Node(i))
 			deadNodes[i] = struct{}{}
 		} else {
 			liveNodes[i] = struct{}{}
 		}
 	}
 
-	t.L().Printf("starting read load")
+	l.Printf("starting read load")
 	const loadDuration = 4 * time.Minute
 	timeoutCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	time.AfterFunc(loadDuration, func() {
-		t.L().Printf("stopping load")
+		l.Printf("stopping load")
 		cancel()
 	})
-	g, gCtx = errgroup.WithContext(timeoutCtx)
+	g = t.NewGroup(task.WithContext(timeoutCtx), task.ErrorHandler(
+		func(_ context.Context, name string, l *logger.Logger, err error) error {
+			return errors.Wrapf(err, "error reading data")
+		},
+	))
 	const concurrency = 32
 	var cur int
 	for i := 0; cur < concurrency; i++ {
 		node := i%c.Spec().NodeCount + 1
 		if _, ok := liveNodes[node]; ok {
-			g.Go(doSelects(gCtx, node))
+			g.Go(doSelects(node))
 			cur++
 		}
 	}
 	start := timeutil.Now()
 
-	if err := g.Wait(); err != nil && timeoutCtx.Err() == nil {
-		t.Fatalf("error reading data: %v", err)
-	}
+	g.Wait()
 	end := timeutil.Now()
-	t.L().Printf("load stopped")
+	l.Printf("load stopped")
 
 	// Depending on the test's topology, we expect a different set of nodes to
 	// perform follower reads.
@@ -401,7 +440,7 @@ func runFollowerReadsTest(
 			expectedLowRatioNodes = 1
 		}
 	}
-	verifyHighFollowerReadRatios(ctx, t, c, liveNodes, start, end, expectedLowRatioNodes)
+	verifyHighFollowerReadRatios(ctx, t, l, c, liveNodes, start, end, expectedLowRatioNodes)
 
 	if topology.multiRegion {
 		// Perform a ts query to verify that the SQL latencies were well below the
@@ -409,31 +448,44 @@ func runFollowerReadsTest(
 		//
 		// We don't do this for singleRegion since, in a single region, there's no
 		// low latency and high-latency regimes.
-		verifySQLLatency(ctx, t, c, liveNodes, start, end, maxLatencyThreshold)
+		verifySQLLatency(ctx, t, l, c, liveNodes, start, end, maxLatencyThreshold)
 	}
 
 	// Restart dead nodes, if necessary.
 	for i := range deadNodes {
-		c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.Node(i))
+		c.Start(ctx, l, option.DefaultStartOpts(), install.MakeClusterSettings(), c.Node(i))
 	}
 }
 
 // initFollowerReadsDB initializes a database for the follower reads test.
 // Returns the data inserted into the test table.
+//
+// The `connFunc` (and `systemConnFunc`) parameters capture how to
+// connect to the database in a test run. This allows us to use the
+// mixedersion helpers in mixed-version tests. We need to connect to
+// the system tenant to change relevant SystemOnly cluster settings,
+// and some mixed-version tests run in a multi-tenant deployment.
 func initFollowerReadsDB(
-	ctx context.Context, t test.Test, c cluster.Cluster, topology topologySpec,
+	ctx context.Context,
+	t test.Test,
+	l *logger.Logger,
+	c cluster.Cluster,
+	connectFunc, systemConnectFunc func(int) *gosql.DB,
+	rng *rand.Rand,
+	topology topologySpec,
 ) (data map[int]int64) {
-	db := c.Conn(ctx, t.L(), 1)
-	defer db.Close()
+	systemDB := systemConnectFunc(1)
+	db := connectFunc(1)
+
 	// Disable load based splitting and range merging because splits and merges
 	// interfere with follower reads. This test's workload regularly triggers load
 	// based splitting in the first phase creating small ranges which later
 	// in the test are merged. The merging tends to coincide with the final phase
 	// of the test which attempts to observe low latency reads leading to
 	// flakiness.
-	_, err := db.ExecContext(ctx, "SET CLUSTER SETTING kv.range_split.by_load_enabled = 'false'")
+	_, err := systemDB.ExecContext(ctx, "SET CLUSTER SETTING kv.range_split.by_load_enabled = 'false'")
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, "SET CLUSTER SETTING kv.range_merge.queue_enabled = 'false'")
+	_, err = systemDB.ExecContext(ctx, "SET CLUSTER SETTING kv.range_merge.queue_enabled = 'false'")
 	require.NoError(t, err)
 
 	// Check the cluster regions.
@@ -481,7 +533,7 @@ func initFollowerReadsDB(
 	}
 
 	// Wait until the table has completed up-replication.
-	t.L().Printf("waiting for up-replication...")
+	l.Printf("waiting for up-replication...")
 	retryOpts := retry.Options{MaxBackoff: 15 * time.Second}
 	for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
 		// Check that the table has the expected number and location of voting and
@@ -529,7 +581,7 @@ func initFollowerReadsDB(
 			ctx, q1, votersCount, nonVotersCount, pq.Array(votersSet), pq.Array(nonVotersSet),
 		).Scan(&ok, &voters, &nonVoters)
 		if errors.Is(err, gosql.ErrNoRows) {
-			t.L().Printf("up-replication not complete, missing range")
+			l.Printf("up-replication not complete, missing range")
 			continue
 		}
 		require.NoError(t, err)
@@ -538,9 +590,9 @@ func initFollowerReadsDB(
 			break
 		}
 
-		t.L().Printf("up-replication not complete, "+
-			"found voters = %v (want %d in set %v) and non_voters = %s (want %d in set %v)",
-			voters, votersCount, votersSet, nonVoters, votersCount, votersSet)
+		l.Printf("up-replication not complete, "+
+			"found voters = %v (want %d in set %v) and non_voters = %v (want %d in set %v)",
+			voters, votersCount, votersSet, nonVoters, nonVotersCount, nonVotersSet)
 	}
 
 	if topology.multiRegion {
@@ -569,7 +621,7 @@ func initFollowerReadsDB(
 				// If we're going to be killing nodes in a multi-region cluster, make
 				// sure system ranges have all upreplicated as expected as well. Do so
 				// using replication reports.
-				WaitForUpdatedReplicationReport(ctx, t, db)
+				roachtestutil.WaitForUpdatedReplicationReport(ctx, t, db)
 
 				var expAtRisk int
 				if topology.survival == zone {
@@ -597,7 +649,7 @@ func initFollowerReadsDB(
 					break
 				}
 
-				t.L().Printf("rebalancing not complete, expected %d at risk ranges, "+
+				l.Printf("rebalancing not complete, expected %d at risk ranges, "+
 					"found %d", expAtRisk, atRisk)
 			}
 		}
@@ -607,25 +659,23 @@ func initFollowerReadsDB(
 	const concurrency = 32
 	sem := make(chan struct{}, concurrency)
 	data = make(map[int]int64)
-	insert := func(ctx context.Context, k int) func() error {
-		v := rand.Int63()
+	insert := func(k int) task.Func {
+		v := rng.Int63()
 		data[k] = v
-		return func() error {
+		return func(ctx context.Context, _ *logger.Logger) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			_, err := db.ExecContext(ctx, "INSERT INTO mr_db.test VALUES ( $1, $2 )", k, v)
-			return err
+			return errors.Wrap(err, "failed to insert data")
 		}
 	}
 
 	// Insert the data.
-	g, gCtx := errgroup.WithContext(ctx)
+	g := t.NewGroup(task.WithContext(ctx))
 	for i := 0; i < rows; i++ {
-		g.Go(insert(gCtx, i))
+		g.Go(insert(i))
 	}
-	if err := g.Wait(); err != nil {
-		t.Fatalf("failed to insert data: %v", err)
-	}
+	g.Wait()
 
 	return data
 }
@@ -650,6 +700,7 @@ func computeFollowerReadDuration(ctx context.Context, db *gosql.DB) (time.Durati
 func verifySQLLatency(
 	ctx context.Context,
 	t test.Test,
+	l *logger.Logger,
 	c cluster.Cluster,
 	liveNodes map[int]struct{},
 	start, end time.Time,
@@ -661,11 +712,11 @@ func verifySQLLatency(
 		adminNode = i
 		break
 	}
-	adminURLs, err := c.ExternalAdminUIAddr(ctx, t.L(), c.Node(adminNode))
+	adminURLs, err := c.ExternalAdminUIAddr(ctx, l, c.Node(adminNode))
 	if err != nil {
 		t.Fatal(err)
 	}
-	url := "http://" + adminURLs[0] + "/ts/query"
+	url := "https://" + adminURLs[0] + "/ts/query"
 	var sources []string
 	for i := range liveNodes {
 		sources = append(sources, strconv.Itoa(i))
@@ -681,8 +732,9 @@ func verifySQLLatency(
 			SourceAggregator: tspb.TimeSeriesQueryAggregator_MAX.Enum(),
 		}},
 	}
+	client := roachtestutil.DefaultHTTPClient(c, l)
 	var response tspb.TimeSeriesQueryResponse
-	if err := httputil.PostProtobuf(ctx, http.Client{}, url, &request, &response); err != nil {
+	if err := client.PostProtobuf(ctx, url, &request, &response); err != nil {
 		t.Fatal(err)
 	}
 	perTenSeconds := response.Results[0].Datapoints
@@ -712,6 +764,7 @@ func verifySQLLatency(
 func verifyHighFollowerReadRatios(
 	ctx context.Context,
 	t test.Test,
+	l *logger.Logger,
 	c cluster.Cluster,
 	liveNodes map[int]struct{},
 	start, end time.Time,
@@ -729,9 +782,12 @@ func verifyHighFollowerReadRatios(
 		adminNode = i
 		break
 	}
-	adminURLs, err := c.ExternalAdminUIAddr(ctx, t.L(), c.Node(adminNode))
+	adminURLs, err := c.ExternalAdminUIAddr(
+		ctx, l, c.Node(adminNode), option.VirtualClusterName(install.SystemInterfaceName),
+	)
 	require.NoError(t, err)
-	url := "http://" + adminURLs[0] + "/ts/query"
+
+	url := "https://" + adminURLs[0] + "/ts/query"
 	request := tspb.TimeSeriesQueryRequest{
 		StartNanos: start.UnixNano(),
 		EndNanos:   end.UnixNano(),
@@ -751,9 +807,13 @@ func verifyHighFollowerReadRatios(
 			Derivative: tspb.TimeSeriesQueryDerivative_NON_NEGATIVE_DERIVATIVE.Enum(),
 		})
 	}
-
+	// Make sure to connect to the system tenant in case this test
+	// is running on a multitenant deployment.
+	client := roachtestutil.DefaultHTTPClient(
+		c, l, roachtestutil.VirtualCluster(install.SystemInterfaceName),
+	)
 	var response tspb.TimeSeriesQueryResponse
-	if err := httputil.PostProtobuf(ctx, http.Client{}, url, &request, &response); err != nil {
+	if err := client.PostProtobuf(ctx, url, &request, &response); err != nil {
 		t.Fatal(err)
 	}
 
@@ -784,7 +844,7 @@ func verifyHighFollowerReadRatios(
 		}
 	}
 
-	t.L().Printf("interval stats: %s", intervalsToString(stats))
+	l.Printf("interval stats: %s", intervalsToString(stats))
 
 	// Now count how many intervals have more than the tolerated number of nodes
 	// with low follower read ratios.
@@ -833,14 +893,21 @@ const followerReadsMetric = "follower_reads_success_count"
 // according to the metric.
 func getFollowerReadCounts(ctx context.Context, t test.Test, c cluster.Cluster) ([]int, error) {
 	followerReadCounts := make([]int, c.Spec().NodeCount)
-	getFollowerReadCount := func(ctx context.Context, node int) func() error {
-		return func() error {
-			adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, t.L(), c.Node(node))
+	getFollowerReadCount := func(node int) task.Func {
+		return func(ctx context.Context, l *logger.Logger) error {
+			adminUIAddrs, err := c.ExternalAdminUIAddr(
+				ctx, l, c.Node(node), option.VirtualClusterName(install.SystemInterfaceName),
+			)
 			if err != nil {
 				return err
 			}
-			url := "http://" + adminUIAddrs[0] + "/_status/vars"
-			resp, err := httputil.Get(ctx, url)
+			url := "https://" + adminUIAddrs[0] + "/_status/vars"
+			// Make sure to connect to the system tenant in case this test
+			// is running on a multitenant deployment.
+			client := roachtestutil.DefaultHTTPClient(
+				c, l, roachtestutil.VirtualCluster(install.SystemInterfaceName),
+			)
+			resp, err := client.Get(ctx, url)
 			if err != nil {
 				return err
 			}
@@ -864,11 +931,11 @@ func getFollowerReadCounts(ctx context.Context, t test.Test, c cluster.Cluster) 
 			return nil
 		}
 	}
-	g, gCtx := errgroup.WithContext(ctx)
+	g := t.NewErrorGroup(task.WithContext(ctx))
 	for i := 1; i <= c.Spec().NodeCount; i++ {
-		g.Go(getFollowerReadCount(gCtx, i))
+		g.Go(getFollowerReadCount(i), task.Name(fmt.Sprintf("follower-read-count-%d", i)))
 	}
-	if err := g.Wait(); err != nil {
+	if err := g.WaitE(); err != nil {
 		return nil, err
 	}
 	return followerReadCounts, nil
@@ -908,7 +975,19 @@ func runFollowerReadsMixedVersionSingleRegionTest(
 	ctx context.Context, t test.Test, c cluster.Cluster,
 ) {
 	topology := topologySpec{multiRegion: false}
-	runFollowerReadsMixedVersionTest(ctx, t, c, topology, exactStaleness)
+	runFollowerReadsMixedVersionTest(ctx, t, c, topology, exactStaleness,
+		// This test is incompatible with separate process mode as it queries metrics from
+		// TSDB. Separate process clusters currently do not write to TSDB as serverless uses
+		// third party metrics persistence solutions instead.
+		//
+		// TODO(darrylwong): Once #137625 is complete, we can switch to querying prometheus using
+		// `clusterstats` instead and re-enable separate process.
+		mixedversion.EnabledDeploymentModes(
+			mixedversion.SystemOnlyDeployment,
+			mixedversion.SharedProcessDeployment,
+		),
+		mixedversion.MinimumSupportedVersion("v23.2.0"),
+	)
 }
 
 // runFollowerReadsMixedVersionGlobalTableTest runs a multi-region follower-read
@@ -928,6 +1007,23 @@ func runFollowerReadsMixedVersionGlobalTableTest(
 		// Use a longer upgrade timeout to give the migrations enough time to finish
 		// considering the cross-region latency.
 		mixedversion.UpgradeTimeout(60*time.Minute),
+
+		// This test is flaky when upgrading from v23.1 to v23.2 for follower
+		// reads in shared-process deployments. There were a number of changes
+		// to tenant health checks since then which appear to have addressed
+		// this issue.
+		mixedversion.MinimumSupportedVersion("v23.2.0"),
+
+		// This test is incompatible with separate process mode as it queries metrics from
+		// TSDB. Separate process clusters currently do not write to TSDB as serverless uses
+		// third party metrics persistence solutions instead.
+		//
+		// TODO(darrylwong): Once #137625 is complete, we can switch to querying prometheus using
+		// `clusterstats` instead and re-enable separate process.
+		mixedversion.EnabledDeploymentModes(
+			mixedversion.SystemOnlyDeployment,
+			mixedversion.SharedProcessDeployment,
+		),
 	)
 }
 
@@ -941,24 +1037,22 @@ func runFollowerReadsMixedVersionTest(
 	rc readConsistency,
 	opts ...mixedversion.CustomOption,
 ) {
-	// The http requests to the admin UI performed by the test don't play
-	// well with secure clusters. As of the time of writing, they return
-	// either of the following errors:
-	//  tls: failed to verify certificate: x509: “node” certificate is not standards compliant
-	//  tls: failed to verify certificate: x509: certificate signed by unknown authority
-	//
-	// Disable secure mode for simplicity.
-	opts = append(opts, mixedversion.ClusterSettingOption(install.SecureOption(false)))
 	mvt := mixedversion.NewTest(ctx, t, t.L(), c, c.All(), opts...)
 
 	var data map[int]int64
 	runInit := func(ctx context.Context, l *logger.Logger, r *rand.Rand, h *mixedversion.Helper) error {
-		data = initFollowerReadsDB(ctx, t, c, topology)
+		if topology.multiRegion {
+			if err := enableTenantMultiRegion(l, r, h); err != nil {
+				return err
+			}
+		}
+
+		data = initFollowerReadsDB(ctx, t, l, c, h.Connect, h.System.Connect, r, topology)
 		return nil
 	}
 
 	runFollowerReads := func(ctx context.Context, l *logger.Logger, r *rand.Rand, h *mixedversion.Helper) error {
-		runFollowerReadsTest(ctx, t, c, topology, rc, data)
+		runFollowerReadsTest(ctx, t, l, c, r, topology, rc, data)
 		return nil
 	}
 
@@ -966,4 +1060,16 @@ func runFollowerReadsMixedVersionTest(
 	mvt.InMixedVersion("run follower reads", runFollowerReads)
 	mvt.AfterUpgradeFinalized("run follower reads", runFollowerReads)
 	mvt.Run()
+}
+
+// enableTenantMultiRegion enables multi-region features on the
+// mixedversion tenant if necessary (no-op otherwise).
+func enableTenantMultiRegion(l *logger.Logger, r *rand.Rand, h *mixedversion.Helper) error {
+	if !h.IsMultitenant() || h.Context().FromVersion.AtLeast(mixedversion.TenantsAndSystemAlignedSettingsVersion) {
+		return nil
+	}
+
+	const setting = "sql.multi_region.allow_abstractions_for_secondary_tenants.enabled"
+	err := setTenantSetting(l, r, h, setting, true)
+	return errors.Wrapf(err, "setting %s", setting)
 }

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colenc
 
@@ -23,7 +18,7 @@ import (
 
 // MarshalLegacy is the vectorized version of the row based valueside.MarshalLegacy.
 // It plucks off the vectorized types for special handling and delegates the rest.
-func MarshalLegacy(colType *types.T, vec coldata.Vec, row int) (roachpb.Value, error) {
+func MarshalLegacy(colType *types.T, vec *coldata.Vec, row int) (roachpb.Value, error) {
 	var r roachpb.Value
 
 	if vec.Nulls().NullAt(row) {

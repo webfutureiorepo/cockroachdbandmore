@@ -1,5 +1,3 @@
-# LogicTest: !local-mixed-23.1
-
 statement ok
 CREATE TABLE xy (x INT, y INT);
 
@@ -40,8 +38,12 @@ SELECT * FROM xy;
 statement ok
 DROP TABLE IF EXISTS xy;
 CREATE TABLE xy (x INT, y TEXT);
+
+onlyif config local-legacy-schema-changer local-mixed-24.3
+statement ok
 SET enable_experimental_alter_column_type_general=true;
 
+skipif config local-legacy-schema-changer
 statement ok
 ALTER TABLE xy ALTER COLUMN y TYPE REFCURSOR USING y::REFCURSOR;
 

@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -106,14 +101,26 @@ func readProvisionalVal(
 
 }
 
-// acquireLocksOnKeys acquires locks on each of the keys in the result of a
-// {,Reverse}ScanRequest. The locks are held by the specified transaction with
-// the supplied locks strength and durability. The list of LockAcquisitions is
-// returned to the caller, which the caller must accumulate in its result set.
+// acquireLocksOnKeys checks for conflicts, and if none are found, acquires
+// locks on each of the keys in the result of a {,Reverse}ScanRequest. The
+// acquired locks are held by the specified transaction[1] with the supplied
+// lock strength and durability. The list of LockAcquisitions is returned to the
+// caller, which the caller must accumulate in its result set.
 //
-// It is possible to run into a lock conflict error when trying to acquire a
-// lock on one of the keys. In such cases, a LockConflictError is returned to
+// Even though the function is called post evaluation, at which point requests
+// have already sequenced with all locks in the in-memory lock table, there may
+// still be (currently undiscovered) replicated locks. This is because the
+// in-memory lock table only has a partial view of all locks for a range.
+// Therefore, the first thing we do is check for replicated lock conflicts that
+// may have been missed. If any are found, a LockConflictError is returned to
 // the caller.
+//
+// [1] The caller is allowed to pass in a nil transaction; this means that
+// acquireLocksOnKeys can be called on behalf of non-transactional requests.
+// Non-transactional requests are not allowed to hold locks that outlive the
+// lifespan of their request. As such, an empty list is returned for them.
+// However, non-transactional requests do conflict with locks held by concurrent
+// transactional requests, so they may return a LockConflictError.
 func acquireLocksOnKeys(
 	ctx context.Context,
 	readWriter storage.ReadWriter,
@@ -125,18 +132,18 @@ func acquireLocksOnKeys(
 	ms *enginepb.MVCCStats,
 	settings *cluster.Settings,
 ) ([]roachpb.LockAcquisition, error) {
-	acquiredLocks := make([]roachpb.LockAcquisition, scanRes.NumKeys)
+	acquiredLocks := make([]roachpb.LockAcquisition, 0, scanRes.NumKeys)
 	switch scanFmt {
 	case kvpb.BATCH_RESPONSE:
-		var i int
 		err := storage.MVCCScanDecodeKeyValues(scanRes.KVData, func(key storage.MVCCKey, _ []byte) error {
 			k := copyKey(key.Key)
 			acq, err := acquireLockOnKey(ctx, readWriter, txn, str, dur, k, ms, settings)
 			if err != nil {
 				return err
 			}
-			acquiredLocks[i] = acq
-			i++
+			if !acq.Empty() {
+				acquiredLocks = append(acquiredLocks, acq)
+			}
 			return nil
 		})
 		if err != nil {
@@ -144,13 +151,15 @@ func acquireLocksOnKeys(
 		}
 		return acquiredLocks, nil
 	case kvpb.KEY_VALUES:
-		for i, row := range scanRes.KVs {
+		for _, row := range scanRes.KVs {
 			k := copyKey(row.Key)
 			acq, err := acquireLockOnKey(ctx, readWriter, txn, str, dur, k, ms, settings)
 			if err != nil {
 				return nil, err
 			}
-			acquiredLocks[i] = acq
+			if !acq.Empty() {
+				acquiredLocks = append(acquiredLocks, acq)
+			}
 		}
 		return acquiredLocks, nil
 	case kvpb.COL_BATCH_RESPONSE:
@@ -160,13 +169,26 @@ func acquireLocksOnKeys(
 	}
 }
 
-// acquireLockOnKey acquires a lock on the specified key. The lock is acquired
-// by the specified transaction with the supplied lock strength and durability.
-// The resultant lock acquisition struct is returned, which the caller must
-// accumulate in its result set.
+// acquireLockOnKey checks for conflicts, and if non are found, acquires a lock
+// on the specified key. The lock is acquired by the specified transaction[1]
+// with the supplied lock strength and durability. The resultant lock
+// acquisition struct is returned, which the caller must accumulate in its
+// result set.
 //
-// It is possible for lock acquisition to run into a lock conflict error, in
-// which case a LockConflictError is returned to the caller.
+// Even though the function is called post evaluation, at which point requests
+// have already sequenced with all locks in the in-memory lock table, there may
+// still be (currently undiscovered) replicated locks. This is because the
+// in-memory lock table only has a partial view of all locks for a range.
+// Therefore, the first thing we do is check for replicated lock conflicts that
+// may have been missed. If any are found, a LockConflictError is returned to
+// the caller.
+//
+// [1] The caller is allowed to pass in a nil transaction; this means that
+// acquireLockOnKey can be called on behalf of non-transactional requests.
+// Non-transactional requests are not allowed to hold locks that outlive the
+// lifespan of their request. As such, an empty lock acquisition is returned for
+// them. However, non-transactional requests do conflict with locks held by
+// concurrent transactional requests, so they may return a LockConflictError.
 func acquireLockOnKey(
 	ctx context.Context,
 	readWriter storage.ReadWriter,
@@ -178,6 +200,21 @@ func acquireLockOnKey(
 	settings *cluster.Settings,
 ) (roachpb.LockAcquisition, error) {
 	maxLockConflicts := storage.MaxConflictsPerLockConflictError.Get(&settings.SV)
+	targetLockConflictBytes := storage.TargetBytesPerLockConflictError.Get(&settings.SV)
+	if txn == nil {
+		// Non-transactional requests are not allowed to acquire locks that outlive
+		// the request's lifespan. However, they may conflict with locks held by
+		// other concurrent transactional requests. Evaluation up until this point
+		// has only scanned for (and not found any) conflicts with locks in the
+		// in-memory lock table. This includes all unreplicated locks and contended
+		// replicated locks. We haven't considered conflicts with un-contended
+		// replicated locks -- do so now.
+		//
+		// NB: The supplied durability is insignificant for non-transactional
+		// requests.
+		return roachpb.LockAcquisition{},
+			storage.MVCCCheckForAcquireLock(ctx, readWriter, txn, str, key, maxLockConflicts, targetLockConflictBytes)
+	}
 	switch dur {
 	case lock.Unreplicated:
 		// Evaluation up until this point has only scanned for (and not found any)
@@ -185,7 +222,7 @@ func acquireLockOnKey(
 		// unreplicated locks and contended replicated locks. We haven't considered
 		// conflicts with un-contended replicated locks -- we need to do so before
 		// we can acquire our own unreplicated lock; do so now.
-		err := storage.MVCCCheckForAcquireLock(ctx, readWriter, txn, str, key, maxLockConflicts)
+		err := storage.MVCCCheckForAcquireLock(ctx, readWriter, txn, str, key, maxLockConflicts, targetLockConflictBytes)
 		if err != nil {
 			return roachpb.LockAcquisition{}, err
 		}
@@ -196,7 +233,7 @@ func acquireLockOnKey(
 		// conflicts with un-contended replicated locks -- we need to do so before
 		// we can acquire our own replicated lock; do that now, and also acquire
 		// the replicated lock if no conflicts are found.
-		if err := storage.MVCCAcquireLock(ctx, readWriter, txn, str, key, ms, maxLockConflicts); err != nil {
+		if err := storage.MVCCAcquireLock(ctx, readWriter, txn, str, key, ms, maxLockConflicts, targetLockConflictBytes); err != nil {
 			return roachpb.LockAcquisition{}, err
 		}
 	default:
@@ -323,7 +360,8 @@ func (ltv *txnBoundReplicatedLockTableView) IsKeyLockedByConflictingTxn(
 	}
 	// TODO(arul): We could conflict with multiple (shared) locks here but we're
 	// only returning the first one. We could return all of them instead.
-	err := storage.MVCCCheckForAcquireLock(ctx, ltv.reader, ltv.txn, str, key, 1 /* maxConflicts */)
+	err := storage.MVCCCheckForAcquireLock(ctx, ltv.reader, ltv.txn, str, key, 1, /* maxConflicts */
+		0 /* targetLockConflictBytes */)
 	if err != nil {
 		if lcErr := (*kvpb.LockConflictError)(nil); errors.As(err, &lcErr) {
 			return true, &lcErr.Locks[0].Txn, nil

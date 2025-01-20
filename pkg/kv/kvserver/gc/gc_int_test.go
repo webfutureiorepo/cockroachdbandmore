@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gc_test
 
@@ -36,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
@@ -44,7 +40,7 @@ import (
 // smallEngineBlocks configures Pebble with a block size of 1 byte, to provoke
 // bugs in time-bound iterators. We disable this under race, due to the slowdown.
 var smallEngineBlocks = !util.RaceEnabled &&
-	util.ConstantWithMetamorphicTestBool("small-engine-blocks", false)
+	metamorphic.ConstantWithTestBool("small-engine-blocks", false)
 
 func init() {
 	randutil.SeedForTests()
@@ -202,10 +198,6 @@ WHERE 'kv' IN (
 					for _, id := range rangeIDs {
 						stats := getRangeStats(t, id)
 						t.Logf("range %d stats: %s", id, &stats)
-						// Test can't give meaningful results if stats contain estimates.
-						// Test also doesn't perform any operations that result in estimated stats
-						// being created, so it is a failure in the environment if that happens.
-						require.Zerof(t, stats.ContainsEstimates, "we must not have estimates")
 						if stats.RangeKeyCount > 0 || stats.KeyCount > 0 {
 							nonEmptyRangeIDs = append(nonEmptyRangeIDs, id)
 						}

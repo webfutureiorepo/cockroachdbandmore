@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package contentionutils
 
@@ -15,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/stretchr/testify/require"
@@ -117,6 +114,33 @@ func TestConcurrentWriterGuard(t *testing.T) {
 	}
 }
 
+func TestConcurrentBufferGuard_ForceSyncExec(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	t.Run("executes function prior to onBufferFullSync", func(t *testing.T) {
+		// Construct a guard whose onBufferFullSync fn simply checks that a
+		// condition was set prior to execution. We can later make assertions
+		// on the result.
+		conditionSet := false
+		fnCalled := false
+		guard := NewConcurrentBufferGuard(
+			func() int64 {
+				return 1024 // 1K
+			}, /* limiter */
+			func(currentWriterIdx int64) {
+				fnCalled = conditionSet
+			}, /* onBufferFullSync */
+		)
+		// Execute and verify our func was called prior to the
+		// onBufferFullSync call.
+		guard.ForceSyncExec(func() {
+			conditionSet = true
+		})
+		require.True(t, fnCalled)
+	})
+}
+
 func runConcurrentWriterGuard(t *testing.T, concurrentWriters int, sizeLimit int64) {
 	start := make(chan struct{})
 	buf := newTestBuffer(sizeLimit)
@@ -157,7 +181,7 @@ func randomGeneratedInput() (input []pair, expected map[uuid.UUID]int) {
 
 	p := pair{}
 	for i := 0; i < inputSize; i++ {
-		p.k = uuid.FastMakeV4()
+		p.k = uuid.MakeV4()
 		p.v = rand.Int()
 		input = append(input, p)
 		expected[p.k] = p.v

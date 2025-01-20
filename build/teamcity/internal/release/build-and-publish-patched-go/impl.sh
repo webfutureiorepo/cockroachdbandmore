@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -xeuo pipefail
 
 # When updating to a new Go version, update all of these variables.
-GOVERS=1.21.5
+GOVERS=1.22.8
 GOLINK=https://go.dev/dl/go$GOVERS.src.tar.gz
-SRCSHASUM=285cbbdf4b6e6e62ed58f370f3f6d8c30825d6e56c5853c66d3c23bcdb09db19
+SRCSHASUM=df12c23ebf19dea0f4bf46a22cbeda4a3eca6f474f318390ce774974278440b8
 # We use this for bootstrapping (this is NOT re-published). Note the version
 # matches the version we're publishing, although it doesn't technically have to.
 GOLINUXLINK=https://go.dev/dl/go$GOVERS.linux-amd64.tar.gz
-LINUXSHASUM=e2bc0b3e4b64111ec117295c088bde5f00eeed1567999ff77bc859d7df70078e
+LINUXSHASUM=5f467d29fc67c7ae6468cb6ad5b047a274bae8180cac5e0b7ddbfeba3e47e18f
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

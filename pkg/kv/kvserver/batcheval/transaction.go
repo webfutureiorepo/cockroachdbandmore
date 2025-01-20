@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -128,6 +123,12 @@ func CanCreateTxnRecord(ctx context.Context, rec EvalContext, txn *roachpb.Trans
 	if !ok {
 		log.VEventf(ctx, 2, "txn tombstone present; transaction has been aborted")
 		return kvpb.NewTransactionAbortedError(reason)
+	}
+	// Verify that if the transaction record is being created, the client thinks
+	// it's in the PENDING state.
+	if txn.Status != roachpb.PENDING {
+		return errors.AssertionFailedf(
+			"cannot create transaction record with non-PENDING transaction: %v", txn)
 	}
 	return nil
 }

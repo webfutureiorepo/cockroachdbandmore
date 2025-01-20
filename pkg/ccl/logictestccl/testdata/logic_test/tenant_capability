@@ -37,7 +37,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -63,7 +65,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -82,7 +86,9 @@ can_admin_split            false
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -108,7 +114,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -134,7 +142,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -160,7 +170,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         true
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -179,7 +191,9 @@ can_admin_split            false
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -198,7 +212,9 @@ can_admin_split            false
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  true
@@ -217,7 +233,9 @@ can_admin_split            false
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -237,7 +255,9 @@ can_admin_split            true
 can_admin_unsplit          true
 can_check_consistency      true
 can_debug_process          true
+can_prepare_txns           true
 can_use_nodelocal_storage  true
+can_view_all_metrics       true
 can_view_node_info         true
 can_view_tsdb_metrics      true
 exempt_from_rate_limiting  true
@@ -279,7 +299,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -309,7 +331,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -344,7 +368,9 @@ can_admin_split            true
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -363,7 +389,9 @@ can_admin_split            false
 can_admin_unsplit          false
 can_check_consistency      false
 can_debug_process          false
+can_prepare_txns           false
 can_use_nodelocal_storage  false
+can_view_all_metrics       false
 can_view_node_info         false
 can_view_tsdb_metrics      false
 exempt_from_rate_limiting  false
@@ -382,7 +410,9 @@ can_admin_split            true
 can_admin_unsplit          true
 can_check_consistency      true
 can_debug_process          true
+can_prepare_txns           true
 can_use_nodelocal_storage  true
+can_view_all_metrics       true
 can_view_node_info         true
 can_view_tsdb_metrics      true
 exempt_from_rate_limiting  true

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execinfra
 
@@ -66,24 +61,20 @@ func MisplannedRanges(
 		overlapping := rdc.GetCachedOverlapping(ctx, rSpan)
 
 		for _, ri := range overlapping {
-			if _, ok := misplanned[ri.Desc().RangeID]; ok {
+			if _, ok := misplanned[ri.Desc.RangeID]; ok {
 				// We're already returning info about this range.
 				continue
 			}
 			// Ranges with unknown leases are not returned, as the current node might
 			// actually have the lease without the local cache knowing about it.
-			l := ri.Lease()
-			if l != nil && l.Replica.NodeID != nodeID {
-				misplannedRanges = append(misplannedRanges, roachpb.RangeInfo{
-					Desc:                  *ri.Desc(),
-					Lease:                 *l,
-					ClosedTimestampPolicy: ri.ClosedTimestampPolicy(),
-				})
+			l := ri.Lease
+			if !l.Empty() && l.Replica.NodeID != nodeID {
+				misplannedRanges = append(misplannedRanges, ri)
 
 				if misplanned == nil {
 					misplanned = make(map[roachpb.RangeID]struct{})
 				}
-				misplanned[ri.Desc().RangeID] = struct{}{}
+				misplanned[ri.Desc.RangeID] = struct{}{}
 			}
 		}
 	}
@@ -211,13 +202,13 @@ func (h *LimitHintHelper) ReadSomeRows(rowsRead int64) error {
 
 // UseStreamer returns whether the kvstreamer.Streamer API should be used as
 // well as the txn that should be used (regardless of the boolean return value).
-func (flowCtx *FlowCtx) UseStreamer() (bool, *kv.Txn, error) {
+func (flowCtx *FlowCtx) UseStreamer(ctx context.Context) (bool, *kv.Txn, error) {
 	useStreamer := flowCtx.EvalCtx.SessionData().StreamerEnabled && flowCtx.Txn != nil &&
 		flowCtx.Txn.Type() == kv.LeafTxn && flowCtx.MakeLeafTxn != nil
 	if !useStreamer {
 		return false, flowCtx.Txn, nil
 	}
-	leafTxn, err := flowCtx.MakeLeafTxn()
+	leafTxn, err := flowCtx.MakeLeafTxn(ctx)
 	if leafTxn == nil || err != nil {
 		// leafTxn might be nil in some flows which run outside of the txn, the
 		// streamer should not be used in such cases.

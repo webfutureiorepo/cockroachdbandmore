@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kv
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
@@ -130,7 +126,7 @@ type Result struct {
 	// Rows contains the key/value pairs for the operation. The number of rows
 	// returned varies by operation. For Get, Put, CPut, and Inc the number
 	// of rows returned is the number of keys operated on. For Scan the number of
-	// rows returned is the number or rows matching the scan capped by the
+	// rows returned is the number of rows matching the scan capped by the
 	// maxRows parameter and other options. For Del and DelRange Rows is nil.
 	Rows []KeyValue
 
@@ -183,18 +179,22 @@ type DBContext struct {
 	// NodeID provides the node ID for setting the gateway node and avoiding
 	// clock uncertainty for root transactions started at the gateway.
 	NodeID *base.SQLIDContainer
+	// Settings is the collection of cluster settings. The field is optional and
+	// can be set to nil in tests.
+	Settings *cluster.Settings
 	// Stopper is used for async tasks.
 	Stopper *stop.Stopper
 }
 
 // DefaultDBContext returns (a copy of) the default options for
 // NewDBWithContext.
-func DefaultDBContext(stopper *stop.Stopper) DBContext {
+func DefaultDBContext(settings *cluster.Settings, stopper *stop.Stopper) DBContext {
 	return DBContext{
 		UserPriority: roachpb.NormalUserPriority,
 		// TODO(tbg): this is ugly. Force callers to pass in an SQLIDContainer.
-		NodeID:  &base.SQLIDContainer{},
-		Stopper: stopper,
+		NodeID:   &base.SQLIDContainer{},
+		Settings: settings,
+		Stopper:  stopper,
 	}
 }
 
@@ -269,7 +269,6 @@ type DB struct {
 	// Especially SettingsValue.
 	SQLKVResponseAdmissionQ *admission.WorkQueue
 	AdmissionPacerFactory   admission.PacerFactory
-	SettingsValues          *settings.Values
 }
 
 // NonTransactionalSender returns a Sender that can be used for sending
@@ -297,6 +296,14 @@ func (db *DB) Context() DBContext {
 	return db.ctx
 }
 
+// SettingsValues returns the DB's settings.Values, if configured.
+func (db *DB) SettingsValues() *settings.Values {
+	if db.ctx.Settings == nil {
+		return nil
+	}
+	return &db.ctx.Settings.SV
+}
+
 // NewBatch creates a new empty batch.
 func (db *DB) NewBatch() *Batch {
 	return &Batch{}
@@ -306,7 +313,7 @@ func (db *DB) NewBatch() *Batch {
 func NewDB(
 	actx log.AmbientContext, factory TxnSenderFactory, clock *hlc.Clock, stopper *stop.Stopper,
 ) *DB {
-	return NewDBWithContext(actx, factory, clock, DefaultDBContext(stopper))
+	return NewDBWithContext(actx, factory, clock, DefaultDBContext(nil /* settings */, stopper))
 }
 
 // NewDBWithContext returns a new DB with the given parameters.
@@ -464,20 +471,6 @@ func (db *DB) CPut(ctx context.Context, key, value interface{}, expValue []byte)
 func (db *DB) CPutInline(ctx context.Context, key, value interface{}, expValue []byte) error {
 	b := &Batch{}
 	b.CPutInline(key, value, expValue)
-	return getOneErr(db.Run(ctx, b), b)
-}
-
-// InitPut sets the first value for a key to value. A ConditionFailedError is
-// reported if a value already exists for the key and it's not equal to the
-// value passed in. If failOnTombstones is set to true, tombstones count as
-// mismatched values and will cause a ConditionFailedError.
-//
-// key can be either a byte slice or a string. value can be any key type, a
-// protoutil.Message or any Go primitive type (bool, int, etc). It is illegal to
-// set value to nil.
-func (db *DB) InitPut(ctx context.Context, key, value interface{}, failOnTombstones bool) error {
-	b := &Batch{}
-	b.InitPut(key, value, failOnTombstones)
 	return getOneErr(db.Run(ctx, b), b)
 }
 
@@ -771,8 +764,6 @@ func (db *DB) AdminRelocateRange(
 	return getOneErr(db.Run(ctx, b), b)
 }
 
-var noRemoteFile kvpb.AddSSTableRequest_RemoteFile
-
 // AddSSTable links a file into the Pebble log-structured merge-tree.
 //
 // The disallowConflicts, disallowShadowingBelow parameters
@@ -789,7 +780,7 @@ func (db *DB) AddSSTable(
 	batchTs hlc.Timestamp,
 ) (roachpb.Span, int64, error) {
 	b := &Batch{Header: kvpb.Header{Timestamp: batchTs}}
-	b.addSSTable(begin, end, data, noRemoteFile, disallowConflicts, disallowShadowing, disallowShadowingBelow,
+	b.addSSTable(begin, end, data, disallowConflicts, disallowShadowing, disallowShadowingBelow,
 		stats, ingestAsWrites, hlc.Timestamp{} /* sstTimestampToRequestTimestamp */)
 	err := getOneErr(db.Run(ctx, b), b)
 	if err != nil {
@@ -802,23 +793,37 @@ func (db *DB) AddSSTable(
 	return resp.RangeSpan, resp.AvailableBytes, nil
 }
 
-func (db *DB) AddRemoteSSTable(
+// LinkExternalSSTable links an external sst into the Pebble log-structured merge-tree.
+func (db *DB) LinkExternalSSTable(
 	ctx context.Context,
 	span roachpb.Span,
-	file kvpb.AddSSTableRequest_RemoteFile,
-	stats *enginepb.MVCCStats,
-) (roachpb.Span, int64, error) {
-	b := &Batch{}
-	b.addSSTable(span.Key, span.EndKey, nil, file, false, false, hlc.Timestamp{}, stats, false, hlc.Timestamp{})
+	file kvpb.LinkExternalSSTableRequest_ExternalFile,
+	batchTimestamp hlc.Timestamp,
+) error {
+	b := &Batch{Header: kvpb.Header{Timestamp: batchTimestamp}}
+	b.linkExternalSSTable(span, file)
 	err := getOneErr(db.Run(ctx, b), b)
 	if err != nil {
-		return roachpb.Span{}, 0, err
+		if m := (*kvpb.RangeKeyMismatchError)(nil); errors.As(err, &m) {
+			r, err := m.MismatchedRange()
+			if err != nil {
+				return err
+			}
+			// TODO(dt): iterate over all of all of m.Ranges, not just first, but
+			// ensure we cover all of `span` when we do.
+			lhs := roachpb.Span{Key: span.Key, EndKey: r.Desc.EndKey.AsRawKey()}
+			rhs := roachpb.Span{Key: lhs.EndKey, EndKey: span.EndKey}
+			if err := db.LinkExternalSSTable(ctx, lhs, file, batchTimestamp); err != nil {
+				return err
+			}
+			return db.LinkExternalSSTable(ctx, rhs, file, batchTimestamp)
+		}
+		return err
 	}
 	if l := len(b.response.Responses); l != 1 {
-		return roachpb.Span{}, 0, errors.AssertionFailedf("expected single response, got %d", l)
+		return errors.AssertionFailedf("expected single response, got %d", l)
 	}
-	resp := b.response.Responses[0].GetAddSstable()
-	return resp.RangeSpan, resp.AvailableBytes, nil
+	return nil
 }
 
 // AddSSTableAtBatchTimestamp links a file into the Pebble log-structured
@@ -839,7 +844,7 @@ func (db *DB) AddSSTableAtBatchTimestamp(
 	batchTs hlc.Timestamp,
 ) (hlc.Timestamp, roachpb.Span, int64, error) {
 	b := &Batch{Header: kvpb.Header{Timestamp: batchTs}}
-	b.addSSTable(begin, end, data, noRemoteFile,
+	b.addSSTable(begin, end, data,
 		disallowConflicts, disallowShadowing, disallowShadowingBelow,
 		stats, ingestAsWrites, batchTs)
 	err := getOneErr(db.Run(ctx, b), b)
@@ -1091,6 +1096,46 @@ func runTxn(ctx context.Context, txn *Txn, retryable func(context.Context, *Txn)
 	return err
 }
 
+// CommitPrepared commits the prepared transaction.
+func (db *DB) CommitPrepared(ctx context.Context, txn *roachpb.Transaction) error {
+	return db.endPrepared(ctx, txn, true /* commit */)
+}
+
+// RollbackPrepared rolls back the prepared transaction.
+func (db *DB) RollbackPrepared(ctx context.Context, txn *roachpb.Transaction) error {
+	return db.endPrepared(ctx, txn, false /* commit */)
+}
+
+func (db *DB) endPrepared(ctx context.Context, txn *roachpb.Transaction, commit bool) error {
+	if txn.Status != roachpb.PREPARED {
+		return errors.WithContextTags(errors.AssertionFailedf("transaction %v is not in a prepared state", txn), ctx)
+	}
+	if txn.Key == nil {
+		// If the transaction key is nil, the transaction was read-only and never
+		// wrote a transaction record when preparing. Committing or rolling back
+		// such a transaction is a no-op.
+		return nil
+	}
+
+	// NOTE: an EndTxn sent to a prepared transaction does not need a deadline,
+	// because the commit deadline was already checked when the transaction was
+	// prepared and the transaction can not have been pushed to a later commit
+	// timestamp when prepared.
+	et := endTxnReq(commit, hlc.Timestamp{} /* deadline */)
+	et.req.Key = txn.Key
+	// TODO(nvanbenschoten): it's unfortunate that we have to set the txn's
+	// LockSpans here. cmd_end_transaction.go should be able to read them from the
+	// transaction record. Unfortunately, it currently doesn't. Address this
+	// before merging this commit.
+	et.req.LockSpans = txn.LockSpans
+	ba := &kvpb.BatchRequest{Requests: et.unionArr[:]}
+	ba.Txn = txn
+	// NOTE: bypass the CrossRangeTxnWrapperSender, which does not support
+	// transactional requests. Use the underlying sender directly.
+	_, pErr := db.sendUsingSender(ctx, ba, db.factory.NonTransactionalSender())
+	return pErr.GoError()
+}
+
 // send runs the specified calls synchronously in a single batch and returns
 // any errors. Returns (nil, nil) for an empty batch.
 func (db *DB) send(ctx context.Context, ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
@@ -1164,7 +1209,9 @@ func getOneRow(runErr error, b *Batch) (KeyValue, error) {
 func IncrementValRetryable(ctx context.Context, db *DB, key roachpb.Key, inc int64) (int64, error) {
 	var err error
 	var res KeyValue
-	for r := retry.Start(base.DefaultRetryOptions()); r.Next(); {
+	retryOpts := base.DefaultRetryOptions()
+	retryOpts.Closer = db.Context().Stopper.ShouldQuiesce()
+	for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
 		res, err = db.Inc(ctx, key, inc)
 		if errors.HasType(err, (*kvpb.UnhandledRetryableError)(nil)) ||
 			errors.HasType(err, (*kvpb.AmbiguousResultError)(nil)) {

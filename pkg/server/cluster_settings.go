@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -50,3 +45,14 @@ var PersistedInsightsUIEnabled = settings.RegisterBoolSetting(
 	"sql.stats.persisted_insights.ui.enabled",
 	"enable the insights endpoint to get data from the persisted insights tables",
 	false)
+
+// DebugZipRedactAddressesEnabled guards whether hostname / ip address and other sensitive fields
+// should be redacted in the debug zip
+var DebugZipRedactAddressesEnabled = settings.RegisterBoolSetting(
+	settings.ApplicationLevel,
+	"debug.zip.redact_addresses.enabled",
+	"enables the redaction of hostnames and ip addresses in debug zip",
+	false,
+	settings.WithPublic,
+	settings.WithReportable(true),
+)

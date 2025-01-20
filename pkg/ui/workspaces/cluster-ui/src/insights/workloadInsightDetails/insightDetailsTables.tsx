@@ -1,16 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React, { useState } from "react";
+
 import { ColumnDescriptor, SortedTable, SortSetting } from "src/sortedtable";
 import { DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT, Duration } from "src/util";
+
+import { TimeScale } from "../../timeScaleDropdown";
+import { Timestamp } from "../../timestamp";
 import { ContentionDetails, ContentionEvent, InsightExecEnum } from "../types";
 import {
   insightsTableTitles,
@@ -18,8 +17,6 @@ import {
   StatementDetailsLink,
   TransactionDetailsLink,
 } from "../workloadInsights/util";
-import { TimeScale } from "../../timeScaleDropdown";
-import { Timestamp } from "../../timestamp";
 
 interface InsightDetailsTableProps {
   data: ContentionEvent[];

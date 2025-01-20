@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -109,9 +104,11 @@ func (b *Builder) buildCreateView(cv *tree.CreateView, inScope *scope) (outScope
 	outScope = b.allocScope()
 	outScope.expr = b.factory.ConstructCreateView(
 		&memo.CreateViewPrivate{
-			Syntax:    cv,
-			Schema:    schID,
-			ViewQuery: tree.AsStringWithFlags(cv.AsSource, tree.FmtParsable),
+			Syntax: cv,
+			Schema: schID,
+			// We need the view query to include user-defined types as a 3-part name to
+			// properly detect cross-database type access.
+			ViewQuery: tree.AsStringWithFlags(cv.AsSource, tree.FmtParsable|tree.FmtAlwaysQualifyUserDefinedTypeNames),
 			Columns:   p,
 			Deps:      b.schemaDeps,
 			TypeDeps:  b.schemaTypeDeps,

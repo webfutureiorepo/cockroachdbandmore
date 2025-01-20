@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -145,11 +142,19 @@ func AuthorizeChangefeedJobAccess(
 	ctx context.Context,
 	a jobsauth.AuthorizationAccessor,
 	jobID jobspb.JobID,
-	payload *jobspb.Payload,
+	getLegacyPayload func(ctx context.Context) (*jobspb.Payload, error),
 ) error {
+	payload, err := getLegacyPayload(ctx)
+	if err != nil {
+		return err
+	}
 	specs, ok := payload.UnwrapDetails().(jobspb.ChangefeedDetails)
 	if !ok {
 		return errors.Newf("could not unwrap details from the payload of job %d", jobID)
+	}
+
+	if len(specs.TargetSpecifications) == 0 {
+		return pgerror.Newf(pgcode.InsufficientPrivilege, "job contains no tables on which the user has %s privilege", privilege.CHANGEFEED)
 	}
 
 	for _, spec := range specs.TargetSpecifications {

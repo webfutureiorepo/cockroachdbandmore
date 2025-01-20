@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package parser exposes a parser for plpgsql.
 package parser
@@ -14,6 +9,7 @@ package parser
 import (
 	"go/constant"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroach/pkg/sql/scanner"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -24,6 +20,13 @@ import (
 func init() {
 	scanner.NewNumValFn = func(a constant.Value, s string, b bool) interface{} { return tree.NewNumVal(a, s, b) }
 	scanner.NewPlaceholderFn = func(s string) (interface{}, error) { return tree.NewPlaceholder(s) }
+	parser.ParseDoBlockFn = func(options tree.DoBlockOptions) (tree.DoBlockBody, error) {
+		doBlockBody, err := makeDoStmt(options)
+		if err != nil {
+			return nil, err
+		}
+		return doBlockBody, nil
+	}
 }
 
 // Parser wraps a scanner, parser and other utilities present in the parser

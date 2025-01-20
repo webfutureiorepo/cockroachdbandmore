@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -17,7 +12,6 @@ import (
 	"strconv"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprofiler/profilerconstants"
@@ -172,11 +166,6 @@ func constructBackupExecutionDetails(
 // RequestExecutionDetailFiles implements the JobProfiler interface.
 func (p *planner) RequestExecutionDetailFiles(ctx context.Context, jobID jobspb.JobID) error {
 	execCfg := p.ExecCfg()
-	if !execCfg.Settings.Version.IsActive(ctx, clusterversion.V23_2) {
-		return errors.Newf("execution details can only be requested on a cluster with version >= %s",
-			clusterversion.V23_2.String())
-	}
-
 	_, err := execCfg.SQLStatusServer.RequestJobProfilerExecutionDetails(ctx,
 		&serverpb.RequestJobProfilerExecutionDetailsRequest{
 			JobId: int64(jobID),

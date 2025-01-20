@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package copy
 
@@ -27,8 +22,10 @@ import (
 
 	"github.com/cockroachdb/apd/v3"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/ccl"
 	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -89,6 +86,7 @@ const csvData = `%d|155190|7706|1|17|21168.23|0.04|0.02|N|O|1996-03-13|1996-02-1
 
 func TestDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer ccl.TestingEnableEnterprise()() // allow usage of READ COMMITTED
 	ctx := context.Background()
 
 	doTest := func(t *testing.T, d *datadriven.TestData, conn clisqlclient.Conn) string {
@@ -269,6 +267,9 @@ func TestCopyFromTransaction(t *testing.T) {
 		defer srv.Stopper().Stop(ctx)
 
 		s := srv.ApplicationLayer()
+		// Disable pipelining. Without this, pipelined writes performed as part
+		// of the COPY can be lost, which can then cause the COPY to fail.
+		kvcoord.PipelinedWritesEnabled.Override(ctx, &s.ClusterSettings().SV, false)
 
 		url, cleanup := sqlutils.PGUrl(t, s.AdvSQLAddr(), "copytest", url.User(username.RootUser))
 		defer cleanup()
@@ -579,10 +580,11 @@ func TestLargeDynamicRows(t *testing.T) {
 			return nil
 		},
 	}
-	s := serverutils.StartServerOnly(t, params)
-	defer s.Stopper().Stop(ctx)
+	srv := serverutils.StartServerOnly(t, params)
+	defer srv.Stopper().Stop(ctx)
+	s := srv.ApplicationLayer()
 
-	url, cleanup := sqlutils.PGUrl(t, s.ApplicationLayer().AdvSQLAddr(), "copytest", url.User(username.RootUser))
+	url, cleanup := s.PGUrl(t)
 	defer cleanup()
 	var sqlConnCtx clisqlclient.Context
 	conn := sqlConnCtx.MakeSQLConn(io.Discard, io.Discard, url.String())
@@ -592,10 +594,10 @@ func TestLargeDynamicRows(t *testing.T) {
 	err := conn.Exec(ctx, `SET COPY_FAST_PATH_ENABLED = 'true'`)
 	require.NoError(t, err)
 
-	// 4.0 MiB is minimum, copy sets max row size to this value / 3
-	for _, l := range []serverutils.ApplicationLayerInterface{s, s.SystemLayer()} {
-		kvserverbase.MaxCommandSize.Override(ctx, &l.ClusterSettings().SV, 4<<20)
-	}
+	// 4.0 MiB is minimum, but due to #117070 use 5MiB instead to avoid flakes.
+	// Copy sets max row size to this value / 3.
+	const memLimit = kvserverbase.MaxCommandSizeFloor + 1<<20
+	kvserverbase.MaxCommandSize.Override(ctx, &s.ClusterSettings().SV, memLimit)
 
 	err = conn.Exec(ctx, "CREATE TABLE t (s STRING)")
 	require.NoError(t, err)
@@ -614,9 +616,7 @@ func TestLargeDynamicRows(t *testing.T) {
 	batchNumber = 0
 
 	// Reset and make sure we use 1 batch.
-	for _, l := range []serverutils.ApplicationLayerInterface{s, s.SystemLayer()} {
-		kvserverbase.MaxCommandSize.Override(ctx, &l.ClusterSettings().SV, kvserverbase.MaxCommandSizeDefault)
-	}
+	kvserverbase.MaxCommandSize.Override(ctx, &s.ClusterSettings().SV, kvserverbase.MaxCommandSizeDefault)
 
 	// This won't work if the batch size gets set to less than 5. When the batch
 	// size is 4, the test hook will count an extra empty batch.

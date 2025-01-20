@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs_test
 
@@ -81,7 +76,7 @@ func TestUpdaterUpdatesJobInfo(t *testing.T) {
 		expectedProgress jobspb.Progress) {
 		infoStorage := createdJob.InfoStorage(txn)
 
-		payload, exists, err := infoStorage.GetLegacyPayload(ctx)
+		payload, exists, err := infoStorage.GetLegacyPayload(ctx, "verifyPayloadAndProgress")
 		require.NoError(t, err)
 		require.True(t, exists)
 		data, err := protoutil.Marshal(&expectedPayload)
@@ -90,7 +85,7 @@ func TestUpdaterUpdatesJobInfo(t *testing.T) {
 		}
 		require.Equal(t, data, payload)
 
-		progress, exists, err := infoStorage.GetLegacyProgress(ctx)
+		progress, exists, err := infoStorage.GetLegacyProgress(ctx, "verifyPayloadAndProgress")
 		require.NoError(t, err)
 		require.True(t, exists)
 		data, err = protoutil.Marshal(&expectedProgress)

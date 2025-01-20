@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ttljob_test
 
@@ -219,7 +214,7 @@ func (h *rowLevelTTLTestJobTestHelper) verifyExpiredRowsJobOnly(
 		var progress jobspb.Progress
 		require.NoError(t, protoutil.Unmarshal(progressBytes, &progress))
 
-		actualNumExpiredRows := progress.UnwrapDetails().(jobspb.RowLevelTTLProgress).JobRowCount
+		actualNumExpiredRows := progress.UnwrapDetails().(jobspb.RowLevelTTLProgress).JobDeletedRowCount
 		require.Equal(t, int64(expectedNumExpiredRows), actualNumExpiredRows)
 		jobCount++
 	}
@@ -275,8 +270,9 @@ func (h *rowLevelTTLTestJobTestHelper) verifyExpiredRows(
 			require.Equal(t, expectedProcessorRowCount, processorProgress.ProcessorRowCount)
 			expectedJobRowCount += expectedProcessorRowCount
 		}
-		require.Equal(t, expectedJobSpanCount, rowLevelTTLProgress.JobSpanCount)
-		require.Equal(t, expectedJobRowCount, rowLevelTTLProgress.JobRowCount)
+		require.Equal(t, expectedJobSpanCount, rowLevelTTLProgress.JobProcessedSpanCount)
+		require.Equal(t, expectedJobSpanCount, rowLevelTTLProgress.JobTotalSpanCount)
+		require.Equal(t, expectedJobRowCount, rowLevelTTLProgress.JobDeletedRowCount)
 		jobCount++
 	}
 	require.Equal(t, 1, jobCount)
@@ -781,8 +777,8 @@ func TestRowLevelTTLJobRandomEntries(t *testing.T) {
 					randgen.RandTypeFromSlice(rng, indexableTyps).SQLString(),
 					randgen.RandTypeFromSlice(rng, indexableTyps).SQLString(),
 					familyClauses,
-					1+rng.Intn(100),
-					1+rng.Intn(100),
+					10+rng.Intn(100),
+					10+rng.Intn(100),
 				),
 				numSplits:         1 + rng.Intn(9),
 				numExpiredRows:    rng.Intn(2000),
@@ -837,8 +833,7 @@ func TestRowLevelTTLJobRandomEntries(t *testing.T) {
 			th, cleanupFunc := newRowLevelTTLTestJobTestHelper(
 				t,
 				&sql.TTLTestingKnobs{
-					AOSTDuration:     &zeroDuration,
-					ReturnStatsError: true,
+					AOSTDuration: &zeroDuration,
 				},
 				tc.numSplits == 0 && !tc.forceNonMultiTenant, // SPLIT AT does not work with multi-tenant
 				1, /* numNodes */
@@ -929,6 +924,41 @@ func TestRowLevelTTLJobRandomEntries(t *testing.T) {
 			th.verifyExpiredRowsJobOnly(t, tc.numExpiredRows)
 		})
 	}
+}
+
+func TestRowLevelTTLCancelStats(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	th, cleanupFunc := newRowLevelTTLTestJobTestHelper(
+		t,
+		&sql.TTLTestingKnobs{
+			AOSTDuration:     &zeroDuration,
+			ReturnStatsError: true,
+			ExtraStatsQuery:  "SELECT pg_sleep(100)",
+		},
+		false, /* testMultiTenant */
+		1,     /* numNodes */
+	)
+	defer cleanupFunc()
+
+	th.sqlDB.Exec(t, `
+CREATE TABLE t (
+  id INT PRIMARY KEY,
+  expire_at TIMESTAMPTZ
+) WITH (
+  ttl_expiration_expression = 'expire_at',
+  ttl_row_stats_poll_interval = '1 minute'
+)`)
+	th.sqlDB.Exec(t, `INSERT INTO t (id, expire_at) VALUES (1, '2020-01-01')`)
+
+	// Force the schedule to execute. Normally, the job would not fail due to a
+	// stats error, but we have set the ReturnStatsError knob to true in this
+	// test.
+	th.waitForScheduledJob(t, jobs.StatusFailed, "cancelling TTL stats query because TTL job completed")
+
+	results := th.sqlDB.QueryStr(t, "SELECT * FROM t")
+	require.Empty(t, results)
 }
 
 func TestOutboundForeignKey(t *testing.T) {
@@ -1107,7 +1137,8 @@ func TestMakeTTLJobDescription(t *testing.T) {
 			createTable := getCreateTable(testCase.tableSelectBatchSize)
 			th.sqlDB.Exec(t, createTable)
 			th.waitForScheduledJob(t, jobs.StatusSucceeded, "")
-			rows := th.sqlDB.QueryStr(t, "SELECT description FROM [SHOW JOBS] WHERE job_type = 'ROW LEVEL TTL'")
+			rows := th.sqlDB.QueryStr(t, "SELECT description FROM [SHOW JOBS SELECT id FROM system.jobs WHERE job_type = 'ROW LEVEL TTL']")
+			t.Log(rows)
 			require.Len(t, rows, 1)
 			row := rows[0]
 			require.Contains(t, row[0], fmt.Sprintf("LIMIT %d", testCase.jobSelectBatchSize))

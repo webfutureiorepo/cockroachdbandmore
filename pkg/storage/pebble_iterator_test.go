@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -15,7 +10,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
+	stdfs "io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -25,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -43,7 +39,7 @@ func TestPebbleIterator_Corruption(t *testing.T) {
 	// Create a Pebble DB that can be used to back a pebbleIterator.
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
-	p, err := Open(context.Background(), Filesystem(dataDir), cluster.MakeClusterSettings())
+	p, err := Open(context.Background(), fs.MustInitPhysicalTestingEnv(dataDir), cluster.MakeClusterSettings())
 	require.NoError(t, err)
 	defer p.Close()
 
@@ -53,11 +49,11 @@ func TestPebbleIterator_Corruption(t *testing.T) {
 	require.NoError(t, p.Flush())
 
 	// Corrupt the SSTs in the DB.
-	err = filepath.Walk(dataDir, func(path string, info fs.FileInfo, err error) error {
+	err = filepath.WalkDir(dataDir, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !strings.HasSuffix(info.Name(), ".sst") {
+		if !strings.HasSuffix(d.Name(), ".sst") {
 			return nil
 		}
 		file, err := os.OpenFile(path, os.O_WRONLY, 0600)
@@ -90,7 +86,7 @@ func TestPebbleIterator_Corruption(t *testing.T) {
 	require.Panics(t, func() { iter.Close() })
 
 	// Should have laid down marker file to prevent startup.
-	_, err = p.Stat(base.PreventedStartupFile(p.GetAuxiliaryDir()))
+	_, err = p.Env().Stat(base.PreventedStartupFile(p.GetAuxiliaryDir()))
 	require.NoError(t, err)
 }
 
@@ -109,7 +105,7 @@ func TestPebbleIterator_ExternalCorruption(t *testing.T) {
 	ctx := context.Background()
 	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
 	var f bytes.Buffer
-	w := MakeBackupSSTWriter(ctx, st, &f)
+	w := MakeTransportSSTWriter(ctx, st, &f)
 
 	// Create an example sstable.
 	var rawValue [64]byte

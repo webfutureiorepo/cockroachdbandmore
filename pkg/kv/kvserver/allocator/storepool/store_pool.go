@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storepool
 
@@ -961,6 +956,10 @@ type StoreList struct {
 	// CandidateIOOverloadScores tracks the IO overload stats for Stores that are
 	// eligible to be rebalance candidates.
 	CandidateIOOverloadScores Stat
+
+	// CandidateMaxIOOverloadScores tracks the max IO overload stats for Stores
+	// that are eligible to be rebalance candidates.
+	CandidateMaxIOOverloadScores Stat
 }
 
 // MakeStoreList constructs a new store list based on the passed in descriptors.
@@ -976,6 +975,8 @@ func MakeStoreList(descriptors []roachpb.StoreDescriptor) StoreList {
 		sl.CandidateCPU.update(desc.Capacity.CPUPerSecond)
 		score, _ := desc.Capacity.IOThreshold.Score()
 		sl.CandidateIOOverloadScores.update(score)
+		maxScore, _ := desc.Capacity.IOThresholdMax.Score()
+		sl.CandidateMaxIOOverloadScores.update(maxScore)
 	}
 	return sl
 }
@@ -988,12 +989,16 @@ func (sl StoreList) String() string {
 func (sl StoreList) SafeFormat(w redact.SafePrinter, _ rune) {
 	var buf redact.StringBuilder
 	buf.Printf(
-		"  candidate: avg-ranges=%.2f avg-leases=%.2f avg-disk-usage=%s avg-queries-per-second=%.2f avg-store-cpu-per-second=%s",
+		"  candidate: avg-ranges=%.2f avg-leases=%.2f avg-disk-usage=%s "+
+			"avg-queries-per-second=%.2f avg-store-cpu-per-second=%s "+
+			"avg-io-overload=%.2f(max=%.2f)",
 		sl.CandidateRanges.Mean,
 		sl.CandidateLeases.Mean,
 		humanizeutil.IBytes(int64(sl.candidateLogicalBytes.Mean)),
 		sl.CandidateQueriesPerSecond.Mean,
 		humanizeutil.Duration(time.Duration(int64(sl.CandidateCPU.Mean))),
+		sl.CandidateIOOverloadScores.Mean,
+		sl.CandidateMaxIOOverloadScores.Mean,
 	)
 	if len(sl.Stores) > 0 {
 		buf.Printf("\n")
@@ -1002,12 +1007,16 @@ func (sl StoreList) SafeFormat(w redact.SafePrinter, _ rune) {
 	}
 	for _, desc := range sl.Stores {
 		ioScore, _ := desc.Capacity.IOThreshold.Score()
-		buf.Printf("  %v: ranges=%d leases=%d disk-usage=%s queries-per-second=%.2f store-cpu-per-second=%s io-overload=%.2f\n",
+		maxIOScore, _ := desc.Capacity.IOThresholdMax.Score()
+		buf.Printf(
+			"  %v: ranges=%d leases=%d disk-usage=%s queries-per-second=%.2f "+
+				"store-cpu-per-second=%s io-overload=%.2f(max=%.2f)\n",
 			desc.StoreID, desc.Capacity.RangeCount,
 			desc.Capacity.LeaseCount, humanizeutil.IBytes(desc.Capacity.LogicalBytes),
 			desc.Capacity.QueriesPerSecond,
 			humanizeutil.Duration(time.Duration(int64(desc.Capacity.CPUPerSecond))),
 			ioScore,
+			maxIOScore,
 		)
 	}
 	w.Print(buf)
@@ -1099,7 +1108,7 @@ func (sp *StorePool) GetStoreList(filter StoreFilter) (StoreList, int, Throttled
 	sp.DetailsMu.Lock()
 	defer sp.DetailsMu.Unlock()
 
-	var storeIDs roachpb.StoreIDSlice
+	storeIDs := make(roachpb.StoreIDSlice, 0, len(sp.DetailsMu.StoreDetails))
 	for storeID := range sp.DetailsMu.StoreDetails {
 		storeIDs = append(storeIDs, storeID)
 	}

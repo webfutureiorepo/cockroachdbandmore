@@ -1,4 +1,4 @@
-# LogicTest: local
+# LogicTest: local-read-committed
 
 statement ok
 CREATE TABLE supermarket (
@@ -22,6 +22,8 @@ query T
 EXPLAIN (OPT) SELECT aisle FROM supermarket WHERE person = 'matilda' FOR UPDATE
 ----
 lock supermarket
+ ├── key columns: person
+ ├── lock columns: (9-12)
  ├── locking: for-update,durability-guaranteed
  └── scan supermarket
       └── constraint: /1: [/'matilda' - /'matilda']
@@ -52,14 +54,17 @@ UPDATE supermarket
 update supermarket
  └── project
       ├── scan supermarket
-      │    └── constraint: /7: [/'michael' - /'michael']
+      │    ├── constraint: /9: [/'michael' - /'michael']
+      │    └── flags: avoid-full-scan
       └── projections
            └── subquery
                 └── project
                      └── lock supermarket
+                          ├── key columns: person
+                          ├── lock columns: (25-28)
                           ├── locking: for-update,durability-guaranteed
                           └── scan supermarket
-                               └── constraint: /13: [/'matilda' - /'matilda']
+                               └── constraint: /17: [/'matilda' - /'matilda']
 
 query T
 EXPLAIN (VERBOSE)
@@ -119,6 +124,8 @@ SELECT aisle + 1 FROM s
 with &1 (s)
  ├── project
  │    └── lock supermarket
+ │         ├── key columns: person
+ │         ├── lock columns: (9-12)
  │         ├── locking: for-update,durability-guaranteed
  │         └── scan supermarket
  │              └── constraint: /1: [/'matilda' - /'matilda']
@@ -151,7 +158,7 @@ vectorized: true
 └── • subquery
     │ id: @S1
     │ original sql: SELECT aisle FROM supermarket WHERE person = 'matilda' FOR UPDATE
-    │ exec mode: all rows
+    │ exec mode: discard all rows
     │
     └── • buffer
         │ columns: (aisle)
@@ -182,6 +189,8 @@ with &1 (names)
  ├── values
  │    └── ('matilda',)
  └── lock supermarket
+      ├── key columns: supermarket.person
+      ├── lock columns: (11-14)
       ├── locking: for-update,durability-guaranteed
       └── project
            └── inner-join (lookup supermarket)
@@ -235,7 +244,7 @@ vectorized: true
 └── • subquery
     │ id: @S1
     │ original sql: SELECT 'matilda' AS person
-    │ exec mode: all rows
+    │ exec mode: discard all rows
     │
     └── • buffer
         │ columns: (person)
@@ -254,6 +263,8 @@ SELECT aisle
   FOR UPDATE
 ----
 lock supermarket
+ ├── key columns: person
+ ├── lock columns: (9-12)
  ├── locking: for-update,durability-guaranteed
  └── project
       └── index-join supermarket
@@ -309,6 +320,8 @@ SELECT aisle
   FOR UPDATE
 ----
 lock supermarket
+ ├── key columns: person
+ ├── lock columns: (9-12)
  ├── locking: for-update,durability-guaranteed
  └── project
       └── inner-join (lookup supermarket)

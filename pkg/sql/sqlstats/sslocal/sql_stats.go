@@ -1,18 +1,12 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sslocal
 
 import (
 	"context"
-	"math"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -51,8 +45,7 @@ type SQLStats struct {
 
 	knobs *sqlstats.TestingKnobs
 
-	insights           insights.WriterProvider
-	latencyInformation insights.LatencyInformation
+	anomalies *insights.AnomalyDetector
 }
 
 func newSQLStats(
@@ -61,27 +54,23 @@ func newSQLStats(
 	uniqueTxnFingerprintLimit *settings.IntSetting,
 	curMemBytesCount *metric.Gauge,
 	maxMemBytesHist metric.IHistogram,
-	insightsWriter insights.WriterProvider,
 	parentMon *mon.BytesMonitor,
 	flushTarget Sink,
 	knobs *sqlstats.TestingKnobs,
-	latencyInformation insights.LatencyInformation,
+	anomalies *insights.AnomalyDetector,
 ) *SQLStats {
-	monitor := mon.NewMonitor(
-		"SQLStats",
-		mon.MemoryResource,
-		curMemBytesCount,
-		maxMemBytesHist,
-		-1, /* increment */
-		math.MaxInt64,
-		st,
-	)
+	monitor := mon.NewMonitor(mon.Options{
+		Name:       mon.MakeMonitorName("SQLStats"),
+		CurCount:   curMemBytesCount,
+		MaxHist:    maxMemBytesHist,
+		Settings:   st,
+		LongLiving: true,
+	})
 	s := &SQLStats{
-		st:                 st,
-		flushTarget:        flushTarget,
-		knobs:              knobs,
-		insights:           insightsWriter,
-		latencyInformation: latencyInformation,
+		st:          st,
+		flushTarget: flushTarget,
+		knobs:       knobs,
+		anomalies:   anomalies,
 	}
 	s.atomic = ssmemstorage.NewSQLStatsAtomicCounters(
 		st,
@@ -108,6 +97,10 @@ func (s *SQLStats) GetTotalFingerprintBytes() int64 {
 	return s.mu.mon.AllocBytes()
 }
 
+func (s *SQLStats) GetCounters() *ssmemstorage.SQLStatsAtomicCounters {
+	return s.atomic
+}
+
 func (s *SQLStats) getStatsForApplication(appName string) *ssmemstorage.Container {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -120,8 +113,7 @@ func (s *SQLStats) getStatsForApplication(appName string) *ssmemstorage.Containe
 		s.mu.mon,
 		appName,
 		s.knobs,
-		s.insights(false /* internal */),
-		s.latencyInformation,
+		s.anomalies,
 	)
 	s.mu.apps[appName] = a
 	return a
@@ -151,30 +143,38 @@ func (s *SQLStats) resetAndMaybeDumpStats(ctx context.Context, target Sink) (err
 	// accumulate data using that until it closes (or changes its
 	// application_name).
 	for appName, statsContainer := range s.mu.apps {
-		// Save the existing data to logs.
-		// TODO(knz/dt): instead of dumping the stats to the log, save
-		// them in a SQL table so they can be inspected by the DBA and/or
-		// the UI.
-		if sqlstats.DumpStmtStatsToLogBeforeReset.Get(&s.st.SV) {
-			statsContainer.SaveToLog(ctx, appName)
-		}
-
-		if target != nil {
-			lastErr := target.AddAppStats(ctx, appName, statsContainer)
-			// If we run out of memory budget, Container.Add() will merge stats in
-			// statsContainer with all the existing stats. However it will discard
-			// rest of the stats in statsContainer that requires memory allocation.
-			// We do not wish to short circuit here because we want to still try our
-			// best to merge all the stats that we can.
-			if lastErr != nil {
-				err = lastErr
-			}
-		}
-
+		lastErr := s.MaybeDumpStatsToLog(ctx, appName, statsContainer, target)
 		statsContainer.Clear(ctx)
+		err = lastErr
 	}
 	s.mu.lastReset = timeutil.Now()
 
+	return err
+}
+
+// MaybeDumpStatsToLog flushes stats into target If it is not nil.
+func (s *SQLStats) MaybeDumpStatsToLog(
+	ctx context.Context, appName string, container *ssmemstorage.Container, target Sink,
+) (err error) {
+	// Save the existing data to logs.
+	// TODO(knz/dt): instead of dumping the stats to the log, save
+	// them in a SQL table so they can be inspected by the DBA and/or
+	// the UI.
+	if sqlstats.DumpStmtStatsToLogBeforeReset.Get(&s.st.SV) {
+		container.SaveToLog(ctx, appName)
+	}
+
+	if target != nil {
+		lastErr := target.AddAppStats(ctx, appName, container)
+		// If we run out of memory budget, Container.Add() will merge stats in
+		// statsContainer with all the existing stats. However it will discard
+		// rest of the stats in statsContainer that requires memory allocation.
+		// We do not wish to short circuit here because we want to still try our
+		// best to merge all the stats that we can.
+		if lastErr != nil {
+			err = lastErr
+		}
+	}
 	return err
 }
 

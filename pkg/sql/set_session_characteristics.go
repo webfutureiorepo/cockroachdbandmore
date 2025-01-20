@@ -1,18 +1,14 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/asof"
@@ -23,25 +19,18 @@ import (
 func (p *planner) SetSessionCharacteristics(
 	ctx context.Context, n *tree.SetSessionCharacteristics,
 ) (planNode, error) {
+	allowReadCommitted := allowReadCommittedIsolation.Get(&p.execCfg.Settings.SV)
+	allowRepeatableRead := allowRepeatableReadIsolation.Get(&p.execCfg.Settings.SV)
+	hasLicense := base.CCLDistributionAndEnterpriseEnabled(p.ExecCfg().Settings)
 	if err := p.sessionDataMutatorIterator.applyOnEachMutatorError(func(m sessionDataMutator) error {
 		// Note: We also support SET DEFAULT_TRANSACTION_ISOLATION TO ' .... '.
-		switch n.Modes.Isolation {
-		case tree.UnspecifiedIsolation:
-		// Nothing to do.
-		case tree.ReadUncommittedIsolation, tree.ReadCommittedIsolation:
-			level := tree.SerializableIsolation
-			if allowReadCommittedIsolation.Get(&p.execCfg.Settings.SV) {
-				level = tree.ReadCommittedIsolation
+		if n.Modes.Isolation != tree.UnspecifiedIsolation {
+			level, upgraded, upgradedDueToLicense := n.Modes.Isolation.UpgradeToEnabledLevel(
+				allowReadCommitted, allowRepeatableRead, hasLicense)
+			if f := p.sessionDataMutatorIterator.upgradedIsolationLevel; upgraded && f != nil {
+				f(ctx, n.Modes.Isolation, upgradedDueToLicense)
 			}
 			m.SetDefaultTransactionIsolationLevel(level)
-		case tree.RepeatableReadIsolation, tree.SnapshotIsolation:
-			level := tree.SerializableIsolation
-			if allowSnapshotIsolation.Get(&p.execCfg.Settings.SV) {
-				level = tree.SnapshotIsolation
-			}
-			m.SetDefaultTransactionIsolationLevel(level)
-		default:
-			m.SetDefaultTransactionIsolationLevel(n.Modes.Isolation)
 		}
 
 		// Note: We also support SET DEFAULT_TRANSACTION_PRIORITY TO ' .... '.

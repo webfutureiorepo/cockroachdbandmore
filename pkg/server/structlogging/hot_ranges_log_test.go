@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package structlogging_test
 
@@ -25,14 +20,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
 )
 
 type hotRangesLogSpy struct {
@@ -85,6 +81,8 @@ func TestHotRangesStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	sc := log.ScopeWithoutShowLogs(t)
 	defer sc.Close(t)
+
+	skip.UnderRace(t)
 
 	ctx := context.Background()
 	spy := hotRangesLogSpy{t: t}
@@ -141,7 +139,6 @@ func TestHotRangesStats(t *testing.T) {
 	for _, i := range []int{1, 2} {
 		spy.Reset()
 		ts := tc.ApplicationLayer(i)
-		logcrash.DiagnosticsReportingEnabled.Override(ctx, &ts.ClusterSettings().SV, true)
 		structlogging.TelemetryHotRangesStatsEnabled.Override(ctx, &ts.ClusterSettings().SV, true)
 		structlogging.TelemetryHotRangesStatsInterval.Override(ctx, &ts.ClusterSettings().SV, time.Second)
 		structlogging.TelemetryHotRangesStatsLoggingDelay.Override(ctx, &ts.ClusterSettings().SV, 0*time.Millisecond)
@@ -160,10 +157,13 @@ func TestHotRangesStats(t *testing.T) {
 		// We should have gotten 5 distinct range ids, one for each split point above.
 		logs := spy.Logs()[:5]
 		for _, l := range logs {
+			assert.Equal(t, l.Databases, []string{"‹test›"})
+			assert.Equal(t, l.Tables, []string{"‹foo›"})
+			assert.Equal(t, l.Indexes, []string{"‹foo_pkey›"})
 			_, ok := rangeIDs[l.RangeID]
 			if ok {
 				t.Fatalf(`Logged ranges should be unique per node for this test.
-found range on node %d and node %d: %s %s %s %s %d`, i, l.LeaseholderNodeID, l.DatabaseName, l.SchemaName, l.TableName, l.IndexName, l.RangeID)
+found range on node %d and node %d: %s %s %s %s %d`, i, l.LeaseholderNodeID, l.Databases, l.SchemaName, l.Tables, l.Indexes, l.RangeID)
 			}
 			rangeIDs[l.RangeID] = struct{}{}
 		}

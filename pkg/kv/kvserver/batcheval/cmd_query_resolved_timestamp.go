@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
@@ -110,7 +106,7 @@ func computeMinIntentTimestamp(
 		UpperBound: ltEnd,
 		// Ignore Exclusive and Shared locks. We only care about intents.
 		MatchMinStr:  lock.Intent,
-		ReadCategory: storage.BatchEvalReadCategory,
+		ReadCategory: fs.BatchEvalReadCategory,
 	}
 	iter, err := storage.NewLockTableIterator(ctx, reader, opts)
 	if err != nil {

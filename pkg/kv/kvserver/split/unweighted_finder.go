@@ -1,19 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package split
 
 import (
 	"bytes"
 	"math"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -208,8 +203,8 @@ func (f *UnweightedFinder) NoSplitKeyCauseLogMsg() redact.RedactableString {
 
 // PopularKeyFrequency implements the LoadBasedSplitter interface.
 func (f *UnweightedFinder) PopularKeyFrequency() float64 {
-	sort.Slice(f.samples[:], func(i, j int) bool {
-		return bytes.Compare(f.samples[i].key, f.samples[j].key) < 0
+	slices.SortFunc(f.samples[:], func(a, b sample) int {
+		return bytes.Compare(a.key, b.key)
 	})
 
 	currentKeyCount := 1

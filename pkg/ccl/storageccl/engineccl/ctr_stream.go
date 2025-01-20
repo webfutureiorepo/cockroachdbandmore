@@ -1,10 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package engineccl
 
@@ -44,34 +41,61 @@ const (
 func (c *FileCipherStreamCreator) CreateNew(
 	ctx context.Context,
 ) (*enginepbccl.EncryptionSettings, FileStream, error) {
-	key, err := c.keyManager.ActiveKey(ctx)
+	key, err := c.keyManager.ActiveKeyForWriter(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	settings := &enginepbccl.EncryptionSettings{}
 	if key == nil || key.Info.EncryptionType == enginepbccl.EncryptionType_Plaintext {
 		settings.EncryptionType = enginepbccl.EncryptionType_Plaintext
-		stream := &filePlainStream{}
-		return settings, stream, nil
+	} else {
+		settings.EncryptionType = key.Info.EncryptionType
+		settings.KeyId = key.Info.KeyId
+		settings.Nonce = make([]byte, ctrNonceSize)
+		_, err = rand.Read(settings.Nonce)
+		if err != nil {
+			return nil, nil, err
+		}
+		counterBytes := make([]byte, 4)
+		if _, err = rand.Read(counterBytes); err != nil {
+			return nil, nil, err
+		}
+		// Does not matter how we convert 4 random bytes into uint32
+		settings.Counter = binary.LittleEndian.Uint32(counterBytes)
 	}
-	settings.EncryptionType = key.Info.EncryptionType
-	settings.KeyId = key.Info.KeyId
-	settings.Nonce = make([]byte, ctrNonceSize)
-	_, err = rand.Read(settings.Nonce)
+
+	fcs, err := createFileCipherStream(settings, key)
 	if err != nil {
 		return nil, nil, err
 	}
-	counterBytes := make([]byte, 4)
-	if _, err = rand.Read(counterBytes); err != nil {
-		return nil, nil, err
+	return settings, fcs, nil
+}
+
+func createFileCipherStream(
+	settings *enginepbccl.EncryptionSettings, key *enginepbccl.SecretKey,
+) (FileStream, error) {
+	switch settings.EncryptionType {
+	case enginepbccl.EncryptionType_Plaintext:
+		return &filePlainStream{}, nil
+
+	case enginepbccl.EncryptionType_AES128_CTR, enginepbccl.EncryptionType_AES192_CTR, enginepbccl.EncryptionType_AES256_CTR:
+		ctrCS, err := newCTRBlockCipherStream(key, settings.Nonce, settings.Counter)
+		if err != nil {
+			return nil, err
+		}
+		return &fileCipherStream{bcs: ctrCS}, nil
+
+	case enginepbccl.EncryptionType_AES_128_CTR_V2, enginepbccl.EncryptionType_AES_192_CTR_V2, enginepbccl.EncryptionType_AES_256_CTR_V2:
+		var iv [ctrBlockSize]byte
+		copy(iv[:ctrNonceSize], settings.Nonce)
+		binary.BigEndian.PutUint32(iv[ctrNonceSize:ctrNonceSize+4], settings.Counter)
+		fcs, err := newFileCipherStreamV2(key.Key, iv[:])
+		if err != nil {
+			return nil, err
+		}
+		return fcs, nil
 	}
-	// Does not matter how we convert 4 random bytes into uint32
-	settings.Counter = binary.LittleEndian.Uint32(counterBytes)
-	ctrCS, err := newCTRBlockCipherStream(key, settings.Nonce, settings.Counter)
-	if err != nil {
-		return nil, nil, err
-	}
-	return settings, &fileCipherStream{bcs: ctrCS}, nil
+	return nil, fmt.Errorf("unknown encryption type %s", settings.EncryptionType)
 }
 
 // CreateExisting creates a FileStream for an existing file by looking up the key described by
@@ -86,11 +110,7 @@ func (c *FileCipherStreamCreator) CreateExisting(
 	if err != nil {
 		return nil, err
 	}
-	ctrCS, err := newCTRBlockCipherStream(key, settings.Nonce, settings.Counter)
-	if err != nil {
-		return nil, err
-	}
-	return &fileCipherStream{bcs: ctrCS}, nil
+	return createFileCipherStream(settings, key)
 }
 
 // FileStream encrypts/decrypts byte slices at arbitrary file offsets.

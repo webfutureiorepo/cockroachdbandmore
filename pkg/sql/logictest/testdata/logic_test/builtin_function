@@ -150,6 +150,40 @@ SELECT random() * 0.0
 ----
 0
 
+statement ok
+SELECT setseed(0.1)
+
+# The previous call to setseed() should affect the next query.
+query IR
+SELECT i, random() FROM ROWS FROM (generate_series(1, 5)) AS i ORDER by i
+----
+1  0.8090535001228529
+2  0.33363615433097443
+3  0.10208231032120892
+4  0.43716650508717286
+5  0.16686635296305902
+
+statement ok
+SELECT setseed(0.1)
+
+query IR
+SELECT i, random() FROM ROWS FROM (generate_series(1, 5)) AS i ORDER by i
+----
+1  0.8090535001228529
+2  0.33363615433097443
+3  0.10208231032120892
+4  0.43716650508717286
+5  0.16686635296305902
+
+# Subqueries need to use the same RNG.
+statement ok
+SELECT setseed(0.1)
+
+query RR
+WITH cte(col) AS (SELECT random()) SELECT col, random() FROM cte
+----
+0.8090535001228529  0.33363615433097443
+
 # Concatenating 'empty' because the empty string doesn't work in these tests.
 query T
 SELECT concat() || 'empty'
@@ -161,8 +195,13 @@ SELECT concat('RoacH', NULL)
 ----
 RoacH
 
-statement error unknown signature: concat\(string, bool, decimal, bool\)
-SELECT concat('RoacH', false, 64.532, TRUE)
+statement ok
+CREATE TYPE concat_enum AS ENUM ('foo', 'bar', 'baz')
+
+query T
+SELECT concat('foo'::concat_enum, ' ', 64.532, ' ', 'baz'::concat_enum, ' ', 42, ' ', 1 = 0, ' ', '{"foo": "bar"}'::json, ' ', '{1, 2, 3}'::int[])
+----
+foo 64.532 baz 42 f {"foo": "bar"} {1,2,3}
 
 query T
 SELECT substr('RoacH', 2, 3)
@@ -2249,7 +2288,7 @@ CREATE INDEX pg_indexdef_partial_idx ON test.public.pg_indexdef_test USING btree
 query T
 SELECT pg_catalog.pg_get_indexdef((SELECT oid from pg_class WHERE relname='pg_indexdef_partial_enum_idx'))
 ----
-CREATE INDEX pg_indexdef_partial_enum_idx ON test.public.pg_indexdef_test USING btree (a ASC) WHERE (e IN ('foo'::test.public.testenum, 'bar'::test.public.testenum))
+CREATE INDEX pg_indexdef_partial_enum_idx ON test.public.pg_indexdef_test USING btree (a ASC) WHERE (e IN ('foo'::public.testenum, 'bar'::public.testenum))
 
 query T
 SELECT pg_catalog.pg_get_indexdef(0, 0, true)
@@ -2996,6 +3035,7 @@ SELECT (SELECT * FROM [SHOW crdb_version]) = version()
 ----
 true
 
+# Replicated version field was added in 24.3, which will make the two non-equivalent.
 query B
 select crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor)) = descriptor from system.descriptor where id = 1
 ----
@@ -3035,7 +3075,7 @@ subtest crdb_internal.trace_id
 # switch users -- this one has no permissions so expect errors
 user testuser
 
-query error insufficient privilege
+query error user testuser does not have REPAIRCLUSTER system privilege
 SELECT * FROM crdb_internal.trace_id()
 
 user root
@@ -3050,7 +3090,7 @@ subtest crdb_internal.payloads_for_span
 # switch users -- this one has no permissions so expect errors
 user testuser
 
-query error user testuser does not have VIEWCLUSTERMETADATA system privilege
+query error user testuser does not have REPAIRCLUSTER system privilege
 SELECT * FROM crdb_internal.payloads_for_span(0)
 
 user root
@@ -3066,7 +3106,7 @@ subtest crdb_internal.payloads_for_trace
 # switch users -- this one has no permissions so expect errors
 user testuser
 
-query error user testuser does not have VIEWCLUSTERMETADATA system privilege
+query error user testuser does not have REPAIRCLUSTER system privilege
 SELECT * FROM crdb_internal.payloads_for_span(0)
 
 user root
@@ -3080,7 +3120,7 @@ span_id payload_type  payload_jsonb
 # switch users -- this one has no permissions so expect errors
 user testuser
 
-query error insufficient privilege
+query error user testuser does not have REPAIRCLUSTER system privilege
 SELECT * FROM crdb_internal.set_trace_verbose(0, false)
 
 user root
@@ -3825,6 +3865,72 @@ select crdb_internal.job_payload_type('invalid'::BYTES);
 query error pgcode 22023 pq: crdb_internal.job_payload_type\(\): invalid type in job payload protocol message: Payload.Type called on a payload with an unknown details type: <nil>
 select crdb_internal.job_payload_type('');
 
+subtest crdb_internal.get_fully_qualified_table_name
+query T
+SELECT crdb_internal.get_fully_qualified_table_name(NULL)
+----
+NULL
+
+query T
+SELECT crdb_internal.get_fully_qualified_table_name(9999999)
+----
+NULL
+
+statement ok
+CREATE DATABASE "testDatabase"
+
+query T
+SELECT crdb_internal.get_fully_qualified_table_name((SELECT id FROM system.namespace WHERE name = 'foo'))
+----
+test.public.foo
+
+statement error unknown signature: crdb_internal.get_fully_qualified_table_name\(string\)
+SELECT crdb_internal.get_fully_qualified_table_name('')
+
+statement ok
+USE "testDatabase"
+
+statement ok
+CREATE SCHEMA "testSchema"
+
+statement ok
+CREATE TABLE "testSchema"."testTable" (a INT)
+
+let $testTableID
+SELECT id FROM system.namespace WHERE name = 'testTable'
+
+statement ok
+USE test
+
+query T
+SELECT crdb_internal.get_fully_qualified_table_name($testTableID)
+----
+"testDatabase"."testSchema"."testTable"
+
+user testuser
+
+# Verify that testuser has permissions to use the builtin function, and the
+# backing view.
+query T
+SELECT crdb_internal.get_fully_qualified_table_name($testTableID)
+----
+"testDatabase"."testSchema"."testTable"
+
+user root
+
+statement ok
+REVOKE CONNECT ON DATABASE "testDatabase" FROM public
+
+user testuser
+
+# testuser should no longer be able to see the name.
+query T
+SELECT crdb_internal.get_fully_qualified_table_name($testTableID)
+----
+NULL
+
+user root
+
 subtest crdb_internal.redactable_sql_constants
 query T
 SELECT crdb_internal.redactable_sql_constants(NULL)
@@ -4012,7 +4118,7 @@ statement error start key must be less than end key
 SELECT crdb_internal.check_consistency(true, crdb_internal.tenant_span()[2], crdb_internal.tenant_span()[2])
 
 query TT
-SELECT status, regexp_replace(detail, '[0-9]+', '', 'g')
+SELECT status, regexp_replace(detail, '[0-9-]+', '', 'g')
 FROM crdb_internal.check_consistency(true, crdb_internal.tenant_span()[1], crdb_internal.tenant_span()[2])
 ORDER BY range_id
 LIMIT 1
@@ -4031,24 +4137,30 @@ subtest end
 subtest merge_aggregated_stmts_metadata
 
 query T
-SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[ '{ "db": [ "defaultdb", "movr" ], "distSQLCount": 1, "failedCount": 2, "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 33, "vecCount": 0 }'::JSON, '{ "db": ["tpcc"], "distSQLCount": 1, "failedCount": 2, "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 85, "vecCount": 2 }'::JSON ])
+SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[ '{ "db": [ "defaultdb", "movr" ], "distSQLCount": 1, "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 33, "vecCount": 0 }'::JSON, '{ "db": ["tpcc"], "distSQLCount": 1, "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 85, "vecCount": 2 }'::JSON ])
 ----
-{"appNames": [], "db": ["defaultdb", "movr", "tpcc"], "distSQLCount": 2, "failedCount": 4, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 118, "vecCount": 2}
+{"appNames": [], "db": ["defaultdb", "movr", "tpcc"], "distSQLCount": 2, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 118, "vecCount": 2}
 
 query T
 SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[])
 ----
-{"appNames": [], "db": [], "distSQLCount": 0, "failedCount": 0, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 0, "implicitTxn": false, "query": "", "querySummary": "", "stmtType": "", "totalCount": 0, "vecCount": 0}
+{"appNames": [], "db": [], "distSQLCount": 0, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 0, "implicitTxn": false, "query": "", "querySummary": "", "stmtType": "", "totalCount": 0, "vecCount": 0}
 
 query T
-SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[ '{ "db": [ "defaultdb", "tpcc" ], "distSQLCount": 1, "failedCount": 2, "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 33, "vecCount": 0 }'::JSON, '{ "db": ["tpcc"], "distSQLCount": 23, "failedCount": 0, "fullScanCount": 99, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 3, "vecCount": 2 }'::JSON, '{"hello": "world"}'::JSON ])
+SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[ '{ "db": [ "defaultdb", "tpcc" ], "distSQLCount": 1, "fullScanCount": 0, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 33, "vecCount": 0 }'::JSON, '{ "db": ["tpcc"], "distSQLCount": 23, "fullScanCount": 99, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 3, "vecCount": 2 }'::JSON, '{"hello": "world"}'::JSON ])
 ----
-{"appNames": [], "db": ["defaultdb", "tpcc"], "distSQLCount": 47, "failedCount": 2, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 198, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 39, "vecCount": 4}
+{"appNames": [], "db": ["defaultdb", "tpcc"], "distSQLCount": 24, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 99, "implicitTxn": true, "query": "SELECT 1", "querySummary": "SELECT 1", "stmtType": "TypeDML", "totalCount": 36, "vecCount": 2}
 
 query T
 SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[ '{"aMalformedMetadaObj": 123}'::JSON, '{"key": "value"}'::JSON ])
 ----
-{"appNames": [], "db": [], "distSQLCount": 0, "failedCount": 0, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 0, "implicitTxn": false, "query": "", "querySummary": "", "stmtType": "", "totalCount": 0, "vecCount": 0}
+{"appNames": [], "db": [], "distSQLCount": 0, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 0, "implicitTxn": false, "query": "", "querySummary": "", "stmtType": "", "totalCount": 0, "vecCount": 0}
+
+# Merge 2 objects with partial data to check that no value is reused between iterations.
+query T
+SELECT crdb_internal.merge_aggregated_stmt_metadata(ARRAY[ '{"distSQLCount": 111, "fullScanCount": 333 }'::JSON, '{"totalCount": 1, "vecCount": 2}'::JSON, '{"key": "value"}'::JSON ])
+----
+{"appNames": [], "db": [], "distSQLCount": 111, "fingerprintID": "", "formattedQuery": "", "fullScanCount": 333, "implicitTxn": false, "query": "", "querySummary": "", "stmtType": "", "totalCount": 1, "vecCount": 2}
 
 subtest end
 
@@ -4227,3 +4339,72 @@ query T rowsort
 SELECT oidvectortypes(proargtypes) FROM pg_proc WHERE proname='custom_fn'
 ----
 custom_typ
+
+subtest obj_description_with_comment_on_type
+
+skipif config local-legacy-schema-changer
+statement ok
+CREATE TYPE roach_dwellings AS ENUM ('roach_motel','roach_kitchen','roach_bathroom','roach_house');
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_dwellings IS 'roach_penthouse coming soon';
+
+# This select statement tests the underlying statement run with \dT
+skipif config local-legacy-schema-changer
+query TTT colnames
+SELECT n.nspname AS "Schema",
+         pg_catalog.format_type(t.oid, NULL) AS "Name",
+         COALESCE(pg_catalog.obj_description(t.oid, 'pg_type'),'') AS "Description"
+    FROM pg_catalog.pg_type t
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+   WHERE (t.typrelid = 0
+         OR (SELECT c.relkind = 'c'
+               FROM pg_catalog.pg_class c
+              WHERE c.oid = t.typrelid))
+     AND (NOT EXISTS(
+         SELECT 1
+           FROM pg_catalog.pg_type el
+          WHERE el.oid = t.typelem AND el.typarray = t.oid))
+     AND n.nspname !~ '^pg_'
+     AND n.nspname <> 'information_schema'
+     AND n.nspname <> 'crdb_internal'
+     AND pg_catalog.pg_type_is_visible(t.oid)
+ORDER BY 1, 2;
+----
+Schema  Name             Description
+public  concat_enum      ·
+public  custom_typ       ·
+public  roach_dwellings  ·
+public  testenum         ·
+
+subtest end
+
+subtest type_is_indexable
+
+# Indexable type (int4).
+query B
+SELECT crdb_internal.type_is_indexable(23);
+----
+true
+
+# Unindexable type (refcursor).
+query B
+SELECT crdb_internal.type_is_indexable(1790);
+----
+false
+
+statement ok
+CREATE TYPE foo_type AS ENUM ('v1', 'v2', 'v3');
+
+query B
+SELECT crdb_internal.type_is_indexable((SELECT oid FROM pg_type WHERE typname = 'foo_type'));
+----
+true
+
+query T
+SELECT crdb_internal.type_is_indexable(NULL);
+----
+NULL
+
+subtest end

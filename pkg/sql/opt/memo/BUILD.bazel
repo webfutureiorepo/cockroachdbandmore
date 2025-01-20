@@ -80,10 +80,6 @@ go_test(
         "//pkg/sql/opt/testutils/opttester:testfixtures",
     ],
     embed = [":memo"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/kv/kvserver/concurrency/isolation",
         "//pkg/settings/cluster",
@@ -129,7 +125,7 @@ genrule(
     cmd = """
       $(location //pkg/sql/opt/optgen/cmd/optgen) -out $@ exprs $(locations //pkg/sql/opt:ops)
     """,
-    exec_tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
+    tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
     visibility = ["//visibility:public"],
 )
 

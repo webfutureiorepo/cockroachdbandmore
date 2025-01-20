@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package descs
 
@@ -17,10 +12,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydrateddesccache"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/internal/catkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 )
@@ -30,7 +26,7 @@ type CollectionFactory struct {
 	settings                             *cluster.Settings
 	codec                                keys.SQLCodec
 	leaseMgr                             *lease.Manager
-	virtualSchemas                       catalog.VirtualSchemas
+	virtualSchemas                       VirtualCatalogHolder
 	hydrated                             *hydrateddesccache.Cache
 	systemDatabase                       *catkv.SystemDatabaseCache
 	spanConfigSplitter                   spanconfig.Splitter
@@ -72,7 +68,7 @@ func NewCollectionFactory(
 	ctx context.Context,
 	settings *cluster.Settings,
 	leaseMgr *lease.Manager,
-	virtualSchemas catalog.VirtualSchemas,
+	virtualSchemas VirtualCatalogHolder,
 	hydrated *hydrateddesccache.Cache,
 	spanConfigSplitter spanconfig.Splitter,
 	spanConfigLimiter spanconfig.Limiter,
@@ -87,9 +83,10 @@ func NewCollectionFactory(
 		systemDatabase:     leaseMgr.SystemDatabaseCache(),
 		spanConfigSplitter: spanConfigSplitter,
 		spanConfigLimiter:  spanConfigLimiter,
-		defaultMonitor: mon.NewUnlimitedMonitor(ctx, "CollectionFactoryDefaultUnlimitedMonitor",
-			mon.MemoryResource, nil /* curCount */, nil, /* maxHist */
-			0 /* noteworthy */, settings),
+		defaultMonitor: mon.NewUnlimitedMonitor(ctx, mon.Options{
+			Name:     mon.MakeMonitorName("CollectionFactoryDefaultUnlimitedMonitor"),
+			Settings: settings,
+		}),
 		defaultDescriptorSessionDataProvider: defaultDescriptorSessionDataProvider,
 	}
 }
@@ -169,4 +166,12 @@ type RegionProvider interface {
 	// GetRegions provides access to the set of regions available to the
 	// current tenant.
 	GetRegions(ctx context.Context) (*serverpb.RegionsResponse, error)
+
+	// SynthesizeRegionConfig returns a RegionConfig that describes the
+	// multiregion setup for the given database ID.
+	SynthesizeRegionConfig(
+		ctx context.Context,
+		dbID descpb.ID,
+		opts ...multiregion.SynthesizeRegionConfigOption,
+	) (multiregion.RegionConfig, error)
 }

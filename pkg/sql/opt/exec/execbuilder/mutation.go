@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execbuilder
 
@@ -30,20 +25,26 @@ import (
 
 func (b *Builder) buildMutationInput(
 	mutExpr, inputExpr memo.RelExpr, colList opt.ColList, p *memo.MutationPrivate,
-) (execPlan, error) {
-	shouldApplyImplicitLocking, err := b.shouldApplyImplicitLockingToMutationInput(mutExpr)
+) (_ execPlan, outputCols colOrdMap, err error) {
+	toLock, err := b.shouldApplyImplicitLockingToMutationInput(mutExpr)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
-	if shouldApplyImplicitLocking {
-		// Re-entrance is not possible because mutations are never nested.
-		b.forceForUpdateLocking = true
-		defer func() { b.forceForUpdateLocking = false }()
+	if toLock != 0 {
+		if b.forceForUpdateLocking.Contains(int(toLock)) {
+			return execPlan{}, colOrdMap{}, errors.AssertionFailedf(
+				"unexpectedly found table %v in forceForUpdateLocking set", toLock,
+			)
+		}
+		b.forceForUpdateLocking.Add(int(toLock))
+		defer func() {
+			b.forceForUpdateLocking.Remove(int(toLock))
+		}()
 	}
 
-	input, err := b.buildRelational(inputExpr)
+	input, inputCols, err := b.buildRelational(inputExpr)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// TODO(mgartner/radu): This can incorrectly append columns in a FK cascade
@@ -60,37 +61,52 @@ func (b *Builder) buildMutationInput(
 		}
 	}
 
-	input, err = b.ensureColumns(input, inputExpr, colList, inputExpr.ProvidedPhysical().Ordering)
+	// Currently, the execution engine requires one input column for each fetch,
+	// insert, update, and delete expression, so use ensureColumns to map and
+	// reorder columns so that they correspond to target table columns.
+	// For example:
+	//
+	//   UPDATE xyz SET x=1, y=1
+	//
+	// Here, the input has just one column (because the constant is shared), and
+	// so must be mapped to two separate update columns.
+	//
+	// TODO(andyk): Using ensureColumns here can result in an extra Render.
+	// Upgrade execution engine to not require this.
+	input, inputCols, err = b.ensureColumns(
+		input, inputCols, inputExpr, colList,
+		inputExpr.ProvidedPhysical().Ordering, true, /* reuseInputCols */
+	)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if p.WithID != 0 {
 		label := fmt.Sprintf("buffer %d", p.WithID)
 		bufferNode, err := b.factory.ConstructBuffer(input.root, label)
 		if err != nil {
-			return execPlan{}, err
+			return execPlan{}, colOrdMap{}, err
 		}
 
-		b.addBuiltWithExpr(p.WithID, input.outputCols, bufferNode)
+		b.addBuiltWithExpr(p.WithID, inputCols, bufferNode)
 		input.root = bufferNode
 	}
-	return input, nil
+	return input, inputCols, nil
 }
 
-func (b *Builder) buildInsert(ins *memo.InsertExpr) (execPlan, error) {
-	if ep, ok, err := b.tryBuildFastPathInsert(ins); err != nil || ok {
-		return ep, err
+func (b *Builder) buildInsert(ins *memo.InsertExpr) (_ execPlan, outputCols colOrdMap, err error) {
+	if ep, cols, ok, err := b.tryBuildFastPathInsert(ins); err != nil || ok {
+		return ep, cols, err
 	}
 	// Construct list of columns that only contains columns that need to be
 	// inserted (e.g. delete-only mutation columns don't need to be inserted).
-	colList := make(opt.ColList, 0, len(ins.InsertCols)+len(ins.CheckCols)+len(ins.PartialIndexPutCols))
-	colList = appendColsWhenPresent(colList, ins.InsertCols)
-	colList = appendColsWhenPresent(colList, ins.CheckCols)
-	colList = appendColsWhenPresent(colList, ins.PartialIndexPutCols)
-	input, err := b.buildMutationInput(ins, ins.Input, colList, &ins.MutationPrivate)
+	colList := appendColsWhenPresent(
+		ins.InsertCols, ins.CheckCols, ins.PartialIndexPutCols,
+		ins.VectorIndexPutPartitionCols, ins.VectorIndexPutCentroidCols,
+	)
+	input, _, err := b.buildMutationInput(ins, ins.Input, colList, &ins.MutationPrivate)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// Construct the Insert node.
@@ -106,32 +122,39 @@ func (b *Builder) buildInsert(ins *memo.InsertExpr) (execPlan, error) {
 		insertOrds,
 		returnOrds,
 		checkOrds,
+		ins.UniqueWithTombstoneIndexes,
 		b.allowAutoCommit && len(ins.UniqueChecks) == 0 &&
-			len(ins.FKChecks) == 0 && len(ins.FKCascades) == 0,
+			len(ins.FKChecks) == 0 && len(ins.FKCascades) == 0 && ins.AfterTriggers == nil,
 	)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 	// Construct the output column map.
 	ep := execPlan{root: node}
 	if ins.NeedResults() {
-		ep.outputCols = mutationOutputColMap(ins)
+		outputCols = b.mutationOutputColMap(ins)
 	}
 
 	if err := b.buildUniqueChecks(ins.UniqueChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKChecks(ins.FKChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
-	return ep, nil
+	if err := b.buildAfterTriggers(ins.WithID, ins.AfterTriggers); err != nil {
+		return execPlan{}, colOrdMap{}, err
+	}
+
+	return ep, outputCols, nil
 }
 
 // tryBuildFastPathInsert attempts to construct an insert using the fast path,
 // checking all required conditions. See exec.Factory.ConstructInsertFastPath.
-func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok bool, _ error) {
+func (b *Builder) tryBuildFastPathInsert(
+	ins *memo.InsertExpr,
+) (_ execPlan, outputCols colOrdMap, ok bool, _ error) {
 	// Conditions from ConstructFastPathInsert:
 	//
 	//  - there are no other mutations in the statement, and the output of the
@@ -140,12 +163,16 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 	//
 	// This condition was taken into account in build().
 	if !b.allowInsertFastPath {
-		return execPlan{}, false, nil
+		return execPlan{}, colOrdMap{}, false, nil
 	}
 	// If there are unique checks required, there must be the same number of fast
 	// path unique checks.
 	if len(ins.UniqueChecks) != len(ins.FastPathUniqueChecks) {
-		return execPlan{}, false, nil
+		return execPlan{}, colOrdMap{}, false, nil
+	}
+	// Do not attempt the fast path if there are any triggers.
+	if ins.AfterTriggers != nil {
+		return execPlan{}, colOrdMap{}, false, nil
 	}
 
 	insInput := ins.Input
@@ -153,7 +180,7 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 	// Values expressions containing subqueries or UDFs, or having a size larger
 	// than the max mutation batch size are disallowed.
 	if !ok || !memo.ValuesLegalForInsertFastPath(values) {
-		return execPlan{}, false, nil
+		return execPlan{}, colOrdMap{}, false, nil
 	}
 
 	md := b.mem.Metadata()
@@ -167,7 +194,7 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 			// uniqueness checks during fast-path insert. Even if DatumsFromConstraint
 			// contains no Datums, that case indicates that all values to check come
 			// from the input row.
-			return execPlan{}, false, nil
+			return execPlan{}, colOrdMap{}, false, nil
 		}
 		execFastPathCheck := &uniqChecks[i]
 		// Set up the execbuilder structure from the elements built during
@@ -175,9 +202,12 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		execFastPathCheck.ReferencedTable = md.Table(c.ReferencedTableID)
 		execFastPathCheck.ReferencedIndex = execFastPathCheck.ReferencedTable.Index(c.ReferencedIndexOrdinal)
 		execFastPathCheck.CheckOrdinal = c.CheckOrdinal
-		locking, err := b.buildLocking(c.Locking)
+
+		// If there is a unique index with implicit partitioning columns, the fast
+		// path can write tombstones to lock the row in all partitions.
+		locking, err := b.buildLocking(ins.Table, c.Locking)
 		if err != nil {
-			return execPlan{}, false, err
+			return execPlan{}, colOrdMap{}, false, err
 		}
 		execFastPathCheck.Locking = locking
 		execFastPathCheck.InsertCols = make([]exec.TableColumnOrdinal, len(c.InsertCols))
@@ -193,11 +223,26 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 				panic(errors.AssertionFailedf("expected %d tuple elements in insert fast path uniqueness check, found %d", len(c.InsertCols), len(tuple.Elems)))
 			}
 			for k := 0; k < len(tuple.Elems); k++ {
-				constExpr, _ := tuple.Elems[k].(*memo.ConstExpr)
-				execFastPathCheck.DatumsFromConstraint[j][execFastPathCheck.InsertCols[k]] = constExpr.Value
+				var constDatum tree.Datum
+				switch e := tuple.Elems[k].(type) {
+				case *memo.ConstExpr:
+					constDatum = e.Value
+				case *memo.TrueExpr:
+					constDatum = tree.DBoolTrue
+				case *memo.FalseExpr:
+					constDatum = tree.DBoolFalse
+				default:
+					return execPlan{}, colOrdMap{}, false, nil
+				}
+				execFastPathCheck.DatumsFromConstraint[j][execFastPathCheck.InsertCols[k]] = constDatum
 			}
 		}
 		uniqCheck := &ins.UniqueChecks[i]
+		// TODO(mgartner): We shouldn't keep references to md, uniqCheck, and
+		// execFastPathCheck. Ideally, the query plan for the constraint would
+		// produce the constraint column names as output columns. Then, the
+		// error message could be constructed without needing to access the
+		// catalog or metadata.
 		execFastPathCheck.MkErr = func(values tree.Datums) error {
 			return mkFastPathUniqueCheckErr(md, uniqCheck, values, execFastPathCheck.ReferencedIndex)
 		}
@@ -210,19 +255,19 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		c := &ins.FKChecks[i]
 		if md.Table(c.ReferencedTable).ID() == md.Table(ins.Table).ID() {
 			// Self-referencing FK.
-			return execPlan{}, false, nil
+			return execPlan{}, colOrdMap{}, false, nil
 		}
 		fk := tab.OutboundForeignKey(c.FKOrdinal)
 		lookupJoin, isLookupJoin := c.Check.(*memo.LookupJoinExpr)
 		if !isLookupJoin || lookupJoin.JoinType != opt.AntiJoinOp {
 			// Not a lookup anti-join.
-			return execPlan{}, false, nil
+			return execPlan{}, colOrdMap{}, false, nil
 		}
 		// TODO(rytaft): see if we can remove the requirement that LookupExpr is
 		// empty.
 		if len(lookupJoin.On) > 0 || len(lookupJoin.LookupExpr) > 0 ||
 			len(lookupJoin.KeyCols) != fk.ColumnCount() {
-			return execPlan{}, false, nil
+			return execPlan{}, colOrdMap{}, false, nil
 		}
 		inputExpr := lookupJoin.Input
 		// Ignore any select (used to deal with NULLs).
@@ -231,15 +276,15 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		}
 		withScan, isWithScan := inputExpr.(*memo.WithScanExpr)
 		if !isWithScan {
-			return execPlan{}, false, nil
+			return execPlan{}, colOrdMap{}, false, nil
 		}
 		if withScan.With != ins.WithID {
-			return execPlan{}, false, nil
+			return execPlan{}, colOrdMap{}, false, nil
 		}
 
-		locking, err := b.buildLocking(lookupJoin.Locking)
+		locking, err := b.buildLocking(lookupJoin.Table, lookupJoin.Locking)
 		if err != nil {
-			return execPlan{}, false, err
+			return execPlan{}, colOrdMap{}, false, err
 		}
 
 		out := &fkChecks[i]
@@ -250,12 +295,12 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 			var withColOrd, inputColOrd int
 			withColOrd, ok = withScan.OutCols.Find(keyCol)
 			if !ok {
-				return execPlan{}, false, errors.AssertionFailedf("cannot find column %d", keyCol)
+				return execPlan{}, colOrdMap{}, false, errors.AssertionFailedf("cannot find column %d", keyCol)
 			}
 			inputCol := withScan.InCols[withColOrd]
 			inputColOrd, ok = ins.InsertCols.Find(inputCol)
 			if !ok {
-				return execPlan{}, false, errors.AssertionFailedf("cannot find column %d", inputCol)
+				return execPlan{}, colOrdMap{}, false, errors.AssertionFailedf("cannot find column %d", inputCol)
 			}
 			out.InsertCols[j] = exec.TableColumnOrdinal(inputColOrd)
 		}
@@ -288,18 +333,18 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		}
 	}
 
-	colList := make(opt.ColList, 0, len(ins.InsertCols)+len(ins.CheckCols)+len(ins.PartialIndexPutCols))
-	colList = appendColsWhenPresent(colList, ins.InsertCols)
-	colList = appendColsWhenPresent(colList, ins.CheckCols)
-	colList = appendColsWhenPresent(colList, ins.PartialIndexPutCols)
+	colList := appendColsWhenPresent(
+		ins.InsertCols, ins.CheckCols, ins.PartialIndexPutCols,
+		ins.VectorIndexDelPartitionCols, ins.VectorIndexPutCentroidCols,
+	)
 	rows, err := b.buildValuesRows(values)
 	if err != nil {
-		return execPlan{}, false, err
+		return execPlan{}, colOrdMap{}, false, err
 	}
 	// We may need to rearrange the columns.
 	rows, err = rearrangeColumns(values.Cols, rows, colList)
 	if err != nil {
-		return execPlan{}, false, err
+		return execPlan{}, colOrdMap{}, false, err
 	}
 
 	// Construct the InsertFastPath node.
@@ -314,17 +359,18 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		checkOrds,
 		fkChecks,
 		uniqChecks,
+		ins.UniqueWithTombstoneIndexes,
 		b.allowAutoCommit,
 	)
 	if err != nil {
-		return execPlan{}, false, err
+		return execPlan{}, colOrdMap{}, false, err
 	}
 	// Construct the output column map.
 	ep := execPlan{root: node}
 	if ins.NeedResults() {
-		ep.outputCols = mutationOutputColMap(ins)
+		outputCols = b.mutationOutputColMap(ins)
 	}
-	return ep, true, nil
+	return ep, outputCols, true, nil
 }
 
 // rearrangeColumns rearranges the columns in a matrix of TypedExpr values.
@@ -357,37 +403,25 @@ func rearrangeColumns(
 	return outRows, nil
 }
 
-func (b *Builder) buildUpdate(upd *memo.UpdateExpr) (execPlan, error) {
-	// Currently, the execution engine requires one input column for each fetch
-	// and update expression, so use ensureColumns to map and reorder columns so
-	// that they correspond to target table columns. For example:
-	//
-	//   UPDATE xyz SET x=1, y=1
-	//
-	// Here, the input has just one column (because the constant is shared), and
-	// so must be mapped to two separate update columns.
-	//
-	// TODO(andyk): Using ensureColumns here can result in an extra Render.
-	// Upgrade execution engine to not require this.
-	cnt := len(upd.FetchCols) + len(upd.UpdateCols) + len(upd.PassthroughCols) +
-		len(upd.CheckCols) + len(upd.PartialIndexPutCols) + len(upd.PartialIndexDelCols)
-	colList := make(opt.ColList, 0, cnt)
-	colList = appendColsWhenPresent(colList, upd.FetchCols)
-	colList = appendColsWhenPresent(colList, upd.UpdateCols)
-	// The RETURNING clause of the Update can refer to the columns
-	// in any of the FROM tables. As a result, the Update may need
-	// to passthrough those columns so the projection above can use
-	// them.
+func (b *Builder) buildUpdate(upd *memo.UpdateExpr) (_ execPlan, outputCols colOrdMap, err error) {
+	var neededPassThroughCols opt.OptionalColList
 	if upd.NeedResults() {
-		colList = append(colList, upd.PassthroughCols...)
+		// The RETURNING clause of the Update can refer to the columns
+		// in any of the FROM tables. As a result, the Update may need
+		// to passthrough those columns so the projection above can use
+		// them.
+		neededPassThroughCols = opt.OptionalColList(upd.PassthroughCols)
 	}
-	colList = appendColsWhenPresent(colList, upd.CheckCols)
-	colList = appendColsWhenPresent(colList, upd.PartialIndexPutCols)
-	colList = appendColsWhenPresent(colList, upd.PartialIndexDelCols)
+	colList := appendColsWhenPresent(
+		upd.FetchCols, upd.UpdateCols, neededPassThroughCols, upd.CheckCols,
+		upd.PartialIndexPutCols, upd.PartialIndexDelCols,
+		upd.VectorIndexPutPartitionCols, upd.VectorIndexPutCentroidCols,
+		upd.VectorIndexDelPartitionCols,
+	)
 
-	input, err := b.buildMutationInput(upd, upd.Input, colList, &upd.MutationPrivate)
+	input, _, err := b.buildMutationInput(upd, upd.Input, colList, &upd.MutationPrivate)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// Construct the Update node.
@@ -415,68 +449,53 @@ func (b *Builder) buildUpdate(upd *memo.UpdateExpr) (execPlan, error) {
 		returnColOrds,
 		checkOrds,
 		passthroughCols,
+		upd.UniqueWithTombstoneIndexes,
 		b.allowAutoCommit && len(upd.UniqueChecks) == 0 &&
-			len(upd.FKChecks) == 0 && len(upd.FKCascades) == 0,
+			len(upd.FKChecks) == 0 && len(upd.FKCascades) == 0 && upd.AfterTriggers == nil,
 	)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildUniqueChecks(upd.UniqueChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKChecks(upd.FKChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKCascades(upd.WithID, upd.FKCascades); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
+	}
+
+	if err := b.buildAfterTriggers(upd.WithID, upd.AfterTriggers); err != nil {
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// Construct the output column map.
 	ep := execPlan{root: node}
 	if upd.NeedResults() {
-		ep.outputCols = mutationOutputColMap(upd)
+		outputCols = b.mutationOutputColMap(upd)
 	}
-	return ep, nil
+	return ep, outputCols, nil
 }
 
-func (b *Builder) buildUpsert(ups *memo.UpsertExpr) (execPlan, error) {
-	// Currently, the execution engine requires one input column for each insert,
-	// fetch, and update expression, so use ensureColumns to map and reorder
-	// columns so that they correspond to target table columns. For example:
-	//
-	//   INSERT INTO xyz (x, y) VALUES (1, 1)
-	//   ON CONFLICT (x) DO UPDATE SET x=2, y=2
-	//
-	// Here, both insert values and update values come from the same input column
-	// (because the constants are shared), and so must be mapped to separate
-	// output columns.
-	//
+func (b *Builder) buildUpsert(ups *memo.UpsertExpr) (_ execPlan, outputCols colOrdMap, err error) {
 	// If CanaryCol = 0, then this is the "blind upsert" case, which uses a KV
 	// "Put" to insert new rows or blindly overwrite existing rows. Existing rows
 	// do not need to be fetched or separately updated (i.e. ups.FetchCols and
 	// ups.UpdateCols are both empty).
-	//
-	// TODO(andyk): Using ensureColumns here can result in an extra Render.
-	// Upgrade execution engine to not require this.
-	cnt := len(ups.InsertCols) + len(ups.FetchCols) + len(ups.UpdateCols) + len(ups.CheckCols) +
-		len(ups.PartialIndexPutCols) + len(ups.PartialIndexDelCols) + 1
-	colList := make(opt.ColList, 0, cnt)
-	colList = appendColsWhenPresent(colList, ups.InsertCols)
-	colList = appendColsWhenPresent(colList, ups.FetchCols)
-	colList = appendColsWhenPresent(colList, ups.UpdateCols)
-	if ups.CanaryCol != 0 {
-		colList = append(colList, ups.CanaryCol)
-	}
-	colList = appendColsWhenPresent(colList, ups.CheckCols)
-	colList = appendColsWhenPresent(colList, ups.PartialIndexPutCols)
-	colList = appendColsWhenPresent(colList, ups.PartialIndexDelCols)
+	colList := appendColsWhenPresent(
+		ups.InsertCols, ups.FetchCols, ups.UpdateCols, opt.OptionalColList{ups.CanaryCol},
+		ups.CheckCols, ups.PartialIndexPutCols, ups.PartialIndexDelCols,
+		ups.VectorIndexPutPartitionCols, ups.VectorIndexPutCentroidCols,
+		ups.VectorIndexDelPartitionCols,
+	)
 
-	input, err := b.buildMutationInput(ups, ups.Input, colList, &ups.MutationPrivate)
+	input, inputCols, err := b.buildMutationInput(ups, ups.Input, colList, &ups.MutationPrivate)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// Construct the Upsert node.
@@ -484,9 +503,9 @@ func (b *Builder) buildUpsert(ups *memo.UpsertExpr) (execPlan, error) {
 	tab := md.Table(ups.Table)
 	canaryCol := exec.NodeColumnOrdinal(-1)
 	if ups.CanaryCol != 0 {
-		canaryCol, err = input.getNodeColumnOrdinal(ups.CanaryCol)
+		canaryCol, err = getNodeColumnOrdinal(inputCols, ups.CanaryCol)
 		if err != nil {
-			return execPlan{}, err
+			return execPlan{}, colOrdMap{}, err
 		}
 	}
 	insertColOrds := ordinalSetFromColList(ups.InsertCols)
@@ -505,23 +524,28 @@ func (b *Builder) buildUpsert(ups *memo.UpsertExpr) (execPlan, error) {
 		updateColOrds,
 		returnColOrds,
 		checkOrds,
+		ups.UniqueWithTombstoneIndexes,
 		b.allowAutoCommit && len(ups.UniqueChecks) == 0 &&
-			len(ups.FKChecks) == 0 && len(ups.FKCascades) == 0,
+			len(ups.FKChecks) == 0 && len(ups.FKCascades) == 0 && ups.AfterTriggers == nil,
 	)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildUniqueChecks(ups.UniqueChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKChecks(ups.FKChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKCascades(ups.WithID, ups.FKCascades); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
+	}
+
+	if err := b.buildAfterTriggers(ups.WithID, ups.AfterTriggers); err != nil {
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// If UPSERT returns rows, they contain all non-mutation columns from the
@@ -530,34 +554,31 @@ func (b *Builder) buildUpsert(ups *memo.UpsertExpr) (execPlan, error) {
 	// result of the UPSERT operation for that row.
 	ep := execPlan{root: node}
 	if ups.NeedResults() {
-		ep.outputCols = mutationOutputColMap(ups)
+		outputCols = b.mutationOutputColMap(ups)
 	}
-	return ep, nil
+	return ep, outputCols, nil
 }
 
-func (b *Builder) buildDelete(del *memo.DeleteExpr) (execPlan, error) {
+func (b *Builder) buildDelete(del *memo.DeleteExpr) (_ execPlan, outputCols colOrdMap, err error) {
 	// Check for the fast-path delete case that can use a range delete.
 	if ep, ok, err := b.tryBuildDeleteRange(del); err != nil || ok {
-		return ep, err
+		return ep, colOrdMap{}, err
 	}
-
-	// Ensure that order of input columns matches order of target table columns.
-	//
-	// TODO(andyk): Using ensureColumns here can result in an extra Render.
-	// Upgrade execution engine to not require this.
-	colList := make(opt.ColList, 0, len(del.FetchCols)+len(del.PassthroughCols)+len(del.PartialIndexDelCols))
-	colList = appendColsWhenPresent(colList, del.FetchCols)
-	// The RETURNING clause of the Delete can refer to the columns in any of the
-	// USING tables. As a result, the Update may need to passthrough those
-	// columns so the projection above can use them.
+	var neededPassThroughCols opt.OptionalColList
 	if del.NeedResults() {
-		colList = append(colList, del.PassthroughCols...)
+		// The RETURNING clause of the Delete can refer to the columns
+		// in any of the FROM tables. As a result, the Delete may need
+		// to passthrough those columns so the projection above can use
+		// them.
+		neededPassThroughCols = opt.OptionalColList(del.PassthroughCols)
 	}
-	colList = appendColsWhenPresent(colList, del.PartialIndexDelCols)
+	colList := appendColsWhenPresent(
+		del.FetchCols, neededPassThroughCols, del.PartialIndexDelCols, del.VectorIndexDelPartitionCols,
+	)
 
-	input, err := b.buildMutationInput(del, del.Input, colList, &del.MutationPrivate)
+	input, _, err := b.buildMutationInput(del, del.Input, colList, &del.MutationPrivate)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 	// Construct the Delete node.
 	md := b.mem.Metadata()
@@ -581,27 +602,32 @@ func (b *Builder) buildDelete(del *memo.DeleteExpr) (execPlan, error) {
 		fetchColOrds,
 		returnColOrds,
 		passthroughCols,
-		b.allowAutoCommit && len(del.FKChecks) == 0 && len(del.FKCascades) == 0,
+		b.allowAutoCommit && len(del.FKChecks) == 0 &&
+			len(del.FKCascades) == 0 && del.AfterTriggers == nil,
 	)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKChecks(del.FKChecks); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	if err := b.buildFKCascades(del.WithID, del.FKCascades); err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
+	}
+
+	if err := b.buildAfterTriggers(del.WithID, del.AfterTriggers); err != nil {
+		return execPlan{}, colOrdMap{}, err
 	}
 
 	// Construct the output column map.
 	ep := execPlan{root: node}
 	if del.NeedResults() {
-		ep.outputCols = mutationOutputColMap(del)
+		outputCols = b.mutationOutputColMap(del)
 	}
 
-	return ep, nil
+	return ep, outputCols, nil
 }
 
 // tryBuildDeleteRange attempts to construct a fast DeleteRange execution for a
@@ -643,6 +669,9 @@ func (b *Builder) tryBuildDeleteRange(del *memo.DeleteExpr) (_ execPlan, ok bool
 	if err := b.buildFKCascades(del.WithID, del.FKCascades); err != nil {
 		return execPlan{}, false, err
 	}
+	if err := b.buildAfterTriggers(del.WithID, del.AfterTriggers); err != nil {
+		return execPlan{}, false, err
+	}
 	return ep, true, nil
 }
 
@@ -675,7 +704,7 @@ func (b *Builder) buildDeleteRange(del *memo.DeleteExpr) (execPlan, error) {
 				autoCommit = true
 			}
 		}
-		if len(del.FKChecks) > 0 || len(del.FKCascades) > 0 {
+		if len(del.FKChecks) > 0 || len(del.FKCascades) > 0 || del.AfterTriggers != nil {
 			autoCommit = false
 		}
 	}
@@ -692,15 +721,26 @@ func (b *Builder) buildDeleteRange(del *memo.DeleteExpr) (execPlan, error) {
 	return execPlan{root: root}, nil
 }
 
-// appendColsWhenPresent appends non-zero column IDs from the src list into the
-// dst list, and returns the possibly grown list.
-func appendColsWhenPresent(dst opt.ColList, src opt.OptionalColList) opt.ColList {
-	for _, col := range src {
-		if col != 0 {
-			dst = append(dst, col)
+// appendColsWhenPresent combines all non-zero column IDs from the given lists
+// into a single column list, and returns the combined list.
+func appendColsWhenPresent(lists ...opt.OptionalColList) opt.ColList {
+	var cnt int
+	for _, list := range lists {
+		for _, id := range list {
+			if id != 0 {
+				cnt++
+			}
 		}
 	}
-	return dst
+	combined := make(opt.ColList, 0, cnt)
+	for _, list := range lists {
+		for _, col := range list {
+			if col != 0 {
+				combined = append(combined, col)
+			}
+		}
+	}
+	return combined
 }
 
 // ordinalSetFromColList returns the set of ordinal positions of each non-zero
@@ -720,18 +760,18 @@ func ordinalSetFromColList(colList opt.OptionalColList) intsets.Fast {
 // mutationOutputColMap constructs a ColMap for the execPlan that maps from the
 // opt.ColumnID of each output column to the ordinal position of that column in
 // the result.
-func mutationOutputColMap(mutation memo.RelExpr) opt.ColMap {
+func (b *Builder) mutationOutputColMap(mutation memo.RelExpr) colOrdMap {
 	private := mutation.Private().(*memo.MutationPrivate)
 	tab := mutation.Memo().Metadata().Table(private.Table)
 	outCols := mutation.Relational().OutputCols
 
-	var colMap opt.ColMap
+	colMap := b.colOrdsAlloc.Alloc()
 	ord := 0
 	for i, n := 0, tab.ColumnCount(); i < n; i++ {
 		colID := private.Table.ColumnID(i)
 		// System columns should not be included in mutations.
 		if outCols.Contains(colID) && tab.Column(i).Kind() != cat.System {
-			colMap.Set(int(colID), ord)
+			colMap.Set(colID, ord)
 			ord++
 		}
 	}
@@ -740,7 +780,7 @@ func mutationOutputColMap(mutation memo.RelExpr) opt.ColMap {
 	// columns it allowed to pass through.
 	for _, colID := range private.PassthroughCols {
 		if colID != 0 {
-			colMap.Set(int(colID), ord)
+			colMap.Set(colID, ord)
 			ord++
 		}
 	}
@@ -748,11 +788,15 @@ func mutationOutputColMap(mutation memo.RelExpr) opt.ColMap {
 	return colMap
 }
 
-// checkContainsLocking sets CheckContainsNonDefaultKeyLocking based on whether
-// we found non-default locking while building a check query plan.
+// checkContainsLocking sets PlanFlagCheckContainsLocking based on whether we
+// found locking while building a check query plan.
 func (b *Builder) checkContainsLocking(mainContainsLocking bool) {
-	b.CheckContainsNonDefaultKeyLocking = b.CheckContainsNonDefaultKeyLocking || b.ContainsNonDefaultKeyLocking
-	b.ContainsNonDefaultKeyLocking = b.ContainsNonDefaultKeyLocking || mainContainsLocking
+	if b.flags.IsSet(exec.PlanFlagContainsLocking) {
+		b.flags.Set(exec.PlanFlagCheckContainsLocking)
+	}
+	if mainContainsLocking {
+		b.flags.Set(exec.PlanFlagContainsLocking)
+	}
 }
 
 // buildUniqueChecks builds uniqueness check queries. These check queries are
@@ -762,13 +806,13 @@ func (b *Builder) checkContainsLocking(mainContainsLocking bool) {
 // violated. Those queries are each wrapped in an ErrorIfRows operator, which
 // will throw an appropriate error in case the inner query returns any rows.
 func (b *Builder) buildUniqueChecks(checks memo.UniqueChecksExpr) error {
-	defer b.checkContainsLocking(b.ContainsNonDefaultKeyLocking)
-	b.ContainsNonDefaultKeyLocking = false
+	defer b.checkContainsLocking(b.flags.IsSet(exec.PlanFlagContainsLocking))
+	b.flags.Unset(exec.PlanFlagContainsLocking)
 	md := b.mem.Metadata()
 	for i := range checks {
 		c := &checks[i]
 		// Construct the query that returns uniqueness violations.
-		query, err := b.buildRelational(c.Check)
+		query, queryCols, err := b.buildRelational(c.Check)
 		if err != nil {
 			return err
 		}
@@ -776,7 +820,7 @@ func (b *Builder) buildUniqueChecks(checks memo.UniqueChecksExpr) error {
 		mkErr := func(row tree.Datums) error {
 			keyVals := make(tree.Datums, len(c.KeyCols))
 			for i, col := range c.KeyCols {
-				ord, err := query.getNodeColumnOrdinal(col)
+				ord, err := getNodeColumnOrdinal(queryCols, col)
 				if err != nil {
 					return err
 				}
@@ -794,13 +838,13 @@ func (b *Builder) buildUniqueChecks(checks memo.UniqueChecksExpr) error {
 }
 
 func (b *Builder) buildFKChecks(checks memo.FKChecksExpr) error {
-	defer b.checkContainsLocking(b.ContainsNonDefaultKeyLocking)
-	b.ContainsNonDefaultKeyLocking = false
+	defer b.checkContainsLocking(b.flags.IsSet(exec.PlanFlagContainsLocking))
+	b.flags.Unset(exec.PlanFlagContainsLocking)
 	md := b.mem.Metadata()
 	for i := range checks {
 		c := &checks[i]
 		// Construct the query that returns FK violations.
-		query, err := b.buildRelational(c.Check)
+		query, queryCols, err := b.buildRelational(c.Check)
 		if err != nil {
 			return err
 		}
@@ -808,7 +852,7 @@ func (b *Builder) buildFKChecks(checks memo.FKChecksExpr) error {
 		mkErr := func(row tree.Datums) error {
 			keyVals := make(tree.Datums, len(c.KeyCols))
 			for i, col := range c.KeyCols {
-				ord, err := query.getNodeColumnOrdinal(col)
+				ord, err := getNodeColumnOrdinal(queryCols, col)
 				if err != nil {
 					return err
 				}
@@ -867,6 +911,41 @@ func mkUniqueCheckErr(md *opt.Metadata, c *memo.UniqueChecksItem, keyVals tree.D
 	)
 }
 
+// mkUniqueCheckErrWithoutColNames is a simpler version of mkUniqueCheckErr that
+// omits column names from the error details.
+func mkUniqueCheckErrWithoutColNames(
+	md *opt.Metadata, c *memo.UniqueChecksItem, keyVals tree.Datums,
+) error {
+	tabMeta := md.TableMeta(c.Table)
+	uc := tabMeta.Table.Unique(c.CheckOrdinal)
+	constraintName := uc.Name()
+	var msg, details bytes.Buffer
+
+	// Generate an error of the form:
+	//   ERROR:  duplicate key value violates unique constraint "foo"
+	//   DETAIL: Key (2) already exists.
+	msg.WriteString("duplicate key value violates unique constraint ")
+	lexbase.EncodeEscapedSQLIdent(&msg, constraintName)
+
+	details.WriteString("Key (")
+	for i, d := range keyVals {
+		if i > 0 {
+			details.WriteString(", ")
+		}
+		details.WriteString(d.String())
+	}
+
+	details.WriteString(") already exists.")
+
+	return errors.WithDetail(
+		pgerror.WithConstraintName(
+			pgerror.Newf(pgcode.UniqueViolation, "%s", msg.String()),
+			constraintName,
+		),
+		details.String(),
+	)
+}
+
 // mkFastPathUniqueCheckErr is a wrapper for mkUniqueCheckErr in the insert fast
 // path flow, which reorders the keyVals row according to the ordering of the
 // key columns in index `idx`. This is needed because mkUniqueCheckErr assumes
@@ -884,7 +963,7 @@ func mkFastPathUniqueCheckErr(
 	for i := 0; i < uc.ColumnCount(); i++ {
 		ord := uc.ColumnOrdinal(tabMeta.Table, i)
 		found := false
-		for j := 0; j < idx.ColumnCount(); j++ {
+		for j := 0; j < idx.KeyColumnCount() && j < len(keyVals); j++ {
 			keyCol := idx.Column(j)
 			keyColOrd := keyCol.Column.Ordinal()
 			if ord == keyColOrd {
@@ -894,10 +973,11 @@ func mkFastPathUniqueCheckErr(
 			}
 		}
 		if !found {
-			// We still need to return an error, even if the key values could not be
-			// determined.
-			return errors.AssertionFailedf(
-				"insert fast path failed uniqueness check, but could not find unique columns for row, %v", keyVals)
+			// The unique constraint columns could not be matched to the index
+			// key columns. This can happen when the index columns are computed
+			// columns that map to the unique constraint columns (see #126988).
+			// When this happens, produce a simpler error message.
+			return mkUniqueCheckErrWithoutColNames(md, c, keyVals)
 		}
 	}
 	return mkUniqueCheckErr(md, c, newKeyVals)
@@ -1000,7 +1080,7 @@ func (b *Builder) buildFKCascades(withID opt.WithID, cascades memo.FKCascades) e
 	if len(cascades) == 0 {
 		return nil
 	}
-	cb, err := makeCascadeBuilder(b, withID)
+	cb, err := makePostQueryBuilder(b, withID)
 	if err != nil {
 		return err
 	}
@@ -1010,9 +1090,22 @@ func (b *Builder) buildFKCascades(withID opt.WithID, cascades memo.FKCascades) e
 	return nil
 }
 
-// forUpdateLocking is the row-level locking mode used by mutations during their
-// initial row scan, when such locking is deemed desirable. The locking mode is
-// equivalent to that used by a SELECT FOR UPDATE statement, except not durable.
+func (b *Builder) buildAfterTriggers(withID opt.WithID, triggers *memo.AfterTriggers) error {
+	if triggers == nil {
+		return nil
+	}
+	tb, err := makePostQueryBuilder(b, withID)
+	if err != nil {
+		return err
+	}
+	b.triggers = append(b.triggers, tb.setupTriggers(triggers))
+	return nil
+}
+
+// forUpdateLocking is the row-level locking mode implicitly used by mutations
+// during their initial row scan, when such locking is deemed desirable. The
+// locking mode is equivalent to that used by a SELECT FOR UPDATE statement,
+// except not durable.
 var forUpdateLocking = opt.Locking{
 	Strength:   tree.ForUpdate,
 	WaitPolicy: tree.LockWaitBlock,
@@ -1021,33 +1114,41 @@ var forUpdateLocking = opt.Locking{
 
 // shouldApplyImplicitLockingToMutationInput determines whether or not the
 // builder should apply a FOR UPDATE row-level locking mode to the initial row
-// scan of a mutation expression.
-func (b *Builder) shouldApplyImplicitLockingToMutationInput(mutExpr memo.RelExpr) (bool, error) {
+// scan of a mutation expression. If the builder should lock the initial row
+// scan, it returns the TableID of the scan, otherwise it returns 0.
+func (b *Builder) shouldApplyImplicitLockingToMutationInput(
+	mutExpr memo.RelExpr,
+) (opt.TableID, error) {
+	if !b.evalCtx.SessionData().ImplicitSelectForUpdate {
+		return 0, nil
+	}
+
 	switch t := mutExpr.(type) {
 	case *memo.InsertExpr:
 		// Unlike with the other three mutation expressions, it never makes
 		// sense to apply implicit row-level locking to the input of an INSERT
 		// expression because any contention results in unique constraint
 		// violations.
-		return false, nil
+		return 0, nil
 
 	case *memo.UpdateExpr:
-		return b.shouldApplyImplicitLockingToUpdateInput(t), nil
+		return shouldApplyImplicitLockingToUpdateOrDeleteInput(t.Input, t.Table), nil
 
 	case *memo.UpsertExpr:
-		return b.shouldApplyImplicitLockingToUpsertInput(t), nil
+		return shouldApplyImplicitLockingToUpsertInput(t), nil
 
 	case *memo.DeleteExpr:
-		return b.shouldApplyImplicitLockingToDeleteInput(t), nil
+		return shouldApplyImplicitLockingToUpdateOrDeleteInput(t.Input, t.Table), nil
 
 	default:
-		return false, errors.AssertionFailedf("unexpected mutation expression %T", t)
+		return 0, errors.AssertionFailedf("unexpected mutation expression %T", t)
 	}
 }
 
-// shouldApplyImplicitLockingToUpdateInput determines whether or not the builder
-// should apply a FOR UPDATE row-level locking mode to the initial row scan of
-// an UPDATE statement.
+// shouldApplyImplicitLockingToUpdateOrDeleteInput determines whether the
+// builder should apply a FOR UPDATE row-level locking mode to the initial row
+// scan of an UPDATE statement or a DELETE. If the builder should lock the
+// initial row scan, it returns the TableID of the scan, otherwise it returns 0.
 //
 // Conceptually, if we picture an UPDATE statement as the composition of a
 // SELECT statement and an INSERT statement (with loosened semantics around
@@ -1067,64 +1168,82 @@ func (b *Builder) shouldApplyImplicitLockingToMutationInput(mutExpr memo.RelExpr
 // is strictly a performance optimization for contended writes. Therefore, it is
 // not worth risking the transformation being a pessimization, so it is only
 // applied when doing so does not risk creating artificial contention.
-func (b *Builder) shouldApplyImplicitLockingToUpdateInput(upd *memo.UpdateExpr) bool {
-	if !b.evalCtx.SessionData().ImplicitSelectForUpdate {
-		return false
-	}
-
-	// Try to match the Update's input expression against the pattern:
+//
+// UPDATEs and DELETEs happen to have exactly the same matching pattern, so we
+// reuse this function for both.
+func shouldApplyImplicitLockingToUpdateOrDeleteInput(
+	input memo.RelExpr, tabID opt.TableID,
+) opt.TableID {
+	// Try to match the mutation's input expression against the pattern:
 	//
-	//   [Project]* [IndexJoin] Scan
+	//   [Project]* [IndexJoin] (Scan | LookupJoin [LookupJoin] Values)
 	//
-	input := upd.Input
+	// The IndexJoin will only be present if the base expression is a Scan, but
+	// making it an optional prefix to the LookupJoins makes the logic simpler.
 	input = unwrapProjectExprs(input)
 	if idxJoin, ok := input.(*memo.IndexJoinExpr); ok {
 		input = idxJoin.Input
 	}
-	_, ok := input.(*memo.ScanExpr)
-	return ok
+	switch t := input.(type) {
+	case *memo.ScanExpr:
+		return t.Table
+	case *memo.LookupJoinExpr:
+		if innerJoin, ok := t.Input.(*memo.LookupJoinExpr); ok && innerJoin.Table == t.Table {
+			t = innerJoin
+		}
+		md := input.Memo().Metadata()
+		mutStableID := md.Table(tabID).ID()
+		lookupStableID := md.Table(t.Table).ID()
+		// Only lock rows read in the lookup join if the lookup table is the
+		// same as the table being updated. Also, don't lock rows if there is an
+		// ON condition so that we don't lock rows that won't be updated.
+		if mutStableID == lookupStableID && t.On.IsTrue() && t.Input.Op() == opt.ValuesOp {
+			return t.Table
+		}
+	}
+	return 0
 }
 
 // tryApplyImplicitLockingToUpsertInput determines whether or not the builder
 // should apply a FOR UPDATE row-level locking mode to the initial row scan of
-// an UPSERT statement.
-func (b *Builder) shouldApplyImplicitLockingToUpsertInput(ups *memo.UpsertExpr) bool {
-	if !b.evalCtx.SessionData().ImplicitSelectForUpdate {
-		return false
-	}
-
+// an UPSERT statement. If the builder should lock the initial row scan, it
+// returns the TableID of the scan, otherwise it returns 0.
+func shouldApplyImplicitLockingToUpsertInput(ups *memo.UpsertExpr) opt.TableID {
 	// Try to match the Upsert's input expression against the pattern:
 	//
-	//   [Project]* (LeftJoin Scan | LookupJoin) [Project]* Values
+	//   [Project]* (LeftJoin Scan | LookupJoin [LookupJoin]) [Project]* Values
 	//
 	input := ups.Input
 	input = unwrapProjectExprs(input)
+	var toLock opt.TableID
 	switch join := input.(type) {
 	case *memo.LeftJoinExpr:
-		if _, ok := join.Right.(*memo.ScanExpr); !ok {
-			return false
+		scan, ok := join.Right.(*memo.ScanExpr)
+		if !ok {
+			return 0
 		}
 		input = join.Left
+		toLock = scan.Table
 
 	case *memo.LookupJoinExpr:
 		input = join.Input
+		if inner, ok := input.(*memo.LookupJoinExpr); ok && inner.Table == join.Table {
+			// When a generic query plan reads from a secondary index first,
+			// then performs a lookup into the primary index, the plan has a
+			// double lookup join pattern. We add implicit locks in this case
+			// where both lookup joins have the same table.
+			input = inner.Input
+		}
+		toLock = join.Table
 
 	default:
-		return false
+		return 0
 	}
 	input = unwrapProjectExprs(input)
-	_, ok := input.(*memo.ValuesExpr)
-	return ok
-}
-
-// tryApplyImplicitLockingToDeleteInput determines whether or not the builder
-// should apply a FOR UPDATE row-level locking mode to the initial row scan of
-// an DELETE statement.
-//
-// TODO(nvanbenschoten): implement this method to match on appropriate Delete
-// expression trees and apply a row-level locking mode.
-func (b *Builder) shouldApplyImplicitLockingToDeleteInput(del *memo.DeleteExpr) bool {
-	return false
+	if _, ok := input.(*memo.ValuesExpr); ok {
+		return toLock
+	}
+	return 0
 }
 
 // unwrapProjectExprs unwraps zero or more nested ProjectExprs. It returns the
@@ -1136,13 +1255,13 @@ func unwrapProjectExprs(input memo.RelExpr) memo.RelExpr {
 	return input
 }
 
-func (b *Builder) buildLock(lock *memo.LockExpr) (execPlan, error) {
+func (b *Builder) buildLock(lock *memo.LockExpr) (_ execPlan, outputCols colOrdMap, err error) {
 	// Don't bother creating the lookup join if we don't need it.
-	locking, err := b.buildLocking(lock.Locking)
+	locking, err := b.buildLocking(lock.Table, lock.Locking)
 	if err != nil {
-		return execPlan{}, err
+		return execPlan{}, colOrdMap{}, err
 	}
-	if !locking.IsLocking() {
+	if locking.IsNoOp() {
 		return b.buildRelational(lock.Input)
 	}
 

@@ -1,50 +1,42 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { Icon, Tooltip } from "@cockroachlabs/ui-components";
 import classNames from "classnames/bind";
+import moment from "moment-timezone";
+import React from "react";
+import { Link } from "react-router-dom";
 
-import styles from "./sessionsTable.module.scss";
+import { Button } from "src/button/button";
+import {
+  Dropdown,
+  DropdownOption as DropdownItem,
+} from "src/dropdown/dropdown";
+import { CircleFilled } from "src/icon/circleFilled";
+import { ColumnDescriptor, SortedTable } from "src/sortedtable/sortedtable";
 import {
   DurationToMomentDuration,
   DurationToNumber,
   TimestampToMoment,
 } from "src/util/convert";
 import { BytesWithPrecision, Count, DATE_FORMAT } from "src/util/format";
-import { Link } from "react-router-dom";
-import React from "react";
 
-import moment from "moment-timezone";
-
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-type ISession = cockroach.server.serverpb.Session;
-type Status = cockroach.server.serverpb.Session.Status;
-
-import { TerminateSessionModalRef } from "./terminateSessionModal";
-import { TerminateQueryModalRef } from "./terminateQueryModal";
-import { ColumnDescriptor, SortedTable } from "src/sortedtable/sortedtable";
-
-import { Icon } from "@cockroachlabs/ui-components";
-import { CircleFilled } from "src/icon/circleFilled";
-
-import {
-  Dropdown,
-  DropdownOption as DropdownItem,
-} from "src/dropdown/dropdown";
-import { Button } from "src/button/button";
-import { Tooltip } from "@cockroachlabs/ui-components";
-import { computeOrUseStmtSummary, FixLong } from "../util";
 import {
   statisticsTableTitles,
   StatisticType,
 } from "../statsTableUtil/statsTableUtil";
 import { Timestamp } from "../timestamp";
+import { computeOrUseStmtSummary, FixLong } from "../util";
+
+import styles from "./sessionsTable.module.scss";
+import { TerminateQueryModalRef } from "./terminateQueryModal";
+import { TerminateSessionModalRef } from "./terminateSessionModal";
+
+type ISession = cockroach.server.serverpb.ISession;
+type Status = cockroach.server.serverpb.Session.Status;
 
 const cx = classNames.bind(styles);
 
@@ -268,7 +260,7 @@ export function makeSessionsColumns(
       className: cx("cl-table__col-session-actions"),
       titleAlign: "right",
       cell: ({ session }) => {
-        const menuItems: DropdownItem[] = [
+        const menuItems: DropdownItem<"cancelStatement" | "cancelSession">[] = [
           {
             value: "cancelStatement",
             name: "Cancel Statement",

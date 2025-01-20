@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -36,6 +31,7 @@ import (
 )
 
 type createSequenceNode struct {
+	zeroInputPlanNode
 	n      *tree.CreateSequence
 	dbDesc catalog.DatabaseDescriptor
 }
@@ -55,10 +51,6 @@ func (p *planner) CreateSequence(ctx context.Context, n *tree.CreateSequence) (p
 		return nil, err
 	}
 	n.Name.ObjectNamePrefix = prefix
-
-	if err := p.CheckPrivilege(ctx, dbDesc, privilege.CREATE); err != nil {
-		return nil, err
-	}
 
 	return &createSequenceNode{
 		n:      n,

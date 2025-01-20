@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -76,7 +71,7 @@ func (ib *IndexBackfillPlanner) BackfillIndexes(
 	tracker scexec.BackfillerProgressWriter,
 	job *jobs.Job,
 	descriptor catalog.TableDescriptor,
-) (err error) {
+) (retErr error) {
 	// Potentially install a protected timestamp before the GC interval is hit,
 	// which can help avoid transaction retry errors, with shorter GC intervals.
 	protectedTimestampCleaner := ib.execCfg.ProtectedTimestampManager.TryToProtectBeforeGC(ctx,
@@ -86,7 +81,7 @@ func (ib *IndexBackfillPlanner) BackfillIndexes(
 	defer func() {
 		cleanupError := protectedTimestampCleaner(ctx)
 		if cleanupError != nil {
-			err = errors.CombineErrors(cleanupError, err)
+			retErr = errors.CombineErrors(retErr, cleanupError)
 		}
 	}()
 
@@ -122,18 +117,18 @@ func (ib *IndexBackfillPlanner) BackfillIndexes(
 		return nil
 	}
 	now := ib.execCfg.DB.Clock().Now()
-	run, err := ib.plan(
+	run, retErr := ib.plan(
 		ctx,
 		descriptor,
-		progress.MinimumWriteTimestamp,
 		now,
+		progress.MinimumWriteTimestamp,
 		progress.MinimumWriteTimestamp,
 		spansToDo,
 		progress.DestIndexIDs,
 		updateFunc,
 	)
-	if err != nil {
-		return err
+	if retErr != nil {
+		return retErr
 	}
 	return run(ctx)
 }
@@ -192,9 +187,10 @@ func (ib *IndexBackfillPlanner) plan(
 	) error {
 		sd := NewInternalSessionData(ctx, ib.execCfg.Settings, "plan-index-backfill")
 		evalCtx = createSchemaChangeEvalCtx(ctx, ib.execCfg, sd, nowTimestamp, descriptors)
-		planCtx = ib.execCfg.DistSQLPlanner.NewPlanningCtx(ctx, &evalCtx,
-			nil /* planner */, txn.KV(), DistributionTypeSystemTenantOnly)
-		// TODO(ajwerner): Adopt util.ConstantWithMetamorphicTestRange for the
+		planCtx = ib.execCfg.DistSQLPlanner.NewPlanningCtx(
+			ctx, &evalCtx, nil /* planner */, txn.KV(), FullDistribution,
+		)
+		// TODO(ajwerner): Adopt metamorphic.ConstantWithTestRange for the
 		// batch size. Also plumb in a testing knob.
 		chunkSize := indexBackfillBatchSize.Get(&ib.execCfg.Settings.SV)
 		const writeAtRequestTimestamp = true

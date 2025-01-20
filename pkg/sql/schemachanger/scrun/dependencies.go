@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scrun
 
@@ -32,6 +27,11 @@ type JobRunDependencies interface {
 
 	// ClusterSettings returns the cluster settings.
 	ClusterSettings() *cluster.Settings
+
+	// GetExplain returns the explain output for the current phase.
+	GetExplain() string
+	// SetExplain uses a callback to store the explain output for later retrieval.
+	SetExplain(string, error)
 }
 
 // EventLogger contains the dependencies required for logging schema change

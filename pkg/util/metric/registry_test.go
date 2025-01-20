@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metric
 
@@ -76,7 +71,8 @@ func TestRegistry(t *testing.T) {
 	topGauge := NewGauge(Metadata{Name: "top.gauge"})
 	r.AddMetric(topGauge)
 
-	r.AddMetric(NewGaugeFloat64(Metadata{Name: "top.floatgauge"}))
+	topFloatGauge := NewGaugeFloat64(Metadata{Name: "top.floatgauge"})
+	r.AddMetric(topFloatGauge)
 
 	topCounter := NewCounter(Metadata{Name: "top.counter"})
 	r.AddMetric(topCounter)
@@ -90,7 +86,9 @@ func TestRegistry(t *testing.T) {
 		BucketConfig: Count1KBuckets,
 	}))
 
-	r.AddMetric(NewGauge(Metadata{Name: "bottom.gauge"}))
+	bottomGauge := NewGauge(Metadata{Name: "bottom.gauge"})
+	r.AddMetric(bottomGauge)
+
 	ms := &struct {
 		StructGauge         *Gauge
 		StructGauge64       *GaugeFloat64
@@ -99,6 +97,7 @@ func TestRegistry(t *testing.T) {
 		StructHistogram     IHistogram
 		NestedStructGauge   NestedStruct
 		ArrayStructCounters [4]*Counter
+		MapOfCounters       map[int32]*Counter
 		// Ensure that nil struct values in arrays are safe.
 		NestedStructArray [2]*NestedStruct
 		// A few extra ones: either not exported, or not metric objects.
@@ -126,6 +125,10 @@ func TestRegistry(t *testing.T) {
 			NewCounter(Metadata{Name: "array.struct.counter.1"}),
 			nil, // skipped
 			NewCounter(Metadata{Name: "array.struct.counter.3"}),
+		},
+		MapOfCounters: map[int32]*Counter{
+			1: NewCounter(Metadata{Name: "map.counter.0"}),
+			2: NewCounter(Metadata{Name: "map.counter.1"}),
 		},
 		NestedStructArray: [2]*NestedStruct{
 			0: nil, // skipped
@@ -156,8 +159,11 @@ func TestRegistry(t *testing.T) {
 		"array.struct.counter.0":      {},
 		"array.struct.counter.1":      {},
 		"array.struct.counter.3":      {},
+		"map.counter.0":               {},
+		"map.counter.1":               {},
 		"nested.struct.array.1.gauge": {},
 	}
+	totalMetrics := len(expNames)
 
 	r.Each(func(name string, _ interface{}) {
 		if _, exist := expNames[name]; !exist {
@@ -167,6 +173,23 @@ func TestRegistry(t *testing.T) {
 	})
 	if len(expNames) > 0 {
 		t.Fatalf("missed names: %v", expNames)
+	}
+
+	// Test RemoveMetric.
+	r.RemoveMetric(topFloatGauge)
+	r.RemoveMetric(bottomGauge)
+	if g := r.getGauge("bottom.gauge"); g != nil {
+		t.Errorf("getGauge returned non-nil %v, expected nil", g)
+	}
+	count := 0
+	r.Each(func(name string, _ interface{}) {
+		if name == "top.floatgauge" || name == "bottom.gauge" {
+			t.Errorf("unexpected name: %s", name)
+		}
+		count++
+	})
+	if count != totalMetrics-2 {
+		t.Fatalf("not all metrics are present: returned %d, expected %d", count, totalMetrics-2)
 	}
 
 	// Test Select
@@ -312,4 +335,44 @@ func TestRegistryPanicsWhenAddingUnexportedMetrics(t *testing.T) {
 			})
 		},
 	)
+}
+
+func TestRegistryContains(t *testing.T) {
+	r := NewRegistry()
+	expectedMetrics := []string{"top.gauge", "struct.counter", "struct.histogram"}
+
+	containsCheckPrefixes := func(m string) bool {
+		return r.Contains(m) &&
+			r.Contains(fmt.Sprintf("cr.node.%s", m)) &&
+			r.Contains(fmt.Sprintf("cr.store.%s", m))
+	}
+
+	for _, m := range expectedMetrics {
+		if containsCheckPrefixes(m) {
+			t.Errorf("unexpected metric: %s", m)
+		}
+	}
+
+	topGauge := NewGauge(Metadata{Name: "top.gauge"})
+	r.AddMetric(topGauge)
+
+	ms := &struct {
+		StructCounter   *Counter
+		StructHistogram IHistogram
+	}{
+		StructCounter: NewCounter(Metadata{Name: "struct.counter"}),
+		StructHistogram: NewHistogram(HistogramOptions{
+			Mode:         HistogramModePrometheus,
+			Metadata:     Metadata{Name: "struct.histogram"},
+			Duration:     time.Minute,
+			BucketConfig: Count1KBuckets,
+		}),
+	}
+	r.AddMetricStruct(ms)
+
+	for _, m := range expectedMetrics {
+		if !containsCheckPrefixes(m) {
+			t.Errorf("missing metric: %s", m)
+		}
+	}
 }

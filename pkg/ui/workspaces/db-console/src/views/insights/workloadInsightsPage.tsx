@@ -1,17 +1,8 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
-import { refreshStmtInsights, refreshTxnInsights } from "src/redux/apiReducers";
-import { AdminUIState } from "src/redux/state";
 import {
   WorkloadInsightEventFilters,
   SortSetting,
@@ -22,6 +13,15 @@ import {
   WorkloadInsightsRootControl,
   WorkloadInsightsViewProps,
 } from "@cockroachlabs/cluster-ui";
+import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
+import { bindActionCreators } from "redux";
+
+import { refreshStmtInsights, refreshTxnInsights } from "src/redux/apiReducers";
+import { LocalSetting } from "src/redux/localsettings";
+import { AdminUIState } from "src/redux/state";
+import { setGlobalTimeScaleAction } from "src/redux/statements";
+import { selectTimeScale } from "src/redux/timeScale";
 import {
   filtersLocalSetting,
   selectStmtInsights,
@@ -33,10 +33,6 @@ import {
   selectStmtInsightsMaxApiReached,
   selectTxnInsightsMaxApiReached,
 } from "src/views/insights/insightsSelectors";
-import { bindActionCreators } from "redux";
-import { LocalSetting } from "src/redux/localsettings";
-import { setGlobalTimeScaleAction } from "src/redux/statements";
-import { selectTimeScale } from "src/redux/timeScale";
 
 export const insightStatementColumnsLocalSetting = new LocalSetting<
   AdminUIState,
@@ -79,7 +75,6 @@ const statementMapStateToProps = (
   timeScale: selectTimeScale(state),
   isLoading: selectStmtInsightsLoading(state),
   maxSizeApiReached: selectStmtInsightsMaxApiReached(state),
-  useObsService: false,
 });
 
 const TransactionDispatchProps = {
@@ -115,7 +110,8 @@ const WorkloadInsightsPage = withRouter(
     StateProps,
     DispatchProps,
     RouteComponentProps,
-    WorkloadInsightsViewProps
+    WorkloadInsightsViewProps,
+    AdminUIState
   >(
     (state: AdminUIState, props: RouteComponentProps) => ({
       transactionInsightsViewStateProps: transactionMapStateToProps(

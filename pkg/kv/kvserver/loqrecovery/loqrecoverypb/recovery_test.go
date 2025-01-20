@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package loqrecoverypb
 
@@ -97,7 +92,7 @@ func TestClusterInfoMergeChecksDescriptor(t *testing.T) {
 }
 
 func TestClusterInfoMergeSameClusterID(t *testing.T) {
-	uuid1 := uuid.FastMakeV4()
+	uuid1 := uuid.MakeV4()
 	info1 := ClusterReplicaInfo{
 		ClusterID:   uuid1.String(),
 		Descriptors: []roachpb.RangeDescriptor{{RangeID: 1}},
@@ -125,8 +120,8 @@ func TestClusterInfoMergeSameClusterID(t *testing.T) {
 }
 
 func TestClusterInfoMergeRejectDifferentMetadata(t *testing.T) {
-	uuid1 := uuid.FastMakeV4()
-	uuid2 := uuid.FastMakeV4()
+	uuid1 := uuid.MakeV4()
+	uuid2 := uuid.MakeV4()
 	info1 := ClusterReplicaInfo{
 		ClusterID:   uuid1.String(),
 		Descriptors: []roachpb.RangeDescriptor{{RangeID: 1}},
@@ -167,7 +162,7 @@ func TestClusterInfoMergeRejectDifferentMetadata(t *testing.T) {
 }
 
 func TestClusterInfoInitializeByMerge(t *testing.T) {
-	uuid1 := uuid.FastMakeV4().String()
+	uuid1 := uuid.MakeV4().String()
 	version1 := roachpb.Version{Major: 22, Minor: 2}
 	info := ClusterReplicaInfo{
 		ClusterID:   uuid1,

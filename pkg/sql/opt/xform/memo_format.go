@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package xform
 
@@ -96,7 +91,7 @@ func (mf *memoFormatter) format() string {
 			c := tpChild.Childf("%s", s.required)
 			mf.formatBest(s.best, s.required)
 			c.Childf("best: %s", mf.buf.String())
-			c.Childf("cost: %.2f", s.cost)
+			c.Childf("cost: %.2f", s.cost.C)
 		}
 	}
 

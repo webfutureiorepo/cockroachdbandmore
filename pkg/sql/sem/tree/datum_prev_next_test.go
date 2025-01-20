@@ -1,16 +1,12 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree_test
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -32,6 +28,7 @@ func TestDatumPrevNext(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	rng, _ := randutil.NewTestRand()
+	ctx := context.Background()
 	var evalCtx eval.Context
 	const numRuns = 1000
 	for i := 0; i < numRuns; i++ {
@@ -48,16 +45,16 @@ func TestDatumPrevNext(t *testing.T) {
 				continue
 			}
 		}
-		if !d.IsMin(&evalCtx) {
-			if prev, ok := tree.DatumPrev(d, &evalCtx, &evalCtx.CollationEnv); ok {
-				cmp, err := d.CompareError(&evalCtx, prev)
+		if !d.IsMin(ctx, &evalCtx) {
+			if prev, ok := tree.DatumPrev(ctx, d, &evalCtx, &evalCtx.CollationEnv); ok {
+				cmp, err := d.Compare(ctx, &evalCtx, prev)
 				require.NoError(t, err)
 				require.True(t, cmp > 0, "d=%s, prev=%s, type=%s", d.String(), prev.String(), d.ResolvedType().SQLString())
 			}
 		}
-		if !d.IsMax(&evalCtx) {
-			if next, ok := tree.DatumNext(d, &evalCtx, &evalCtx.CollationEnv); ok {
-				cmp, err := d.CompareError(&evalCtx, next)
+		if !d.IsMax(ctx, &evalCtx) {
+			if next, ok := tree.DatumNext(ctx, d, &evalCtx, &evalCtx.CollationEnv); ok {
+				cmp, err := d.Compare(ctx, &evalCtx, next)
 				require.NoError(t, err)
 				require.True(t, cmp < 0, "d=%s, next=%s, type=%s", d.String(), next.String(), d.ResolvedType().SQLString())
 			}

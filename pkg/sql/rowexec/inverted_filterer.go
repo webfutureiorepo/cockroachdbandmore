@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -47,8 +42,9 @@ type invertedFilterer struct {
 	input          execinfra.RowSource
 	invertedColIdx uint32
 
-	diskMonitor *mon.BytesMonitor
-	rc          *rowcontainer.DiskBackedNumberedRowContainer
+	unlimitedMemMonitor *mon.BytesMonitor
+	diskMonitor         *mon.BytesMonitor
+	rc                  *rowcontainer.DiskBackedNumberedRowContainer
 
 	invertedEval batchedInvertedExprEvaluator
 	// The invertedEval result.
@@ -95,8 +91,14 @@ func newInvertedFilterer(
 	ifr.outputRow[ifr.invertedColIdx].Datum = tree.DNull
 
 	// Initialize ProcessorBase.
-	if err := ifr.ProcessorBase.Init(
-		ctx, ifr, post, outputColTypes, flowCtx, processorID, nil, /* memMonitor */
+	evalCtx := flowCtx.EvalCtx
+	if spec.PreFiltererSpec != nil {
+		// Only make a copy of the eval context if we're going to pass it to the
+		// ExprHelper later.
+		evalCtx = flowCtx.NewEvalCtx()
+	}
+	if err := ifr.ProcessorBase.InitWithEvalCtx(
+		ctx, ifr, post, outputColTypes, flowCtx, evalCtx, processorID, nil, /* memMonitor */
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{ifr.input},
 			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
@@ -110,13 +112,15 @@ func newInvertedFilterer(
 
 	// Initialize memory monitor and row container for input rows.
 	ifr.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.Mon, flowCtx, "inverted-filterer-limited")
+	ifr.unlimitedMemMonitor = execinfra.NewMonitor(ctx, flowCtx.Mon, "inverted-filterer-unlimited")
 	ifr.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "inverted-filterer-disk")
 	ifr.rc = rowcontainer.NewDiskBackedNumberedRowContainer(
 		true, /* deDup */
 		rcColTypes,
-		ifr.EvalCtx,
+		ifr.FlowCtx.EvalCtx,
 		ifr.FlowCtx.Cfg.TempStorage,
 		ifr.MemMonitor,
+		ifr.unlimitedMemMonitor,
 		ifr.diskMonitor,
 	)
 
@@ -129,7 +133,7 @@ func newInvertedFilterer(
 		semaCtx := flowCtx.NewSemaContext(flowCtx.Txn)
 		var exprHelper execinfrapb.ExprHelper
 		colTypes := []*types.T{spec.PreFiltererSpec.Type}
-		if err := exprHelper.Init(ctx, spec.PreFiltererSpec.Expression, colTypes, semaCtx, ifr.EvalCtx); err != nil {
+		if err := exprHelper.Init(ctx, spec.PreFiltererSpec.Expression, colTypes, semaCtx, evalCtx); err != nil {
 			return nil, err
 		}
 		preFilterer, preFiltererState, err := invertedidx.NewBoundPreFilterer(
@@ -224,11 +228,11 @@ func (ifr *invertedFilterer) readInput() (invertedFiltererState, *execinfrapb.Pr
 		// key as a DBytes. The Datum should never be DNull since nulls aren't
 		// stored in inverted indexes.
 		if row[ifr.invertedColIdx].Datum == nil {
-			ifr.MoveToDraining(errors.New("no datum found"))
+			ifr.MoveToDraining(errors.AssertionFailedf("no datum found"))
 			return ifrStateUnknown, ifr.DrainHelper()
 		}
 		if row[ifr.invertedColIdx].Datum.ResolvedType().Family() != types.EncodedKeyFamily {
-			ifr.MoveToDraining(errors.New("inverted column should have type encodedkey"))
+			ifr.MoveToDraining(errors.AssertionFailedf("inverted column should have type encodedkey"))
 			return ifrStateUnknown, ifr.DrainHelper()
 		}
 		enc = []byte(*row[ifr.invertedColIdx].Datum.(*tree.DEncodedKey))
@@ -304,6 +308,9 @@ func (ifr *invertedFilterer) close() {
 		if ifr.MemMonitor != nil {
 			ifr.MemMonitor.Stop(ifr.Ctx())
 		}
+		if ifr.unlimitedMemMonitor != nil {
+			ifr.unlimitedMemMonitor.Stop(ifr.Ctx())
+		}
 		if ifr.diskMonitor != nil {
 			ifr.diskMonitor.Stop(ifr.Ctx())
 		}
@@ -319,7 +326,7 @@ func (ifr *invertedFilterer) execStatsForTrace() *execinfrapb.ComponentStats {
 	return &execinfrapb.ComponentStats{
 		Inputs: []execinfrapb.InputStats{is},
 		Exec: execinfrapb.ExecStats{
-			MaxAllocatedMem:  optional.MakeUint(uint64(ifr.MemMonitor.MaximumBytes())),
+			MaxAllocatedMem:  optional.MakeUint(uint64(ifr.MemMonitor.MaximumBytes() + ifr.unlimitedMemMonitor.MaximumBytes())),
 			MaxAllocatedDisk: optional.MakeUint(uint64(ifr.diskMonitor.MaximumBytes())),
 		},
 		Output: ifr.OutputHelper.Stats(),

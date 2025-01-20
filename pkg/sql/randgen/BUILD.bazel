@@ -51,9 +51,11 @@ go_library(
         "//pkg/util/tsearch",
         "//pkg/util/uint128",
         "//pkg/util/uuid",
+        "//pkg/util/vector",
         "@com_github_cockroachdb_apd_v3//:apd",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_lib_pq//oid",
+        "@com_github_twpayne_go_geom//:go-geom",
     ],
 )
 
@@ -66,10 +68,6 @@ go_test(
         "types_test.go",
     ],
     embed = [":randgen"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/ccl",

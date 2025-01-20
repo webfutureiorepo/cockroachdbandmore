@@ -1,14 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import isEmpty from "lodash/isEmpty";
+import isNil from "lodash/isNil";
+import some from "lodash/some";
+import values from "lodash/values";
 
 import { LocalityTier, LocalityTree } from "src/redux/localities";
 import { ILocation, LocationTree } from "src/redux/locations";
@@ -31,7 +29,7 @@ export function getLocation(locations: LocationTree, tier: LocalityTier) {
  * the LocationTree.
  */
 export function hasLocation(locations: LocationTree, tier: LocalityTier) {
-  return !_.isNil(getLocation(locations, tier));
+  return !isNil(getLocation(locations, tier));
 }
 
 /*
@@ -49,7 +47,7 @@ export function findMostSpecificLocation(
     const currentTier = tiers[currentIndex];
     const location = getLocation(locations, currentTier);
 
-    if (!_.isNil(location)) {
+    if (!isNil(location)) {
       return location;
     }
 
@@ -71,31 +69,31 @@ export function findOrCalculateLocation(
   // If a location is assigned to this locality, return it.
   const thisTier = locality.tiers[locality.tiers.length - 1];
   const thisLocation = getLocation(locations, thisTier);
-  if (!_.isNil(thisLocation)) {
+  if (!isNil(thisLocation)) {
     return thisLocation;
   }
 
   // If this locality has nodes directly, we can't calculate a location; bail.
-  if (!_.isEmpty(locality.nodes)) {
+  if (!isEmpty(locality.nodes)) {
     return null;
   }
 
   // If this locality has no child localities, we can't calculate a location.
   // Note, this shouldn't ever actually happen.
-  if (_.isEmpty(locality.localities)) {
+  if (isEmpty(locality.localities)) {
     return null;
   }
 
   // Find (or calculate) the location of each child locality.
   const childLocations: ILocation[] = [];
-  _.values(locality.localities).forEach(tier => {
-    _.values(tier).forEach(child => {
+  values(locality.localities).forEach(tier => {
+    values(tier).forEach(child => {
       childLocations.push(findOrCalculateLocation(locations, child));
     });
   });
 
   // If any child location is missing, bail.
-  if (_.some(childLocations, _.isNil)) {
+  if (some(childLocations, isNil)) {
     return null;
   }
 

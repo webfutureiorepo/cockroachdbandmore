@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gc
 
@@ -62,7 +57,7 @@ func (ds dataDistribution) setupTest(
 				"invalid test data, range can't be used together with value: key=%s, rangeKey=%s",
 				kv.Key.String(), rangeKey.String())
 			err := storage.MVCCDeleteRangeUsingTombstone(ctx, eng, &ms, rangeKey.StartKey,
-				rangeKey.EndKey, rangeKey.Timestamp, hlc.ClockTimestamp{}, nil, nil, false, 1, nil)
+				rangeKey.EndKey, rangeKey.Timestamp, hlc.ClockTimestamp{}, nil, nil, false, 1, 0, nil)
 			require.NoError(t, err, "failed to put delete range")
 		} else if txn == nil {
 			if kv.Key.Timestamp.IsEmpty() {

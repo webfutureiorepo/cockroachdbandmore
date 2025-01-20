@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package timer defines an Analyzer that detects correct use of
 // timeutil.Timer.
@@ -57,7 +52,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		if !ok {
 			return false
 		}
-		typ := tv.Type.Underlying()
+		typ := tv.Type
 		for {
 			ptr, pok := typ.(*types.Pointer)
 			if !pok {
@@ -69,10 +64,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		if !ok {
 			return false
 		}
-		if named.Obj().Type().String() != "github.com/cockroachdb/cockroach/pkg/util/timeutil.Timer" {
-			return false
-		}
-		return true
+		const timerName = "github.com/cockroachdb/cockroach/pkg/util/timeutil.Timer"
+		return named.Obj().Type().String() == timerName
 	}
 
 	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)

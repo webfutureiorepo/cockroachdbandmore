@@ -1,28 +1,20 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
 var libPQBlocklist = blocklist{
-	"pq.ExampleConnectorWithNoticeHandler":           "unknown",
 	"pq.TestBinaryByteSliceToInt":                    "41547",
 	"pq.TestBinaryByteSlicetoUUID":                   "41547",
 	"pq.TestConnListen":                              "41522",
 	"pq.TestConnUnlisten":                            "41522",
 	"pq.TestConnUnlistenAll":                         "41522",
-	"pq.TestConnectorWithNoticeHandler_Simple":       "unknown",
 	"pq.TestConnectorWithNotificationHandler_Simple": "unknown",
 	"pq.TestCopyInRaiseStmtTrigger":                  "5807",
 	"pq.TestCopyInTypes":                             "5807",
 	"pq.TestCopyRespLoopConnectionError":             "5807",
-	"pq.TestInfinityTimestamp":                       "41564",
 	"pq.TestIssue186":                                "41558",
 	"pq.TestIssue196":                                "41689",
 	"pq.TestIssue282":                                "12137",

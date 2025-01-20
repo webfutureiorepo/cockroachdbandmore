@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigsqlwatcher
 
@@ -34,7 +29,7 @@ type buffer struct {
 		syncutil.Mutex
 
 		// rangefeed.Buffer stores spanconfigsqlwatcher.Events.
-		buffer *rangefeedbuffer.Buffer
+		buffer *rangefeedbuffer.Buffer[event]
 
 		// rangefeedFrontiers tracks the frontier timestamps of individual
 		// rangefeeds established by the SQLWatcher.
@@ -75,7 +70,7 @@ const (
 // newBuffer constructs a new buffer initialized with a starting frontier
 // timestamp.
 func newBuffer(limit int, initialFrontierTS hlc.Timestamp) *buffer {
-	rangefeedBuffer := rangefeedbuffer.New(limit)
+	rangefeedBuffer := rangefeedbuffer.New[event](limit)
 	eventBuffer := &buffer{}
 	eventBuffer.mu.buffer = rangefeedBuffer
 	for i := range eventBuffer.mu.rangefeedFrontiers {
@@ -167,7 +162,7 @@ var _ sort.Interface = &events{}
 // returns  a list of relevant events which were buffered up to that timestamp.
 func (b *buffer) flushEvents(
 	ctx context.Context,
-) (updates []rangefeedbuffer.Event, combinedFrontierTS hlc.Timestamp) {
+) (updates []event, combinedFrontierTS hlc.Timestamp) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	// First we determine the checkpoint timestamp, which is the minimum
@@ -196,7 +191,7 @@ func (b *buffer) flush(
 					ev, prevEv)
 			}
 		}
-		evs = append(evs, ev.(event))
+		evs = append(evs, ev)
 	}
 	// Nil out the underlying slice since we have copied over the events.
 	bufferedEvents = nil

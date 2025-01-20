@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package local
 
@@ -135,6 +130,18 @@ func (p *Provider) GetPreemptedSpotVMs(
 	return nil, nil
 }
 
+func (p *Provider) GetHostErrorVMs(
+	l *logger.Logger, vms vm.List, since time.Time,
+) ([]string, error) {
+	return nil, nil
+}
+
+func (p *Provider) GetVMSpecs(
+	l *logger.Logger, vms vm.List,
+) (map[string]map[string]interface{}, error) {
+	return nil, nil
+}
+
 func (p *Provider) CreateVolumeSnapshot(
 	l *logger.Logger, volume vm.Volume, vsco vm.VolumeSnapshotCreateOpts,
 ) (vm.VolumeSnapshot, error) {
@@ -178,6 +185,10 @@ func (o *providerOpts) ConfigureCreateFlags(flags *pflag.FlagSet) {
 func (o *providerOpts) ConfigureClusterFlags(*pflag.FlagSet, vm.MultipleProjectsOption) {
 }
 
+// ConfigureClusterCleanupFlags is part of ProviderOpts. This implementation is a no-op.
+func (o *providerOpts) ConfigureClusterCleanupFlags(flags *pflag.FlagSet) {
+}
+
 // CleanSSH is part of the vm.Provider interface.  This implementation is a no-op.
 func (p *Provider) CleanSSH(l *logger.Logger) error {
 	return nil
@@ -196,10 +207,47 @@ func (p *Provider) RemoveLabels(l *logger.Logger, vms vm.List, labels []string) 
 	return nil
 }
 
+func (p *Provider) CreateLoadBalancer(*logger.Logger, vm.List, int) error {
+	return nil
+}
+
+func (p *Provider) DeleteLoadBalancer(*logger.Logger, vm.List, int) error {
+	return nil
+}
+
+func (p *Provider) ListLoadBalancers(*logger.Logger, vm.List) ([]vm.ServiceAddress, error) {
+	return nil, nil
+}
+
+func (p *Provider) createVM(clusterName string, index int, creationTime time.Time) (vm.VM, error) {
+	cVM := vm.VM{
+		Name:             "localhost",
+		CreatedAt:        creationTime,
+		Lifetime:         time.Hour,
+		PrivateIP:        "127.0.0.1",
+		Provider:         ProviderName,
+		DNSProvider:      ProviderName,
+		ProviderID:       ProviderName,
+		PublicIP:         "127.0.0.1",
+		PublicDNS:        "localhost",
+		RemoteUser:       config.OSUser.Username,
+		VPC:              ProviderName,
+		MachineType:      ProviderName,
+		Zone:             ProviderName,
+		LocalClusterName: clusterName,
+	}
+	path := VMDir(clusterName, index+1)
+	err := os.MkdirAll(path, 0755)
+	if err != nil {
+		return vm.VM{}, err
+	}
+	return cVM, nil
+}
+
 // Create just creates fake host-info entries in the local filesystem
 func (p *Provider) Create(
 	l *logger.Logger, names []string, opts vm.CreateOpts, unusedProviderOpts vm.ProviderOpts,
-) error {
+) (vm.List, error) {
 	now := timeutil.Now()
 	c := &cloud.Cluster{
 		Name:      opts.ClusterName,
@@ -209,37 +257,53 @@ func (p *Provider) Create(
 	}
 
 	if !config.IsLocalClusterName(c.Name) {
-		return errors.Errorf("'%s' is not a valid local cluster name", c.Name)
+		return nil, errors.Errorf("'%s' is not a valid local cluster name", c.Name)
 	}
 
 	for i := range names {
-		c.VMs[i] = vm.VM{
-			Name:             "localhost",
-			CreatedAt:        now,
-			Lifetime:         time.Hour,
-			PrivateIP:        "127.0.0.1",
-			Provider:         ProviderName,
-			DNSProvider:      ProviderName,
-			ProviderID:       ProviderName,
-			PublicIP:         "127.0.0.1",
-			PublicDNS:        "localhost",
-			RemoteUser:       config.OSUser.Username,
-			VPC:              ProviderName,
-			MachineType:      ProviderName,
-			Zone:             ProviderName,
-			LocalClusterName: c.Name,
-		}
-		path := VMDir(c.Name, i+1)
-		err := os.MkdirAll(path, 0755)
+		var err error
+		c.VMs[i], err = p.createVM(c.Name, i, now)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := p.storage.SaveCluster(l, c); err != nil {
-		return err
+		return nil, err
 	}
 	p.clusters[c.Name] = c
-	return nil
+	return c.VMs, nil
+}
+
+func (p *Provider) Grow(
+	l *logger.Logger, vms vm.List, clusterName string, names []string,
+) (vm.List, error) {
+	now := timeutil.Now()
+	offset := p.clusters[clusterName].VMs.Len()
+	newVms := make(vm.List, len(names))
+	for i := range names {
+		cVM, err := p.createVM(clusterName, i+offset, now)
+		if err != nil {
+			return nil, err
+		}
+		newVms[i] = cVM
+	}
+	p.clusters[clusterName].VMs = append(p.clusters[clusterName].VMs, newVms...)
+	return newVms, p.storage.SaveCluster(l, p.clusters[clusterName])
+}
+
+func (p *Provider) Shrink(l *logger.Logger, vmsToDelete vm.List, clusterName string) error {
+	keepCount := p.clusters[clusterName].VMs.Len() - len(vmsToDelete)
+	for i := 0; i < p.clusters[clusterName].VMs.Len(); i++ {
+		if i < keepCount {
+			continue
+		}
+		path := VMDir(clusterName, i+1)
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	p.clusters[clusterName].VMs = p.clusters[clusterName].VMs[:keepCount]
+	return p.storage.SaveCluster(l, p.clusters[clusterName])
 }
 
 // Delete is part of the vm.Provider interface.

@@ -25,8 +25,8 @@ go_test(
         "profiler_test.go",
     ],
     exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
+        "//build/toolchains:is_heavy": {"test.Pool": "large"},
+        "//conditions:default": {"test.Pool": "default"},
     }),
     deps = [
         ":jobsprofiler",
@@ -42,6 +42,7 @@ go_test(
         "//pkg/sql",
         "//pkg/sql/execinfrapb",
         "//pkg/sql/isql",
+        "//pkg/sql/physicalplan",
         "//pkg/testutils",
         "//pkg/testutils/jobutils",
         "//pkg/testutils/serverutils",

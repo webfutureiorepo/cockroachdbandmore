@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cluster
 
@@ -318,7 +313,15 @@ func (c *Container) WaitUntilNotRunning(ctx context.Context) error {
 		if exitCode := waitOKBody.StatusCode; exitCode != 0 {
 			err = errors.Errorf("non-zero exit code: %d", exitCode)
 			fmt.Fprintln(out, err.Error())
-			log.Shoutf(ctx, severity.INFO, "command left-over files in %s", c.cluster.volumesDir)
+			volumesDir := c.cluster.volumesDir
+			// NB: TEST_UNDECLARED_OUTPUTS_DIR is set for remote Bazel tests.
+			undeclaredOutsDir := os.Getenv("TEST_UNDECLARED_OUTPUTS_DIR")
+			if undeclaredOutsDir != "" {
+				log.Shoutf(ctx, severity.INFO, "command left-over files in %s",
+					strings.Replace(volumesDir, undeclaredOutsDir, "outputs.zip", 1))
+			} else {
+				log.Shoutf(ctx, severity.INFO, "command left-over files in %s", volumesDir)
+			}
 		}
 
 		return err

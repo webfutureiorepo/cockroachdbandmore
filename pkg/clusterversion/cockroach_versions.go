@@ -1,16 +1,15 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clusterversion
 
-import "github.com/cockroachdb/cockroach/pkg/roachpb"
+import (
+	"fmt"
+
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+)
 
 // Key is a unique identifier for a version of CockroachDB.
 type Key int
@@ -121,15 +120,21 @@ type Key int
 // own documentation in ./pkg/upgrade, which you should peruse should you feel
 // that an upgrade is necessary for your use case.
 //
-// ## Permanent upgrades
+// ## Bootstrap upgrades
 //
-// Permanent upgrades are upgrades that double as initialization steps when
-// bootstrapping a new cluster. As such, they cannot be removed even as the
-// version they are tied to becomes unsupported.
+// Bootstrap upgrades are two upgrades that run as initialization steps when
+// bootstrapping a new cluster, regardless of the version (baked-in migrations)
+// at which the cluster bootstrapped. When all clusters -- both those being
+// freshly created and those being upgraded from some older version -- need to
+// run some piece of code, typically that code is called both in an upgrade
+// migration that existing clusters will run during upgrade and in the bootstrap
+// upgrades that only new clusters will run; bootstrap upgrades are not re-run
+// during later upgrades, so any modifications to them also need to be run as
+// separate upgrades.
 //
 // # Phasing out Versions and Upgrades
 //
-// Versions and non-permanent upgrades can be removed once they are no longer
+// Versions can be removed once they are no longer
 // going to be exercised. This is primarily driven by the
 // MinSupported version, which declares the oldest *cluster* (not binary)
 // version of CockroachDB that may interface with the running node. It typically
@@ -160,145 +165,65 @@ type Key int
 // All "is active" checks for the key will always evaluate to true. You'll also
 // want to delete the constant and remove its entry in the `versionsSingleton`
 // block below.
-//
-// Permanent upgrades and their associated version key cannot be removed (even
-// if it is below MinSupported). The version key should start with `Permanent_`
-// to make this more explicit. The version numbers should not be changed - we
-// want all nodes in a mixed-version cluster to agree on what version a certain
-// upgrade step is tied to (in the unlikely scenario that we have mixed-version
-// nodes while bootstrapping a cluster).
 const (
-	// VPrimordial versions are associated with permanent upgrades that exist for
-	// historical reasons; no new primordial versions should be added, and no new
-	// upgrades should be tied to existing primordial versions.
+	// VBootstrap versions are associated with bootstrap steps; no new bootstrap
+	// versions should be added, as the bootstrap{System,Cluster} functions in the
+	// upgrades package are extended in-place.
+	VBootstrapSystem Key = iota
+	VBootstrapTenant
 
-	VPrimordial1 Key = iota
-	VPrimordial2
-	VPrimordial3
-	VPrimordial4
-	VPrimordial5
-	VPrimordial6
+	// No new VBootstrap versions should be added.
 
-	// No new VPrimordial versions should be added.
+	VBootstrapMax
 
-	VPrimordialMax
+	// V24_1 is CockroachDB v24.1. It's used for all v24.1.x patch releases.
+	V24_1
 
-	// Permanent_V22_2SQLSchemaTelemetryScheduledJobs adds an automatic schedule for SQL schema
-	// telemetry logging jobs.
-	// This is a permanent migration which should exist forever.
-	Permanent_V22_2SQLSchemaTelemetryScheduledJobs
+	// V24_2 is CockroachDB v24.2. It's used for all v24.2.x patch releases.
+	V24_2
 
-	// Permanent_V23_1KeyVisualizerTablesAndJobs adds the system tables that
-	// support the key visualizer.
-	Permanent_V23_1KeyVisualizerTablesAndJobs
+	// V24_3 is CockroachDB v24.3. It's used for all v24.3.x patch releases.
+	V24_3
 
-	// Permanent_V23_1_CreateJobsMetricsPollingJob creates the permanent job
-	// responsible for polling the jobs table for metrics.
-	Permanent_V23_1_CreateJobsMetricsPollingJob
+	V25_1_Start
 
-	// Permanent_V23_1_CreateAutoConfigRunnerJob is the version where the auto
-	// config runner persistent job has been created.
-	Permanent_V23_1_CreateAutoConfigRunnerJob
+	// V25_1_AddJobsTables added new jobs tables.
+	V25_1_AddJobsTables
 
-	// Permanent_V23_1ChangeSQLStatsTTL is the version where the gc TTL was
-	// updated to all SQL Stats tables.
-	Permanent_V23_1ChangeSQLStatsTTL
+	// V25_1_MoveRaftTruncatedState moves the RaftTruncatedState in eval result
+	// from ReplicaState to its own field.
+	V25_1_MoveRaftTruncatedState
 
-	// Permanent_V23_1CreateSystemActivityUpdateJob is the version at which
-	// Cockroach adds a job that periodically updates the statement_activity and
-	// transaction_activity tables.
-	Permanent_V23_1CreateSystemActivityUpdateJob
+	// V25_1_AddRangeForceFlushKey adds the RangeForceFlushKey, a replicated
+	// range-ID local key, which is written below raft.
+	V25_1_AddRangeForceFlushKey
 
-	// V23_1 is CockroachDB v23.1. It's used for all v23.1.x patch releases.
-	V23_1
+	// V25_1_BatchStreamRPC adds the BatchStream RPC, which allows for more
+	// efficient Batch unary RPCs.
+	V25_1_BatchStreamRPC
 
-	// V23_2Start demarcates the start of cluster versions stepped through during
-	// the process of upgrading from previous supported releases to 23.2.
-	V23_2Start
+	// V25_1_PreparedTransactionsTable adds the system.prepared_transactions
+	// table. The table is used to store information about prepared transaction
+	// that are part of the XA two-phase commit protocol.
+	V25_1_PreparedTransactionsTable
 
-	// V23_2_EnableRangeCoalescingForSystemTenant enables range coalescing for
-	// the system tenant.
-	V23_2_EnableRangeCoalescingForSystemTenant
+	// V25_1_AddJobsColumns added new columns to system.jobs.
+	V25_1_AddJobsColumns
 
-	// V23_2_UseACRaftEntryEntryEncodings gates the use of raft entry encodings
-	// that (optionally) embed below-raft admission data.
-	V23_2_UseACRaftEntryEntryEncodings
+	// V25_1_JobsWritesFence is an empty version that is used to add a "fence"
+	// between the column addition version and the backfill version. This allows
+	// the backfill version's upgrade step to make the assumption that all nodes
+	// will be writing to the new columns, since moving from fence to backfill can
+	// only start once no nodes are still on add-columnns.
+	V25_1_JobsWritesFence
 
-	// V23_2_PebbleFormatDeleteSizedAndObsolete upgrades Pebble's format major
-	// version to FormatDeleteSizedAndObsolete, allowing use of a new sstable
-	// format version Pebblev4. This version has two improvements:
-	//   a) It allows the use of DELSIZED point tombstones.
-	//   b) It encodes the obsolence of keys in a key-kind bit.
-	V23_2_PebbleFormatDeleteSizedAndObsolete
-
-	// V23_2_UseSizedPebblePointTombstones enables the use of Pebble's new
-	// DeleteSized operations.
-	V23_2_UseSizedPebblePointTombstones
-
-	// V23_2_PebbleFormatVirtualSSTables upgrades Pebble's format major version to
-	// FormatVirtualSSTables, allowing use of virtual sstables in Pebble.
-	V23_2_PebbleFormatVirtualSSTables
-
-	// V23_2_StmtDiagForPlanGist enables statement diagnostic feature to collect
-	// the bundle for particular plan gist.
-	V23_2_StmtDiagForPlanGist
-
-	// V23_2_RegionaLivenessTable guarantees the regional liveness table exists
-	// and its ready for use.
-	V23_2_RegionaLivenessTable
-
-	// V23_2_RemoveLockTableWaiterTouchPush simplifies the push logic in
-	// lock_table_waiter by passing the wait policy of the pusher as part of the
-	// push request and leaving the push outcome to the server-side logic.
-	V23_2_RemoveLockTableWaiterTouchPush
-
-	// V23_2_ChangefeedLaggingRangesOpts is used to version gate the changefeed
-	// options lagging_ranges_threshold and lagging_ranges_polling_interval.
-	V23_2_ChangefeedLaggingRangesOpts
-
-	// V23_2_GrantExecuteToPublic is no longer used. See #114203.
-	V23_2_GrantExecuteToPublic
-
-	// V23_2_EnablePebbleFormatVirtualSSTables enables the Pebble
-	// FormatMajorVersion for virtual sstables. Note that the ratcheting for the
-	// format major version in Pebble should have happened with
-	// V23_2_PebbleFormatVirtualSSTables above.
-	V23_2_EnablePebbleFormatVirtualSSTables
-
-	// Permanent_V23_2_MVCCStatisticsTable adds the system.mvcc_statistics
-	// table and update job. The table is used to serve fast reads of historical
-	// mvcc data from observability surfaces.
-	Permanent_V23_2_MVCCStatisticsTable
-
-	// V23_2_AddSystemExecInsightsTable is the version at which Cockroach creates
-	// {statement|transaction}_execution_insights system tables.
-	V23_2_AddSystemExecInsightsTable
-
-	// ***************************************************************************
-	//            WHERE TO ADD VERSION GATES DURING 23.2 STABILITY?
-	// ---------------------------------------------------------------------------
-	// If version gate is for 23.2 (to be backported to release-23.2):
-	//    Then add new gate above this comment (immediately above this comment).
-	// If version gate is for 24.1 (upcoming 24.1 development):
-	//    Then add new gate at the end (immediately above the "Add new versions
-	//    here" comment).
-	// ***************************************************************************
-
-	// V23_2 is CockroachDB v23.2. It's used for all v23.2.x patch releases.
-	V23_2
-
-	// V24_1Start demarcates the start of cluster versions stepped through during
-	// the process of upgrading from 23.2 to 24.1.
-	V24_1Start
+	// V25_1_JobsBackfill backfills the new jobs tables and columns.
+	V25_1_JobsBackfill
 
 	// *************************************************
-	// Step (1) Add new versions here.
+	// Step (1) Add new versions above this comment.
 	// Do not add new versions to a patch release.
 	// *************************************************
-
-	// V24_1_DropPayloadAndProgressFromSystemJobsTable drop the unused payload and
-	// progress columns from system.jobs table.
-	V24_1_DropPayloadAndProgressFromSystemJobsTable
 
 	numKeys
 )
@@ -323,51 +248,30 @@ const (
 // to ensure that upgrades don't occur between in-development and released
 // versions (see developmentBranch and maybeApplyDevOffset).
 var versionTable = [numKeys]roachpb.Version{
-	VPrimordial1:   {Major: 0, Minor: 0, Internal: 2},
-	VPrimordial2:   {Major: 0, Minor: 0, Internal: 4},
-	VPrimordial3:   {Major: 0, Minor: 0, Internal: 6},
-	VPrimordial4:   {Major: 0, Minor: 0, Internal: 8},
-	VPrimordial5:   {Major: 0, Minor: 0, Internal: 10},
-	VPrimordial6:   {Major: 0, Minor: 0, Internal: 12},
-	VPrimordialMax: {Major: 0, Minor: 0, Internal: 424242},
+	VBootstrapSystem: {Major: 0, Minor: 0, Internal: 2},
+	VBootstrapTenant: {Major: 0, Minor: 0, Internal: 4},
+	VBootstrapMax:    {Major: 0, Minor: 0, Internal: 424242},
 
-	// Permanent upgrades from previous versions.
-	Permanent_V22_2SQLSchemaTelemetryScheduledJobs: {Major: 22, Minor: 1, Internal: 42},
-	Permanent_V23_1KeyVisualizerTablesAndJobs:      {Major: 22, Minor: 2, Internal: 32},
-	Permanent_V23_1_CreateJobsMetricsPollingJob:    {Major: 22, Minor: 2, Internal: 38},
-	Permanent_V23_1_CreateAutoConfigRunnerJob:      {Major: 22, Minor: 2, Internal: 90},
-	Permanent_V23_1ChangeSQLStatsTTL:               {Major: 22, Minor: 2, Internal: 98},
-	Permanent_V23_1CreateSystemActivityUpdateJob:   {Major: 22, Minor: 2, Internal: 102},
+	V24_1: {Major: 24, Minor: 1, Internal: 0},
+	V24_2: {Major: 24, Minor: 2, Internal: 0},
+	V24_3: {Major: 24, Minor: 3, Internal: 0},
 
-	V23_1: {Major: 23, Minor: 1, Internal: 0},
+	// v25.1 versions. Internal versions must be even.
+	V25_1_Start: {Major: 24, Minor: 3, Internal: 2},
 
-	// v23.2 versions. Internal versions must be even.
-	V23_2Start: {Major: 23, Minor: 1, Internal: 2},
-	V23_2_EnableRangeCoalescingForSystemTenant: {Major: 23, Minor: 1, Internal: 8},
-	V23_2_UseACRaftEntryEntryEncodings:         {Major: 23, Minor: 1, Internal: 10},
-	V23_2_PebbleFormatDeleteSizedAndObsolete:   {Major: 23, Minor: 1, Internal: 12},
-	V23_2_UseSizedPebblePointTombstones:        {Major: 23, Minor: 1, Internal: 14},
-	V23_2_PebbleFormatVirtualSSTables:          {Major: 23, Minor: 1, Internal: 16},
-	V23_2_StmtDiagForPlanGist:                  {Major: 23, Minor: 1, Internal: 18},
-	V23_2_RegionaLivenessTable:                 {Major: 23, Minor: 1, Internal: 20},
-	V23_2_RemoveLockTableWaiterTouchPush:       {Major: 23, Minor: 1, Internal: 22},
-	V23_2_ChangefeedLaggingRangesOpts:          {Major: 23, Minor: 1, Internal: 24},
-	V23_2_GrantExecuteToPublic:                 {Major: 23, Minor: 1, Internal: 26},
-	V23_2_EnablePebbleFormatVirtualSSTables:    {Major: 23, Minor: 1, Internal: 28},
-	Permanent_V23_2_MVCCStatisticsTable:        {Major: 23, Minor: 1, Internal: 30},
-	V23_2_AddSystemExecInsightsTable:           {Major: 23, Minor: 1, Internal: 32},
-
-	V23_2: {Major: 23, Minor: 2, Internal: 0},
-
-	// v24.1 versions. Internal versions must be even.
-	V24_1Start: {Major: 23, Minor: 2, Internal: 2},
+	V25_1_AddJobsTables:             {Major: 24, Minor: 3, Internal: 4},
+	V25_1_MoveRaftTruncatedState:    {Major: 24, Minor: 3, Internal: 6},
+	V25_1_AddRangeForceFlushKey:     {Major: 24, Minor: 3, Internal: 8},
+	V25_1_BatchStreamRPC:            {Major: 24, Minor: 3, Internal: 10},
+	V25_1_PreparedTransactionsTable: {Major: 24, Minor: 3, Internal: 12},
+	V25_1_AddJobsColumns:            {Major: 24, Minor: 3, Internal: 14},
+	V25_1_JobsWritesFence:           {Major: 24, Minor: 3, Internal: 16},
+	V25_1_JobsBackfill:              {Major: 24, Minor: 3, Internal: 18},
 
 	// *************************************************
-	// Step (2): Add new versions here.
+	// Step (2): Add new versions above this comment.
 	// Do not add new versions to a patch release.
 	// *************************************************
-
-	V24_1_DropPayloadAndProgressFromSystemJobsTable: {Major: 23, Minor: 2, Internal: 4},
 }
 
 // Latest is always the highest version key. This is the maximum logical cluster
@@ -375,23 +279,21 @@ var versionTable = [numKeys]roachpb.Version{
 const Latest Key = numKeys - 1
 
 // MinSupported is the minimum logical cluster version supported by this branch.
-const MinSupported Key = V23_1
+const MinSupported Key = V24_3
 
-// PreviousRelease is the logical cluster version of the previous release.
-//
-// Note: this is always the last element of SupportedPreviousReleases(); it is
-// also provided as a constant for convenience.
-const PreviousRelease Key = V23_2
+// PreviousRelease is the logical cluster version of the previous release (which must
+// have at least an RC build published).
+const PreviousRelease Key = V24_3
 
-// V24_1 is a placeholder that will eventually be replaced by the actual 24.1
+// V25_1 is a placeholder that will eventually be replaced by the actual 25.1
 // version Key, but in the meantime it points to the latest Key. The placeholder
 // is defined so that it can be referenced in code that simply wants to check if
-// a cluster is running 24.1 and has completed all associated migrations; most
+// a cluster is running 24.3 and has completed all associated migrations; most
 // version gates can use this instead of defining their own version key if they
-// only need to check that the cluster has upgraded to 24.1.
-const V24_1 = Latest
+// only need to check that the cluster has upgraded to 25.1.
+const V25_1 = Latest
 
-// developmentBranch must be true on the main development branch but should be
+// DevelopmentBranch must be true on the main development branch but should be
 // set to false on a release branch once the set of versions becomes append-only
 // and associated upgrade implementations are frozen.
 //
@@ -402,7 +304,7 @@ const V24_1 = Latest
 //     binary in a dev cluster.
 //
 // See devOffsetKeyStart for more details.
-const developmentBranch = true
+const DevelopmentBranch = true
 
 // finalVersion should be set on a release branch to the minted final cluster
 // version key, e.g. to V23_2 on the release-23.2 branch once it is minted.
@@ -410,8 +312,21 @@ const developmentBranch = true
 // TestFinalVersion).
 const finalVersion Key = -1
 
+// TestingExtraVersions may be set to true by packages of tests which will
+// intentionally use Keys greater than Latest, which otherwise would crash
+// and/or cause errors. This should only be done in packages of tests
+// specifically focused on upgrade infrastructure, as it may make mistaken use
+// of Keys greater than latest, which would likely cause odd behavior, harder to
+// notice and debug.
+var TestingExtraVersions = false
+
 // Version returns the roachpb.Version corresponding to a key.
 func (k Key) Version() roachpb.Version {
+	if TestingExtraVersions && k > Latest {
+		v := versionTable[Latest]
+		v.Internal += int32(k-Latest) * 2
+		return maybeApplyDevOffset(k, v)
+	}
 	version := versionTable[k]
 	return maybeApplyDevOffset(k, version)
 }
@@ -448,7 +363,7 @@ func (k Key) String() string {
 // cluster).
 func SupportedPreviousReleases() []Key {
 	res := make([]Key, 0, 2)
-	for k := MinSupported; k < Latest; k++ {
+	for k := MinSupported; k <= PreviousRelease; k++ {
 		if k.IsFinal() {
 			res = append(res, k)
 		}
@@ -466,4 +381,27 @@ func ListBetween(from, to roachpb.Version) []roachpb.Version {
 		}
 	}
 	return cvs
+}
+
+// StringForPersistence returns the string representation of the given
+// version in cases where that version needs to be persisted. This
+// takes backwards compatibility into account, making sure that we use
+// the old version formatting if we need to continue supporting
+// releases that don't understand it.
+//
+// TODO(renato): remove this function once MinSupported is at least 24.1.
+func StringForPersistence(v roachpb.Version) string {
+	return stringForPersistenceWithMinSupported(v, MinSupported.Version())
+}
+
+func stringForPersistenceWithMinSupported(v, minSupported roachpb.Version) string {
+	// newFormattingVersion is the version in which the new version
+	// formatting (#115223) was introduced.
+	newFormattingVersion := roachpb.Version{Major: 24, Minor: 1}
+
+	if minSupported.AtLeast(newFormattingVersion) || v.IsFinal() {
+		return v.String()
+	}
+
+	return fmt.Sprintf("%d.%d-%d", v.Major, v.Minor, v.Internal)
 }

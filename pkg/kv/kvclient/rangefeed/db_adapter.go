@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeed
 
@@ -27,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/span"
 	"github.com/cockroachdb/errors"
 )
 
@@ -76,7 +72,35 @@ func (dbc *dbAdapter) RangeFeed(
 	eventC chan<- kvcoord.RangeFeedMessage,
 	opts ...kvcoord.RangeFeedOption,
 ) error {
-	return dbc.distSender.RangeFeed(ctx, spans, startFrom, eventC, opts...)
+	timedSpans := make([]kvcoord.SpanTimePair, 0, len(spans))
+	for _, sp := range spans {
+		timedSpans = append(timedSpans, kvcoord.SpanTimePair{
+			Span:       sp,
+			StartAfter: startFrom,
+		})
+	}
+	return dbc.distSender.RangeFeed(ctx, timedSpans, eventC, opts...)
+}
+
+// RangeFeedFromFrontier is part of the DB interface.
+func (dbc *dbAdapter) RangeFeedFromFrontier(
+	ctx context.Context,
+	frontier span.Frontier,
+	eventC chan<- kvcoord.RangeFeedMessage,
+	opts ...kvcoord.RangeFeedOption,
+) error {
+	timedSpans := make([]kvcoord.SpanTimePair, 0, frontier.Len())
+	frontier.Entries(
+		func(sp roachpb.Span, ts hlc.Timestamp) (done span.OpResult) {
+			timedSpans = append(timedSpans, kvcoord.SpanTimePair{
+				// Clone the span as the rangefeed progress tracker will manipulate the
+				// original frontier.
+				Span:       sp.Clone(),
+				StartAfter: ts,
+			})
+			return false
+		})
+	return dbc.distSender.RangeFeed(ctx, timedSpans, eventC, opts...)
 }
 
 // Scan is part of the DB interface.
@@ -85,6 +109,7 @@ func (dbc *dbAdapter) Scan(
 	spans []roachpb.Span,
 	asOf hlc.Timestamp,
 	rowFn func(value roachpb.KeyValue),
+	rowsFn func([]kv.KeyValue),
 	cfg scanConfig,
 ) error {
 	if len(spans) == 0 {
@@ -100,7 +125,7 @@ func (dbc *dbAdapter) Scan(
 	// If we don't have parallelism configured, just scan each span in turn.
 	if cfg.scanParallelism == nil {
 		for _, sp := range spans {
-			if err := dbc.scanSpan(ctx, sp, asOf, rowFn, cfg.targetScanBytes, cfg.onSpanDone, cfg.overSystemTable, acc); err != nil {
+			if err := dbc.scanSpan(ctx, sp, asOf, rowFn, rowsFn, cfg.targetScanBytes, cfg.OnSpanDone, cfg.overSystemTable, acc); err != nil {
 				return err
 			}
 		}
@@ -135,8 +160,8 @@ func (dbc *dbAdapter) Scan(
 
 	g := ctxgroup.WithContext(ctx)
 	err := dbc.divideAndSendScanRequests(
-		ctx, &g, spans, asOf, rowFn,
-		parallelismFn, cfg.targetScanBytes, cfg.onSpanDone, cfg.overSystemTable, acc)
+		ctx, &g, spans, asOf, rowFn, rowsFn,
+		parallelismFn, cfg.targetScanBytes, cfg.OnSpanDone, cfg.overSystemTable, acc)
 	if err != nil {
 		cancel()
 	}
@@ -148,6 +173,7 @@ func (dbc *dbAdapter) scanSpan(
 	span roachpb.Span,
 	asOf hlc.Timestamp,
 	rowFn func(value roachpb.KeyValue),
+	rowsFn func([]kv.KeyValue),
 	targetScanBytes int64,
 	onScanDone OnScanCompleted,
 	overSystemTable bool,
@@ -181,8 +207,12 @@ func (dbc *dbAdapter) scanSpan(
 					return err
 				}
 				res := b.Results[0]
-				for _, row := range res.Rows {
-					rowFn(roachpb.KeyValue{Key: row.Key, Value: *row.Value})
+				if rowsFn != nil {
+					rowsFn(res.Rows)
+				} else {
+					for _, row := range res.Rows {
+						rowFn(roachpb.KeyValue{Key: row.Key, Value: *row.Value})
+					}
 				}
 				if res.ResumeSpan == nil {
 					if onScanDone != nil {
@@ -212,6 +242,7 @@ func (dbc *dbAdapter) divideAndSendScanRequests(
 	spans []roachpb.Span,
 	asOf hlc.Timestamp,
 	rowFn func(value roachpb.KeyValue),
+	rowsFn func(values []kv.KeyValue),
 	parallelismFn func() int,
 	targetScanBytes int64,
 	onSpanDone OnScanCompleted,
@@ -253,7 +284,7 @@ func (dbc *dbAdapter) divideAndSendScanRequests(
 			sp := partialRS.AsRawSpanWithNoLocals()
 			workGroup.GoCtx(func(ctx context.Context) error {
 				defer limAlloc.Release()
-				return dbc.scanSpan(ctx, sp, asOf, rowFn, targetScanBytes, onSpanDone, overSystemTable, acc)
+				return dbc.scanSpan(ctx, sp, asOf, rowFn, rowsFn, targetScanBytes, onSpanDone, overSystemTable, acc)
 			})
 
 			if !ri.NeedAnother(nextRS) {

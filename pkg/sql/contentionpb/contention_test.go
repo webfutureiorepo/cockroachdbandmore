@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package contentionpb
 
@@ -22,17 +17,17 @@ import (
 
 func TestExtendedContentionEventHash(t *testing.T) {
 	event1 := ExtendedContentionEvent{}
-	event1.BlockingEvent.TxnMeta.ID = uuid.FastMakeV4()
-	event1.WaitingTxnID = uuid.FastMakeV4()
+	event1.BlockingEvent.TxnMeta.ID = uuid.MakeV4()
+	event1.WaitingTxnID = uuid.MakeV4()
 	event1.WaitingStmtID = clusterunique.ID{Uint128: uint128.Uint128{Lo: 12, Hi: 987}}
 
 	eventWithDifferentBlockingTxnID := event1
-	eventWithDifferentBlockingTxnID.BlockingEvent.TxnMeta.ID = uuid.FastMakeV4()
+	eventWithDifferentBlockingTxnID.BlockingEvent.TxnMeta.ID = uuid.MakeV4()
 
 	require.NotEqual(t, eventWithDifferentBlockingTxnID.Hash(), event1.Hash())
 
 	eventWithDifferentWaitingTxnID := event1
-	eventWithDifferentWaitingTxnID.WaitingTxnID = uuid.FastMakeV4()
+	eventWithDifferentWaitingTxnID.WaitingTxnID = uuid.MakeV4()
 	require.NotEqual(t, eventWithDifferentWaitingTxnID.Hash(), event1.Hash())
 
 	eventWithDifferentStmtId := event1

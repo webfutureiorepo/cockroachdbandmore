@@ -23,6 +23,7 @@ go_library(
         "//pkg/sql/isql",
         "//pkg/util/ctxgroup",
         "//pkg/util/hlc",
+        "//pkg/util/timeutil",
         "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
     ],
@@ -35,10 +36,6 @@ go_test(
         "jobs_protected_ts_test.go",
         "main_test.go",
     ],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/security/securityassets",
         "//pkg/security/securitytest",

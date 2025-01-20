@@ -1,16 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,7 +25,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigjob"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigptsreader"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
@@ -36,6 +37,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -43,6 +46,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -60,6 +64,8 @@ func TestChangefeedUpdateProtectedTimestamp(t *testing.T) {
 		ctx := context.Background()
 		ptsInterval := 50 * time.Millisecond
 		changefeedbase.ProtectTimestampInterval.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
+		changefeedbase.ProtectTimestampLag.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
 
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
@@ -255,6 +261,8 @@ func TestChangefeedProtectedTimestamps(t *testing.T) {
 
 		changefeedbase.ProtectTimestampInterval.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, 100*time.Millisecond)
+		changefeedbase.ProtectTimestampLag.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, 100*time.Millisecond)
 
 		ptp := s.Server.DistSQLServer().(*distsql.ServerImpl).ServerConfig.ProtectedTimestampProvider
 		store, err := s.SystemServer.GetStores().(*kvserver.Stores).GetStore(s.SystemServer.GetFirstStoreID())
@@ -442,20 +450,47 @@ func TestChangefeedCanceledWhenPTSIsOld(t *testing.T) {
 	cdcTestWithSystem(t, testFn, feedTestEnterpriseSinks)
 }
 
-// TestPTSRecordProtectsTargetsAndDescriptorTable tests that descriptors are not
-// GC'd when they are protected by a PTS record.
-func TestPTSRecordProtectsTargetsAndDescriptorTable(t *testing.T) {
+// TestPTSRecordProtectsTargetsAndSystemTables tests that descriptors and other
+// required tables are not GC'd when they are protected by a PTS record.
+func TestPTSRecordProtectsTargetsAndSystemTables(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	s, db, stopServer := startTestFullServer(t, feedTestOptions{})
+	ctx := context.Background()
+
+	// Useful for debugging.
+	require.NoError(t, log.SetVModule("spanconfigstore=2,store=2,reconciler=3,mvcc_gc_queue=2,kvaccessor=2"))
+
+	settings := cluster.MakeTestingClusterSettings()
+	spanconfigjob.ReconciliationJobCheckpointInterval.Override(ctx, &settings.SV, 1*time.Second)
+
+	// Keep track of where the spanconfig reconciler is up to.
+	lastReconcilerCheckpoint := atomic.Value{}
+	lastReconcilerCheckpoint.Store(hlc.Timestamp{})
+	s, db, stopServer := startTestFullServer(t, feedTestOptions{
+		knobsFn: func(knobs *base.TestingKnobs) {
+			if knobs.SpanConfig == nil {
+				knobs.SpanConfig = &spanconfig.TestingKnobs{}
+			}
+			scKnobs := knobs.SpanConfig.(*spanconfig.TestingKnobs)
+			scKnobs.JobOnCheckpointInterceptor = func(lastCheckpoint hlc.Timestamp) error {
+				now := hlc.Timestamp{WallTime: time.Now().UnixNano()}
+				t.Logf("reconciler checkpoint %s (%s)", lastCheckpoint, now.GoTime().Sub(lastCheckpoint.GoTime()))
+				lastReconcilerCheckpoint.Store(lastCheckpoint)
+				return nil
+			}
+			scKnobs.SQLWatcherCheckpointNoopsEveryDurationOverride = 1 * time.Second
+		},
+		settings: settings,
+	})
+
 	defer stopServer()
 	execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 	sqlDB := sqlutils.MakeSQLRunner(db)
-
 	sqlDB.Exec(t, "CREATE TABLE foo (a INT, b STRING)")
+	sqlDB.Exec(t, `CREATE USER test`)
+	sqlDB.Exec(t, `GRANT admin TO test`)
 	ts := s.Clock().Now()
-	ctx := context.Background()
 
 	fooDescr := cdctest.GetHydratedTableDescriptor(t, s.ExecutorConfig(), "d", "foo")
 	var targets changefeedbase.Targets
@@ -463,21 +498,246 @@ func TestPTSRecordProtectsTargetsAndDescriptorTable(t *testing.T) {
 		TableID: fooDescr.GetID(),
 	})
 
+	// We need to give our PTS record a legit job ID so the protected ts
+	// reconciler doesn't delete it, so start up a dummy changefeed job and use its id.
+	registry := s.JobRegistry().(*jobs.Registry)
+	dummyJobDone := make(chan struct{})
+	defer close(dummyJobDone)
+	registry.TestingWrapResumerConstructor(jobspb.TypeChangefeed,
+		func(raw jobs.Resumer) jobs.Resumer {
+			return &fakeResumer{done: dummyJobDone}
+		})
+	var jobID jobspb.JobID
+	sqlDB.QueryRow(t, `CREATE CHANGEFEED FOR TABLE foo INTO 'null://'`).Scan(&jobID)
+	waitForJobStatus(sqlDB, t, jobID, `running`)
+
 	// Lay protected timestamp record.
-	ptr := createProtectedTimestampRecord(ctx, s.Codec(), 42, targets, ts)
+	ptr := createProtectedTimestampRecord(ctx, s.Codec(), jobID, targets, ts)
 	require.NoError(t, execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		return execCfg.ProtectedTimestampProvider.WithTxn(txn).Protect(ctx, ptr)
 	}))
 
+	// Set GC TTL to a small value to make the tables GC'd. We need to set this
+	// *after* we set the PTS record so that we dont GC the tables before
+	// the PTS is applied/picked up.
+	sqlDB.Exec(t, `ALTER DATABASE system CONFIGURE ZONE USING gc.ttlseconds = 1`)
+
+	// The following code was shameless stolen from
+	// TestShowTenantFingerprintsProtectsTimestamp which almost
+	// surely copied it from the 2-3 other tests that have
+	// something similar.  We should put this in a helper. We have
+	// ForceTableGC, but in ad-hoc testing that appeared to bypass
+	// the PTS record making it useless for this test.
+	//
+	// TODO(ssd): Make a helper that does this.
+	refreshPTSReaderCache := func(asOf hlc.Timestamp, tableName, databaseName string) {
+		tableID, err := s.QueryTableID(ctx, username.RootUserName(), tableName, databaseName)
+		require.NoError(t, err)
+		tableKey := s.Codec().TablePrefix(uint32(tableID))
+		store, err := s.StorageLayer().GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
+		require.NoError(t, err)
+		var repl *kvserver.Replica
+		testutils.SucceedsSoon(t, func() error {
+			repl = store.LookupReplica(roachpb.RKey(tableKey))
+			if repl == nil {
+				return errors.New("could not find replica")
+			}
+			return nil
+		})
+		ptsReader := store.GetStoreConfig().ProtectedTimestampReader
+		t.Logf("updating PTS reader cache to %s", asOf)
+		require.NoError(
+			t,
+			spanconfigptsreader.TestingRefreshPTSState(ctx, t, ptsReader, asOf),
+		)
+		require.NoError(t, repl.ReadProtectedTimestampsForTesting(ctx))
+	}
+	gcTestTableRange := func(tableName, databaseName string) {
+		row := sqlDB.QueryRow(t, fmt.Sprintf("SELECT range_id FROM [SHOW RANGES FROM TABLE %s.%s]", tableName, databaseName))
+		var rangeID int64
+		row.Scan(&rangeID)
+		refreshPTSReaderCache(s.Clock().Now(), tableName, databaseName)
+		t.Logf("enqueuing range %d (table %s.%s) for mvccGC", rangeID, tableName, databaseName)
+		sqlDB.Exec(t, `SELECT crdb_internal.kv_enqueue_replica($1, 'mvccGC', true)`, rangeID)
+	}
+
 	// Alter foo few times, then force GC at ts-1.
 	sqlDB.Exec(t, "ALTER TABLE foo ADD COLUMN c STRING")
 	sqlDB.Exec(t, "ALTER TABLE foo ADD COLUMN d STRING")
-	require.NoError(t, s.ForceTableGC(ctx, "system", "descriptor", ts.Add(-1, 0)))
 
-	// We can still fetch table descriptors because of protected timestamp record.
+	// Remove this entry from role_members.
+	sqlDB.Exec(t, "REVOKE admin FROM test")
+
+	// Change the user's password to update the users table.
+	sqlDB.Exec(t, `ALTER USER test WITH PASSWORD 'testpass'`)
+
+	// Sleep for enough time to pass the configured GC threshold (1 second).
+	time.Sleep(2 * time.Second)
+
+	// Wait for the spanconfigs to be reconciled.
+	now := hlc.Timestamp{WallTime: time.Now().UnixNano()}
+	t.Logf("waiting for spanconfigs to be reconciled")
+	testutils.SucceedsWithin(t, func() error {
+		lastCheckpoint := lastReconcilerCheckpoint.Load().(hlc.Timestamp)
+		if lastCheckpoint.Less(now) {
+			return errors.Errorf("last checkpoint %s is not less than now %s", lastCheckpoint, now)
+		}
+		t.Logf("last reconciler checkpoint ok at %s", lastCheckpoint)
+		return nil
+	}, 1*time.Minute)
+
+	// If you want to GC all system tables:
+	//
+	// tabs := systemschema.MakeSystemTables()
+	// for _, t := range tabs {
+	// 	if t.IsPhysicalTable() && !t.IsSequence() {
+	// 		gcTestTableRange("system", t.GetName())
+	// 	}
+	// }
+	t.Logf("GC'ing system tables")
+	gcTestTableRange("system", "descriptor")
+	gcTestTableRange("system", "zones")
+	gcTestTableRange("system", "comments")
+	gcTestTableRange("system", "role_members")
+	gcTestTableRange("system", "users")
+
+	// We can still fetch table descriptors and role members because of protected timestamp record.
 	asOf := ts
 	_, err := fetchTableDescriptors(ctx, &execCfg, targets, asOf)
 	require.NoError(t, err)
+	// The role_members entry we removed is still visible at the asOf time because of the PTS record.
+	rms, err := fetchRoleMembers(ctx, &execCfg, asOf)
+	require.NoError(t, err)
+	require.Contains(t, rms, []string{"admin", "test"})
+
+	// The user password is still null.
+	ups, err := fetchUsersAndPasswords(ctx, &execCfg, asOf)
+	require.NoError(t, err)
+	found := false
+	for _, up := range ups {
+		if up.username == "test" {
+			require.Equal(t, tree.DNull, up.password)
+			found = true
+			break
+		}
+	}
+	require.True(t, found)
+
+}
+
+// TestChangefeedUpdateProtectedTimestampTargets tests that changefeeds will
+// remake their PTS records if they detect that they lack required targets.
+func TestChangefeedMigratesProtectedTimestampTargets(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, s TestServerWithSystem, f cdctest.TestFeedFactory) {
+		ctx := context.Background()
+
+		dontMigrate := atomic.Bool{}
+		dontMigrate.Store(true)
+		knobs := s.TestingKnobs.
+			DistSQL.(*execinfra.TestingKnobs).
+			Changefeed.(*TestingKnobs)
+		knobs.PreservePTSTargets = func() bool {
+			return dontMigrate.Load()
+		}
+
+		ptsInterval := 50 * time.Millisecond
+		changefeedbase.ProtectTimestampInterval.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
+		changefeedbase.ProtectTimestampLag.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
+
+		sqlDB := sqlutils.MakeSQLRunner(s.DB)
+		sysDB := sqlutils.MakeSQLRunner(s.SystemServer.SQLConn(t))
+
+		sysDB.Exec(t, "SET CLUSTER SETTING kv.protectedts.poll_interval = '10ms'")
+		sysDB.Exec(t, "SET CLUSTER SETTING kv.closed_timestamp.target_duration = '100ms'") // speeds up the test
+		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY)`)
+
+		foo := feed(t, f, `CREATE CHANGEFEED FOR foo WITH resolved = '20ms'`)
+		defer closeFeed(t, foo)
+
+		registry := s.Server.JobRegistry().(*jobs.Registry)
+		execCfg := s.Server.ExecutorConfig().(sql.ExecutorConfig)
+		ptp := s.Server.DistSQLServer().(*distsql.ServerImpl).ServerConfig.ProtectedTimestampProvider
+		fooDesc := desctestutils.TestingGetPublicTableDescriptor(s.SystemServer.DB(), s.Codec, "d", "foo")
+		fooID := fooDesc.GetID()
+
+		jobFeed := foo.(cdctest.EnterpriseTestFeed)
+
+		// removes table 3 from the target of the PTS record.
+		removeOnePTSTarget := func(recordID uuid.UUID) error {
+			return execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+				s := `select target from system.protected_ts_records where id = $1`
+				datums, err := txn.QueryRowEx(ctx, "pts-test", txn.KV(), sessiondata.NodeUserSessionDataOverride, s, recordID)
+				require.NoError(t, err)
+				j := tree.MustBeDBytes(datums[0])
+
+				target := &ptpb.Target{}
+				require.NoError(t, protoutil.Unmarshal([]byte(j), target))
+
+				// remove '3' (system.descriptor) to simulate a missing system table
+				ids := target.GetSchemaObjects().IDs
+				idx := slices.Index(ids, catid.DescID(3))
+				target.GetSchemaObjects().IDs = slices.Delete(ids, idx, idx+1)
+
+				bs, err := protoutil.Marshal(target)
+				require.NoError(t, err)
+
+				_, err = txn.ExecEx(ctx, "pts-test", txn.KV(), sessiondata.NodeUserSessionDataOverride,
+					"UPDATE system.protected_ts_records SET target = $1 WHERE id = $2", bs, recordID,
+				)
+				require.NoError(t, err)
+				return nil
+			})
+		}
+
+		// Wipe out the targets from the changefeed PTS record, simulating an old-style PTS record.
+		oldRecordID := getPTSRecordID(ctx, t, registry, jobFeed)
+		require.NoError(t, removeOnePTSTarget(oldRecordID))
+
+		// Sanity check: make sure that it worked
+		oldRecord, err := readPTSRecord(ctx, t, execCfg, ptp, oldRecordID)
+		require.NoError(t, err)
+		targetIDs := oldRecord.Target.GetSchemaObjects().IDs
+		require.Contains(t, targetIDs, fooID)
+		require.NotSubset(t, targetIDs, systemTablesToProtect)
+
+		// Flip the knob so the changefeed migrates the record
+		dontMigrate.Store(false)
+
+		getNewPTSRecord := func() *ptpb.Record {
+			var recID uuid.UUID
+			var record *ptpb.Record
+			testutils.SucceedsSoon(t, func() error {
+				recID = getPTSRecordID(ctx, t, registry, jobFeed)
+				if recID.Equal(oldRecordID) {
+					return errors.New("waiting for new PTS record")
+				}
+				return nil
+			})
+			record, err := readPTSRecord(ctx, t, execCfg, ptp, recID)
+			require.NoError(t, err)
+			return record
+		}
+
+		// Read the new PTS record.
+		newRec := getNewPTSRecord()
+		require.NotNil(t, newRec.Target)
+
+		// Assert the new PTS record has the right targets.
+		targetIDs = newRec.Target.GetSchemaObjects().IDs
+		require.Contains(t, targetIDs, fooID)
+		require.Subset(t, targetIDs, systemTablesToProtect)
+
+		// Ensure the old pts record was deleted.
+		_, err = readPTSRecord(ctx, t, execCfg, ptp, oldRecordID)
+		require.ErrorContains(t, err, "does not exist")
+	}
+
+	cdcTestWithSystem(t, testFn, feedTestEnterpriseSinks)
 }
 
 // TestChangefeedUpdateProtectedTimestamp tests that changefeeds using the
@@ -502,6 +762,8 @@ func TestChangefeedMigratesProtectedTimestamps(t *testing.T) {
 		ptsInterval := 50 * time.Millisecond
 		changefeedbase.ProtectTimestampInterval.Override(
 			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
+		changefeedbase.ProtectTimestampLag.Override(
+			context.Background(), &s.Server.ClusterSettings().SV, ptsInterval)
 
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sysDB := sqlutils.MakeSQLRunner(s.SystemServer.SQLConn(t))
@@ -521,41 +783,7 @@ func TestChangefeedMigratesProtectedTimestamps(t *testing.T) {
 		descID := descpb.ID(keys.DescriptorTableID)
 
 		jobFeed := foo.(cdctest.EnterpriseTestFeed)
-		loadProgressErr := func() (jobspb.Progress, error) {
-			job, err := registry.LoadJob(ctx, jobFeed.JobID())
-			if err != nil {
-				return jobspb.Progress{}, err
-			}
-			return job.Progress(), nil
-		}
 
-		getPTSRecordID := func() uuid.UUID {
-			var recordID uuid.UUID
-			testutils.SucceedsSoon(t, func() error {
-				progress, err := loadProgressErr()
-				if err != nil {
-					return err
-				}
-				uid := progress.GetChangefeed().ProtectedTimestampRecord
-				if uid == uuid.Nil {
-					return errors.Newf("no pts record")
-				}
-				recordID = uid
-				return nil
-			})
-			return recordID
-		}
-
-		readPTSRecord := func(recID uuid.UUID) (rec *ptpb.Record, err error) {
-			err = execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
-				rec, err = ptp.WithTxn(txn).GetRecord(ctx, recID)
-				if err != nil {
-					return err
-				}
-				return nil
-			})
-			return
-		}
 		removePTSTarget := func(recordID uuid.UUID) error {
 			return execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 				if _, err := txn.ExecEx(ctx, "pts-test", txn.KV(), sessiondata.NodeUserSessionDataOverride,
@@ -570,9 +798,9 @@ func TestChangefeedMigratesProtectedTimestamps(t *testing.T) {
 		}
 
 		// Wipe out the targets from the changefeed PTS record, simulating an old-style PTS record.
-		oldRecordID := getPTSRecordID()
+		oldRecordID := getPTSRecordID(ctx, t, registry, jobFeed)
 		require.NoError(t, removePTSTarget(oldRecordID))
-		rec, err := readPTSRecord(oldRecordID)
+		rec, err := readPTSRecord(ctx, t, execCfg, ptp, oldRecordID)
 		require.NoError(t, err)
 		require.NotNil(t, rec)
 		require.Nil(t, rec.Target)
@@ -584,14 +812,14 @@ func TestChangefeedMigratesProtectedTimestamps(t *testing.T) {
 			var recID uuid.UUID
 			var record *ptpb.Record
 			testutils.SucceedsSoon(t, func() error {
-				recID = getPTSRecordID()
+				recID = getPTSRecordID(ctx, t, registry, jobFeed)
 				if recID.Equal(oldRecordID) {
 					return errors.New("waiting for new PTS record")
 				}
 
 				return nil
 			})
-			record, err = readPTSRecord(recID)
+			record, err = readPTSRecord(ctx, t, execCfg, ptp, recID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -608,9 +836,125 @@ func TestChangefeedMigratesProtectedTimestamps(t *testing.T) {
 		require.Contains(t, targetIDs, descID)
 
 		// Ensure the old pts record was deleted.
-		_, err = readPTSRecord(oldRecordID)
+		_, err = readPTSRecord(ctx, t, execCfg, ptp, oldRecordID)
 		require.ErrorContains(t, err, "does not exist")
 	}
 
 	cdcTestWithSystem(t, testFn, feedTestEnterpriseSinks)
+}
+
+func fetchRoleMembers(
+	ctx context.Context, execCfg *sql.ExecutorConfig, ts hlc.Timestamp,
+) ([][]string, error) {
+	var roleMembers [][]string
+	err := execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+		if err := txn.KV().SetFixedTimestamp(ctx, ts); err != nil {
+			return err
+		}
+		it, err := txn.QueryIteratorEx(ctx, "test-get-role-members", txn.KV(), sessiondata.NoSessionDataOverride, "SELECT role, member FROM system.role_members")
+		if err != nil {
+			return err
+		}
+		defer func() { _ = it.Close() }()
+
+		var ok bool
+		for ok, err = it.Next(ctx); ok && err == nil; ok, err = it.Next(ctx) {
+			role, member := string(tree.MustBeDString(it.Cur()[0])), string(tree.MustBeDString(it.Cur()[1]))
+			roleMembers = append(roleMembers, []string{role, member})
+		}
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return roleMembers, nil
+}
+
+type userPass struct {
+	username string
+	password tree.Datum
+}
+
+func fetchUsersAndPasswords(
+	ctx context.Context, execCfg *sql.ExecutorConfig, ts hlc.Timestamp,
+) ([]userPass, error) {
+	var users []userPass
+	err := execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+		if err := txn.KV().SetFixedTimestamp(ctx, ts); err != nil {
+			return err
+		}
+		it, err := txn.QueryIteratorEx(ctx, "test-get-users", txn.KV(),
+			sessiondata.NoSessionDataOverride,
+			`SELECT username, "hashedPassword" FROM system.users`,
+		)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = it.Close() }()
+
+		var ok bool
+		for ok, err = it.Next(ctx); ok && err == nil; ok, err = it.Next(ctx) {
+			username := string(tree.MustBeDString(it.Cur()[0]))
+			users = append(users, userPass{username: username, password: it.Cur()[1]})
+		}
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func getPTSRecordID(
+	ctx context.Context, t *testing.T, registry *jobs.Registry, jobFeed cdctest.EnterpriseTestFeed,
+) uuid.UUID {
+	var recordID uuid.UUID
+	testutils.SucceedsSoon(t, func() error {
+		progress, err := loadProgressErr(ctx, registry, jobFeed)
+		if err != nil {
+			return err
+		}
+		uid := progress.GetChangefeed().ProtectedTimestampRecord
+		if uid == uuid.Nil {
+			return errors.Newf("no pts record")
+		}
+		recordID = uid
+		return nil
+	})
+	return recordID
+}
+
+func readPTSRecord(
+	ctx context.Context,
+	t *testing.T,
+	execCfg sql.ExecutorConfig,
+	ptp protectedts.Provider,
+	recID uuid.UUID,
+) (rec *ptpb.Record, err error) {
+	err = execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+		rec, err = ptp.WithTxn(txn).GetRecord(ctx, recID)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	return
+}
+
+func loadProgressErr(
+	ctx context.Context, registry *jobs.Registry, jobFeed cdctest.EnterpriseTestFeed,
+) (jobspb.Progress, error) {
+	job, err := registry.LoadJob(ctx, jobFeed.JobID())
+	if err != nil {
+		return jobspb.Progress{}, err
+	}
+	return job.Progress(), nil
 }

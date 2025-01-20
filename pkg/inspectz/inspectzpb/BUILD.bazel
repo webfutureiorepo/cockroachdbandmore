@@ -9,7 +9,7 @@ proto_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb:kvflowinspectpb_proto",
-        "@go_googleapis//google/api:annotations_proto",
+        "//pkg/kv/kvserver/storeliveness/storelivenesspb:storelivenesspb_proto",
     ],
 )
 
@@ -21,7 +21,7 @@ go_proto_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb",
-        "@org_golang_google_genproto//googleapis/api/annotations:go_default_library",
+        "//pkg/kv/kvserver/storeliveness/storelivenesspb",
     ],
 )
 

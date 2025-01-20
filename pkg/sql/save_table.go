@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -24,7 +19,7 @@ import (
 //
 // The node creates the table on startup. If the table exists, it errors out.
 type saveTableNode struct {
-	source planNode
+	singleInputPlanNode
 
 	target tree.TableName
 
@@ -43,9 +38,13 @@ type saveTableNode struct {
 const saveTableInsertBatch = 100
 
 func (p *planner) makeSaveTable(
-	source planNode, target *tree.TableName, colNames []string,
+	input planNode, target *tree.TableName, colNames []string,
 ) planNode {
-	return &saveTableNode{source: source, target: *target, colNames: colNames}
+	return &saveTableNode{
+		singleInputPlanNode: singleInputPlanNode{input},
+		target:              *target,
+		colNames:            colNames,
+	}
 }
 
 func (n *saveTableNode) startExec(params runParams) error {
@@ -53,7 +52,7 @@ func (n *saveTableNode) startExec(params runParams) error {
 		Table: n.target,
 	}
 
-	cols := planColumns(n.source)
+	cols := planColumns(n.input)
 	if len(n.colNames) != len(cols) {
 		return errors.AssertionFailedf(
 			"number of column names (%d) does not match number of columns (%d)",
@@ -99,7 +98,7 @@ func (n *saveTableNode) issue(params runParams) error {
 
 // Next is part of the planNode interface.
 func (n *saveTableNode) Next(params runParams) (bool, error) {
-	res, err := n.source.Next(params)
+	res, err := n.input.Next(params)
 	if err != nil {
 		return res, err
 	}
@@ -108,7 +107,7 @@ func (n *saveTableNode) Next(params runParams) (bool, error) {
 		err := n.issue(params)
 		return false, err
 	}
-	row := n.source.Values()
+	row := n.input.Values()
 	exprs := make(tree.Exprs, len(row))
 	for i := range row {
 		exprs[i] = row[i]
@@ -124,10 +123,10 @@ func (n *saveTableNode) Next(params runParams) (bool, error) {
 
 // Values is part of the planNode interface.
 func (n *saveTableNode) Values() tree.Datums {
-	return n.source.Values()
+	return n.input.Values()
 }
 
 // Close is part of the planNode interface.
 func (n *saveTableNode) Close(ctx context.Context) {
-	n.source.Close(ctx)
+	n.input.Close(ctx)
 }

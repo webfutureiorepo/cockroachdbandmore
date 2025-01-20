@@ -1,17 +1,13 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,6 +38,13 @@ func TestSingleKey(t *testing.T) {
 		})
 	defer tc.Stopper().Stop(context.Background())
 	ctx := context.Background()
+
+	// Increase the kv.transaction.internal.max_auto_retries setting to
+	// avoid transaction retry limit exceeded errors under heavy stress.
+	for i := 0; i < num; i++ {
+		sv := tc.Servers[i].DB().SettingsValues()
+		kv.MaxInternalTxnAutoRetries.Override(ctx, sv, math.MaxInt64)
+	}
 
 	// Initialize the value for our test key to zero.
 	const key = "test-key"

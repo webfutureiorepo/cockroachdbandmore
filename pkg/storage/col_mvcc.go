@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -438,19 +433,16 @@ func mvccScanToCols(
 
 	// Try to use the same root monitor (from the store) if the account is
 	// provided.
-	monitor := opts.MemoryAccount.Monitor()
-	if monitor == nil {
+	var monitor *mon.BytesMonitor
+	if opts.MemoryAccount != nil {
+		monitor = opts.MemoryAccount.Monitor()
+	} else {
 		// If we don't have the monitor, then we create a "fake" one that is not
 		// connected to the memory accounting system.
-		monitor = mon.NewMonitor(
-			"mvcc-scan-to-cols",
-			mon.MemoryResource,
-			nil,           /* curCount */
-			nil,           /* maxHist */
-			-1,            /* increment */
-			math.MaxInt64, /* noteworthy */
-			st,
-		)
+		monitor = mon.NewMonitor(mon.Options{
+			Name:     mon.MakeMonitorName("mvcc-scan-to-cols"),
+			Settings: st,
+		})
 		monitor.Start(ctx, nil /* pool */, mon.NewStandaloneBudget(math.MaxInt64))
 		defer monitor.Stop(ctx)
 	}

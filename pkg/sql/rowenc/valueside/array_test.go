@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package valueside
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -133,7 +129,9 @@ func TestArrayEncoding(t *testing.T) {
 				t.Fatal(err)
 			}
 			evalContext := eval.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
-			if d.Compare(evalContext, &test.datum) != 0 {
+			if cmp, err := d.Compare(context.Background(), evalContext, &test.datum); err != nil {
+				t.Fatal(err)
+			} else if cmp != 0 {
 				t.Fatalf("expected %v to decode to %s, got %s", test.encoding, test.datum.String(), d.String())
 			}
 		})

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cloud
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/util/cidr"
 	"github.com/cockroachdb/cockroach/pkg/util/ioctx"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/errors"
@@ -170,7 +166,6 @@ type ExternalStorageContext struct {
 
 	BlobClientFactory blobs.BlobClientFactory
 	DB                isql.DB
-	MetricsRecorder   *Metrics
 }
 
 // ExternalStorageContext contains the dependencies passed to external storage
@@ -181,9 +176,19 @@ type EarlyBootExternalStorageContext struct {
 	// storage, but I am rather uncertain it is a good idea. We
 	// may be using this provider before we've even read our
 	// cached settings.
-	Settings *cluster.Settings
-	Options  []ExternalStorageOption
-	Limiters Limiters
+	Settings        *cluster.Settings
+	Options         []ExternalStorageOption
+	Limiters        Limiters
+	MetricsRecorder *Metrics
+}
+
+// ExternalStorageOptions rolls up the Options into a struct.
+func (e *EarlyBootExternalStorageContext) ExternalStorageOptions() ExternalStorageOptions {
+	var options ExternalStorageOptions
+	for _, option := range e.Options {
+		option(&options)
+	}
+	return options
 }
 
 // ExternalStorageOptions holds dependencies and values that can be
@@ -192,6 +197,7 @@ type EarlyBootExternalStorageContext struct {
 type ExternalStorageOptions struct {
 	ioAccountingInterceptor  ReadWriterInterceptor
 	AzureStorageTestingKnobs base.ModuleTestingKnobs
+	ClientName               string
 }
 
 // ExternalStorageConstructor is a function registered to create instances
@@ -207,13 +213,13 @@ type EarlyBootExternalStorageConstructor func(
 // NewEarlyBootExternalStorageAccessor creates an
 // EarlyBootExternalStorageAccessor
 func NewEarlyBootExternalStorageAccessor(
-	st *cluster.Settings, conf base.ExternalIODirConfig,
+	st *cluster.Settings, conf base.ExternalIODirConfig, lookup *cidr.Lookup,
 ) *EarlyBootExternalStorageAccessor {
 	return &EarlyBootExternalStorageAccessor{
 		conf:     conf,
 		settings: st,
 		limiters: MakeLimiters(&st.SV),
-		metrics:  MakeMetrics(),
+		metrics:  MakeMetrics(lookup),
 	}
 }
 

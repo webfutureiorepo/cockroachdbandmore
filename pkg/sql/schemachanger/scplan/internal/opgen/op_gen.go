@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -133,8 +128,14 @@ func (r *registry) buildGraph(
 			if e.ops != nil {
 				ops = e.ops(e.n.Element(), &md)
 			}
+			// Operations are revertible unless stated otherwise.
+			revertible := true
+			if e.revertible != nil {
+				// If a callback function exists invoke it to find out.
+				revertible = e.revertible(e.n.Element(), &md)
+			}
 			if err := g.AddOpEdges(
-				e.n.Target, e.from, e.to, e.revertible, e.canFail, ops...,
+				e.n.Target, e.from, e.to, revertible, e.canFail, ops...,
 			); err != nil {
 				return nil, err
 			}

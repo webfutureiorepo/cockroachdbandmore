@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigstore
 
@@ -34,10 +29,6 @@ func newSystemSpanConfigStore() *systemSpanConfigStore {
 
 // apply takes an incremental set of system span config updates and applies them
 // to the underlying store. It returns a list of targets deleted/records added.
-//
-// TODO(arul): Even though this is called from spanconfig.Store.Apply, which
-// accepts a dryrun field, we don't accept a a dry run option here because it's
-// unused; instead, we plan on removing it entirely.
 func (s *systemSpanConfigStore) apply(
 	updates ...spanconfig.Update,
 ) (deleted []spanconfig.SystemTarget, added []spanconfig.Record, _ error) {

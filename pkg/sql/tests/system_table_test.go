@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests_test
 
@@ -53,10 +48,10 @@ func TestInitialKeys(t *testing.T) {
 		var nonDescKeys int
 		if systemTenant {
 			codec = keys.SystemSQLCodec
-			nonDescKeys = 15
+			nonDescKeys = 17
 		} else {
 			codec = keys.MakeSQLCodec(roachpb.MustMakeTenantID(5))
-			nonDescKeys = 4
+			nonDescKeys = 8
 		}
 
 		ms := bootstrap.MakeMetadataSchema(codec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef())
@@ -194,13 +189,9 @@ func TestSystemTableLiterals(t *testing.T) {
 		}
 	}
 
-	// Add one for the system.span_count table, which is currently the only
-	// non-system tenant table.
-	const expectedNumberOfSystemTables = bootstrap.NumSystemTablesForSystemTenant + 1
-	require.Equal(t, expectedNumberOfSystemTables, len(testcases))
+	require.Equal(t, bootstrap.NumSystemTablesForSystemTenant, len(testcases))
 
 	runTest := func(t *testing.T, name string, test testcase) {
-		t.Helper()
 		privs := *test.pkg.GetPrivileges()
 		desc := test.pkg
 		// Allocate an ID to dynamically allocated system tables.
@@ -239,8 +230,8 @@ func TestSystemTableLiterals(t *testing.T) {
 			gen.TableDescriptor.PrimaryIndex.ID = 2
 			gen.TableDescriptor.NextIndexID = 3
 		case keys.LeaseTableID:
-			gen.TableDescriptor.PrimaryIndex.ID = 2
-			gen.TableDescriptor.NextIndexID = 3
+			gen.TableDescriptor.PrimaryIndex.ID = 3
+			gen.TableDescriptor.NextIndexID = 4
 		}
 
 		if desc.TableDesc().Equal(gen.TableDesc()) {

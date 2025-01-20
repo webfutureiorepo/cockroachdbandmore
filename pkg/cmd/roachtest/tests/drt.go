@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -16,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/prometheus"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -23,8 +19,6 @@ import (
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
-
-//go:generate mockgen -package tests -destination drt_generated_test.go github.com/cockroachdb/cockroach/pkg/roachprod/prometheus Client
 
 type tpccChaosEventProcessor struct {
 	workloadInstances []workloadInstance
@@ -240,8 +234,8 @@ func (ep *tpccChaosEventProcessor) err() error {
 	return err
 }
 
-func (ep *tpccChaosEventProcessor) listen(ctx context.Context, l *logger.Logger) {
-	go func() {
+func (ep *tpccChaosEventProcessor) listen(ctx context.Context, t task.Tasker, l *logger.Logger) {
+	t.Go(func(context.Context, *logger.Logger) error {
 		var prevTime time.Time
 		started := false
 		for ev := range ep.ch {
@@ -301,5 +295,6 @@ func (ep *tpccChaosEventProcessor) listen(ctx context.Context, l *logger.Logger)
 			}
 			prevTime = ev.Time
 		}
-	}()
+		return nil
+	})
 }

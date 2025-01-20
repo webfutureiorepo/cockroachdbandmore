@@ -1,18 +1,14 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 syntax = "proto3";
 package cockroach.sql.sessiondatapb;
 option go_package = "github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb";
 
 import "gogoproto/gogo.proto";
+import "util/hlc/timestamp.proto";
 
 // LocalOnlySessionData contains the serializable components of session
 // parameters that only influence execution on the gateway nodes.
@@ -305,7 +301,7 @@ message LocalOnlySessionData {
   int64 transaction_timeout = 81 [(gogoproto.casttype) = "time.Duration"];
   // SystemIdentityProto is the original name of the client presented to pgwire
   // before it was mapped to a SQL identifier.
-  string system_identity_proto = 82 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security/username.SQLUsernameProto"];
+  string system_identity_proto = 82;
   // DescriptorValidationMode indicates whether to validate the descriptors at
   // read and write time, at read time only, or never.
   int64 descriptor_validation_mode = 83 [(gogoproto.casttype) = "DescriptorValidationMode"];
@@ -367,11 +363,8 @@ message LocalOnlySessionData {
   // Execution of these deallocated prepared statements will fail until they are
   // prepared again.
   int64 prepared_statements_cache_size = 97;
-  // StreamerEnabled controls whether the Streamer API can be used.
-  bool streamer_enabled = 98;
-  // DisableDropVirtualCluster causes errors when the client
-  // attempts to drop virtual clusters or tenant records.
-  bool disable_drop_virtual_cluster = 99;
+  reserved 98;
+  reserved 99;
   // MultipleActivePortalEnabled determines if the pgwire portal execution
   // for certain queries can be paused. If true, portals with read-only SELECT
   // query without sub/post queries can be executed in interleaving manner, but
@@ -464,7 +457,8 @@ message LocalOnlySessionData {
   // fixes a bug that incorrectly truncated the provided ordering (see #113072).
   bool optimizer_use_provided_ordering_fix = 115;
   // DisableChangefeedReplication, when true, disables changefeed events from
-  // being emitted for changes to data made in a session.
+  // being emitted for changes to data made in a session. This will apply only
+  // to new txns created in the session.
   bool disable_changefeed_replication = 116;
   // CopyTxnQualityOfService indicates the default QoSLevel/WorkPriority of the
   // transactions used to evaluate COPY commands.
@@ -479,12 +473,127 @@ message LocalOnlySessionData {
   // CopyNumRetriesPerBatch determines the number of times a single batch of
   // rows can be retried for non-atomic COPY.
   int32 copy_num_retries_per_batch = 120;
-  // AutoCommitBeforeDDL will cause any DDL statement received during an
-  // explicit transaction to make the transaction auto-commit before executing
-  // the DDL statement. After the auto-commit, any other statements that are
-  // in the transaction block will instead be executed in their own
+  // AutoCommitBeforeDDL will cause any DDL statement received during a
+  // multi-statement transaction to make the transaction auto-commit before
+  // executing the DDL statement. After the auto-commit, any other statements
+  // that are in the transaction block will instead be executed in their own
   // implicit transaction.
   bool autocommit_before_ddl = 121 [(gogoproto.customname) = "AutoCommitBeforeDDL"];
+  // CloseCursorsAtCommit determines whether cursors remain open after their
+  // parent transaction closes. This is useful for oracle compatibility.
+  bool close_cursors_at_commit = 122;
+  // PLpgSQLUseStrictInto causes PL/pgSQL "SELECT ... INTO" and "RETURNING INTO"
+  // syntax to always behave as if they were specified with the STRICT option,
+  // which throws a runtime error when the SQL statement doesn't return exactly
+  // one row. This is useful for oracle compatibility.
+  bool plpgsql_use_strict_into = 123 [(gogoproto.customname) = "PLpgSQLUseStrictInto"];
+  // OptimizerUseVirtualComputedColumnStats indicates whether we should use
+  // statistics on virtual computed columns for cardinality estimation in the
+  // optimizer.
+  bool optimizer_use_virtual_computed_column_stats = 124;
+  // OptimizerUseTrigramSimilarityOptimization indicates whether the optimizer
+  // should generate improved plans for queries with trigram similarity filters.
+  bool optimizer_use_trigram_similarity_optimization = 125;
+  // OptimizerUseImprovedDistinctOnLimitHintCosting indicates whether the
+  // optimizer should use an improved costing estimate for DistinctOn operators
+  // with limit hints.
+  bool optimizer_use_improved_distinct_on_limit_hint_costing = 126;
+  // OptimizerUseImprovedTrigramSimilaritySelectivity indicates whether the
+  // optimizer should use an improved selectivitiy estimate for trigram
+  // similarity filters.
+  bool optimizer_use_improved_trigram_similarity_selectivity = 127;
+  // OptimizerUseImprovedZigzagJoinCosting, when true, indicates that the
+  // optimizer should use improved logic in the cost model for zigzag joins.
+  bool optimizer_use_improved_zigzag_join_costing = 128;
+  // OptimizerUseImprovedMultiColumnSelectivityEstimate, when true, indicates
+  // that the optimizer should use an improved selectivity estimate for
+  // multi-column predicates.
+  bool optimizer_use_improved_multi_column_selectivity_estimate = 129;
+  // OptimizerProveImplicationWithVirtualComputedColumns, when true, indicates
+  // that the optimizer should use virtual computed columns to prove partial
+  // index implication.
+  bool optimizer_prove_implication_with_virtual_computed_columns = 130;
+  reserved 131;
+  // OptimizerPushOffsetIntoIndexJoin, when true, indicates that the optimizer
+  // should push offset expressions into index joins.
+  bool optimizer_push_offset_into_index_join = 132;
+  // PlanCacheMode indicates the method that the optimizer should use to choose
+  // between a custom and generic query plan.
+  PlanCacheMode plan_cache_mode = 133;
+  // OptimizerUsePolymorphicParameterFix, when true, causes the optimizer to
+  // validate a routine's polymorphic parameters during overload resolution
+  // and type-checking.
+  bool optimizer_use_polymorphic_parameter_fix = 134;
+  // OriginIDForLogicalDataReplication is an identifier for the cluster that
+  // originally wrote the data that are being written in this session. An
+  // originID of 0 (the default) identifies a local write, 1 identifies a remote
+  // write of unspecified origin, and 2+ are reserved to identify remote writes
+  // from specific clusters.
+  uint32 origin_id_for_logical_data_replication = 135 [(gogoproto.customname) = "OriginIDForLogicalDataReplication"];
+  // EnableCreateStatsUsingExtremesBoolEnum, when true, allows the use of CREATE
+  // STATISTICS .. USING EXTREMES on bool and enum columns.
+  bool enable_create_stats_using_extremes_bool_enum = 136;
+  // OptimizerUseMergedPartialStatistics indicates whether we should use
+  // statistics merged from partial and full statistics for cardinality
+  // estimation in the optimizer.
+  bool optimizer_use_merged_partial_statistics = 137;
+  // OptimizerUseConditionalHoistFix, when true, prevents the optimizer from
+  // hoisting a volatile expression that is conditionally executed by a CASE,
+  // COALESCE, or IFERR expression.
+  bool optimizer_use_conditional_hoist_fix = 138;
+  // OptimizerPushLimitIntoProjectFilteredScan, when true, indicates that the
+  // optimizer should push limit expressions into projects of filtered scans.
+  bool optimizer_push_limit_into_project_filtered_scan = 139;
+  // OriginTimestampForLogicalDataReplication is the mvcc timestamp the data
+  // written in this session were originally written with before being
+  // replicated via Logical Data Replication.
+  util.hlc.Timestamp origin_timestamp_for_logical_data_replication = 140 [(gogoproto.nullable) = false];
+  // BypassPCRReaderCatalogAOST disables the AOST used by all user queries on
+  // the PCR reader catalog.
+  bool bypass_pcr_reader_catalog_aost = 141  [(gogoproto.customname) = "BypassPCRReaderCatalogAOST"];
+  // UnsafeAllowTriggersModifyingCascades, when true, allows row-level BEFORE
+  // triggers to modify or filter rows that are being updated or deleted as
+  // part of a cascading foreign key action. This is unsafe because it can
+  // lead to constraint violations.
+  bool unsafe_allow_triggers_modifying_cascades = 142;
+  // DisableVecUnionEagerCancellation disables the eager cancellation that is
+  // performed by the vectorized engine when transitioning into the draining
+  // state in some cases.
+  bool disable_vec_union_eager_cancellation = 143;
+  // RecursionDepthLimit is the maximum depth that nested trigger-function calls
+  // can reach.
+  int64 recursion_depth_limit = 144;
+  // DistributeGroupByRowCountThreshold is the minimum number of rows estimated
+  // to be processed by the GroupBy operator so that we choose to distribute the
+  // plan because of this aggregator stage of DistSQL processors.
+  uint64 distribute_group_by_row_count_threshold = 145;
+  // DistributeSortRowCountThreshold is the minimum number of rows estimated
+  // to be processed by the Sort operator so that we choose to distribute the
+  // plan because of this sorter stage of DistSQL processors.
+  uint64 distribute_sort_row_count_threshold = 146;
+  // DistributeScanRowCountThreshold is the minimum number of rows estimated to
+  // be read by the Scan operator so that we choose to distribute the plan
+  // because of this TableReader stage of DistSQL processors.
+  uint64 distribute_scan_row_count_threshold = 147;
+  // AlwaysDistributeFullScans determines whether full table scans always force
+  // the plan to be distributed, regardless of the estimated row count.
+  bool always_distribute_full_scans = 148;
+  // DistributeJoinRowCountThreshold is the minimum number of rows estimated to
+  // be processed from both inputs by the hash or merge join so that we choose
+  // to distribute the plan because of this joiner stage of DistSQL processors.
+  uint64 distribute_join_row_count_threshold = 149;
+  // LegacyVarcharTyping controls the legacy behavior of allowing some invalid
+  // mix-typed comparisons with VARCHAR types. See #137837, #133037, and
+  // #132268.
+  bool legacy_varchar_typing = 150;
+  // AvoidFullTableScansInMutations indicates whether mutation queries that plan
+  // full table scans should be avoided.
+  bool avoid_full_table_scans_in_mutations = 151;
+  // RowLevelSecurityEnabled indicates whether row level security is enabled
+  bool row_level_security_enabled = 152;
+  // CatalogDigestStalenessCheckEnabled is used to enable using the catalog
+  // digest information to do fast memo checks.
+  bool catalog_digest_staleness_check_enabled = 153;
 
   ///////////////////////////////////////////////////////////////////////////
   // WARNING: consider whether a session parameter you're adding needs to  //
@@ -499,6 +608,23 @@ enum ReplicationMode {
   REPLICATION_MODE_DISABLED = 0;
   REPLICATION_MODE_ENABLED = 1;
   REPLICATION_MODE_DATABASE = 2;
+}
+
+// PlanCacheMode controls the optimizer's decision to use a custom or generic
+// query plan.
+enum PlanCacheMode {
+  option (gogoproto.goproto_enum_prefix) = false;
+  option (gogoproto.goproto_enum_stringer) = false;
+
+  // PlanCacheModeForceCustom forces the optimizer to use a custom query plan.
+  force_custom_plan = 0 [(gogoproto.enumvalue_customname) = "PlanCacheModeForceCustom"];
+
+  // PlanCacheModeForceCustom forces the optimizer to use a generic query plan.
+  force_generic_plan = 1 [(gogoproto.enumvalue_customname) = "PlanCacheModeForceGeneric"];
+
+  // PlanCacheModeAuto allows the optimizer to automatically choose between a
+  // custom and generic query plan.
+  auto = 2 [(gogoproto.enumvalue_customname) = "PlanCacheModeAuto"];
 }
 
 // SequenceCacheEntry is an entry in a SequenceCache.

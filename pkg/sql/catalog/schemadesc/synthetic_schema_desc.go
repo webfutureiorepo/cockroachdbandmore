@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemadesc
 
@@ -81,7 +76,7 @@ func (p synthetic) NewBuilder() catalog.DescriptorBuilder {
 		"%s schema cannot create a builder", p.kindName())
 	return nil // unreachable
 }
-func (p synthetic) GetReferencedDescIDs() (catalog.DescriptorIDSet, error) {
+func (p synthetic) GetReferencedDescIDs(catalog.ValidationLevel) (catalog.DescriptorIDSet, error) {
 	return catalog.DescriptorIDSet{}, nil
 }
 func (p synthetic) ValidateSelf(_ catalog.ValidationErrorAccumulator) {
@@ -154,12 +149,17 @@ func (p synthetic) ForEachUDTDependentForHydration(fn func(t *types.T) error) er
 	return nil
 }
 
+// MaybeRequiresTypeHydration implements the catalog.Descriptor interface.
+func (p synthetic) MaybeRequiresTypeHydration() bool { return false }
+
 func (p synthetic) GetRawBytesInStorage() []byte {
 	return nil
 }
 
 // GetResolvedFuncDefinition implements the SchemaDescriptor interface.
-func (p synthetic) GetResolvedFuncDefinition(name string) (*tree.ResolvedFunctionDefinition, bool) {
+func (p synthetic) GetResolvedFuncDefinition(
+	context.Context, string,
+) (*tree.ResolvedFunctionDefinition, bool) {
 	return nil, false
 }
 

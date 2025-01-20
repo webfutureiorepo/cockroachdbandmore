@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
@@ -29,6 +24,63 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 )
+
+// bootstrapSystem runs a series of steps required to bootstrap a new cluster's
+// system tenant. These are run before the rest of the initialization steps in
+// bootstrapCluster. The steps are run when, and only when, a new cluster is
+// created, so typically when a step is added here it is also invoked in a
+// separate upgrade migration so that existing clusters will run it as well.
+func bootstrapSystem(
+	ctx context.Context, cv clusterversion.ClusterVersion, deps upgrade.SystemDeps,
+) error {
+	for _, u := range []struct {
+		name string
+		fn   upgrade.SystemUpgradeFunc
+	}{
+		{"initialize cluster version", populateVersionSetting},
+		{"configure key visualizer", keyVisualizerTablesMigration},
+		{"configure sql activity table TTLs", sqlStatsTTLChange},
+	} {
+		log.Infof(ctx, "executing system bootstrap step %q", u.name)
+		if err := u.fn(ctx, cv, deps); err != nil {
+			return errors.Wrapf(err, "system bootstrap step %q failed", u.name)
+		}
+	}
+	return nil
+}
+
+// bootstrapCluster runs a series of steps required to bootstrap a new cluster,
+// i.e. those things which run once when a new cluster is initialized, including
+// when a virtual cluster is created. The steps are run when, and only when, a
+// new cluster is created, so typically when a step is added here it is also
+// invoked in a separate upgrade migration so that existing clusters will run it
+// as well.
+func bootstrapCluster(
+	ctx context.Context, cv clusterversion.ClusterVersion, deps upgrade.TenantDeps,
+) error {
+	for _, u := range []struct {
+		name string
+		fn   upgrade.TenantUpgradeFunc
+	}{
+		{"add users and roles", addRootUser},
+		{"enable diagnostics reporting", optInToDiagnosticsStatReporting},
+		{"initialize the cluster.secret setting", initializeClusterSecret},
+		{"update system.locations with default location data", updateSystemLocationData},
+		{"create default databases", createDefaultDbs},
+		{"add default SQL schema telemetry schedule", ensureSQLSchemaTelemetrySchedule},
+		{"create jobs metrics polling job", createJobsMetricsPollingJob},
+		{"create sql activity updater job", createActivityUpdateJobMigration},
+		{"create mvcc stats job", createMVCCStatisticsJob},
+		{"create update cached table metadata job", createUpdateTableMetadataCacheJob},
+		{"maybe initialize replication standby read-only catalog", maybeSetupPCRStandbyReader},
+	} {
+		log.Infof(ctx, "executing bootstrap step %q", u.name)
+		if err := u.fn(ctx, cv, deps); err != nil {
+			return errors.Wrapf(err, "bootstrap step %q failed", u.name)
+		}
+	}
+	return nil
+}
 
 func addRootUser(
 	ctx context.Context, _ clusterversion.ClusterVersion, deps upgrade.TenantDeps,
@@ -149,7 +201,7 @@ func updateSystemLocationData(
 	// If so, we don't want to do anything.
 	row, err := deps.InternalExecutor.QueryRowEx(ctx, "update-system-locations",
 		nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		`SELECT count(*) FROM system.locations`)
 	if err != nil {
 		return err
@@ -181,7 +233,7 @@ func createDefaultDbs(
 	// Create the default databases. These are plain databases with
 	// default permissions. Nothing special happens if they exist
 	// already.
-	const createDbStmt = `CREATE DATABASE IF NOT EXISTS "%s"`
+	const createDbStmt = `CREATE DATABASE IF NOT EXISTS "%s" WITH OWNER root`
 
 	var err error
 	for _, dbName := range []string{catalogkeys.DefaultDatabaseName, catalogkeys.PgDatabaseName} {

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -64,15 +59,10 @@ func makeTestContext(stopper *stop.Stopper) testContext {
 	return testContext{
 		clock:  clock,
 		mockDB: kv.NewDB(ambient, factory, clock, stopper),
-		mon: mon.NewMonitor(
-			"test root mon",
-			mon.MemoryResource,
-			nil,  /* curCount */
-			nil,  /* maxHist */
-			-1,   /* increment */
-			1000, /* noteworthy */
-			settings,
-		),
+		mon: mon.NewMonitor(mon.Options{
+			Name:     mon.MakeMonitorName("test root mon"),
+			Settings: settings,
+		}),
 		tracer:   ambient.Tracer,
 		ctx:      context.Background(),
 		settings: settings,
@@ -84,14 +74,10 @@ func (tc *testContext) createOpenState(typ txnType) (fsm.State, *txnState) {
 	sp := tc.tracer.StartSpan("createOpenState")
 	ctx := tracing.ContextWithSpan(tc.ctx, sp)
 
-	txnStateMon := mon.NewMonitor("test mon",
-		mon.MemoryResource,
-		nil,  /* curCount */
-		nil,  /* maxHist */
-		-1,   /* increment */
-		1000, /* noteworthy */
-		cluster.MakeTestingClusterSettings(),
-	)
+	txnStateMon := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test mon"),
+		Settings: cluster.MakeTestingClusterSettings(),
+	})
 	txnStateMon.StartNoReserved(tc.ctx, tc.mon)
 
 	ts := txnState{
@@ -130,14 +116,10 @@ func (tc *testContext) createCommitWaitState() (fsm.State, *txnState, error) {
 }
 
 func (tc *testContext) createNoTxnState() (fsm.State, *txnState) {
-	txnStateMon := mon.NewMonitor("test mon",
-		mon.MemoryResource,
-		nil,  /* curCount */
-		nil,  /* maxHist */
-		-1,   /* increment */
-		1000, /* noteworthy */
-		cluster.MakeTestingClusterSettings(),
-	)
+	txnStateMon := mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("test mon"),
+		Settings: cluster.MakeTestingClusterSettings(),
+	})
 	ts := txnState{mon: txnStateMon, connCtx: tc.ctx}
 	return stateNoTxn{}, &ts
 }
@@ -709,6 +691,36 @@ func TestTransitions(t *testing.T) {
 			// We would like to test that the transaction's epoch bumped if the txn
 			// performed any operations, but it's not easy to do the test.
 			expTxn: &expKVTxn{},
+		},
+		{
+			// PREPARE TRANSACTION.
+			name: "Open + prepare",
+			init: func() (fsm.State, *txnState, uuid.UUID, error) {
+				s, ts := testCon.createOpenState(explicitTxn)
+				return s, ts, ts.mu.txn.ID(), nil
+			},
+			ev:       eventTxnFinishPrepared{},
+			expState: stateNoTxn{},
+			expAdv: expAdvance{
+				expCode: advanceOne,
+				expEv:   txnPrepare,
+			},
+			expTxn: nil,
+		},
+		{
+			// PREPARE TRANSACTION on an upgraded txn.
+			name: "Open (upgraded) + prepare",
+			init: func() (fsm.State, *txnState, uuid.UUID, error) {
+				s, ts := testCon.createOpenState(upgradedExplicitTxn)
+				return s, ts, ts.mu.txn.ID(), nil
+			},
+			ev:       eventTxnFinishPrepared{},
+			expState: stateNoTxn{},
+			expAdv: expAdvance{
+				expCode: advanceOne,
+				expEv:   txnPrepare,
+			},
+			expTxn: nil,
 		},
 		//
 		// Tests starting from the Aborted state.

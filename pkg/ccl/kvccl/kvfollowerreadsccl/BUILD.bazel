@@ -44,10 +44,9 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":kvfollowerreadsccl"],
     exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
+        "//build/toolchains:is_heavy": {"test.Pool": "large"},
+        "//conditions:default": {"test.Pool": "default"},
     }),
-    tags = ["ccl_test"],
     deps = [
         "//pkg/base",
         "//pkg/ccl",

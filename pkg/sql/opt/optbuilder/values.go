@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -80,6 +75,14 @@ func (b *Builder) buildValuesClause(
 			// resolving the column types.
 			elems[elemPos] = b.buildScalar(texpr, inScope, nil, nil, nil)
 			elemPos += numCols
+			// Type-check the expression once again in order to update expressions
+			// that wrap a UDF to reflect the modified type. Make sure to use the
+			// previously resolved type as the desired type, since the AST may have
+			// been modified to remove type annotations.
+			texpr, err = tree.TypeCheck(b.ctx, texpr, b.semaCtx, texpr.ResolvedType())
+			if err != nil {
+				panic(err)
+			}
 			if typ := texpr.ResolvedType(); typ.Family() != types.UnknownFamily {
 				if colTypes[colIdx].Family() == types.UnknownFamily {
 					colTypes[colIdx] = typ
@@ -155,9 +158,9 @@ func rightHasMoreSpecificTuple(left, right *types.T) (isMoreSpecific bool, isEqu
 		return rightHasMoreSpecificTuple(left.ArrayContents(), right.ArrayContents())
 	}
 	if left.Family() == types.TupleFamily && right.Family() == types.TupleFamily {
-		if right == types.AnyTuple {
+		if right.Identical(types.AnyTuple) {
 			return false, true
-		} else if left == types.AnyTuple {
+		} else if left.Identical(types.AnyTuple) {
 			return true, true
 		} else if len(left.TupleContents()) != len(right.TupleContents()) {
 			return false, false

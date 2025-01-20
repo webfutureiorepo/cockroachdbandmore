@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
@@ -113,7 +108,7 @@ func checkStatsForTable(
 
 	// Perform the lookup and refresh, and confirm the
 	// returned stats match the expected values.
-	statsList, err := sc.getTableStatsFromCache(ctx, tableID, nil /* forecast */)
+	statsList, err := sc.getTableStatsFromCache(ctx, tableID, nil /* forecast */, nil /* udtCols */, nil /* typeResolver */)
 	if err != nil {
 		t.Fatalf("error retrieving stats: %s", err)
 	}
@@ -236,7 +231,7 @@ func TestCacheBasic(t *testing.T) {
 	// Create a cache and iteratively query the cache for each tableID. This
 	// will result in the cache getting populated. When the stats cache size is
 	// exceeded, entries should be evicted according to the LRU policy.
-	sc := NewTableStatisticsCache(2 /* cacheSize */, s.ClusterSettings(), db)
+	sc := NewTableStatisticsCache(2 /* cacheSize */, s.ClusterSettings(), db, s.AppStopper())
 	require.NoError(t, sc.Start(ctx, s.Codec(), s.RangeFeedFactory().(*rangefeed.Factory)))
 	for _, tableID := range tableIDs {
 		checkStatsForTable(ctx, t, sc, expectedStats[tableID], tableID)
@@ -338,12 +333,12 @@ func TestCacheUserDefinedTypes(t *testing.T) {
 	insqlDB := s.InternalDB().(descs.DB)
 
 	// Make a stats cache.
-	sc := NewTableStatisticsCache(1, s.ClusterSettings(), insqlDB)
+	sc := NewTableStatisticsCache(1, s.ClusterSettings(), insqlDB, s.AppStopper())
 	require.NoError(t, sc.Start(ctx, s.Codec(), s.RangeFeedFactory().(*rangefeed.Factory)))
 	tbl := desctestutils.TestingGetPublicTableDescriptor(kvDB, s.Codec(), "t", "tt")
 	// Get stats for our table. We are ensuring here that the access to the stats
 	// for tt properly hydrates the user defined type t before access.
-	stats, err := sc.GetTableStats(ctx, tbl)
+	stats, err := sc.GetTableStats(ctx, tbl, nil /* typeResolver */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +353,7 @@ func TestCacheUserDefinedTypes(t *testing.T) {
 	sc.InvalidateTableStats(ctx, tbl.GetID())
 	// Verify that GetTableStats ignores the statistic on the now unknown type and
 	// returns the rest.
-	stats, err = sc.GetTableStats(ctx, tbl)
+	stats, err = sc.GetTableStats(ctx, tbl, nil /* typeResolver */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +386,7 @@ func TestCacheWait(t *testing.T) {
 		tableIDs = append(tableIDs, tableID)
 	}
 	sort.Sort(tableIDs)
-	sc := NewTableStatisticsCache(len(tableIDs) /* cacheSize */, s.ClusterSettings(), db)
+	sc := NewTableStatisticsCache(len(tableIDs) /* cacheSize */, s.ClusterSettings(), db, s.AppStopper())
 	require.NoError(t, sc.Start(ctx, s.Codec(), s.RangeFeedFactory().(*rangefeed.Factory)))
 	for _, tableID := range tableIDs {
 		checkStatsForTable(ctx, t, sc, expectedStats[tableID], tableID)
@@ -407,7 +402,7 @@ func TestCacheWait(t *testing.T) {
 		for n := 0; n < 10; n++ {
 			wg.Add(1)
 			go func() {
-				stats, err := sc.getTableStatsFromCache(ctx, id, nil /* forecast */)
+				stats, err := sc.getTableStatsFromCache(ctx, id, nil /* forecast */, nil /* udtCols */, nil /* typeResolver */)
 				if err != nil {
 					t.Error(err)
 				} else if !checkStats(stats, expectedStats[id]) {
@@ -443,6 +438,7 @@ func TestCacheAutoRefresh(t *testing.T) {
 		10, /* cacheSize */
 		s.ClusterSettings(),
 		s.InternalDB().(descs.DB),
+		s.AppStopper(),
 	)
 	require.NoError(t, sc.Start(ctx, s.Codec(), s.RangeFeedFactory().(*rangefeed.Factory)))
 
@@ -455,7 +451,7 @@ func TestCacheAutoRefresh(t *testing.T) {
 	tableDesc := desctestutils.TestingGetPublicTableDescriptor(s.DB(), s.Codec(), "test", "t")
 
 	expectNStats := func(n int) error {
-		stats, err := sc.GetTableStats(ctx, tableDesc)
+		stats, err := sc.GetTableStats(ctx, tableDesc, nil /* typeResolver */)
 		if err != nil {
 			t.Fatal(err)
 		}

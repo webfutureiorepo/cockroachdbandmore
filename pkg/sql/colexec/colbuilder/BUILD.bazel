@@ -32,6 +32,7 @@ go_library(
         "//pkg/sql/colfetcher",
         "//pkg/sql/colmem",
         "//pkg/sql/execinfra",
+        "//pkg/sql/execinfra/execagg",
         "//pkg/sql/execinfra/execreleasable",
         "//pkg/sql/execinfrapb",
         "//pkg/sql/row",
@@ -43,7 +44,6 @@ go_library(
         "//pkg/sql/types",
         "//pkg/util/buildutil",
         "//pkg/util/errorutil/unimplemented",
-        "//pkg/util/intsets",
         "//pkg/util/log",
         "//pkg/util/mon",
         "@com_github_cockroachdb_errors//:errors",
@@ -59,10 +59,6 @@ go_test(
         "main_test.go",
     ],
     embed = [":colbuilder"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/kv",

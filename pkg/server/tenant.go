@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -22,16 +17,17 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/inspectz"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprotectedts"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptprovider"
@@ -42,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
-	"github.com/cockroachdb/cockroach/pkg/obs"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -119,9 +114,7 @@ type SQLServerWrapper struct {
 	tenantStatus    *statusServer
 	drainServer     *drainServer
 	authentication  authserver.Server
-	// eventsExporter exports data to the Observability Service.
-	eventsExporter obs.EventsExporterInterface
-	stopper        *stop.Stopper
+	stopper         *stop.Stopper
 
 	debug *debug.Server
 
@@ -184,7 +177,13 @@ type tenantServerDeps struct {
 }
 
 type spanLimiterFactory func(isql.Executor, *cluster.Settings, *spanconfig.TestingKnobs) spanconfig.Limiter
-type costControllerFactory func(*cluster.Settings, roachpb.TenantID, kvtenant.TokenBucketProvider) (multitenant.TenantSideCostController, error)
+type costControllerFactory func(
+	*cluster.Settings,
+	roachpb.TenantID,
+	kvtenant.TokenBucketProvider,
+	kvclient.NodeDescStore,
+	roachpb.Locality,
+) (multitenant.TenantSideCostController, error)
 
 // NewSeparateProcessTenantServer creates a tenant-specific, SQL-only
 // server against a KV backend, with defaults appropriate for a
@@ -278,7 +277,7 @@ func newTenantServer(
 	// (until the server is ready) won't cause client connections to be rejected.
 	if baseCfg.SplitListenSQL && !baseCfg.DisableSQLListener {
 		sqlAddrListener, err := ListenAndUpdateAddrs(
-			ctx, &baseCfg.SQLAddr, &baseCfg.SQLAdvertiseAddr, "sql")
+			ctx, &baseCfg.SQLAddr, &baseCfg.SQLAdvertiseAddr, "sql", baseCfg.AcceptProxyProtocolHeaders)
 		if err != nil {
 			return nil, err
 		}
@@ -289,11 +288,15 @@ func newTenantServer(
 	// case, DelayedSetTenantID will be set and should be used to populate
 	// TenantID in the config. We call it here as we need a valid TenantID below.
 	if sqlCfg.DelayedSetTenantID != nil {
-		cfgTenantID, err := sqlCfg.DelayedSetTenantID(ctx)
+		cfgTenantID, cfgLocality, err := sqlCfg.DelayedSetTenantID(ctx)
 		if err != nil {
 			return nil, err
 		}
+		// We need to update sqlCfg and baseCfg here explicitly since copies
+		// were passed into newTenantServer instead of the original serverCfg
+		// object.
 		sqlCfg.TenantID = cfgTenantID
+		baseCfg.Locality = cfgLocality
 	}
 	log.Ops.Infof(ctx, "server starting for tenant %q", redact.Safe(sqlCfg.TenantID))
 	// Inform the server identity provider that we're operating
@@ -330,8 +333,8 @@ func newTenantServer(
 	parseNodeIDFn := func(s string) (roachpb.NodeID, bool, error) {
 		return roachpb.NodeID(0), false, errors.New("tenants cannot proxy to KV Nodes")
 	}
-	getNodeIDHTTPAddressFn := func(id roachpb.NodeID) (*util.UnresolvedAddr, error) {
-		return nil, errors.New("tenants cannot proxy to KV Nodes")
+	getNodeIDHTTPAddressFn := func(id roachpb.NodeID) (*util.UnresolvedAddr, roachpb.Locality, error) {
+		return nil, roachpb.Locality{}, errors.New("tenants cannot proxy to KV Nodes")
 	}
 	sHTTP := newHTTPServer(baseCfg, args.rpcContext, parseNodeIDFn, getNodeIDHTTPAddressFn)
 
@@ -408,6 +411,15 @@ func newTenantServer(
 		}
 	}
 
+	// NB: On a shared process tenant, we start cidr once per tenant.
+	// Potentially we could share this across tenants, but this breaks the
+	// tenant separation model. For a small number of tenants this is OK, but if
+	// we have a large number of tenants in shared process mode this could be a
+	// problem from a memory and network perspective.
+	if err = baseCfg.CidrLookup.Start(ctx, stopper); err != nil {
+		return nil, err
+	}
+
 	// Instantiate the SQL server proper.
 	sqlServer, err := newSQLServer(ctx, args)
 	if err != nil {
@@ -420,14 +432,14 @@ func newTenantServer(
 	sqlServer.migrationServer = tms // only for testing via testTenant
 
 	// Tell the authz server how to connect to SQL.
-	adminAuthzCheck.SetAuthzAccessorFactory(func(opName string) (sql.AuthorizationAccessor, func()) {
+	adminAuthzCheck.SetAuthzAccessorFactory(func(opName redact.SafeString) (sql.AuthorizationAccessor, func()) {
 		// This is a hack to get around a Go package dependency cycle. See comment
 		// in sql/jobs/registry.go on planHookMaker.
 		txn := args.db.NewTxn(ctx, "check-system-privilege")
 		p, cleanup := sql.NewInternalPlanner(
 			opName,
 			txn,
-			username.RootUserName(),
+			username.NodeUserName(),
 			&sql.MemoryMetrics{},
 			sqlServer.execCfg,
 			sql.NewInternalSessionData(ctx, sqlServer.execCfg.Settings, opName),
@@ -504,7 +516,6 @@ func newTenantServer(
 		tenantStatus:    sStatus,
 		drainServer:     drainServer,
 		authentication:  sAuth,
-		eventsExporter:  args.eventsExporter,
 		stopper:         args.stopper,
 
 		debug: debugServer,
@@ -578,7 +589,7 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 		lf = s.sqlServer.cfg.RPCListenerFactory
 	}
 
-	pgL, loopbackPgL, rpcLoopbackDialFn, startRPCServer, err := startListenRPCAndSQL(ctx, workersCtx, *s.sqlServer.cfg, s.stopper, s.grpc, lf, enableSQLListener)
+	pgL, loopbackPgL, rpcLoopbackDialFn, startRPCServer, err := startListenRPCAndSQL(ctx, workersCtx, *s.sqlServer.cfg, s.stopper, s.grpc, lf, enableSQLListener, s.cfg.AcceptProxyProtocolHeaders)
 	if err != nil {
 		return err
 	}
@@ -756,6 +767,7 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 			s.runtime,
 			s.tenantStatus.sessionRegistry,
 			s.sqlServer.execCfg.RootMemoryMonitor,
+			s.cfg.TestingKnobs,
 		); err != nil {
 			return err
 		}
@@ -787,9 +799,22 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 		return err
 	}
 
+	// Start the SQL subsystem.
+	if err := s.sqlServer.preStart(
+		workersCtx,
+		s.stopper,
+		s.sqlServer.cfg.TestingKnobs,
+		orphanedLeasesTimeThresholdNanos,
+	); err != nil {
+		return err
+	}
+
 	// Connect the HTTP endpoints. This also wraps the privileged HTTP
 	// endpoints served by gwMux by the HTTP cookie authentication
 	// check.
+	// NB: This must occur after sqlServer.preStart() which initializes
+	// the cluster version from storage as the http auth server relies on
+	// the cluster version being initialized.
 	if err := s.http.setupRoutes(ctx,
 		s.authentication,  /* authnServer */
 		s.adminAuthzCheck, /* adminAuthzCheck */
@@ -808,19 +833,10 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 			db:               s.db,
 		}), /* apiServer */
 		serverpb.FeatureFlags{
-			CanViewKvMetricDashboards:   s.rpcContext.TenantID.Equal(roachpb.SystemTenantID),
+			CanViewKvMetricDashboards: s.rpcContext.TenantID.Equal(roachpb.SystemTenantID) ||
+				s.sqlServer.serviceMode == mtinfopb.ServiceModeShared,
 			DisableKvLevelAdvancedDebug: true,
 		},
-	); err != nil {
-		return err
-	}
-
-	// Start the SQL subsystem.
-	if err := s.sqlServer.preStart(
-		workersCtx,
-		s.stopper,
-		s.sqlServer.cfg.TestingKnobs,
-		orphanedLeasesTimeThresholdNanos,
 	); err != nil {
 		return err
 	}
@@ -843,6 +859,7 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 			CloneWithMemoryMonitor(sql.MemoryMetrics{}, ieMon),
 		s.costController,
 		s.registry,
+		s.cfg.ExternalIODir,
 	)
 
 	// Start the job scheduler now that the SQL Server and
@@ -866,15 +883,6 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 	if instanceID == 0 {
 		log.Fatalf(ctx, "expected SQLInstanceID to be initialized after preStart")
 	}
-	s.eventsExporter.SetNodeInfo(obs.NodeInfo{
-		ClusterID:     clusterID,
-		TenantID:      int64(s.rpcContext.TenantID.InternalValue),
-		NodeID:        int32(instanceID),
-		BinaryVersion: build.BinaryVersion(),
-	})
-	if err := s.eventsExporter.Start(ctx, s.stopper); err != nil {
-		return errors.Wrap(err, "failed to start the event exporter")
-	}
 
 	// Add more context to the Sentry reporter.
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
@@ -882,6 +890,9 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 			"cluster":   clusterID.String(),
 			"instance":  instanceID.String(),
 			"server_id": fmt.Sprintf("%s-%s", clusterID.Short(), instanceID.String()),
+			// TODO(jaylim-crl): Consider using tenant names here in the future
+			// as well. See discussions in https://github.com/cockroachdb/cockroach/pull/128602.
+			"tenant_id": s.rpcContext.TenantID.String(),
 		})
 	})
 
@@ -983,7 +994,7 @@ func (s *SQLServerWrapper) AcceptClients(ctx context.Context) error {
 		return err
 	}
 
-	s.sqlServer.isReady.Set(true)
+	s.sqlServer.isReady.Store(true)
 
 	log.Event(ctx, "server ready")
 	return nil
@@ -1010,6 +1021,7 @@ func (s *SQLServerWrapper) AcceptInternalClients(ctx context.Context) error {
 					log.Ops.Errorf(connCtx, "serving SQL client conn: %v", err)
 					return
 				}
+				defer status.ReleaseMemory(ctx)
 
 				if err := s.serveConn(connCtx, conn, status); err != nil {
 					log.Ops.Errorf(connCtx, "serving internal SQL client conn: %s", err)
@@ -1117,6 +1129,7 @@ func makeTenantSQLServerArgs(
 	// This tenant's SQL server only serves SQL connections and SQL-to-SQL
 	// RPCs; so it should refuse to serve SQL-to-KV RPCs completely.
 	rpcCtxOpts.TenantRPCAuthorizer = tenantcapabilitiesauthorizer.NewAllowNothingAuthorizer()
+	rpcCtxOpts.Locality = baseCfg.Locality
 
 	rpcContext := rpc.NewContext(startupCtx, rpcCtxOpts)
 
@@ -1181,7 +1194,8 @@ func makeTenantSQLServerArgs(
 		tenantKnobs.OverrideTokenBucketProvider != nil {
 		provider = tenantKnobs.OverrideTokenBucketProvider(provider)
 	}
-	costController, err := deps.costControllerFactory(st, sqlCfg.TenantID, provider)
+	costController, err := deps.costControllerFactory(
+		st, sqlCfg.TenantID, provider, tenantConnect, baseCfg.Locality)
 	if err != nil {
 		return sqlServerArgs{}, err
 	}
@@ -1226,7 +1240,7 @@ func makeTenantSQLServerArgs(
 		ds,
 	)
 
-	dbCtx := kv.DefaultDBContext(stopper)
+	dbCtx := kv.DefaultDBContext(st, stopper)
 	dbCtx.NodeID = deps.instanceIDContainer
 	db := kv.NewDBWithContext(baseCfg.AmbientCtx, tcsFactory, clock, dbCtx)
 
@@ -1236,7 +1250,7 @@ func makeTenantSQLServerArgs(
 		return sqlServerArgs{}, err
 	}
 
-	sTS := ts.MakeTenantServer(baseCfg.AmbientCtx, tenantConnect, rpcContext.TenantID)
+	sTS := ts.MakeTenantServer(baseCfg.AmbientCtx, tenantConnect, rpcContext.TenantID, registry)
 
 	systemConfigWatcher := systemconfigwatcher.NewWithAdditionalProvider(
 		keys.MakeSQLCodec(sqlCfg.TenantID), clock, rangeFeedFactory, &baseCfg.DefaultZoneConfig,
@@ -1303,30 +1317,6 @@ func makeTenantSQLServerArgs(
 	remoteFlowRunnerAcc := monitorAndMetrics.rootSQLMemoryMonitor.MakeBoundAccount()
 	remoteFlowRunner := flowinfra.NewRemoteFlowRunner(baseCfg.AmbientCtx, stopper, &remoteFlowRunnerAcc)
 
-	// Create the EventServer. It will be made operational later, after the
-	// cluster ID is known, with a Start() call.
-	var eventsExporter obs.EventsExporterInterface
-	if baseCfg.ObsServiceAddr != "" {
-		if baseCfg.ObsServiceAddr == base.ObsServiceEmbedFlagValue {
-			// TODO(andrei): Add support for this option for tenants - at least for
-			// shared-process tenants where the event exporting should be hooked up to
-			// the ingester running in the host process.
-			return sqlServerArgs{}, errors.New("--obsservice-addr=embed is not currently supported for tenants")
-		}
-		ee := obs.NewEventsExporter(
-			baseCfg.ObsServiceAddr,
-			timeutil.DefaultTimeSource{},
-			baseCfg.Tracer,
-			5*time.Second,                          // maxStaleness
-			1<<20,                                  // triggerSizeBytes - 1MB
-			10*1<<20,                               // maxBufferSizeBytes - 10MB
-			monitorAndMetrics.rootSQLMemoryMonitor, // memMonitor - this is not "SQL" usage, but we don't have another memory pool
-		)
-		eventsExporter = ee
-	} else {
-		eventsExporter = &obs.NoopEventsExporter{}
-	}
-
 	// TODO(irfansharif): hook up NewGrantCoordinatorSQL.
 	var noopElasticCPUGrantCoord *admission.ElasticCPUGrantCoordinator = nil
 	return sqlServerArgs{
@@ -1380,7 +1370,6 @@ func makeTenantSQLServerArgs(
 		costController:           costController,
 		monitorAndMetrics:        monitorAndMetrics,
 		grpc:                     grpcServer,
-		eventsExporter:           eventsExporter,
 		externalStorageBuilder:   esb,
 		admissionPacerFactory:    noopElasticCPUGrantCoord,
 		rangeDescIteratorFactory: tenantConnect,
@@ -1426,7 +1415,11 @@ var NewTenantSideCostController costControllerFactory = NewNoopTenantSideCostCon
 // NewNoopTenantSideCostController returns a noop cost
 // controller. Used by shared-process tenants.
 func NewNoopTenantSideCostController(
-	*cluster.Settings, roachpb.TenantID, kvtenant.TokenBucketProvider,
+	*cluster.Settings,
+	roachpb.TenantID,
+	kvtenant.TokenBucketProvider,
+	kvclient.NodeDescStore,
+	roachpb.Locality,
 ) (multitenant.TenantSideCostController, error) {
 	// Return a no-op implementation.
 	return noopTenantSideCostController{}, nil
@@ -1459,7 +1452,11 @@ func (noopTenantSideCostController) OnRequestWait(ctx context.Context) error {
 }
 
 func (noopTenantSideCostController) OnResponseWait(
-	ctx context.Context, req tenantcostmodel.RequestInfo, resp tenantcostmodel.ResponseInfo,
+	ctx context.Context,
+	request *kvpb.BatchRequest,
+	response *kvpb.BatchResponse,
+	targetRange *roachpb.RangeDescriptor,
+	targetReplica *roachpb.ReplicaDescriptor,
 ) error {
 	return nil
 }
@@ -1479,7 +1476,11 @@ func (noopTenantSideCostController) GetCPUMovingAvg() float64 {
 	return 0
 }
 
-func (noopTenantSideCostController) GetCostConfig() *tenantcostmodel.Config {
+func (noopTenantSideCostController) GetRequestUnitModel() *tenantcostmodel.RequestUnitModel {
+	return nil
+}
+
+func (noopTenantSideCostController) GetEstimatedCPUModel() *tenantcostmodel.EstimatedCPUModel {
 	return nil
 }
 

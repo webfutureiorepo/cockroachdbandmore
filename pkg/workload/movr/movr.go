@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package movr
 
@@ -247,6 +242,9 @@ func (*movr) Meta() workload.Meta { return movrMeta }
 
 // Flags implements the Flagser interface.
 func (g *movr) Flags() workload.Flags { return g.flags }
+
+// ConnFlags implements the ConnFlagser interface.
+func (g *movr) ConnFlags() *workload.ConnFlags { return g.connFlags }
 
 // Hooks implements the Hookser interface.
 func (g *movr) Hooks() workload.Hooks {

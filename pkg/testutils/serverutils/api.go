@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // This file provides generic interfaces that allow tests to set up test tenants
 // without importing the server package (avoiding circular dependencies). This
@@ -127,10 +122,6 @@ type TestServerController interface {
 	// SetReadyFn can be configured to notify a test when the server is
 	// ready. This is only effective when called before Start().
 	SetReadyFn(fn func(bool))
-
-	// BinaryVersionOverride returns the value of an override if set using
-	// TestingKnobs.
-	BinaryVersionOverride() roachpb.Version
 
 	// RunInitialSQL is used by 'cockroach demo' to initialize
 	// an admin user.
@@ -330,6 +321,9 @@ type ApplicationLayerInterface interface {
 	// TestingKnobs returns the TestingKnobs in use by the test server.
 	TestingKnobs() *base.TestingKnobs
 
+	// ExternalIODir returns ExternalIODir form the server config.
+	ExternalIODir() string
+
 	// SQLServerInternal returns the *server.SQLServer as an interface{}
 	// Note: most tests should use SQLServer() and InternalExecutor() instead.
 	SQLServerInternal() interface{}
@@ -449,7 +443,7 @@ type ApplicationLayerInterface interface {
 	PrivilegeChecker() interface{}
 
 	// NodeDescStoreI returns the node descriptor lookup interface.
-	// The concrete return type is compatible with interface kvcoord.NodeDescStore.
+	// The concrete return type is compatible with interface kvclient.NodeDescStore.
 	NodeDescStoreI() interface{}
 
 	// Locality returns the locality used by the server.
@@ -645,6 +639,10 @@ type StorageLayerInterface interface {
 	// RaftTransport returns access to the raft transport.
 	// The return value is of type *kvserver.RaftTransport.
 	RaftTransport() interface{}
+
+	// StoreLivenessTransport provides access to the store liveness transport.
+	// The return value is of type *storeliveness.Transport.
+	StoreLivenessTransport() interface{}
 
 	// GetRangeLease returns information on the lease for the range
 	// containing key, and a timestamp taken from the node. The lease is

@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // {{/*
 //go:build execgen_template
@@ -327,7 +322,7 @@ func _CHECK_COL_FUNCTION_TEMPLATE(
 // the HashTable disallows null equality, then if any element in the key is
 // null, there is no match.
 func (ht *HashTable) checkCol(
-	probeVec, buildVec coldata.Vec, keyColIdx int, nToCheck uint32, probeSel []int,
+	probeVec, buildVec *coldata.Vec, keyColIdx int, nToCheck uint32, probeSel []int,
 ) {
 	// {{with .Overloads}}
 	_CHECK_COL_FUNCTION_TEMPLATE(false, false, false)
@@ -341,7 +336,9 @@ func (ht *HashTable) checkCol(
 // checkColAgainstItselfForDistinct is similar to checkCol, but it probes the
 // vector against itself for the purposes of finding matches to unordered
 // distinct columns.
-func (ht *HashTable) checkColAgainstItselfForDistinct(vec coldata.Vec, nToCheck uint32, sel []int) {
+func (ht *HashTable) checkColAgainstItselfForDistinct(
+	vec *coldata.Vec, nToCheck uint32, sel []int,
+) {
 	// {{/*
 	// In order to reuse the same template function as checkCol uses, we use
 	// the same variable names.
@@ -362,7 +359,7 @@ func (ht *HashTable) checkColAgainstItselfForDistinct(vec coldata.Vec, nToCheck 
 // bucket has reached the end, the key is rejected. If the HashTable disallows
 // null equality, then if any element in the key is null, there is no match.
 func (ht *HashTable) checkColDeleting(
-	probeVec, buildVec coldata.Vec, keyColIdx int, nToCheck uint32, probeSel []int,
+	probeVec, buildVec *coldata.Vec, keyColIdx int, nToCheck uint32, probeSel []int,
 ) {
 	// {{with .Overloads}}
 	_CHECK_COL_FUNCTION_TEMPLATE(false, false, true)
@@ -375,7 +372,7 @@ func (ht *HashTable) checkColDeleting(
 // {{with .Overloads}}
 
 func (ht *HashTable) checkColForDistinctTuples(
-	probeVec, buildVec coldata.Vec, nToCheck uint32, probeSel []int,
+	probeVec, buildVec *coldata.Vec, nToCheck uint32, probeSel []int,
 ) {
 	switch probeVec.CanonicalTypeFamily() {
 	// {{range .LeftFamilies}}
@@ -765,7 +762,7 @@ func (ht *HashTable) Check(nToCheck uint32, probeSel []int) uint32 {
 
 // CheckProbeForDistinct performs a column by column check for duplicated tuples
 // in the probe table.
-func (ht *HashTable) CheckProbeForDistinct(vecs []coldata.Vec, nToCheck uint32, sel []int) uint32 {
+func (ht *HashTable) CheckProbeForDistinct(vecs []*coldata.Vec, nToCheck uint32, sel []int) uint32 {
 	for i := range ht.keyCols {
 		ht.checkColAgainstItselfForDistinct(vecs[i], nToCheck, sel)
 	}
@@ -859,9 +856,9 @@ func (ht *HashTable) updateSel(b coldata.Batch) {
 // NOTE: batch is assumed to be non-zero length.
 func (ht *HashTable) FindBuckets(
 	batch coldata.Batch,
-	keyCols []coldata.Vec,
+	keyCols []*coldata.Vec,
 	first, next []keyID,
-	duplicatesChecker func([]coldata.Vec, uint32, []int) uint32,
+	duplicatesChecker func([]*coldata.Vec, uint32, []int) uint32,
 	zeroHeadIDForDistinctTuple bool,
 	probingAgainstItself bool,
 ) {
@@ -886,10 +883,10 @@ func (ht *HashTable) FindBuckets(
 func findBuckets(
 	ht *HashTable,
 	batch coldata.Batch,
-	keyCols []coldata.Vec,
+	keyCols []*coldata.Vec,
 	first []keyID,
 	next []keyID,
-	duplicatesChecker func([]coldata.Vec, uint32, []int) uint32,
+	duplicatesChecker func([]*coldata.Vec, uint32, []int) uint32,
 	zeroHeadIDForDistinctTuple bool,
 	probingAgainstItself bool,
 ) {

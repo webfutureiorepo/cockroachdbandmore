@@ -16,11 +16,11 @@ write *eventpb.AlterTable to event log:
   mutationId: 1
   sql:
     descriptorId: 104
-    statement: ALTER TABLE ‹defaultdb›.‹public›.‹t› ALTER PRIMARY KEY USING COLUMNS (‹j›) USING HASH WITH (‹bucket_count› = ‹3›)
+    statement: ALTER TABLE ‹defaultdb›.‹public›.‹t› ALTER PRIMARY KEY USING COLUMNS (‹j›) USING HASH WITH ('bucket_count' = ‹3›)
     tag: ALTER TABLE
     user: root
   tableName: defaultdb.public.t
-## StatementPhase stage 1 of 1 with 11 MutationType ops
+## StatementPhase stage 1 of 1 with 12 MutationType ops
 upsert descriptor #104
   ...
      id: 104
@@ -129,7 +129,7 @@ upsert descriptor #104
 ## PreCommitPhase stage 1 of 2 with 1 MutationType op
 undo all catalog changes within txn #1
 persist all catalog changes to storage
-## PreCommitPhase stage 2 of 2 with 15 MutationType ops
+## PreCommitPhase stage 2 of 2 with 16 MutationType ops
 upsert descriptor #104
   ...
      createAsOfTime:
@@ -144,6 +144,8 @@ upsert descriptor #104
   +        "1": i
   +        "2": j
   +        "3": crdb_internal_j_shard_3
+  +        "4294967292": crdb_internal_origin_timestamp
+  +        "4294967293": crdb_internal_origin_id
   +        "4294967294": tableoid
   +        "4294967295": crdb_internal_mvcc_timestamp
   +      constraints:
@@ -157,8 +159,8 @@ upsert descriptor #104
   +      name: t
   +    relevantStatements:
   +    - statement:
-  +        redactedStatement: ALTER TABLE ‹defaultdb›.‹public›.‹t› ALTER PRIMARY KEY USING COLUMNS (‹j›) USING HASH WITH (‹bucket_count› = ‹3›)
-  +        statement: ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH (bucket_count = 3)
+  +        redactedStatement: ALTER TABLE ‹defaultdb›.‹public›.‹t› ALTER PRIMARY KEY USING COLUMNS (‹j›) USING HASH WITH ('bucket_count' = ‹3›)
+  +        statement: ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH ('bucket_count' = 3)
   +        statementTag: ALTER TABLE
   +    revertible: true
   +    targetRanks: <redacted>
@@ -268,7 +270,7 @@ upsert descriptor #104
   -  version: "1"
   +  version: "2"
 persist all catalog changes to storage
-create job #1 (non-cancelable: false): "ALTER TABLE defaultdb.public.t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH (bucket_count = 3)"
+create job #1 (non-cancelable: false): "ALTER TABLE defaultdb.public.t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH ('bucket_count' = 3)"
   descriptor IDs: [104]
 # end PreCommitPhase
 commit transaction #1
@@ -711,7 +713,7 @@ begin transaction #18
 ## PostCommitPhase stage 16 of 16 with 4 MutationType ops
 upsert descriptor #104
   ...
-           statement: ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH (bucket_count = 3)
+           statement: ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH ('bucket_count' = 3)
            statementTag: ALTER TABLE
   -    revertible: true
        targetRanks: <redacted>
@@ -791,8 +793,10 @@ upsert descriptor #104
    table:
   -  checks: []
   +  checks:
-  +  - constraintId: 2
-  +    expr: '"crdb_internal_j_shard_3" IN (0,1,2)'
+  +  - columnIds:
+  +    - 3
+  +    constraintId: 2
+  +    expr: crdb_internal_j_shard_3 IN (0,1,2)
   +    fromHashShardedColumn: true
   +    name: check_crdb_internal_j_shard_3
   +    validity: Validating
@@ -878,8 +882,10 @@ upsert descriptor #104
   +    state: DELETE_ONLY
   +  - constraint:
   +      check:
+  +        columnIds:
+  +        - 3
   +        constraintId: 2
-  +        expr: '"crdb_internal_j_shard_3" IN (0,1,2)'
+  +        expr: crdb_internal_j_shard_3 IN (0,1,2)
   +        fromHashShardedColumn: true
   +        name: crdb_internal_constraint_2_name_placeholder
   +        validity: Validating
@@ -946,6 +952,8 @@ upsert descriptor #104
   -        "1": i
   -        "2": j
   -        "3": crdb_internal_j_shard_3
+  -        "4294967292": crdb_internal_origin_timestamp
+  -        "4294967293": crdb_internal_origin_id
   -        "4294967294": tableoid
   -        "4294967295": crdb_internal_mvcc_timestamp
   -      constraints:
@@ -959,8 +967,8 @@ upsert descriptor #104
   -      name: t
   -    relevantStatements:
   -    - statement:
-  -        redactedStatement: ALTER TABLE ‹defaultdb›.‹public›.‹t› ALTER PRIMARY KEY USING COLUMNS (‹j›) USING HASH WITH (‹bucket_count› = ‹3›)
-  -        statement: ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH (bucket_count = 3)
+  -        redactedStatement: ALTER TABLE ‹defaultdb›.‹public›.‹t› ALTER PRIMARY KEY USING COLUMNS (‹j›) USING HASH WITH ('bucket_count' = ‹3›)
+  -        statement: ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH ('bucket_count' = 3)
   -        statementTag: ALTER TABLE
   -    targetRanks: <redacted>
   -    targets: <redacted>
@@ -998,8 +1006,10 @@ upsert descriptor #104
   -    state: DELETE_ONLY
   -  - constraint:
   -      check:
+  -        columnIds:
+  -        - 3
   -        constraintId: 2
-  -        expr: '"crdb_internal_j_shard_3" IN (0,1,2)'
+  -        expr: crdb_internal_j_shard_3 IN (0,1,2)
   -        fromHashShardedColumn: true
   -        name: crdb_internal_constraint_2_name_placeholder
   -        validity: Validating
@@ -1017,7 +1027,7 @@ upsert descriptor #104
   -  version: "13"
   +  version: "14"
 persist all catalog changes to storage
-create job #2 (non-cancelable: true): "GC for ALTER TABLE defaultdb.public.t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH (bucket_count = 3)"
+create job #2 (non-cancelable: true): "GC for ALTER TABLE defaultdb.public.t ALTER PRIMARY KEY USING COLUMNS (j) USING HASH WITH ('bucket_count' = 3)"
   descriptor IDs: [104]
 update progress of schema change job #1: "all stages completed"
 set schema change job #1 to non-cancellable

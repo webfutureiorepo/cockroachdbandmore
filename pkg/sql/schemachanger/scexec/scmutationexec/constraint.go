@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -141,7 +136,7 @@ func (i *immediateVisitor) MakeValidatedCheckConstraintPublic(
 	}
 
 	if !found {
-		return errors.AssertionFailedf("failed to find check constraint %d in table %q (%d)",
+		return errors.AssertionFailedf("failed to find mutation for check constraint %d in table %q (%d)",
 			op.ConstraintID, tbl.GetName(), tbl.GetID())
 	}
 
@@ -245,18 +240,18 @@ func (i *immediateVisitor) RemoveCheckConstraint(
 		return err
 	}
 	var found bool
-	for i, c := range tbl.Checks {
+	for idx, c := range tbl.Checks {
 		if c.ConstraintID == op.ConstraintID {
-			tbl.Checks = append(tbl.Checks[:i], tbl.Checks[i+1:]...)
+			tbl.Checks = append(tbl.Checks[:idx], tbl.Checks[idx+1:]...)
 			found = true
 			break
 		}
 	}
-	for i, m := range tbl.Mutations {
+	for idx, m := range tbl.Mutations {
 		if c := m.GetConstraint(); c != nil &&
 			c.ConstraintType == descpb.ConstraintToUpdate_CHECK &&
 			c.Check.ConstraintID == op.ConstraintID {
-			tbl.Mutations = append(tbl.Mutations[:i], tbl.Mutations[i+1:]...)
+			tbl.Mutations = append(tbl.Mutations[:idx], tbl.Mutations[idx+1:]...)
 			found = true
 			break
 		}

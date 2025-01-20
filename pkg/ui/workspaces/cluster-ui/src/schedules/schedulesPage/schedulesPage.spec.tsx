@@ -1,20 +1,17 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { render } from "@testing-library/react";
+import * as H from "history";
+import React from "react";
+import { MemoryRouter } from "react-router-dom";
+
+import { Schedule } from "src/api/schedulesApi";
 
 import { SchedulesPage, SchedulesPageProps } from "./schedulesPage";
 import { allSchedulesFixture } from "./schedulesPage.fixture";
-import { render } from "@testing-library/react";
-import React from "react";
-import { MemoryRouter } from "react-router-dom";
-import * as H from "history";
-import { Schedule } from "src/api/schedulesApi";
 
 const getMockSchedulesPageProps = (
   schedules: Array<Schedule>,

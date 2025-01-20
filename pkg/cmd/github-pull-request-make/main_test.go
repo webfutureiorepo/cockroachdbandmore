@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -24,12 +19,12 @@ func TestPkgsFromDiff(t *testing.T) {
 			"pkg/ccl/storageccl": makePkg([]string{"TestPutS3"}),
 		},
 		datapathutils.TestDataPath(t, "modified.diff"): {
-			"pkg/ccl/streamingccl/streamingest": makePkg([]string{"TestStreamingAutoReplan"}),
+			"pkg/crosscluster/physical": makePkg([]string{"TestStreamingAutoReplan"}),
 		},
 		datapathutils.TestDataPath(t, "removed.diff"): {},
 		datapathutils.TestDataPath(t, "not_go.diff"):  {},
 		datapathutils.TestDataPath(t, "new_test.diff"): {
-			"pkg/ccl/streamingccl/streamclient": makePkg([]string{
+			"pkg/crosscluster/streamclient": makePkg([]string{
 				"TestExternalConnectionClient",
 				"TestGetFirstActiveClientEmpty",
 			}),

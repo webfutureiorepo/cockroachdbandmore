@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -69,7 +64,7 @@ type ShowCreateDisplayOptions struct {
 // current database.
 func ShowCreateTable(
 	ctx context.Context,
-	p PlanHookState,
+	p *planner,
 	tn *tree.TableName,
 	dbPrefix string,
 	desc catalog.TableDescriptor,
@@ -100,7 +95,7 @@ func ShowCreateTable(
 		}
 		f.WriteString("\n\t")
 		colstr, err := schemaexpr.FormatColumnForDisplay(
-			ctx, desc, col, &p.RunParams(ctx).p.semaCtx, p.RunParams(ctx).p.SessionData(),
+			ctx, desc, col, p.EvalContext(), &p.semaCtx, p.SessionData(),
 			displayOptions.RedactableValues,
 		)
 		if err != nil {
@@ -164,8 +159,9 @@ func ShowCreateTable(
 			idx,
 			partitionBuf.String(),
 			fmtFlags,
-			p.RunParams(ctx).p.SemaCtx(),
-			p.RunParams(ctx).p.SessionData(),
+			p.EvalContext(),
+			p.SemaCtx(),
+			p.SessionData(),
 			catformat.IndexDisplayDefOnly,
 		)
 		if err != nil {
@@ -176,7 +172,7 @@ func ShowCreateTable(
 
 	// Create the FAMILY and CONSTRAINTs of the CREATE statement
 	showFamilyClause(desc, f)
-	if err := showConstraintClause(ctx, desc, &p.RunParams(ctx).p.semaCtx, p.RunParams(ctx).p.SessionData(), f); err != nil {
+	if err := showConstraintClause(ctx, desc, p.EvalContext(), &p.semaCtx, p.SessionData(), f); err != nil {
 		return "", err
 	}
 
@@ -238,7 +234,7 @@ func (p *planner) ShowCreate(
 	tn := tree.MakeUnqualifiedTableName(tree.Name(desc.GetName()))
 	if desc.IsView() {
 		return ShowCreateView(
-			ctx, &p.RunParams(ctx).p.semaCtx, p.RunParams(ctx).p.SessionData(), &tn, desc,
+			ctx, p.EvalContext(), &p.semaCtx, p.SessionData(), &tn, desc,
 			displayOptions.RedactableValues,
 		)
 	}

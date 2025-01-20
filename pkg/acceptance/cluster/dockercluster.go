@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cluster
 
@@ -35,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/security/certnames"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -55,22 +51,28 @@ import (
 )
 
 const (
-	defaultImage  = "docker.io/library/ubuntu:focal-20210119"
+	// We use a docker image mirror to avoid pulling from 3rd party repos, which sometimes have reliability issues.
+	// See https://cockroachlabs.atlassian.net/wiki/spaces/devinf/pages/3462594561/Docker+image+sync for the details.
+	defaultImage  = "us-east1-docker.pkg.dev/crl-docker-sync/docker-io/library/ubuntu:focal-20210119"
 	networkPrefix = "cockroachdb_acceptance"
 )
 
 // DefaultTCP is the default SQL/RPC port specification.
-const DefaultTCP nat.Port = base.DefaultPort + "/tcp"
-const defaultHTTP nat.Port = base.DefaultHTTPPort + "/tcp"
+const (
+	DefaultTCP  nat.Port = base.DefaultPort + "/tcp"
+	defaultHTTP nat.Port = base.DefaultHTTPPort + "/tcp"
+)
 
 // CockroachBinaryInContainer is the container-side path to the CockroachDB
 // binary.
 const CockroachBinaryInContainer = "/cockroach/cockroach"
 
-var cockroachImage = flag.String("i", defaultImage, "the docker image to run")
-var cockroachEntry = flag.String("e", "", "the entry point for the image")
-var waitOnStop = flag.Bool("w", false, "wait for the user to interrupt before tearing down the cluster")
-var maxRangeBytes = *zonepb.DefaultZoneConfig().RangeMaxBytes
+var (
+	cockroachImage = flag.String("i", defaultImage, "the docker image to run")
+	cockroachEntry = flag.String("e", "", "the entry point for the image")
+	waitOnStop     = flag.Bool("w", false, "wait for the user to interrupt before tearing down the cluster")
+	maxRangeBytes  = *zonepb.DefaultZoneConfig().RangeMaxBytes
+)
 
 // CockroachBinary is the path to the host-side binary to use.
 var CockroachBinary = flag.String("b", "", "the host-side binary to run")
@@ -164,10 +166,10 @@ func CreateDocker(
 	cli.NegotiateAPIVersion(ctx)
 
 	clusterID := uuid.MakeV4()
-	clusterIDS := clusterID.Short()
+	clusterIDS := clusterID.Short().String()
 
 	if volumesDir == "" {
-		volumesDir, err = os.MkdirTemp("", fmt.Sprintf("cockroach-acceptance-%s", clusterIDS))
+		volumesDir, err = os.MkdirTemp(datapathutils.DebuggableTempDir(), fmt.Sprintf("cockroach-acceptance-%s", clusterIDS))
 		maybePanic(err)
 	} else {
 		volumesDir = filepath.Join(volumesDir, clusterIDS)

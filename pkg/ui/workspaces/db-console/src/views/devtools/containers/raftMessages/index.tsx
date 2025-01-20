@@ -1,19 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import { TimeScale } from "@cockroachlabs/cluster-ui";
+import isString from "lodash/isString";
+import map from "lodash/map";
 import React from "react";
 import { connect } from "react-redux";
-import { createSelector } from "reselect";
 import { RouteComponentProps, withRouter } from "react-router-dom";
+import { createSelector } from "reselect";
 
+import { PayloadAction } from "src/interfaces/action";
 import { refreshLiveness, refreshNodes } from "src/redux/apiReducers";
 import {
   hoverOff as hoverOffAction,
@@ -29,7 +27,9 @@ import {
 } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
 import { setGlobalTimeScaleAction } from "src/redux/statements";
+import { TimeWindow, setMetricsFixedWindow } from "src/redux/timeScale";
 import { nodeIDAttr } from "src/util/constants";
+import { getMatchParamByName } from "src/util/query";
 import {
   GraphDashboardProps,
   storeIDsForNode,
@@ -41,11 +41,8 @@ import {
   PageConfigItem,
 } from "src/views/shared/components/pageconfig";
 import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
+
 import messagesDashboard from "./messages";
-import { getMatchParamByName } from "src/util/query";
-import { PayloadAction } from "src/interfaces/action";
-import { TimeWindow, setMetricsFixedWindow } from "src/redux/timeScale";
-import { TimeScale } from "@cockroachlabs/cluster-ui";
 
 interface NodeGraphsOwnProps {
   refreshNodes: typeof refreshNodes;
@@ -87,7 +84,7 @@ export class RaftMessages extends React.Component<RaftMessagesProps> {
 
   setClusterPath(nodeID: string) {
     const push = this.props.history.push;
-    if (!_.isString(nodeID) || nodeID === "") {
+    if (!isString(nodeID) || nodeID === "") {
       push("/raft/messages/all/");
     } else {
       push(`/raft/messages/node/${nodeID}`);
@@ -153,7 +150,7 @@ export class RaftMessages extends React.Component<RaftMessagesProps> {
     // Generate graphs for the current dashboard, wrapping each one in a
     // MetricsDataProvider with a unique key.
     const graphs = messagesDashboard(dashboardProps);
-    const graphComponents = _.map(graphs, (graph, idx) => {
+    const graphComponents = map(graphs, (graph, idx) => {
       const key = `nodes.raftMessages.${idx}`;
       return (
         <div key={key}>
@@ -199,7 +196,7 @@ const nodeDropdownOptionsSelector = createSelector(
   (nodeIds, nodeDisplayNameByID): DropdownOption[] => {
     const base = [{ value: "", label: "Cluster" }];
     return base.concat(
-      _.map(nodeIds, id => {
+      map(nodeIds, id => {
         return {
           value: id.toString(),
           label: nodeDisplayNameByID[id],

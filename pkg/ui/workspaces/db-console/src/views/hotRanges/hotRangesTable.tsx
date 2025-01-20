@@ -1,17 +1,8 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useState } from "react";
-import { Link } from "react-router-dom";
-import { Tooltip } from "antd";
-import "antd/lib/tooltip/style";
 import {
   ColumnDescriptor,
   SortedTable,
@@ -20,21 +11,26 @@ import {
   SortSetting,
   Anchor,
   EmptyTable,
+  util,
 } from "@cockroachlabs/cluster-ui";
+import { Tooltip } from "antd";
 import classNames from "classnames/bind";
-import { round } from "lodash";
-import styles from "./hotRanges.module.styl";
+import round from "lodash/round";
+import React, { useState } from "react";
+import { connect } from "react-redux";
+import { Link } from "react-router-dom";
+
+import emptyTableResultsImg from "assets/emptyState/empty-table-results.svg";
+import { sortSettingLocalSetting } from "oss/src/redux/hotRanges";
+import { AdminUIState } from "oss/src/redux/state";
 import { cockroach } from "src/js/protos";
-import { util } from "@cockroachlabs/cluster-ui";
 import {
   performanceBestPracticesHotSpots,
   readsAndWritesOverviewPage,
   uiDebugPages,
 } from "src/util/docs";
-import emptyTableResultsImg from "assets/emptyState/empty-table-results.svg";
-import { sortSettingLocalSetting } from "oss/src/redux/hotRanges";
-import { AdminUIState } from "oss/src/redux/state";
-import { connect } from "react-redux";
+
+import styles from "./hotRanges.module.styl";
 
 const PAGE_SIZE = 50;
 const cx = classNames.bind(styles);
@@ -235,8 +231,8 @@ const HotRangesTable = ({
             Database
           </Tooltip>
         ),
-        cell: val => <>{val.database_name}</>,
-        sort: val => val.database_name,
+        cell: val => <>{val.databases.join(", ")}</>,
+        sort: val => val.databases.join(", "),
       },
       {
         name: "table",
@@ -248,23 +244,8 @@ const HotRangesTable = ({
             Table
           </Tooltip>
         ),
-        cell: val =>
-          // A hot range may not necessarily back a SQL table. If we see a
-          // "table name" that starts with a slash, it is not a table name but
-          // instead the start key of the range, and we should not link it.
-          val.table_name.startsWith("/") ? (
-            val.table_name
-          ) : (
-            <Link
-              to={util.EncodeDatabaseTableUri(
-                val.database_name,
-                val.table_name,
-              )}
-            >
-              {val.table_name}
-            </Link>
-          ),
-        sort: val => val.table_name,
+        cell: val => val.tables.join(", "),
+        sort: val => val.tables.join(", "),
       },
       {
         name: "index",
@@ -276,8 +257,8 @@ const HotRangesTable = ({
             Index
           </Tooltip>
         ),
-        cell: val => <>{val.index_name}</>,
-        sort: val => val.index_name,
+        cell: val => <>{val.indexes.join(", ")}</>,
+        sort: val => val.indexes.join(", "),
       },
       {
         name: "locality",

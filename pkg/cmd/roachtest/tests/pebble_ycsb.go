@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -109,7 +104,7 @@ func runPebbleYCSB(
 	// larger value sizes, so we do this once and reuse the same DB state on
 	// all of the workloads.
 	runPebbleCmd(ctx, t, c, fmt.Sprintf(
-		"(./pebble bench ycsb %s"+
+		"./pebble bench ycsb %s"+
 			" --wipe "+
 			" --workload=read=100"+
 			" --concurrency=1"+
@@ -117,7 +112,7 @@ func runPebbleYCSB(
 			" --initial-keys=%d"+
 			" --cache=%d"+
 			" --num-ops=1 && "+
-			"rm -f %s && tar cvPf %s %s) > init.log 2>&1",
+			"rm -f %s && tar cvPf %s %s",
 		benchDir, size, initialKeys, cache, dataTar, dataTar, benchDir))
 
 	for _, workload := range workloads {

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -37,8 +32,7 @@ import (
 // Therefore, the schema of the source node will be changed to look as follows:
 // pass through column | OVER clauses columns | arguments to window functions.
 type windowNode struct {
-	// The source node.
-	plan planNode
+	singleInputPlanNode
 	// columns is the set of result columns.
 	columns colinfo.ResultColumns
 
@@ -59,7 +53,7 @@ func (n *windowNode) Values() tree.Datums {
 }
 
 func (n *windowNode) Close(ctx context.Context) {
-	n.plan.Close(ctx)
+	n.input.Close(ctx)
 }
 
 var _ tree.TypedExpr = &windowFuncHolder{}

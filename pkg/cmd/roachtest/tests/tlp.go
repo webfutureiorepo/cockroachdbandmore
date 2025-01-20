@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -22,9 +17,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/internal/sqlsmith"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/errors"
@@ -37,12 +34,12 @@ func registerTLP(r registry.Registry) {
 		Name:             "tlp",
 		Owner:            registry.OwnerSQLQueries,
 		Timeout:          time.Hour * 1,
-		RequiresLicense:  true,
 		Cluster:          r.MakeClusterSpec(1),
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Leases:           registry.MetamorphicLeases,
 		NativeLibs:       registry.LibGEOS,
+		Randomized:       true,
 		Run:              runTLP,
 		ExtraLabels:      []string{"O-rsg"},
 	})
@@ -80,7 +77,7 @@ func runTLP(ctx context.Context, t test.Test, c cluster.Cluster) {
 			return
 		}
 		c.Stop(ctx, t.L(), option.DefaultStopOpts())
-		c.Wipe(ctx, false /* preserveCerts */)
+		c.Wipe(ctx)
 	}
 }
 
@@ -136,7 +133,7 @@ func runOneTLP(
 	// statements with the MutationsOnly option. Smither.GenerateTLP always
 	// returns SELECT queries, so the MutationsOnly option is used only for
 	// randomly mutating the database.
-	mutSmither, err := sqlsmith.NewSmither(conn, rnd, sqlsmith.MutationsOnly())
+	mutSmither, err := sqlsmith.NewSmither(conn, rnd, sqlsmith.MutationsOnly(), sqlsmith.SimpleNames())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +141,8 @@ func runOneTLP(
 
 	// Initialize a smither that will never generate mutations.
 	tlpSmither, err := sqlsmith.NewSmither(conn, rnd,
-		sqlsmith.DisableMutations(), sqlsmith.DisableNondeterministicFns())
+		sqlsmith.DisableMutations(), sqlsmith.DisableNondeterministicFns(), sqlsmith.SimpleNames(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +168,11 @@ func runOneTLP(
 		// for a fraction of iterations after that to continually change the
 		// state of the database.
 		if i < 1000 || i%10 == 0 {
-			runMutationStatement(conn, mutSmither, logStmt)
+			runMutationStatement(t, conn, "", mutSmither, logStmt)
 			continue
 		}
 
-		if err := runTLPQuery(conn, tlpSmither, logStmt); err != nil {
+		if err := runTLPQuery(t, conn, tlpSmither, logStmt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -182,7 +180,9 @@ func runOneTLP(
 
 // runMutationsStatement runs a random INSERT, UPDATE, or DELETE statement that
 // potentially modifies the state of the database.
-func runMutationStatement(conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string)) {
+func runMutationStatement(
+	t task.Tasker, conn *gosql.DB, connInfo string, smither *sqlsmith.Smither, logStmt func(string),
+) {
 	// Ignore panics from Generate.
 	defer func() {
 		if r := recover(); r != nil {
@@ -194,10 +194,10 @@ func runMutationStatement(conn *gosql.DB, smither *sqlsmith.Smither, logStmt fun
 
 	// Ignore timeouts.
 	var err error
-	_ = runWithTimeout(func() error {
+	_ = runWithTimeout(t, func() error {
 		// Ignore errors. Log successful statements.
 		if _, err = conn.Exec(stmt); err == nil {
-			logStmt(stmt)
+			logStmt(connInfo + stmt)
 		}
 		return nil
 	})
@@ -208,7 +208,9 @@ func runMutationStatement(conn *gosql.DB, smither *sqlsmith.Smither, logStmt fun
 // returned. GenerateTLP also returns any placeholder arguments needed for the
 // partitioned query. See GenerateTLP for more information on TLP and the
 // generated queries.
-func runTLPQuery(conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string)) error {
+func runTLPQuery(
+	t task.Tasker, conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string),
+) error {
 	// Ignore panics from GenerateTLP.
 	defer func() {
 		if r := recover(); r != nil {
@@ -219,7 +221,7 @@ func runTLPQuery(conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string)
 	unpartitioned, partitioned, args := smither.GenerateTLP()
 	combined := sqlsmith.CombinedTLP(unpartitioned, partitioned)
 
-	return runWithTimeout(func() error {
+	return runWithTimeout(t, func() error {
 		counts := conn.QueryRow(combined, args...)
 		var undiffCount, diffCount int
 		if err := counts.Scan(&undiffCount, &diffCount); err != nil {
@@ -269,12 +271,13 @@ func runTLPQuery(conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string)
 	})
 }
 
-func runWithTimeout(f func() error) error {
+func runWithTimeout(t task.Tasker, f func() error) error {
 	done := make(chan error, 1)
-	go func() {
+	t.Go(func(context.Context, *logger.Logger) error {
 		err := f()
 		done <- err
-	}()
+		return nil
+	})
 	select {
 	case <-time.After(statementTimeout + time.Second*5):
 		// Ignore timeouts.

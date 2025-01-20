@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package gc contains the logic to run scan a range for garbage and issue
 // GC requests to remove that garbage.
@@ -27,13 +22,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/benignerror"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
@@ -42,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble"
 )
 
 const (
@@ -149,10 +143,10 @@ var AdmissionPriority = settings.RegisterEnumSetting(
 	"kv.gc.admission_priority",
 	"the admission priority to use for mvcc gc work",
 	"bulk_normal_pri",
-	map[int64]string{
-		int64(admissionpb.BulkNormalPri): "bulk_normal_pri",
-		int64(admissionpb.NormalPri):     "normal_pri",
-		int64(admissionpb.UserHighPri):   "user_high_pri",
+	map[admissionpb.WorkPriority]string{
+		admissionpb.BulkNormalPri: "bulk_normal_pri",
+		admissionpb.NormalPri:     "normal_pri",
+		admissionpb.UserHighPri:   "user_high_pri",
 	},
 )
 
@@ -228,6 +222,7 @@ type Info struct {
 	// potentially necessary intent resolutions did not fail).
 	TransactionSpanGCAborted, TransactionSpanGCCommitted int
 	TransactionSpanGCStaging, TransactionSpanGCPending   int
+	TransactionSpanGCPrepared                            int
 	// AbortSpanTotal is the total number of transactions present in the AbortSpan.
 	AbortSpanTotal int
 	// AbortSpanConsidered is the number of AbortSpan entries old enough to be
@@ -362,24 +357,15 @@ func Run(
 			intentCleanupBatchTimeout:            options.IntentCleanupBatchTimeout,
 		}, cleanupIntentsFn, &info)
 	if err != nil {
-		if errors.Is(err, pebble.ErrSnapshotExcised) {
-			err = benignerror.NewStoreBenign(err)
-		}
 		return Info{}, err
 	}
 	fastPath, err := processReplicatedKeyRange(ctx, desc, snap, newThreshold,
 		populateBatcherOptions(options), gcer, &info)
 	if err != nil {
-		if errors.Is(err, pebble.ErrSnapshotExcised) {
-			err = benignerror.NewStoreBenign(err)
-		}
 		return Info{}, err
 	}
 	err = processReplicatedRangeTombstones(ctx, desc, snap, fastPath, now, newThreshold, gcer, &info)
 	if err != nil {
-		if errors.Is(err, pebble.ErrSnapshotExcised) {
-			err = benignerror.NewStoreBenign(err)
-		}
 		return Info{}, err
 	}
 
@@ -469,7 +455,7 @@ func processReplicatedKeyRange(
 			CombineRangesAndPoints: true,
 			Reverse:                true,
 			ExcludeUserKeySpan:     excludeUserKeySpan,
-			ReadCategory:           storage.MVCCGCReadCategory,
+			ReadCategory:           fs.MVCCGCReadCategory,
 		}, func(iterator storage.MVCCIterator, span roachpb.Span, keyType storage.IterKeyType) error {
 			// Iterate all versions of all keys from oldest to newest. If a version is an
 			// intent it will have the highest timestamp of any versions and will be
@@ -555,7 +541,7 @@ func processReplicatedLocks(
 			LowerBound:   ltStartKey,
 			UpperBound:   ltEndKey,
 			MatchMinStr:  lock.Shared, // any strength
-			ReadCategory: storage.MVCCGCReadCategory,
+			ReadCategory: fs.MVCCGCReadCategory,
 		}
 		iter, err := storage.NewLockTableIterator(ctx, reader, opts)
 		if err != nil {
@@ -1232,6 +1218,8 @@ func processLocalKeyRange(
 		switch txn.Status {
 		case roachpb.PENDING:
 			info.TransactionSpanGCPending++
+		case roachpb.PREPARED:
+			info.TransactionSpanGCPrepared++
 		case roachpb.STAGING:
 			info.TransactionSpanGCStaging++
 		case roachpb.ABORTED:
@@ -1273,7 +1261,7 @@ func processLocalKeyRange(
 	endKey := keys.MakeRangeKeyPrefix(desc.EndKey)
 
 	_, err := storage.MVCCIterate(ctx, snap, startKey, endKey, hlc.Timestamp{},
-		storage.MVCCScanOptions{ReadCategory: storage.MVCCGCReadCategory},
+		storage.MVCCScanOptions{ReadCategory: fs.MVCCGCReadCategory},
 		func(kv roachpb.KeyValue) error {
 			return handleOne(kv)
 		})
@@ -1397,7 +1385,7 @@ func processReplicatedRangeTombstones(
 		IterKind:           storage.MVCCKeyIterKind,
 		KeyTypes:           storage.IterKeyTypeRangesOnly,
 		ExcludeUserKeySpan: excludeUserKeySpan,
-		ReadCategory:       storage.MVCCGCReadCategory,
+		ReadCategory:       fs.MVCCGCReadCategory,
 	})
 	defer iter.Close()
 

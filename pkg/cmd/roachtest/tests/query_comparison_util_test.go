@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -118,6 +113,38 @@ func TestUnsortedMatricesDiff(t *testing.T) {
 			colTypes:    []string{"FLOAT4"},
 			t1:          [][]string{{"+Inf"}, {"1e-45"}, {"0"}, {"0"}, {"-0.0039"}, {"-Inf"}},
 			t2:          [][]string{{"+Inf"}, {"1e-45"}, {"-0"}, {"0"}, {"-0.0039"}, {"-Inf"}},
+			exactMatch:  false,
+			approxMatch: true,
+		},
+		{
+			name:        "multi row 0 in array matches -0 in array",
+			colTypes:    []string{"[]FLOAT4"},
+			t1:          [][]string{{"NULL"}, {"{1e-45}"}, {"{0,-0}"}, {"{-0.0039,-Inf"}},
+			t2:          [][]string{{"NULL"}, {"{1e-45}"}, {"{-0,0}"}, {"{-0.0039,-Inf"}},
+			exactMatch:  false,
+			approxMatch: true,
+		},
+		{
+			name:        "decimals with trailing zeroes",
+			colTypes:    []string{"DECIMAL"},
+			t1:          [][]string{{"1.20"}, {"1.000"}},
+			t2:          [][]string{{"1.200"}, {"1"}},
+			exactMatch:  false,
+			approxMatch: true,
+		},
+		{
+			name:        "decimals with non-trailing zeroes",
+			colTypes:    []string{"DECIMAL"},
+			t1:          [][]string{{"10"}, {"1.000"}},
+			t2:          [][]string{{"1.0"}, {"1000"}},
+			exactMatch:  false,
+			approxMatch: false,
+		},
+		{
+			name:        "decimals with trailing zeroes in array",
+			colTypes:    []string{"[]DECIMAL"},
+			t1:          [][]string{{"1.0,1.000"}, {"3.0,4.000"}},
+			t2:          [][]string{{"1.00,1"}, {"3.00,4"}},
 			exactMatch:  false,
 			approxMatch: true,
 		},

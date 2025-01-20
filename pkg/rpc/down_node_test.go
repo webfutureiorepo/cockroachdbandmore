@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 
 package rpc
@@ -18,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -42,7 +38,7 @@ func TestConnectingToDownNode(t *testing.T) {
 	testutils.RunTrueAndFalse(t, "refused", func(t *testing.T, refused bool) {
 		ctx := context.Background()
 
-		rpcCtx := newTestContext(uuid.FastMakeV4(), &timeutil.DefaultTimeSource{}, time.Second, stop.NewStopper())
+		rpcCtx := newTestContext(uuid.MakeV4(), &timeutil.DefaultTimeSource{}, time.Second, stop.NewStopper())
 		defer rpcCtx.Stopper.Stop(ctx)
 		rpcCtx.NodeID.Set(context.Background(), 1)
 
@@ -60,7 +56,7 @@ func TestConnectingToDownNode(t *testing.T) {
 		const n = 100
 		for i := 0; i < n; i++ {
 			tBegin := timeutil.Now()
-			_, err = rpcCtx.GRPCDialNode(ln.Addr().String(), 1, DefaultClass).
+			_, err = rpcCtx.GRPCDialNode(ln.Addr().String(), 1, roachpb.Locality{}, DefaultClass).
 				Connect(ctx)
 			require.True(t, errors.HasType(err, (*netutil.InitialHeartbeatFailedError)(nil)), "%+v", err)
 			dur += timeutil.Since(tBegin)

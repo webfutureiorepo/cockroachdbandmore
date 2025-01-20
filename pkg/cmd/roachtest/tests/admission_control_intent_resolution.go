@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -45,8 +40,7 @@ func registerIntentResolutionOverload(r registry.Registry) {
 		// TODO(sumeer): Reduce to weekly after working well.
 		// Tags:      registry.Tags(`weekly`),
 		// Second node is solely for Prometheus.
-		Cluster:          r.MakeClusterSpec(2, spec.CPU(8)),
-		RequiresLicense:  true,
+		Cluster:          r.MakeClusterSpec(2, spec.CPU(8), spec.WorkloadNode()),
 		Leases:           registry.MetamorphicLeases,
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
@@ -54,32 +48,31 @@ func registerIntentResolutionOverload(r registry.Registry) {
 			if c.Spec().NodeCount != 2 {
 				t.Fatalf("expected 2 nodes, found %d", c.Spec().NodeCount)
 			}
-			crdbNodes := c.Spec().NodeCount - 1
-			promNode := crdbNodes + 1
 
 			promCfg := &prometheus.Config{}
-			promCfg.WithPrometheusNode(c.Node(promNode).InstallNodes()[0]).
-				WithNodeExporter(c.Range(1, c.Spec().NodeCount-1).InstallNodes()).
-				WithCluster(c.Range(1, c.Spec().NodeCount-1).InstallNodes()).
+			promCfg.WithPrometheusNode(c.WorkloadNode().InstallNodes()[0]).
+				WithNodeExporter(c.CRDBNodes().InstallNodes()).
+				WithCluster(c.CRDBNodes().InstallNodes()).
 				WithGrafanaDashboardJSON(grafana.ChangefeedAdmissionControlGrafana)
 			err := c.StartGrafana(ctx, t.L(), promCfg)
 			require.NoError(t, err)
+
+			startOpts := option.NewStartOpts(option.NoBackupSchedule)
+			startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs,
+				"--vmodule=io_load_listener=2")
+			roachtestutil.SetDefaultAdminUIPort(c, &startOpts.RoachprodOpts)
+			settings := install.MakeClusterSettings()
+			c.Start(ctx, t.L(), startOpts, settings, c.CRDBNodes())
+
 			promClient, err := clusterstats.SetupCollectorPromClient(ctx, c, t.L(), promCfg)
 			require.NoError(t, err)
 			statCollector := clusterstats.NewStatsCollector(ctx, promClient)
 
-			startOpts := option.DefaultStartOptsNoBackups()
-			startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs,
-				"--vmodule=io_load_listener=2")
-			roachtestutil.SetDefaultSQLPort(c, &startOpts.RoachprodOpts)
-			roachtestutil.SetDefaultAdminUIPort(c, &startOpts.RoachprodOpts)
-			settings := install.MakeClusterSettings()
-			c.Start(ctx, t.L(), startOpts, settings, c.Range(1, crdbNodes))
-			setAdmissionControl(ctx, t, c, true)
+			roachtestutil.SetAdmissionControl(ctx, t, c, true)
 			t.Status("running txn")
-			m := c.NewMonitor(ctx, c.Range(1, crdbNodes))
+			m := c.NewMonitor(ctx, c.CRDBNodes())
 			m.Go(func(ctx context.Context) error {
-				db := c.Conn(ctx, t.L(), crdbNodes)
+				db := c.Conn(ctx, t.L(), len(c.CRDBNodes()))
 				defer db.Close()
 				_, err := db.Exec(`CREATE TABLE test_table(id integer PRIMARY KEY, t TEXT)`)
 				if err != nil {
@@ -143,7 +136,7 @@ func registerIntentResolutionOverload(r registry.Registry) {
 					// We want to use the mean of the last 2m of data to avoid short-lived
 					// spikes causing failures.
 					if len(l0SublevelCount) >= sampleCountForL0Sublevel {
-						latestSampleMeanL0Sublevels := getMeanOverLastN(sampleCountForL0Sublevel, l0SublevelCount)
+						latestSampleMeanL0Sublevels := roachtestutil.GetMeanOverLastN(sampleCountForL0Sublevel, l0SublevelCount)
 						if latestSampleMeanL0Sublevels > subLevelThreshold {
 							t.Fatalf("sub-level mean %f over last %d iterations exceeded threshold", latestSampleMeanL0Sublevels, sampleCountForL0Sublevel)
 						}
@@ -172,20 +165,4 @@ func registerIntentResolutionOverload(r registry.Registry) {
 			m.Wait()
 		},
 	})
-}
-
-// Returns the mean over the last n samples. If n > len(items), returns the mean
-// over the entire items slice.
-func getMeanOverLastN(n int, items []float64) float64 {
-	count := n
-	if len(items) < n {
-		count = len(items)
-	}
-	sum := float64(0)
-	i := 0
-	for i < count {
-		sum += items[len(items)-1-i]
-		i++
-	}
-	return sum / float64(count)
 }

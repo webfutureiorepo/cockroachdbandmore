@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -39,7 +34,7 @@ func (p *planner) LookupNamespaceID(
 		ctx,
 		"crdb-internal-get-descriptor-id",
 		p.txn,
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		query,
 		parentID,
 		parentSchemaID,
@@ -79,7 +74,7 @@ func (p *planner) LookupZoneConfigByNamespaceID(
 
 // IsSystemTable implements tree.PrivilegedAccessor.
 func (p *planner) IsSystemTable(ctx context.Context, id int64) (bool, error) {
-	tbl, err := p.Descriptors().ByID(p.Txn()).Get().Table(ctx, catid.DescID(id))
+	tbl, err := p.Descriptors().ByIDWithoutLeased(p.Txn()).Get().Table(ctx, catid.DescID(id))
 	if err != nil {
 		return false, err
 	}

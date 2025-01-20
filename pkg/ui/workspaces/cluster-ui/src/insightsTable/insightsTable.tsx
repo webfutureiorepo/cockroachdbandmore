@@ -1,20 +1,23 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { Tooltip } from "@cockroachlabs/ui-components";
-import React from "react";
-import { ColumnDescriptor, SortedTable } from "../sortedtable";
 import classNames from "classnames/bind";
-import styles from "./insightsTable.module.scss";
-import { StatementLink } from "../statementsTable";
+import React from "react";
+import { Link } from "react-router-dom";
+
+import { Anchor } from "../anchor";
 import IdxRecAction from "../insights/indexActionBtn";
+import {
+  InsightExecEnum,
+  InsightRecommendation,
+  InsightType,
+} from "../insights/types";
+import { insightType } from "../insights/utils";
+import { ColumnDescriptor, SortedTable } from "../sortedtable";
+import { StatementLink } from "../statementsTable";
 import {
   clusterSettings,
   computeOrUseStmtSummary,
@@ -26,14 +29,8 @@ import {
   statementsRetries,
   stmtPerformanceRules,
 } from "../util";
-import { Anchor } from "../anchor";
-import { Link } from "react-router-dom";
-import {
-  InsightExecEnum,
-  InsightRecommendation,
-  InsightType,
-} from "../insights/types";
-import { insightType } from "../insights/utils";
+
+import styles from "./insightsTable.module.scss";
 
 const cx = classNames.bind(styles);
 
@@ -388,8 +385,8 @@ function actionCell(
             query.toLowerCase().includes("drop ")
               ? "ReplaceIndex"
               : query.toLowerCase().includes("alter ")
-              ? "AlterIndex"
-              : "CreateIndex"
+                ? "AlterIndex"
+                : "CreateIndex"
           }
           database={insightRec.database}
         />

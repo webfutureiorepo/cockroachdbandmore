@@ -1,18 +1,14 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -142,7 +138,7 @@ func (s *condensableSpanSet) maybeCondense(
 
 	// Sort the buckets by size and collapse from largest to smallest
 	// until total size of uncondensed spans no longer exceeds threshold.
-	sort.Slice(buckets, func(i, j int) bool { return buckets[i].bytes > buckets[j].bytes })
+	slices.SortFunc(buckets, func(a, b spanBucket) int { return -cmp.Compare(a.bytes, b.bytes) })
 	s.s = localSpans // reset to hold just the local spans; will add newly condensed and remainder
 	for _, bucket := range buckets {
 		// Condense until we get to half the threshold.

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -526,11 +521,13 @@ func mysqlTableToCockroach(
 		stmt.Defs = append(stmt.Defs, c)
 	}
 
-	semaCtx := tree.MakeSemaContext()
-	semaCtxPtr := &semaCtx
+	var semaCtxPtr *tree.SemaContext
 	// p is nil in some tests.
 	if p != nil && p.SemaCtx() != nil {
 		semaCtxPtr = p.SemaCtx()
+	} else {
+		semaCtx := tree.MakeSemaContext(nil /* resolver */)
+		semaCtxPtr = &semaCtx
 	}
 
 	// Bundle imports do not support user defined types, and so we nil out the

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo
 
@@ -414,12 +409,15 @@ type ScanFlags struct {
 	// NoFullScan disallows use of a full scan for scanning this table.
 	NoFullScan bool
 
+	// AvoidFullScan avoids use of a full scan for scanning this table.
+	AvoidFullScan bool
+
 	// ForceIndex forces the use of a specific index (specified in Index).
 	// ForceIndex and NoIndexJoin cannot both be set at the same time.
-	ForceIndex  bool
-	ForceZigzag bool
-	Direction   tree.Direction
-	Index       int
+	ForceIndex bool
+	// ForceInvertedIndex forces the use of an inverted index.
+	ForceInvertedIndex bool
+	ForceZigzag        bool
 
 	// When the optimizer is performing unique constraint or foreign key
 	// constraint check, we will temporarily disable the not visible index feature
@@ -431,6 +429,9 @@ type ScanFlags struct {
 	// true, optimizer will also generate equivalent memo group using the
 	// invisible index. Otherwise, optimizer will ignore the invisible indexes.
 	DisableNotVisibleIndex bool
+
+	Direction tree.Direction
+	Index     int
 
 	// ZigzagIndexes makes planner prefer a zigzag with particular indexes.
 	// ForceZigzag must also be true.
@@ -518,6 +519,11 @@ const (
 
 	// AllowOnlyMergeJoin has all "disallow" flags set except DisallowMergeJoin.
 	AllowOnlyMergeJoin = disallowAll ^ DisallowMergeJoin
+
+	// AllowAllJoinsIntoRight has all "disallow" flags set except
+	// DisallowHashJoinStoreRight, DisallowLookupJoinIntoRight,
+	// DisallowInvertedJoinIntoRight, and DisallowMergeJoin.
+	AllowAllJoinsIntoRight = disallowAll ^ DisallowHashJoinStoreRight ^ DisallowLookupJoinIntoRight ^ DisallowInvertedJoinIntoRight ^ DisallowMergeJoin
 )
 
 var joinFlagStr = map[JoinFlags]string{
@@ -539,9 +545,9 @@ func (jf JoinFlags) Empty() bool {
 	return jf == 0
 }
 
-// Has returns true if the given flag is set.
-func (jf JoinFlags) Has(flag JoinFlags) bool {
-	return jf&flag != 0
+// Has returns true if all of the given flags are set in the receiver.
+func (jf JoinFlags) Has(flags JoinFlags) bool {
+	return jf&flags == flags
 }
 
 func (jf JoinFlags) String() string {
@@ -697,17 +703,31 @@ type UDFDefinition struct {
 	CalledOnNullInput bool
 
 	// MultiColDataSource is true if the function may return multiple columns.
-	// This is only the case if the UDF returns a RECORD type and is used as a
+	// This is only the case if the UDF returns a composite type and is used as a
 	// data source.
 	MultiColDataSource bool
 
-	// IsRecursive indicates whether the UDF recursively calls itself. This
+	// IsRecursive indicates whether the routine recursively calls itself. This
 	// applies to direct as well as indirect recursive calls (mutual recursion).
 	IsRecursive bool
+
+	// TriggerFunc indicates whether the routine is a trigger function. It is only
+	// set for the outermost routine, and not for any sub-routines that implement
+	// the PL/pgSQL body.
+	TriggerFunc bool
+
+	// BlockStart indicates whether the routine marks the start of a PL/pgSQL
+	// block with an exception handler. This is used to determine when to
+	// initialize the common state held between sub-routines within the same
+	// block.
+	BlockStart bool
 
 	// RoutineType indicates whether this routine is a UDF, stored procedure, or
 	// builtin function.
 	RoutineType tree.RoutineType
+
+	// RoutineLang indicates the language of the routine (SQL or PL/pgSQL).
+	RoutineLang tree.RoutineLanguage
 
 	// Params is the list of columns representing parameters of the function. The
 	// i-th column in the list corresponds to the i-th parameter of the function.
@@ -723,6 +743,10 @@ type UDFDefinition struct {
 	// should be optimized if it is rebuilt. Each props corresponds to the RelExpr
 	// at the same position in Body.
 	BodyProps []*physical.Required
+
+	// BodyStmts, if set, is the string representation of each statement in
+	// Body. It is only populated when verbose tracing is enabled.
+	BodyStmts []string
 
 	// ExceptionBlock contains information needed for exception-handling when the
 	// body of this routine returns an error. It can be unset.
@@ -829,10 +853,16 @@ func (s *ScanPrivate) IsUnfiltered(md *opt.Metadata) bool {
 
 // IsFullIndexScan returns true if the ScanPrivate will produce all rows in the
 // index.
-func (s *ScanPrivate) IsFullIndexScan(md *opt.Metadata) bool {
+func (s *ScanPrivate) IsFullIndexScan() bool {
 	return (s.Constraint == nil || s.Constraint.IsUnconstrained()) &&
 		s.InvertedConstraint == nil &&
 		s.HardLimit == 0
+}
+
+// IsInvertedScan returns true if the index being scanned is an inverted
+// index.
+func (s *ScanPrivate) IsInvertedScan(md *opt.Metadata) bool {
+	return md.Table(s.Table).Index(s.Index).IsInverted()
 }
 
 // IsVirtualTable returns true if the table being scanned is a virtual table.
@@ -894,12 +924,14 @@ func (s *ScanPrivate) PartialIndexPredicate(md *opt.Metadata) FiltersExpr {
 // SetConstraint sets the constraint in the ScanPrivate and caches the exact
 // prefix. This function should always be used instead of modifying the
 // constraint directly.
-func (s *ScanPrivate) SetConstraint(evalCtx *eval.Context, c *constraint.Constraint) {
+func (s *ScanPrivate) SetConstraint(
+	ctx context.Context, evalCtx *eval.Context, c *constraint.Constraint,
+) {
 	s.Constraint = c
 	if c == nil {
 		s.ExactPrefix = 0
 	} else {
-		s.ExactPrefix = c.ExactPrefix(evalCtx)
+		s.ExactPrefix = c.ExactPrefix(ctx, evalCtx)
 	}
 }
 
@@ -1311,45 +1343,55 @@ type FKCascades []FKCascade
 type FKCascade struct {
 	FKConstraint cat.ForeignKeyConstraint
 
+	// HasBeforeTriggers is true if the mutation that is planned for the cascade
+	// will have BEFORE triggers.
+	HasBeforeTriggers bool
+
 	// Builder is an object that can be used as the "optbuilder" for the cascading
 	// query.
-	Builder CascadeBuilder
+	Builder PostQueryBuilder
 
 	// WithID identifies the buffer for the mutation input in the original
 	// expression tree. 0 if the cascade does not require input.
 	WithID opt.WithID
-
-	// OldValues are column IDs from the mutation input that correspond to the
-	// old values of the modified rows. The list maps 1-to-1 to foreign key
-	// columns. Empty if the cascade does not require input.
-	OldValues opt.ColList
-
-	// NewValues are column IDs from the mutation input that correspond to the
-	// new values of the modified rows. The list maps 1-to-1 to foreign key columns.
-	// It is empty if the mutation is a deletion. Empty if the cascade does not
-	// require input.
-	NewValues opt.ColList
 }
 
-// CascadeBuilder is an interface used to construct a cascading query for a
-// specific FK relation. For example: if we are deleting rows from a parent
-// table, after deleting the rows from the parent table this interface will be
-// used to build the corresponding deletion in the child table.
-type CascadeBuilder interface {
-	// Build constructs a cascading query that mutates the child table. The input
-	// is scanned using WithScan with the given WithID; oldValues and newValues
-	// columns correspond 1-to-1 to foreign key columns. For deletes, newValues is
-	// empty.
+// AfterTriggers stores metadata necessary for building a set of AFTER triggers.
+// AFTER triggers are built as needed, after the original query is executed.
+type AfterTriggers struct {
+	Triggers []cat.Trigger
+
+	// Builder is an object that can be used as the "optbuilder" for the cascading
+	// query.
+	Builder PostQueryBuilder
+
+	// WithID identifies the buffer for the mutation input in the original
+	// expression tree. It is always nonzero.
+	WithID opt.WithID
+}
+
+// PostQueryBuilder is an interface used to construct either a cascading query
+// for a specific FK relation, or an AFTER trigger action. For example: if we
+// are deleting rows from a parent table, after deleting the rows from the
+// parent table this interface will be used to build the corresponding deletion
+// in the child table.
+type PostQueryBuilder interface {
+	// Build constructs the plan for the cascading query or AFTER trigger action.
+	// The input is scanned using WithScan with the given WithID; colMap is
+	// provided to map from columns in the original memo to those in the new memo
+	// that is used for the With binding.
 	//
 	// The query does not need to be built in the same memo as the original query;
 	// the only requirement is that the mutation input columns
-	// (oldValues/newValues) are valid in the metadata.
+	// (oldValues/newValues, canaryCol) are valid in the metadata and have entries
+	// in the ColMap.
 	//
 	// The method does not mutate any captured state; it is ok to call Build
 	// concurrently (e.g. if the plan it originates from is cached and reused).
 	//
 	// Some cascades (delete fast path) don't require an input binding. In that
-	// case binding is 0, bindingProps is nil, and oldValues/newValues are empty.
+	// case binding is 0, bindingProps is nil, and colMap is empty. Triggers
+	// always require an input binding.
 	//
 	// Note: factory is always *norm.Factory; it is an interface{} only to avoid
 	// circular package dependencies.
@@ -1361,7 +1403,7 @@ type CascadeBuilder interface {
 		factory interface{},
 		binding opt.WithID,
 		bindingProps *props.Relational,
-		oldValues, newValues opt.ColList,
+		colMap opt.ColMap,
 	) (RelExpr, error)
 }
 
@@ -1373,35 +1415,35 @@ const (
 	// NoStreaming means that the grouping columns have no useful order, so a
 	// hash aggregator should be used.
 	NoStreaming GroupingOrderType = iota
-	// PartialStreaming means that the grouping columns are partially ordered, so
-	// some optimizations can be done during aggregation.
+	// PartialStreaming means that the grouping columns are partially ordered,
+	// so some optimizations can be done during aggregation.
 	PartialStreaming
 	// Streaming means that the grouping columns are fully ordered.
 	Streaming
 )
 
-// GroupingOrderType calculates how many ordered columns that the grouping
-// and input columns have in common and returns NoStreaming if there are none, Streaming if
-// all columns match, and PartialStreaming if only some match. It is similar to
-// StreamingGroupingColOrdering, but does not build an ordering.
+// GroupingOrderType calculates how many ordered columns that the grouping and
+// input columns have in common and returns NoStreaming if there are none,
+// Streaming if all columns match, and PartialStreaming if only some match. It
+// is similar to StreamingGroupingColOrdering, but does not build an ordering.
 func (g *GroupingPrivate) GroupingOrderType(required *props.OrderingChoice) GroupingOrderType {
 	inputOrdering := required.Intersection(&g.Ordering)
-	count := 0
+	var orderedGroupingCols opt.ColSet
 	for i := range inputOrdering.Columns {
 		// Get any grouping column from the set. Normally there would be at most one
 		// because we have rules that remove redundant grouping columns.
 		cols := inputOrdering.Group(i).Intersection(g.GroupingCols)
-		_, ok := cols.Next(0)
+		c, ok := cols.Next(0)
 		if !ok {
 			// This group refers to a column that is not a grouping column.
 			// The rest of the ordering is not useful.
 			break
 		}
-		count++
+		orderedGroupingCols.Add(c)
 	}
-	if count == g.GroupingCols.Len() || g.GroupingCols.Len() == 0 {
+	if orderedGroupingCols.Len() == g.GroupingCols.Len() || g.GroupingCols.Len() == 0 {
 		return Streaming
-	} else if count == 0 {
+	} else if orderedGroupingCols.Len() == 0 {
 		return NoStreaming
 	}
 	return PartialStreaming

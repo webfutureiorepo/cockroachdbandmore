@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package config
 
@@ -333,15 +328,15 @@ func (s *SystemConfig) getZoneConfigForKey(
 	return id, s.DefaultZoneConfig, nil
 }
 
-// GetSpanConfigForKey looks of the span config for the given key. It's part of
-// spanconfig.StoreReader interface. Note that it is only usable for the system
-// tenant config.
+// GetSpanConfigForKey looks of the span config for the given key and the bounds
+// that span the configuration applies to. It's part of spanconfig.StoreReader
+// interface. Note that it is only usable for the system tenant config.
 func (s *SystemConfig) GetSpanConfigForKey(
 	ctx context.Context, key roachpb.RKey,
-) (roachpb.SpanConfig, error) {
+) (roachpb.SpanConfig, roachpb.Span, error) {
 	id, zone, err := s.getZoneConfigForKey(keys.SystemSQLCodec, key)
 	if err != nil {
-		return roachpb.SpanConfig{}, err
+		return roachpb.SpanConfig{}, roachpb.Span{}, err
 	}
 	spanConfig := zone.AsSpanConfig()
 	if id <= keys.MaxReservedDescID {
@@ -354,7 +349,8 @@ func (s *SystemConfig) GetSpanConfigForKey(
 		// applicable to user tables.
 		spanConfig.GCPolicy.IgnoreStrictEnforcement = true
 	}
-	return spanConfig, nil
+	prefix := keys.SystemSQLCodec.TablePrefix(uint32(id))
+	return spanConfig, roachpb.Span{Key: prefix, EndKey: prefix.PrefixEnd()}, nil
 }
 
 // DecodeKeyIntoZoneIDAndSuffix figures out the zone that the key belongs to.

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
@@ -146,6 +142,13 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	// instead of installing them on every run.
 	c.Run(ctx, option.WithNodes(c.All()), "sh", "-c", `"sudo apt-get -y update > logs/apt-upgrade.log 2>&1"`)
 	c.Run(ctx, option.WithNodes(c.All()), "sh", "-c", `"sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade -o Dpkg::Options::='--force-confold' -o DPkg::options::='--force-confdef' > logs/apt-upgrade.log 2>&1"`)
+
+	// Jepsen artifact collection requires bzip2, which is not installed
+	// on the base image.
+	t.L().Printf("installing bzip2")
+	if err := c.Install(ctx, t.L(), c.All(), "bzip2"); err != nil {
+		t.Fatal(err)
+	}
 
 	// TODO(bdarnell): copying the raw binary and compressing it on the
 	// other side is silly, but this lets us avoid platform-specific
@@ -284,17 +287,19 @@ func (j jepsenConfig) startTest(
 			}
 			t.Fatalf("error installing Jepsen deps: %+v", err)
 		}
-		go func() {
+		t.Go(func(context.Context, *logger.Logger) error {
 			errCh <- run("bash", "-e", "-c", fmt.Sprintf(
 				`"cd /mnt/data1/jepsen/cockroachdb && set -eo pipefail && ~/lein run %s > invoke.log 2>&1"`,
 				testArgs))
-		}()
+			return nil
+		})
 	} else {
-		go func() {
+		t.Go(func(context.Context, *logger.Logger) error {
 			errCh <- run("bash", "-e", "-c", fmt.Sprintf(
 				`"cd /mnt/data1/jepsen/cockroachdb && set -eo pipefail && java -jar %s %s > invoke.log 2>&1"`,
 				j.binaryName(), testArgs))
-		}()
+			return nil
+		})
 	}
 	return errCh
 }

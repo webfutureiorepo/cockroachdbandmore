@@ -1,18 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-// "make test" would normally test this file, but it should only be tested
-// within docker compose.
-
-//go:build compose
-// +build compose
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package compare
 
@@ -21,14 +10,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/cmpconn"
+	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/cockroach/pkg/internal/sqlsmith"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/jackc/pgx/v4"
@@ -41,26 +33,27 @@ var (
 )
 
 func TestCompare(t *testing.T) {
+	if os.Getenv("COCKROACH_RUN_COMPOSE_COMPARE") == "" {
+		skip.IgnoreLint(t, "COCKROACH_RUN_COMPOSE_COMPARE not set")
+	}
 	// N.B. randomized SQL workload performed by this test may require CCL
 	var license = envutil.EnvOrDefaultString("COCKROACH_DEV_LICENSE", "")
 	require.NotEmptyf(t, license, "COCKROACH_DEV_LICENSE must be set")
+
+	// Initialize GEOS libraries so that the test can use geospatial types.
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = geos.EnsureInit(geos.EnsureInitErrorDisplayPrivate, path.Join(workingDir, "lib"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	uris := map[string]struct {
 		addr string
 		init []string
 	}{
-		"postgres": {
-			addr: "postgresql://postgres@postgres:5432/postgres",
-			init: []string{
-				"drop schema if exists public cascade",
-				"create schema public",
-				"CREATE EXTENSION IF NOT EXISTS postgis",
-				"CREATE EXTENSION IF NOT EXISTS postgis_topology",
-				"CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;",
-				"CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";",
-				"CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-			},
-		},
 		"cockroach1": {
 			addr: "postgresql://root@cockroach1:26257/postgres?sslmode=disable",
 			init: []string{
@@ -85,22 +78,6 @@ func TestCompare(t *testing.T) {
 		},
 	}
 	configs := map[string]testConfig{
-		"postgres": {
-			setup:           sqlsmith.Setups[sqlsmith.RandTableSetupName],
-			setupMutators:   []randgen.Mutator{randgen.PostgresCreateTableMutator},
-			opts:            []sqlsmith.SmitherOption{sqlsmith.PostgresMode()},
-			ignoreSQLErrors: true,
-			conns: []testConn{
-				{
-					name:     "cockroach1",
-					mutators: []randgen.Mutator{},
-				},
-				{
-					name:     "postgres",
-					mutators: []randgen.Mutator{randgen.PostgresMutator},
-				},
-			},
-		},
 		"mutators": {
 			setup:           sqlsmith.Setups[sqlsmith.RandTableSetupName],
 			opts:            []sqlsmith.SmitherOption{sqlsmith.CompareMode()},

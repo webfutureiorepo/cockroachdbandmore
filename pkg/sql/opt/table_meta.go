@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opt
 
@@ -446,7 +441,7 @@ func (tm *TableMeta) OrigCheckConstraintsStats(
 // CacheIndexPartitionLocalities caches locality prefix sorters in the table
 // metadata for indexes that have a mix of local and remote partitions. It can
 // be called multiple times if necessary to update with new indexes.
-func (tm *TableMeta) CacheIndexPartitionLocalities(evalCtx *eval.Context) {
+func (tm *TableMeta) CacheIndexPartitionLocalities(ctx context.Context, evalCtx *eval.Context) {
 	tab := tm.Table
 	if cap(tm.indexPartitionLocalities) < tab.IndexCount() {
 		tm.indexPartitionLocalities = make([]partition.PrefixSorter, tab.IndexCount())
@@ -455,7 +450,7 @@ func (tm *TableMeta) CacheIndexPartitionLocalities(evalCtx *eval.Context) {
 	for indexOrd, n := 0, tab.IndexCount(); indexOrd < n; indexOrd++ {
 		index := tab.Index(indexOrd)
 		if localPartitions, ok := partition.HasMixOfLocalAndRemotePartitions(evalCtx, index); ok {
-			ps := partition.GetSortedPrefixes(index, localPartitions, evalCtx)
+			ps := partition.GetSortedPrefixes(ctx, index, localPartitions, evalCtx)
 			tm.indexPartitionLocalities[indexOrd] = ps
 		}
 	}

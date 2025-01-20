@@ -647,6 +647,7 @@ explain(shape):
     └── • scan
           table: abc@abc_pkey
           spans: 1+ spans
+          locking strength: for update
 explain(gist):
 • update
 │ table: abc
@@ -679,6 +680,7 @@ explain(shape):
     └── • scan
           table: abc@abc_pkey
           spans: 1+ spans
+          locking strength: for update
 explain(gist):
 • upsert
 │ into: abc()
@@ -708,6 +710,7 @@ explain(shape):
 └── • scan
       table: foo@foo_pkey
       spans: FULL SCAN
+      locking strength: for update
 explain(gist):
 • delete
 │ from: foo
@@ -731,6 +734,7 @@ explain(shape):
 └── • scan
       table: foo@foo_pkey
       spans: 1+ spans
+      locking strength: for update
 explain(gist):
 • delete
 │ from: foo
@@ -918,7 +922,7 @@ explain(shape):
 └── • subquery
     │ id: @S1
     │ original sql: INSERT INTO abc SELECT a, b, c FROM abc RETURNING a
-    │ exec mode: all rows
+    │ exec mode: discard all rows
     │
     └── • buffer
         │ label: buffer 1

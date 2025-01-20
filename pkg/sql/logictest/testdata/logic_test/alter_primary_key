@@ -1,3 +1,5 @@
+# LogicTest: !metamorphic-batch-sizes
+
 statement ok
 CREATE TABLE t (x INT PRIMARY KEY, y INT NOT NULL, z INT NOT NULL, w INT, INDEX i (x), INDEX i2 (z))
 
@@ -581,7 +583,7 @@ statement ok
 CREATE TABLE t (x INT PRIMARY KEY, y INT NOT NULL)
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
@@ -599,7 +601,7 @@ statement ok
 CREATE TABLE t (x INT PRIMARY KEY, y INT NOT NULL)
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
@@ -692,7 +694,7 @@ statement ok
 CREATE TABLE t (x INT NOT NULL)
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t ADD COLUMN y INT
@@ -767,7 +769,7 @@ statement ok
 CREATE TABLE t (x INT PRIMARY KEY, y INT NOT NULL, FAMILY (x), FAMILY (y))
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT "t_pkey"
@@ -785,7 +787,7 @@ statement ok
 CREATE TABLE t (x INT PRIMARY KEY, y INT NOT NULL, FAMILY (x), FAMILY (y))
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT "t_pkey"
@@ -816,7 +818,7 @@ statement ok
 CREATE TABLE t (x INT PRIMARY KEY, y INT NOT NULL)
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -828,7 +830,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -840,7 +842,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -852,7 +854,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -867,7 +869,7 @@ ROLLBACK
 # as their first operation don't succeed either.
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -879,7 +881,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -891,7 +893,7 @@ statement ok
 ROLLBACK
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t DROP CONSTRAINT t_pkey
@@ -914,7 +916,7 @@ statement ok
 CREATE TABLE t2 (x INT)
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 ALTER TABLE t1 DROP CONSTRAINT t1_pkey
@@ -945,7 +947,7 @@ statement ok
 DROP TABLE IF EXISTS t CASCADE
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 CREATE TABLE t (x INT NOT NULL, y INT, FAMILY (x, y), INDEX (y))
@@ -982,7 +984,7 @@ statement ok
 DROP TABLE IF EXISTS t
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 CREATE TABLE t (x INT NOT NULL, y INT, FAMILY (x, y), INDEX (y))
@@ -1020,7 +1022,7 @@ DROP TABLE IF EXISTS t
 skip_on_retry
 
 statement ok
-BEGIN
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement ok
 CREATE TABLE t (
@@ -1866,7 +1868,10 @@ statement ok
 CREATE TABLE t_90836(a INT NOT NULL, b INT NOT NULL, CONSTRAINT "constraint" PRIMARY KEY (a));
 
 statement ok
-ALTER TABLE t_90836 DROP CONSTRAINT "constraint"; ALTER TABLE t_90836 ADD CONSTRAINT "constraint" PRIMARY KEY (b);
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+ALTER TABLE t_90836 DROP CONSTRAINT "constraint";
+ALTER TABLE t_90836 ADD CONSTRAINT "constraint" PRIMARY KEY (b);
+COMMIT;
 
 
 # The following sub test validates a primary key swap,
@@ -1970,5 +1975,76 @@ SELECT index_name, column_name, direction FROM [SHOW INDEXES FROM t_114436] ORDE
 ----
 idx j ASC
 t_114436_pkey j ASC
+
+subtest end
+
+subtest column_not_indexable
+
+statement ok
+CREATE TABLE tab_122871 (
+  col0_4         TSVECTOR NOT NULL,
+  col0_6         OID,
+  col0_18        REGTYPE,
+  PRIMARY KEY (col0_18 DESC)
+);
+
+statement error column col0_4 is of type tsvector and thus is not indexable
+ALTER TABLE tab_122871 ALTER PRIMARY KEY USING COLUMNS (col0_4);
+
+subtest end
+
+# In #123017 we noticed that ALTER PRIMARY KEY does not work correctly
+# if there are either view or function references to an index due to validation
+# errors in both the legacy and declarative schema changer. Long term we can
+# support this in the declarative schema changer.
+subtest alter_primary_key_block_func_view_ref
+
+statement ok
+CREATE TABLE t_view_func_ref_123017 (
+    a STRING NOT NULL,
+    b INT2,
+    UNIQUE (b ASC)
+);
+CREATE FUNCTION f_123017() RETURNS RECORD LANGUAGE SQL AS $$
+  SELECT NULL FROM t_view_func_ref_123017@t_view_func_ref_123017_b_key
+$$;
+CREATE VIEW t_view_123017 AS (SELECT b FROM t_view_func_ref_123017@t_view_func_ref_123017_b_key);
+
+statement error pq: unimplemented: table \"t_view_func_ref_123017\" has an index \(t_view_func_ref_123017_b_key\) that is still referenced by \"f_123017\"
+ALTER TABLE t_view_func_ref_123017 ALTER PRIMARY KEY USING COLUMNS (a);
+
+statement ok
+DROP FUNCTION f_123017;
+
+statement error pq: unimplemented: table \"t_view_func_ref_123017\" has an index \(t_view_func_ref_123017_b_key\) that is still referenced by \"t_view_123017\"
+ALTER TABLE t_view_func_ref_123017 ALTER PRIMARY KEY USING COLUMNS (a);
+
+statement ok
+DROP VIEW t_view_123017;
+
+statement ok
+ALTER TABLE t_view_func_ref_123017 ALTER PRIMARY KEY USING COLUMNS (a);
+
+subtest end
+
+subtest special_characters
+
+statement ok
+CREATE TABLE table_w0_66 ( "Abc" INT4 PRIMARY KEY, "ab\f" INT2 NOT NULL, FAMILY ("Abc", "ab\f"));
+
+statement ok
+ALTER TABLE public.table_w0_66 ALTER PRIMARY KEY USING COLUMNS ("Abc", "ab\f") USING HASH;
+
+query T
+SELECT create_statement FROM [SHOW CREATE TABLE public.table_w0_66]
+----
+CREATE TABLE public.table_w0_66 (
+  "Abc" INT4 NOT NULL,
+  "ab\f" INT2 NOT NULL,
+  "crdb_internal_Abc_ab\f_shard_16" INT8 NOT VISIBLE NOT NULL AS (mod(fnv32(md5(crdb_internal.datums_to_bytes("Abc", "ab\f"))), 16:::INT8)) VIRTUAL,
+  CONSTRAINT table_w0_66_pkey PRIMARY KEY ("Abc" ASC, "ab\f" ASC) USING HASH WITH (bucket_count=16),
+  UNIQUE INDEX "table_w0_66_Abc_key" ("Abc" ASC),
+  FAMILY "fam_0_Abc_ab\f" ("Abc", "ab\f")
+)
 
 subtest end

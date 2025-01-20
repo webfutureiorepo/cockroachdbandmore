@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -43,7 +38,7 @@ func TestJSONFormats(t *testing.T) {
 
 	ctx := context.Background()
 	sysIDPayload := testIDPayload{tenantID: "1"}
-	ctx = context.WithValue(ctx, serverident.ServerIdentificationContextKey{}, sysIDPayload)
+	ctx = serverident.ContextWithServerIdentification(ctx, sysIDPayload)
 	ctx = logtags.AddTag(ctx, "noval", nil)
 	ctx = logtags.AddTag(ctx, "s", "1")
 	ctx = logtags.AddTag(ctx, "long", "2")

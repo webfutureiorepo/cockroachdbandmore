@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multiregionccl_test
 
@@ -35,7 +32,7 @@ import (
 func TestEnsureLocalReadsOnGlobalTables(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.UnderStressRace(t, "https://github.com/cockroachdb/cockroach/issues/102798#issuecomment-1543852311")
+	skip.UnderRace(t, "https://github.com/cockroachdb/cockroach/issues/102798#issuecomment-1543852311")
 
 	// ensureOnlyLocalReads looks at a trace to ensure that reads were served
 	// locally. It returns true if the read was served as a follower read.
@@ -123,15 +120,17 @@ func TestEnsureLocalReadsOnGlobalTables(t *testing.T) {
 
 			// Check that the cache was indeed populated.
 			cache := tc.Server(i).DistSenderI().(*kvcoord.DistSender).RangeDescriptorCache()
-			entry := cache.GetCached(context.Background(), tablePrefix, false /* inverted */)
-			require.NotNil(t, entry.Lease().Empty())
-			require.NotNil(t, entry)
+			entry, err := cache.TestingGetCached(
+				context.Background(), tablePrefix, false /* inverted */, roachpb.LAG_BY_CLUSTER_SETTING,
+			)
+			require.NoError(t, err)
+			require.False(t, entry.Lease.Empty())
 
-			if expected, got := roachpb.LEAD_FOR_GLOBAL_READS, entry.ClosedTimestampPolicy(); got != expected {
+			if expected, got := roachpb.LEAD_FOR_GLOBAL_READS, entry.ClosedTimestampPolicy; got != expected {
 				return errors.Newf("expected closedts policy %s, got %s", expected, got)
 			}
 
-			isLeaseHolder = entry.Lease().Replica.NodeID == tc.Server(i).NodeID()
+			isLeaseHolder = entry.Lease.Replica.NodeID == tc.Server(i).NodeID()
 			return nil
 		})
 

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -74,10 +70,10 @@ func runSampler(
 	// non-zero, the processor will hit this limit and disable sampling.
 	flowCtx.Cfg.TestingKnobs.MemoryLimitBytes = memLimitBytes
 
+	ctx := execversion.TestingWithLatestCtx
 	spec := &execinfrapb.SamplerSpec{
 		Sketches: []execinfrapb.SketchSpec{
 			{
-				SketchType:        execinfrapb.SketchType_HLL_PLUS_PLUS_V1,
 				Columns:           []uint32{0},
 				GenerateHistogram: true,
 			},
@@ -86,12 +82,12 @@ func runSampler(
 		MinSampleSize: uint32(minNumSamples),
 	}
 	p, err := newSamplerProcessor(
-		context.Background(), &flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{},
+		ctx, &flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Run(context.Background(), out)
+	p.Run(ctx, out)
 
 	// Verify we have expectedSamples distinct rows.
 	res := make([]int, 0, numSamples)
@@ -364,34 +360,32 @@ func TestSamplerSketch(t *testing.T) {
 			Mon:     evalCtx.TestingMon,
 		}
 
+		ctx := execversion.TestingWithLatestCtx
 		spec := &execinfrapb.SamplerSpec{
 			SampleSize: uint32(1),
 			Sketches: []execinfrapb.SketchSpec{
 				{
-					SketchType: execinfrapb.SketchType_HLL_PLUS_PLUS_V1,
 					Columns: []uint32{
 						0,
 					},
 				},
 				{
-					SketchType: execinfrapb.SketchType_HLL_PLUS_PLUS_V1,
 					Columns: []uint32{
 						1,
 					},
 				},
 				{
-					SketchType: execinfrapb.SketchType_HLL_PLUS_PLUS_V1,
 					Columns: []uint32{
 						0, 1,
 					},
 				},
 			},
 		}
-		p, err := newSamplerProcessor(context.Background(), &flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{})
+		p, err := newSamplerProcessor(ctx, &flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		p.Run(context.Background(), out)
+		p.Run(ctx, out)
 
 		// Collect the rows, excluding metadata.
 		rows = rows[:0]

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -61,6 +56,11 @@ func declareKeysRecomputeStats(
 	return nil
 }
 
+// RecomputeStatsMismatchError indicates that the start key provided in the
+// request arguments doesn't match the start key of the range descriptor. This
+// can happen when a concurrent merge subsumed this range into another one.
+var RecomputeStatsMismatchError = errors.New("descriptor mismatch; range likely merged")
+
 // RecomputeStats recomputes the MVCCStats stored for this range and adjust them accordingly,
 // returning the MVCCStats delta obtained in the process.
 func RecomputeStats(
@@ -69,7 +69,7 @@ func RecomputeStats(
 	desc := cArgs.EvalCtx.Desc()
 	args := cArgs.Args.(*kvpb.RecomputeStatsRequest)
 	if !desc.StartKey.AsRawKey().Equal(args.Key) {
-		return result.Result{}, errors.New("descriptor mismatch; range likely merged")
+		return result.Result{}, RecomputeStatsMismatchError
 	}
 	dryRun := args.DryRun
 

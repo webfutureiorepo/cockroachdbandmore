@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package keys manages the construction of keys for CockroachDB's key-value
 // layer.
@@ -181,13 +176,14 @@ var _ = [...]interface{}{
 	//   range as a whole. Though they are replicated, they are unaddressable.
 	//   Typical examples are MVCC stats and the abort span. They all share
 	//   `LocalRangeIDPrefix` and `LocalRangeIDReplicatedInfix`.
-	AbortSpanKey, // "abc-"
+	AbortSpanKey,             // "abc-"
+	RangeGCThresholdKey,      // "lgc-"
+	RangeAppliedStateKey,     // "rask"
+	RangeForceFlushKey,       // "rffk"
+	RangeLeaseKey,            // "rll-"
+	RangePriorReadSummaryKey, // "rprs"
 	ReplicatedSharedLocksTransactionLatchingKey, // "rsl-"
-	RangeGCThresholdKey,                         // "lgc-"
-	RangeAppliedStateKey,                        // "rask"
-	RangeLeaseKey,                               // "rll-"
-	RangePriorReadSummaryKey,                    // "rprs"
-	RangeVersionKey,                             // "rver"
+	RangeVersionKey, // "rver"
 
 	//   2. Unreplicated range-ID local keys: These contain metadata that
 	//   pertain to just one replica of a range. They are unreplicated and
@@ -218,6 +214,9 @@ var _ = [...]interface{}{
 	StoreIdentKey,                    // "iden"
 	StoreUnsafeReplicaRecoveryKey,    // "loqr"
 	StoreNodeTombstoneKey,            // "ntmb"
+	StoreLivenessRequesterMetaKey,    // "slrm"
+	StoreLivenessSupportForKey,       // "slsf"
+	StoreLivenessSupporterMetaKey,    // "slsm"
 	StoreCachedSettingsKey,           // "stng"
 	StoreLastUpKey,                   // "uptm"
 
@@ -243,14 +242,16 @@ var _ = [...]interface{}{
 	// 	2. System keys: This is where we store global, system data which is
 	// 	replicated across the cluster.
 	SystemPrefix,
-	NodeLivenessPrefix,     // "\x00liveness-"
-	BootstrapVersionKey,    // "bootstrap-version"
-	NodeIDGenerator,        // "node-idgen"
-	RangeIDGenerator,       // "range-idgen"
-	StatusPrefix,           // "status-"
-	StatusNodePrefix,       // "status-node-"
-	StoreIDGenerator,       // "store-idgen"
-	StartupMigrationPrefix, // "system-version/"
+	NodeLivenessPrefix,              // "\x00liveness-"
+	BootstrapVersionKey,             // "bootstrap-version"
+	ClusterInitGracePeriodTimestamp, // "lic-gpi-ts"
+	TrialLicenseExpiry,              // "lic-tle"
+	NodeIDGenerator,                 // "node-idgen"
+	RangeIDGenerator,                // "range-idgen"
+	StatusPrefix,                    // "status-"
+	StatusNodePrefix,                // "status-node-"
+	StoreIDGenerator,                // "store-idgen"
+	StartupMigrationPrefix,          // "system-version/"
 	// StartupMigrationLease,  // "system-version/lease" - removed in 23.1
 	TimeseriesPrefix,       // "tsd"
 	SystemSpanConfigPrefix, // "xffsys-scfg"

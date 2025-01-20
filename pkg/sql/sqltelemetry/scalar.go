@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqltelemetry
 
@@ -26,9 +21,9 @@ func BuiltinCounter(name, signature string) telemetry.Counter {
 
 func init() {
 	builtinsregistry.AddSubscription(func(name string, _ *tree.FunctionProperties, os []tree.Overload) {
-		for _, o := range os {
-			c := BuiltinCounter(name, o.Signature(false))
-			*o.OnTypeCheck = func() {
+		for i := range os {
+			c := BuiltinCounter(name, os[i].Signature(false))
+			os[i].OnTypeCheck = func() {
 				telemetry.Inc(c)
 			}
 		}

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // Processor definitions for distributed SQL APIs. See
 // docs/RFCS/distributed_sql.md.
@@ -22,6 +17,8 @@ option go_package = "github.com/cockroachdb/cockroach/pkg/sql/execinfrapb";
 import "sql/catalog/descpb/structured.proto";
 import "gogoproto/gogo.proto";
 
+// TODO(yuzefovich): this can be removed once compatibility with 24.3 is no
+// longer needed.
 enum SketchType {
   // This is the github.com/axiomhq/hyperloglog binary format (as of commit
   // 730eea1) for a sketch with precision 14. Values are encoded using their key
@@ -194,4 +191,12 @@ message SampleAggregatorSpec {
   // If true, calculate partial table statistics on the extreme values of
   // the previous full table stat.
   optional bool using_extremes = 11 [(gogoproto.nullable) = false];
+
+  // The number of indexes expected to be scanned as part of this stats
+  // collection. Used for progress reporting.
+  optional uint64 num_indexes = 12 [(gogoproto.nullable) = false];
+
+  // The number of indexes that have been scanned so far. Used for progress
+  // reporting.
+  optional uint64 cur_index = 13 [(gogoproto.nullable) = false];
 }

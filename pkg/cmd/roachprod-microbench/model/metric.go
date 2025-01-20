@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 
 package model
@@ -48,3 +43,18 @@ type Comparison struct {
 	Delta          float64
 	FormattedDelta string
 }
+
+// ComparisonResult holds the comparison results for a specific metric.
+type ComparisonResult struct {
+	Metric      *Metric
+	Comparisons []*ComparisonDetail
+}
+
+// ComparisonDetail holds the details of a single comparison.
+type ComparisonDetail struct {
+	BenchmarkName string
+	Comparison    *Comparison
+}
+
+// ComparisonResultsMap holds the comparison results for all package groups.
+type ComparisonResultsMap map[string][]*ComparisonResult

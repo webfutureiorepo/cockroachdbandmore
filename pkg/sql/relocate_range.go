@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -22,9 +17,9 @@ import (
 )
 
 type relocateRange struct {
+	singleInputPlanNode
 	optColumnsSlot
 
-	rows            planNode
 	subjectReplicas tree.RelocateSubject
 	toStoreID       tree.TypedExpr
 	fromStoreID     tree.TypedExpr
@@ -94,10 +89,10 @@ func (n *relocateRange) startExec(params runParams) (err error) {
 }
 
 func (n *relocateRange) Next(params runParams) (bool, error) {
-	if ok, err := n.rows.Next(params); err != nil || !ok {
+	if ok, err := n.input.Next(params); err != nil || !ok {
 		return ok, err
 	}
-	datum := n.rows.Values()[0]
+	datum := n.input.Values()[0]
 	if datum == tree.DNull {
 		return true, nil
 	}
@@ -131,7 +126,7 @@ func (n *relocateRange) Values() tree.Datums {
 }
 
 func (n *relocateRange) Close(ctx context.Context) {
-	n.rows.Close(ctx)
+	n.input.Close(ctx)
 }
 
 func (n *relocateRange) relocate(params runParams, rangeDesc roachpb.RangeDescriptor) error {

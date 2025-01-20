@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -23,6 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -35,15 +32,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
+	"github.com/cockroachdb/crlib/crtime"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 func TestLastUpdateTimesMap(t *testing.T) {
@@ -64,7 +60,7 @@ func TestLastUpdateTimesMap(t *testing.T) {
 
 	t4 := t3.Add(time.Second)
 	descs = append(descs, []roachpb.ReplicaDescriptor{{ReplicaID: 5}, {ReplicaID: 6}}...)
-	prs := map[uint64]tracker.Progress{
+	prs := map[raftpb.PeerID]tracker.Progress{
 		1: {State: tracker.StateReplicate}, // should be updated
 		// 2 is missing because why not
 		3: {State: tracker.StateProbe},     // should be ignored
@@ -87,9 +83,9 @@ func Test_handleRaftReadyStats_SafeFormat(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	now := timeutil.Now()
-	ts := func(s int) time.Time {
-		return now.Add(time.Duration(s) * time.Second)
+	now := crtime.NowMono()
+	ts := func(s int) crtime.Mono {
+		return now + crtime.Mono(time.Duration(s)*time.Second)
 	}
 
 	stats := handleRaftReadyStats{
@@ -103,6 +99,8 @@ func Test_handleRaftReadyStats_SafeFormat(t *testing.T) {
 				numEntriesProcessed:      2,
 				numEntriesProcessedBytes: 3,
 				numEmptyEntries:          5,
+				numAddSST:                3,
+				numAddSSTCopies:          1,
 			},
 			stateAssertions:      4,
 			numConfChangeEntries: 6,

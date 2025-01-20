@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -40,6 +35,7 @@ func TestDemoLocality(t *testing.T) {
 	// asset loader that is set by default in tests will not be able to
 	// find the certs that demo sets up.
 	securityassets.ResetLoader()
+	defer ResetTest()
 
 	// Using datadriven allows TESTFLAGS=-rewrite.
 	datadriven.RunTest(t, datapathutils.TestDataPath(t, "demo", "test_demo_locality"), func(t *testing.T, td *datadriven.TestData) string {

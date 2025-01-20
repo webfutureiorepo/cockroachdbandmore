@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package cli is the command-line library used by the cockroach binary and
 // other utilities. See README.md.
@@ -35,10 +30,12 @@ import (
 	_ "github.com/cockroachdb/cockroach/pkg/workload/bank"       // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/bulkingest" // registers workloads
 	workloadcli "github.com/cockroachdb/cockroach/pkg/workload/cli"
+	_ "github.com/cockroachdb/cockroach/pkg/workload/debug"     // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/examples"  // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/insights"  // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/kv"        // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/movr"      // registers workloads
+	_ "github.com/cockroachdb/cockroach/pkg/workload/sqlstats"  // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/tpcc"      // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/tpch"      // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/ttlbench"  // registers workloads
@@ -265,11 +262,12 @@ func init() {
 		// TODO(pmattis): stats
 		demoCmd,
 		convertURLCmd,
-		genCmd,
+		GenCmd,
 		versionCmd,
 		DebugCmd,
 		sqlfmtCmd,
 		workloadCmd,
+		encodeURICmd,
 	)
 }
 

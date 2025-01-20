@@ -1,16 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stats
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/bits"
@@ -33,6 +29,7 @@ import (
 // tests that each can be converted to a quantile function and back without
 // changing.
 func TestRandomQuantileRoundTrip(t *testing.T) {
+	ctx := context.Background()
 	colTypes := []*types.T{
 		// Types not in types.Scalar.
 		types.Int4,
@@ -45,13 +42,13 @@ func TestRandomQuantileRoundTrip(t *testing.T) {
 		if canMakeQuantile(HistVersion, colType) {
 			for i := 0; i < 5; i++ {
 				t.Run(fmt.Sprintf("%v/%v", colType.Name(), i), func(t *testing.T) {
-					hist, rowCount := randHist(colType, rng)
+					hist, rowCount := randHist(ctx, colType, rng)
 					qfun, err := makeQuantile(hist, rowCount)
 					if err != nil {
 						t.Errorf("seed: %v unexpected makeQuantile error: %v", seed, err)
 						return
 					}
-					hist2, err := qfun.toHistogram(colType, rowCount)
+					hist2, err := qfun.toHistogram(ctx, colType, rowCount)
 					if err != nil {
 						t.Errorf("seed: %v unexpected quantile.toHistogram error: %v", seed, err)
 						return
@@ -68,7 +65,7 @@ func TestRandomQuantileRoundTrip(t *testing.T) {
 // randHist makes a random histogram of the specified type, with [1, 200]
 // buckets. Not all types are supported. Every bucket will have NumEq > 0 but
 // could have NumRange == 0.
-func randHist(colType *types.T, rng *rand.Rand) (histogram, float64) {
+func randHist(ctx context.Context, colType *types.T, rng *rand.Rand) (histogram, float64) {
 	numBuckets := rng.Intn(200) + 1
 	buckets := make([]cat.HistogramBucket, numBuckets)
 	bounds := randBounds(colType, rng, numBuckets)
@@ -96,9 +93,9 @@ func randHist(colType *types.T, rng *rand.Rand) (histogram, float64) {
 	// Set DistinctRange in all buckets.
 	var compareCtx *eval.Context
 	for i := 1; i < len(buckets); i++ {
-		lowerBound := getNextLowerBound(compareCtx, buckets[i-1].UpperBound)
+		lowerBound := getNextLowerBound(ctx, compareCtx, buckets[i-1].UpperBound)
 		buckets[i].DistinctRange = estimatedDistinctValuesInRange(
-			compareCtx, buckets[i].NumRange, lowerBound, buckets[i].UpperBound,
+			ctx, compareCtx, buckets[i].NumRange, lowerBound, buckets[i].UpperBound,
 		)
 	}
 	return histogram{buckets: buckets}, rowCount
@@ -196,17 +193,18 @@ func randBounds(colType *types.T, rng *rand.Rand, num int) tree.Datums {
 	case types.TimestampFamily, types.TimestampTZFamily:
 		roundTo := tree.TimeFamilyPrecisionToRoundDuration(colType.Precision())
 		var lo, hi int
-		if quantileMaxTimestampSec < math.MaxInt/2 {
-			lo = int(quantileMinTimestampSec)
-			hi = int(quantileMaxTimestampSec)
+		if tree.MaxSupportedTimeSec < math.MaxInt/2 {
+			lo = int(tree.MinSupportedTimeSec)
+			hi = int(tree.MaxSupportedTimeSec)
 		} else {
-			// Make sure we won't overflow in randInts (i.e. make sure that
-			// hi - lo + 1 <= math.MaxInt which requires -2 for hi).
-			w := int(bits.UintSize) - 2
+			// Make sure we don't overflow in randInts on 32-bit systems.
+			// Specifically, make sure that hi - lo + 1 <= math.MaxInt, which requires subtracting 2 from hi.
+			w := bits.UintSize - 2
 			lo = -1 << w
 			hi = (1 << w) - 2
 		}
 		secs := randInts(num, lo, hi)
+
 		for i := range datums {
 			t := timeutil.Unix(int64(secs[i]), 0)
 			var err error
@@ -563,7 +561,7 @@ func TestQuantileToHistogram(t *testing.T) {
 	}
 	for i, tc := range testCases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			hist, err := tc.qfun.toHistogram(types.Float, tc.rows)
+			hist, err := tc.qfun.toHistogram(context.Background(), types.Float, tc.rows)
 			if err != nil {
 				if !tc.err {
 					t.Errorf("test case %d unexpected quantile.toHistogram err: %v", i, err)
@@ -796,22 +794,12 @@ func TestQuantileValueRoundTrip(t *testing.T) {
 		},
 		{
 			typ: types.Timestamp,
-			dat: &tree.DTimestamp{Time: quantileMinTimestamp},
-			val: quantileMinTimestampSec,
-		},
-		{
-			typ: types.Timestamp,
-			dat: &tree.DTimestamp{Time: quantileMaxTimestamp},
-			val: quantileMaxTimestampSec,
-		},
-		{
-			typ: types.Timestamp,
-			dat: &tree.DTimestamp{Time: pgdate.TimeNegativeInfinity},
+			dat: &tree.DTimestamp{Time: pgdate.TimeInfinity},
 			err: true,
 		},
 		{
 			typ: types.Timestamp,
-			dat: &tree.DTimestamp{Time: pgdate.TimeInfinity},
+			dat: &tree.DTimestamp{Time: pgdate.TimeNegativeInfinity},
 			err: true,
 		},
 		{
@@ -821,25 +809,16 @@ func TestQuantileValueRoundTrip(t *testing.T) {
 		},
 		{
 			typ: types.TimestampTZ,
-			dat: &tree.DTimestampTZ{Time: quantileMinTimestamp},
-			val: quantileMinTimestampSec,
-		},
-		{
-			typ: types.TimestampTZ,
-			dat: &tree.DTimestampTZ{Time: quantileMaxTimestamp},
-			val: quantileMaxTimestampSec,
+			dat: &tree.DTimestampTZ{Time: pgdate.TimeInfinity},
+			err: true,
 		},
 		{
 			typ: types.TimestampTZ,
 			dat: &tree.DTimestampTZ{Time: pgdate.TimeNegativeInfinity},
 			err: true,
 		},
-		{
-			typ: types.TimestampTZ,
-			dat: &tree.DTimestampTZ{Time: pgdate.TimeInfinity},
-			err: true,
-		},
 	}
+	ctx := context.Background()
 	var compareCtx *eval.Context
 	for i, tc := range testCases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
@@ -864,9 +843,9 @@ func TestQuantileValueRoundTrip(t *testing.T) {
 				t.Errorf("test case %d (%v) unexpected fromQuantileValue err: %v", i, tc.typ.Name(), err)
 				return
 			}
-			cmp, err := res.CompareError(compareCtx, tc.dat)
+			cmp, err := res.Compare(ctx, compareCtx, tc.dat)
 			if err != nil {
-				t.Errorf("test case %d (%v) unexpected CompareError err: %v", i, tc.typ.Name(), err)
+				t.Errorf("test case %d (%v) unexpected Compare err: %v", i, tc.typ.Name(), err)
 				return
 			}
 			if cmp != 0 {
@@ -1071,52 +1050,46 @@ func TestQuantileValueRoundTripOverflow(t *testing.T) {
 		{
 			typ: types.Timestamp,
 			val: float64(pgdate.TimeNegativeInfinity.Unix()),
-			dat: &tree.DTimestamp{Time: quantileMinTimestamp},
-			res: quantileMinTimestampSec,
+			err: true,
 		},
 		{
 			typ: types.Timestamp,
 			val: float64(pgdate.TimeInfinity.Unix()),
-			dat: &tree.DTimestamp{Time: quantileMaxTimestamp},
-			res: quantileMaxTimestampSec,
+			err: true,
 		},
 		{
 			typ: types.Timestamp,
 			val: -math.MaxFloat64,
-			dat: &tree.DTimestamp{Time: quantileMinTimestamp},
-			res: quantileMinTimestampSec,
+			err: true,
 		},
 		{
 			typ: types.Timestamp,
 			val: math.MaxFloat64,
-			dat: &tree.DTimestamp{Time: quantileMaxTimestamp},
-			res: quantileMaxTimestampSec,
+			err: true,
 		},
+		// TimestampTZ cases.
 		{
 			typ: types.TimestampTZ,
 			val: float64(pgdate.TimeNegativeInfinity.Unix()),
-			dat: &tree.DTimestampTZ{Time: quantileMinTimestamp},
-			res: quantileMinTimestampSec,
+			err: true,
 		},
 		{
 			typ: types.TimestampTZ,
 			val: float64(pgdate.TimeInfinity.Unix()),
-			dat: &tree.DTimestampTZ{Time: quantileMaxTimestamp},
-			res: quantileMaxTimestampSec,
+			err: true,
 		},
 		{
 			typ: types.TimestampTZ,
 			val: -math.MaxFloat64,
-			dat: &tree.DTimestampTZ{Time: quantileMinTimestamp},
-			res: quantileMinTimestampSec,
+			err: true,
 		},
 		{
 			typ: types.TimestampTZ,
 			val: math.MaxFloat64,
-			dat: &tree.DTimestampTZ{Time: quantileMaxTimestamp},
-			res: quantileMaxTimestampSec,
+			err: true,
 		},
 	}
+	ctx := context.Background()
 	var compareCtx *eval.Context
 	for i, tc := range testCases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
@@ -1131,9 +1104,9 @@ func TestQuantileValueRoundTripOverflow(t *testing.T) {
 				t.Errorf("test case %d (%v) expected fromQuantileValue err", i, tc.typ.Name())
 				return
 			}
-			cmp, err := d.CompareError(compareCtx, tc.dat)
+			cmp, err := d.Compare(ctx, compareCtx, tc.dat)
 			if err != nil {
-				t.Errorf("test case %d (%v) unexpected CompareError err: %v", i, tc.typ.Name(), err)
+				t.Errorf("test case %d (%v) unexpected Compare err: %v", i, tc.typ.Name(), err)
 				return
 			}
 			if cmp != 0 {

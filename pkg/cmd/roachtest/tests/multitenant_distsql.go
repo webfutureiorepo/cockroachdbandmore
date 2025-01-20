@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -24,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/stretchr/testify/require"
@@ -36,10 +32,12 @@ func registerMultiTenantDistSQL(r registry.Registry) {
 			b := bundle
 			to := timeout
 			r.Add(registry.TestSpec{
+				Skip:             "https://github.com/cockroachdb/cockroach/issues/128366",
+				SkipDetails:      "test is broken",
 				Name:             fmt.Sprintf("multitenant/distsql/instances=%d/bundle=%s/timeout=%d", numInstances, b, to),
 				Owner:            registry.OwnerSQLQueries,
 				Cluster:          r.MakeClusterSpec(4),
-				CompatibleClouds: registry.AllExceptAWS,
+				CompatibleClouds: registry.CloudsWithServiceRegistration,
 				Suites:           registry.Suites(registry.Nightly),
 				Leases:           registry.MetamorphicLeases,
 				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -61,7 +59,7 @@ func runMultiTenantDistSQL(
 	// This test sets a smaller default range size than the default due to
 	// performance and resource limitations. We set the minimum range max bytes to
 	// 1 byte to bypass the guardrails.
-	settings := install.MakeClusterSettings(install.SecureOption(true))
+	settings := install.MakeClusterSettings()
 	settings.Env = append(settings.Env, "COCKROACH_MIN_RANGE_MAX_BYTES=1")
 	c.Start(ctx, t.L(), option.DefaultStartOpts(), settings, c.Node(1))
 	c.Start(ctx, t.L(), option.DefaultStartOpts(), settings, c.Node(2))
@@ -73,9 +71,13 @@ func runMultiTenantDistSQL(
 	for i := 0; i < numInstances; i++ {
 		node := (i % c.Spec().NodeCount) + 1
 		sqlInstance := i / c.Spec().NodeCount
-		instStartOps := option.DefaultStartVirtualClusterOpts(tenantName, sqlInstance)
+		instStartOps := option.StartVirtualClusterOpts(
+			tenantName, c.Node(node),
+			option.StorageCluster(storageNodes),
+			option.VirtualClusterInstance(sqlInstance),
+		)
 		t.L().Printf("Starting instance %d on node %d", i, node)
-		c.StartServiceForVirtualCluster(ctx, t.L(), c.Node(node), instStartOps, settings, storageNodes)
+		c.StartServiceForVirtualCluster(ctx, t.L(), instStartOps, settings)
 		nodes.Add(i + 1)
 	}
 
@@ -86,7 +88,7 @@ func runMultiTenantDistSQL(
 
 	m := c.NewMonitor(ctx, c.Nodes(1, 2, 3))
 
-	inst1Conn, err := c.ConnE(ctx, t.L(), 1, option.TenantName(tenantName))
+	inst1Conn, err := c.ConnE(ctx, t.L(), 1, option.VirtualClusterName(tenantName))
 	require.NoError(t, err)
 	_, err = inst1Conn.Exec("CREATE TABLE t(n INT, i INT,s STRING, PRIMARY KEY(n,i))")
 	require.NoError(t, err)
@@ -105,7 +107,7 @@ func runMultiTenantDistSQL(
 		m.Go(func(ctx context.Context) error {
 			node := (li % c.Spec().NodeCount) + 1
 			sqlInstance := li / c.Spec().NodeCount
-			dbi, err := c.ConnE(ctx, t.L(), node, option.TenantName(tenantName), option.SQLInstance(sqlInstance))
+			dbi, err := c.ConnE(ctx, t.L(), node, option.VirtualClusterName(tenantName), option.SQLInstance(sqlInstance))
 			require.NoError(t, err)
 			iter := 0
 			for {
@@ -128,17 +130,19 @@ func runMultiTenantDistSQL(
 	for {
 		time.Sleep(time.Second)
 		res, err := inst1Conn.Query("EXPLAIN (VEC) SELECT DISTINCT i FROM t")
+		attempts--
 		if err != nil {
-			attempts--
 			require.Greater(t, attempts, 0, "All nodes didn't show up in time")
 			continue
 		}
 
 		var nodesInPlan intsets.Fast
+		var resStr string
 		for res.Next() {
 			str := ""
 			err = res.Scan(&str)
 			require.NoError(t, err)
+			resStr += str + "\n"
 			fields := strings.Fields(str)
 			l := len(fields)
 			if l > 2 && fields[l-2] == "Node" {
@@ -148,13 +152,13 @@ func runMultiTenantDistSQL(
 				}
 			}
 		}
-		if nodes == nodesInPlan {
+		if nodes.Equals(nodesInPlan) {
 			t.L().Printf("Nodes all present")
 			cancel()
 			break
-		} else {
-			t.L().Printf("Only %d nodes present: %v", nodesInPlan.Len(), nodesInPlan)
 		}
+		t.L().Printf("Only %d nodes present: %v, expected %v", nodesInPlan.Len(), nodesInPlan, nodes)
+		require.Greater(t, attempts, 0, "All nodes didn't show up in time. EXPLAIN (VEC):\n%s", resStr)
 	}
 	m.Wait()
 
@@ -198,7 +202,7 @@ func runMultiTenantDistSQL(
 		if bundle {
 			// Open bundle and verify its contents
 			sqlConnCtx := clisqlclient.Context{}
-			pgURL, err := c.ExternalPGUrl(ctx, t.L(), c.Node(1), tenantName, 0)
+			pgURL, err := c.ExternalPGUrl(ctx, t.L(), c.Node(1), roachprod.PGURLOptions{VirtualClusterName: tenantName})
 			require.NoError(t, err)
 			conn := sqlConnCtx.MakeSQLConn(io.Discard, io.Discard, pgURL[0])
 			bundles, err := clisqlclient.StmtDiagListBundles(ctx, conn)

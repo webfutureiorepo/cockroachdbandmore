@@ -2,7 +2,7 @@
 statement ok
 SET CLUSTER SETTING sql.defaults.use_declarative_schema_changer = 'off';
 
-statement ok;
+statement ok
 SET use_declarative_schema_changer = 'off';
 
 # These test verify that a user's job are visible via
@@ -162,7 +162,7 @@ SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'root' AND job_type = 'SCHEMA C
 
 user testuser
 
-statement error pq: only admins can control jobs owned by other admins
+statement error only admins can control jobs owned by other admins
 PAUSE JOB (SELECT $job_id)
 
 user root
@@ -177,13 +177,13 @@ SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'testuser2' AND job_type = 'SCH
 user testuser
 
 # testuser should no longer have the ability to control jobs.
-statement error pq: user testuser does not have privileges for job
+statement error user testuser does not have privileges for job
 PAUSE JOB (SELECT $job_id)
 
-statement error pq: user testuser does not have privileges for job
+statement error user testuser does not have privileges for job
 CANCEL JOB (SELECT $job_id)
 
-statement error pq: user testuser does not have privileges for job
+statement error user testuser does not have privileges for job
 RESUME JOB (SELECT $job_id)
 
 user root
@@ -268,22 +268,25 @@ SELECT count(*) FROM [SHOW AUTOMATIC JOBS] WHERE job_type = 'POLL JOBS STATS' AN
 ----
 1
 
-# Ensure one AUTO CONFIG RUNNER job is running
-query I
-SELECT count(*) FROM [SHOW AUTOMATIC JOBS] WHERE job_type = 'AUTO CONFIG RUNNER' AND status = 'running'
-----
-1
-
 subtest control_job_priv
 
-user testuser
+user testuser2
 
 statement ok
-CREATE TABLE t_control_job_priv(x INT);
+CREATE TABLE t_control_job_priv(x INT)
+
+# Add a row into the table so that the GC job does not complete immediately;
+# it must wait for the table data gc.ttl before removing the descriptor.
+statement ok
+INSERT INTO t_control_job_priv VALUES (1)
+
+statement ok
 DROP TABLE t_control_job_priv
 
 let $job_id
-SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'testuser' AND job_type = 'SCHEMA CHANGE GC' AND description LIKE 'GC for DROP TABLE test.public.t_control_job_priv'
+SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'testuser2' AND job_type = 'SCHEMA CHANGE GC' AND description LIKE 'GC for DROP TABLE test.public.t_control_job_priv'
+
+user testuser
 
 statement error user testuser does not have privileges for job
 PAUSE JOB (SELECT $job_id)
@@ -307,14 +310,23 @@ subtest end
 
 subtest control_job_priv_inherited
 
-user testuser
+user testuser2
 
 statement ok
-CREATE TABLE t_control_job_priv_inherited(x INT);
+CREATE TABLE t_control_job_priv_inherited(x INT)
+
+# Add a row into the table so that the GC job does not complete immediately;
+# it must wait for the table data gc.ttl before removing the descriptor.
+statement ok
+INSERT INTO t_control_job_priv_inherited VALUES (1)
+
+statement ok
 DROP TABLE t_control_job_priv_inherited
 
 let $job_id
-SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'testuser' AND job_type = 'SCHEMA CHANGE GC' AND description LIKE 'GC for DROP TABLE test.public.t_control_job_priv_inherited'
+SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'testuser2' AND job_type = 'SCHEMA CHANGE GC' AND description LIKE 'GC for DROP TABLE test.public.t_control_job_priv_inherited'
+
+user testuser
 
 statement error user testuser does not have privileges for job
 PAUSE JOB (SELECT $job_id)

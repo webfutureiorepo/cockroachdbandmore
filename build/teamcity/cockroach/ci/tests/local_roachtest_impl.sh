@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2021 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 set -euox pipefail
 
 if [[ "$(uname -m)" =~ (arm64|aarch64)$ ]]; then
@@ -8,12 +14,19 @@ else
   export CROSSLINUX_CONFIG="crosslinux"
 fi
 
-bazel build --config=$CROSSLINUX_CONFIG --config=ci //pkg/cmd/cockroach-short \
+BAZEL_BIN=$(bazel info bazel-bin --config=$CROSSLINUX_CONFIG)
+
+bazel build --config=$CROSSLINUX_CONFIG //pkg/cmd/cockroach-short \
       //pkg/cmd/roachtest \
       //pkg/cmd/roachprod \
       //pkg/cmd/workload
 
-BAZEL_BIN=$(bazel info bazel-bin --config=$CROSSLINUX_CONFIG --config=ci)
+bazel build --config=$CROSSLINUX_CONFIG --config=force_build_cdeps //c-deps:libgeos
+
+mkdir -p lib
+cp $BAZEL_BIN/c-deps/libgeos_foreign/lib/libgeos.so lib/libgeos.so
+cp $BAZEL_BIN/c-deps/libgeos_foreign/lib/libgeos_c.so lib/libgeos_c.so
+chmod a+w lib/libgeos.so lib/libgeos_c.so
 
 # if there are any local clusters on this host, stop them before we
 # attempt to run acceptance tests. While this is generally not the

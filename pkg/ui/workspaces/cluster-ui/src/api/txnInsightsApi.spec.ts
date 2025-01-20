@@ -1,30 +1,27 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import {
-  TxnStmtFingerprintsResponseColumns,
-  FingerprintStmtsResponseColumns,
-} from "./txnInsightsApi";
-import * as sqlApi from "./sqlApi";
-import { SqlExecutionResponse } from "./sqlApi";
+import moment from "moment-timezone";
+
 import {
   InsightExecEnum,
   InsightNameEnum,
   TxnContentionInsightDetails,
 } from "../insights";
+import { MockSqlResponse } from "../util/testing";
+
 import {
   ContentionResponseColumns,
   getTxnInsightsContentionDetailsApi,
 } from "./contentionApi";
-import moment from "moment-timezone";
-import { MockSqlResponse } from "../util/testing";
+import * as sqlApi from "./sqlApi";
+import { SqlExecutionResponse } from "./sqlApi";
+import {
+  TxnStmtFingerprintsResponseColumns,
+  FingerprintStmtsResponseColumns,
+} from "./txnInsightsApi";
 
 type TxnContentionDetailsTests = {
   name: string;
@@ -99,7 +96,7 @@ describe("test txn insights api functions", () => {
           },
         ],
         execType: InsightExecEnum.TRANSACTION,
-        insightName: InsightNameEnum.highContention,
+        insightName: InsightNameEnum.HIGH_CONTENTION,
       },
     },
     {
@@ -146,7 +143,7 @@ describe("test txn insights api functions", () => {
           },
         ],
         execType: InsightExecEnum.TRANSACTION,
-        insightName: InsightNameEnum.highContention,
+        insightName: InsightNameEnum.HIGH_CONTENTION,
       },
     },
     {
@@ -202,7 +199,7 @@ describe("test txn insights api functions", () => {
           },
         ],
         execType: InsightExecEnum.TRANSACTION,
-        insightName: InsightNameEnum.highContention,
+        insightName: InsightNameEnum.HIGH_CONTENTION,
       },
     },
   ] as TxnContentionDetailsTests[])(

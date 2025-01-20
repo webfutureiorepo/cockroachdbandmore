@@ -1,22 +1,17 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tracing
 
 import (
 	"fmt"
-	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
@@ -138,7 +133,7 @@ type Span struct {
 
 	// finishStack is set if debugUseAfterFinish is set. It represents the stack
 	// that called Finish(), in order to report it on further use.
-	finishStack string
+	finishStack debugutil.SafeStack
 }
 
 // IsNoop returns true if this span is a black hole - it doesn't correspond to a
@@ -173,9 +168,9 @@ func (sp *Span) detectUseAfterFinish() bool {
 	// In test builds, we panic on span use after Finish. This is in preparation
 	// of span pooling, at which point use-after-Finish would become corruption.
 	if alreadyFinished && sp.i.tracer.PanicOnUseAfterFinish() {
-		var finishStack string
-		if sp.finishStack == "" {
-			finishStack = "<stack not captured. Set debugUseAfterFinish>"
+		var finishStack debugutil.SafeStack
+		if sp.finishStack == nil {
+			finishStack = debugutil.SafeStack("<stack not captured. Set debugUseAfterFinish>")
 		} else {
 			finishStack = sp.finishStack
 		}
@@ -253,7 +248,7 @@ func (sp *Span) finishInternal() {
 		return
 	}
 	if sp.Tracer().debugUseAfterFinish {
-		sp.finishStack = string(debug.Stack())
+		sp.finishStack = debugutil.Stack()
 	}
 	atomic.StoreInt32(&sp.finished, 1)
 	sp.i.Finish()
@@ -746,7 +741,7 @@ func (sp *Span) reset(
 	// detect use-after-Finish. Similarly, we do the write atomically to prevent
 	// reorderings.
 	atomic.StoreInt32(&sp.finished, 0)
-	sp.finishStack = ""
+	sp.finishStack = nil
 }
 
 // SetOtelStatus sets the status of the OpenTelemetry span (if any).
@@ -946,11 +941,8 @@ func (sm SpanMeta) ToProto() *tracingpb.TraceInfo {
 func SpanMetaFromProto(info tracingpb.TraceInfo) SpanMeta {
 	var otelCtx oteltrace.SpanContext
 	if info.Otel != nil {
-		// NOTE: The ugly starry expressions below can be simplified once/if direct
-		// conversions from slices to arrays gets adopted:
-		// https://github.com/golang/go/issues/46505
-		traceID := *(*[16]byte)(info.Otel.TraceID)
-		spanID := *(*[8]byte)(info.Otel.SpanID)
+		traceID := [16]byte(info.Otel.TraceID)
+		spanID := [8]byte(info.Otel.SpanID)
 		otelCtx = otelCtx.WithRemote(true).WithTraceID(traceID).WithSpanID(spanID)
 	}
 

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -36,10 +31,11 @@ func init() {
 				}),
 				emit(func(this *scpb.FunctionBody) *scop.UpdateFunctionRelationReferences {
 					return &scop.UpdateFunctionRelationReferences{
-						FunctionID:      this.FunctionID,
-						TableReferences: this.UsesTables,
-						ViewReferences:  this.UsesViews,
-						SequenceIDs:     this.UsesSequenceIDs,
+						FunctionID:         this.FunctionID,
+						TableReferences:    this.UsesTables,
+						ViewReferences:     this.UsesViews,
+						SequenceIDs:        this.UsesSequenceIDs,
+						FunctionReferences: this.UsesFunctionIDs,
 					}
 				}),
 			),
@@ -72,7 +68,14 @@ func init() {
 						BackReferencedID: this.FunctionID,
 						RelationIDs:      relationIDs,
 					}
-				})),
+				}),
+				emit(func(this *scpb.FunctionBody) *scop.RemoveBackReferenceInFunctions {
+					return &scop.RemoveBackReferenceInFunctions{
+						BackReferencedDescriptorID: this.FunctionID,
+						FunctionIDs:                append([]descpb.ID(nil), this.UsesFunctionIDs...),
+					}
+				}),
+			),
 		),
 	)
 }

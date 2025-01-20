@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catformat
 
@@ -21,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/errors"
@@ -58,6 +54,7 @@ func IndexForDisplay(
 	index catalog.Index,
 	partition string,
 	formatFlags tree.FmtFlags,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	displayMode IndexDisplayMode,
@@ -70,6 +67,7 @@ func IndexForDisplay(
 		index.Primary(),
 		partition,
 		formatFlags,
+		evalCtx,
 		semaCtx,
 		sessionData,
 		displayMode,
@@ -84,6 +82,7 @@ func indexForDisplay(
 	isPrimary bool,
 	partition string,
 	formatFlags tree.FmtFlags,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	displayMode IndexDisplayMode,
@@ -122,7 +121,7 @@ func indexForDisplay(
 	}
 
 	f.WriteString(" (")
-	if err := FormatIndexElements(ctx, table, index, f, semaCtx, sessionData); err != nil {
+	if err := FormatIndexElements(ctx, table, index, f, evalCtx, semaCtx, sessionData); err != nil {
 		return "", err
 	}
 	f.WriteByte(')')
@@ -167,7 +166,7 @@ func indexForDisplay(
 				predFmtFlag |= tree.FmtOmitNameRedaction
 			}
 		}
-		pred, err := schemaexpr.FormatExprForDisplay(ctx, table, index.Predicate, semaCtx, sessionData, predFmtFlag)
+		pred, err := schemaexpr.FormatExprForDisplay(ctx, table, index.Predicate, evalCtx, semaCtx, sessionData, predFmtFlag)
 		if err != nil {
 			return "", err
 		}
@@ -204,6 +203,7 @@ func FormatIndexElements(
 	table catalog.TableDescriptor,
 	index *descpb.IndexDescriptor,
 	f *tree.FmtCtx,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 ) error {
@@ -230,7 +230,7 @@ func FormatIndexElements(
 		}
 		if col.IsExpressionIndexColumn() {
 			expr, err := schemaexpr.FormatExprForExpressionIndexDisplay(
-				ctx, table, col.GetComputeExpr(), semaCtx, sessionData, elemFmtFlag,
+				ctx, table, col.GetComputeExpr(), evalCtx, semaCtx, sessionData, elemFmtFlag,
 			)
 			if err != nil {
 				return err

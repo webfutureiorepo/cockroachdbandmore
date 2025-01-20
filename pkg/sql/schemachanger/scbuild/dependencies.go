@@ -1,18 +1,14 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuild
 
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -61,6 +57,12 @@ type Dependencies interface {
 	// Statements returns the statements behind this schema change.
 	Statements() []string
 
+	// EvalCtx returns the eval.Context for the schema change statement.
+	EvalCtx() *eval.Context
+
+	// SemaCtx returns the tree.SemaContext for the schema change statement.
+	SemaCtx() *tree.SemaContext
+
 	// AstFormatter returns something that can format AST nodes.
 	AstFormatter() AstFormatter
 
@@ -76,7 +78,11 @@ type Dependencies interface {
 	DescriptorCommentGetter() CommentGetter
 
 	// ZoneConfigGetter returns a zone config reader.
-	ZoneConfigGetter() ZoneConfigGetter
+	ZoneConfigGetter() scdecomp.ZoneConfigGetter
+
+	// GetDefaultZoneConfig is used to get the default zone config inside the
+	// server.
+	GetDefaultZoneConfig() *zonepb.ZoneConfig
 
 	// ClientNoticeSender returns a eval.ClientNoticeSender.
 	ClientNoticeSender() eval.ClientNoticeSender
@@ -89,6 +95,15 @@ type Dependencies interface {
 
 	// ReferenceProviderFactory returns a ReferenceProviderFactory.
 	ReferenceProviderFactory() ReferenceProviderFactory
+
+	// TemporarySchemaProvider returns a TemporarySchemaProvider.
+	TemporarySchemaProvider() TemporarySchemaProvider
+
+	// NodesStatusInfo returns a NodesStatusInfo.
+	NodesStatusInfo() NodesStatusInfo
+
+	// RegionProvider returns a RegionProvider.
+	RegionProvider() RegionProvider
 }
 
 // CreatePartitioningCCLCallback is the type of the CCL callback for creating
@@ -215,9 +230,6 @@ type AstFormatter interface {
 	FormatAstAsRedactableString(statement tree.Statement, annotations *tree.Annotations) redact.RedactableString
 }
 
-// ZoneConfigGetter see scdecomp.ZoneConfigGetter.
-type ZoneConfigGetter scdecomp.ZoneConfigGetter
-
 // CommentGetter see scdecomp.CommentGetter.
 type CommentGetter scdecomp.CommentGetter
 
@@ -261,4 +273,8 @@ type (
 	// FeatureChecker contains operations for checking if a schema change
 	// feature is allowed by the database administrator.
 	FeatureChecker = scbuildstmt.SchemaFeatureChecker
+
+	TemporarySchemaProvider = scbuildstmt.TemporarySchemaProvider
+	NodesStatusInfo         = scbuildstmt.NodeStatusInfo
+	RegionProvider          = scbuildstmt.RegionProvider
 )

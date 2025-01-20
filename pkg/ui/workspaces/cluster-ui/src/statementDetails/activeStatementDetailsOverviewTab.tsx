@@ -1,34 +1,30 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import classNames from "classnames/bind";
-import { Link } from "react-router-dom";
 import { Col, Row } from "antd";
-import { SummaryCard, SummaryCardItem } from "src/summaryCard";
+import classNames from "classnames/bind";
+import React from "react";
+import { Link } from "react-router-dom";
+
+import "antd/lib/col/style";
+import "antd/lib/row/style";
 import {
   ActiveStatement,
   ExecutionContentionDetails,
 } from "src/activeExecutions";
-import { WaitTimeInsightsPanel } from "src/detailsPanels/waitTimeInsightsPanel";
 import { StatusIcon } from "src/activeExecutions/statusIcon";
+import { WaitTimeInsightsPanel } from "src/detailsPanels/waitTimeInsightsPanel";
+import { SummaryCard, SummaryCardItem } from "src/summaryCard";
+import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
 import { DATE_FORMAT_24_TZ, Duration } from "src/util";
 
-import "antd/lib/col/style";
-import "antd/lib/row/style";
-import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
-
-const summaryCardStylesCx = classNames.bind(summaryCardStyles);
+import { Timestamp } from "../timestamp";
 
 import styles from "./statementDetails.module.scss";
-import { Timestamp } from "../timestamp";
+
+const summaryCardStylesCx = classNames.bind(summaryCardStyles);
 const cx = classNames.bind(styles);
 
 type Props = {
@@ -45,7 +41,7 @@ export const ActiveStatementDetailsOverviewTab = ({
   return (
     <>
       <section className={cx("section", "section--container")}>
-        <Row gutter={24} type="flex">
+        <Row gutter={24}>
           <Col className="gutter-row" span={12}>
             <SummaryCard className={cx("summary-card")}>
               <SummaryCardItem

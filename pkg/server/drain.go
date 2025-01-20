@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -87,8 +82,7 @@ var (
 			"to notice drain request and to perform orderly shutdown",
 		10*time.Second,
 		settings.NonNegativeDurationWithMaximum(10*time.Minute),
-		settings.WithName("server.shutdown.jobs.timeout"),
-		settings.WithPublic)
+		settings.WithName("server.shutdown.jobs.timeout"))
 )
 
 // Drain puts the node into the specified drain mode(s) and optionally
@@ -101,7 +95,7 @@ func (s *adminServer) Drain(req *serverpb.DrainRequest, stream serverpb.Admin_Dr
 	// Which node is this request for?
 	nodeID, local, err := s.serverIterator.parseServerID(req.NodeId)
 	if err != nil {
-		return status.Errorf(codes.InvalidArgument, err.Error())
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	if !local {
 		// This request is for another node. Forward it.
@@ -260,7 +254,7 @@ func delegateDrain(
 			if err == io.EOF {
 				break
 			}
-			if grpcutil.IsClosedConnection(err) {
+			if req.Shutdown && grpcutil.IsClosedConnection(err) {
 				// If the drain request contained Shutdown==true, it's
 				// possible for the RPC connection to the target node to be
 				// shut down before a DrainResponse and EOF is
@@ -332,6 +326,14 @@ func (s *drainServer) runDrain(
 func (s *drainServer) drainInner(
 	ctx context.Context, reporter func(int, redact.SafeString), verbose bool,
 ) (err error) {
+	if s.sqlServer.sqlLivenessSessionID != "" {
+		// Set draining only if SQL instance was initialized
+		if err := s.sqlServer.sqlInstanceStorage.SetInstanceDraining(
+			ctx, s.sqlServer.sqlLivenessSessionID, s.sqlServer.SQLInstanceID()); err != nil {
+			return err
+		}
+	}
+
 	if s.serverCtl != nil {
 		// We are on a KV node, with a server controller.
 		//
@@ -383,7 +385,7 @@ func (s *drainServer) drainClients(
 	// Set the gRPC mode of the node to "draining" and mark the node as "not ready".
 	// Probes to /health?ready=1 will now notice the change in the node's readiness.
 	s.grpc.setMode(modeDraining)
-	s.sqlServer.isReady.Set(false)
+	s.sqlServer.isReady.Store(false)
 
 	// Log the number of connections periodically.
 	if err := s.logOpenConns(ctx); err != nil {
@@ -444,7 +446,7 @@ func (s *drainServer) drainClients(
 	statsProvider := s.sqlServer.pgServer.SQLServer.GetSQLStatsProvider().(*persistedsqlstats.PersistedSQLStats)
 	// If the SQL server is disabled there is nothing to drain here.
 	if !s.sqlServer.cfg.DisableSQLServer {
-		statsProvider.Flush(ctx)
+		statsProvider.MaybeFlush(ctx, s.stopper)
 	}
 	statsProvider.Stop(ctx)
 
@@ -475,7 +477,7 @@ func (s *drainServer) drainClients(
 	}
 
 	// Mark the node as fully drained.
-	s.sqlServer.gracefulDrainComplete.Set(true)
+	s.sqlServer.gracefulDrainComplete.Store(true)
 	// Mark this phase in the logs to clarify the context of any subsequent
 	// errors/warnings, if any.
 	log.Infof(ctx, "SQL server drained successfully; SQL queries cannot execute any more")

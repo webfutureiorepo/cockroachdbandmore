@@ -1,21 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/storepool"
@@ -24,15 +20,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/multiqueue"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -41,9 +40,9 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage"
+	"github.com/cockroachdb/pebble/objstorage/remote"
 	"github.com/cockroachdb/pebble/rangekey"
 	"github.com/cockroachdb/redact"
-	"go.etcd.io/raft/v3/raftpb"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
@@ -60,14 +59,21 @@ const (
 	// tagSnapshotTiming is the tracing span tag that the *snapshotTimingTag
 	// lives under.
 	tagSnapshotTiming = "snapshot_timing_tag"
+)
 
-	// DefaultSnapshotSendLimit is the max number of snapshots concurrently sent.
-	// See server.KVConfig for more info.
-	DefaultSnapshotSendLimit = 2
-
-	// DefaultSnapshotApplyLimit is the number of snapshots concurrently applied.
-	// See server.KVConfig for more info.
-	DefaultSnapshotApplyLimit = 1
+// MaxSnapshotSSTableSize is the maximum size of an sstable containing MVCC/user keys
+// in a snapshot before we truncate and write a new snapshot sstable.
+var MaxSnapshotSSTableSize = settings.RegisterByteSizeSetting(
+	settings.SystemOnly,
+	"kv.snapshot_rebalance.max_sst_size",
+	"maximum size of a rebalance or recovery SST size",
+	int64(metamorphic.ConstantWithTestRange(
+		"kv.snapshot_rebalance.max_sst_size",
+		128<<20, /* defaultValue */
+		32<<10,  /* metamorphic min */
+		512<<20, /* metamorphic max */
+	)), // 128 MB default
+	settings.NonNegativeInt,
 )
 
 // snapshotMetrics contains metrics on the number and size of snapshots in
@@ -123,10 +129,23 @@ type kvBatchSnapshotStrategy struct {
 // multiSSTWriter is a wrapper around an SSTWriter and SSTSnapshotStorageScratch
 // that handles chunking SSTs and persisting them to disk.
 type multiSSTWriter struct {
-	st       *cluster.Settings
-	scratch  *SSTSnapshotStorageScratch
-	currSST  storage.SSTWriter
-	keySpans []roachpb.Span
+	st      *cluster.Settings
+	scratch *SSTSnapshotStorageScratch
+	currSST storage.SSTWriter
+	// localKeySpans are key spans that are considered unsplittable across sstables, and
+	// represent the range's range local key spans. In contrast, mvccKeySpan can be split
+	// across multiple sstables if one of them exceeds maxSSTSize. The expectation is
+	// that for large ranges, keys in mvccKeySpan will dominate in size compared to keys
+	// in localKeySpans.
+	localKeySpans []roachpb.Span
+	mvccKeySpan   roachpb.Span
+	// mvccSSTSpans reflects the actual split of the mvccKeySpan into constituent
+	// sstables.
+	mvccSSTSpans []storage.EngineKeyRange
+	// currSpan is the index of the current span being written to. The first
+	// len(localKeySpans) spans are localKeySpans, and the rest are mvccSSTSpans.
+	// In a sense, currSpan indexes into a slice composed of
+	// append(localKeySpans, mvccSSTSpans).
 	currSpan int
 	// The approximate size of the SST chunk to buffer in memory on the receiver
 	// before flushing to disk.
@@ -136,31 +155,92 @@ type multiSSTWriter struct {
 	dataSize int64
 	// The total size of the SSTs.
 	sstSize int64
-	// if skipRangeDelForLastSpan is true, the last span is not ClearRanged in the
-	// same sstable. We rely on the caller to take care of clearing this span
-	// through a different process (eg. IngestAndExcise on pebble).
-	skipRangeDelForLastSpan bool
+	// Incremental count of number of bytes written to disk.
+	writeBytes int64
+	// if skipClearForMVCCSpan is true, the MVCC span is not ClearEngineRange()d in
+	// the same sstable. We rely on the caller to take care of clearing this span
+	// through a different process (eg. IngestAndExcise on pebble). Note that
+	// having this bool to true also disables all range key fragmentation
+	// and splitting of sstables in the mvcc span.
+	skipClearForMVCCSpan bool
+	// maxSSTSize is the maximum size to use for SSTs containing MVCC/user keys.
+	// Once the sstable writer reaches this size, it will be finalized and a new
+	// sstable will be created.
+	maxSSTSize int64
+	// rangeKeyFrag is used to fragment range keys across the mvcc key spans.
+	rangeKeyFrag rangekey.Fragmenter
 }
 
 func newMultiSSTWriter(
 	ctx context.Context,
 	st *cluster.Settings,
 	scratch *SSTSnapshotStorageScratch,
-	keySpans []roachpb.Span,
+	localKeySpans []roachpb.Span,
+	mvccKeySpan roachpb.Span,
 	sstChunkSize int64,
-	skipRangeDelForLastSpan bool,
-) (multiSSTWriter, error) {
-	msstw := multiSSTWriter{
-		st:                      st,
-		scratch:                 scratch,
-		keySpans:                keySpans,
-		sstChunkSize:            sstChunkSize,
-		skipRangeDelForLastSpan: skipRangeDelForLastSpan,
+	skipClearForMVCCSpan bool,
+	rangeKeysInOrder bool,
+) (*multiSSTWriter, error) {
+	msstw := &multiSSTWriter{
+		st:            st,
+		scratch:       scratch,
+		localKeySpans: localKeySpans,
+		mvccKeySpan:   mvccKeySpan,
+		mvccSSTSpans: []storage.EngineKeyRange{{
+			Start: storage.EngineKey{Key: mvccKeySpan.Key},
+			End:   storage.EngineKey{Key: mvccKeySpan.EndKey},
+		}},
+		sstChunkSize:         sstChunkSize,
+		skipClearForMVCCSpan: skipClearForMVCCSpan,
 	}
+	if !skipClearForMVCCSpan && rangeKeysInOrder {
+		// If skipClearForMVCCSpan is true, we don't split the MVCC span across
+		// multiple sstables, as addClearForMVCCSpan could be called by the caller
+		// at any time.
+		//
+		// We also disable snapshot sstable splitting unless the sender has
+		// specified in its snapshot header that it is sending range keys in
+		// key order alongside point keys, as opposed to sending them at the end
+		// of the snapshot. This is necessary to efficiently produce fragmented
+		// snapshot sstables, as otherwise range keys will arrive out-of-order
+		// wrt. point keys.
+		msstw.maxSSTSize = MaxSnapshotSSTableSize.Get(&st.SV)
+	}
+	msstw.rangeKeyFrag = rangekey.Fragmenter{
+		Cmp:    storage.EngineComparer.Compare,
+		Format: storage.EngineComparer.FormatKey,
+		Emit:   msstw.emitRangeKey,
+	}
+
 	if err := msstw.initSST(ctx); err != nil {
 		return msstw, err
 	}
 	return msstw, nil
+}
+
+func (msstw *multiSSTWriter) emitRangeKey(key rangekey.Span) {
+	for i := range key.Keys {
+		if err := msstw.currSST.PutInternalRangeKey(key.Start, key.End, key.Keys[i]); err != nil {
+			panic(fmt.Sprintf("failed to put range key in sst: %s", err))
+		}
+	}
+}
+
+// currentSpan returns the current user-provided span that
+// is being written to. Note that this does not account for
+// mvcc keys being split across multiple sstables.
+func (msstw *multiSSTWriter) currentSpan() roachpb.Span {
+	if msstw.currSpanIsMVCCSpan() {
+		return msstw.mvccKeySpan
+	}
+	return msstw.localKeySpans[msstw.currSpan]
+}
+
+func (msstw *multiSSTWriter) currSpanIsMVCCSpan() bool {
+	if msstw.currSpan >= len(msstw.localKeySpans)+len(msstw.mvccSSTSpans) {
+		panic("current span is out of bounds")
+	}
+	return msstw.currSpan >= len(msstw.localKeySpans)
 }
 
 func (msstw *multiSSTWriter) initSST(ctx context.Context) error {
@@ -170,26 +250,103 @@ func (msstw *multiSSTWriter) initSST(ctx context.Context) error {
 	}
 	newSST := storage.MakeIngestionSSTWriter(ctx, msstw.st, newSSTFile)
 	msstw.currSST = newSST
-	if msstw.skipRangeDelForLastSpan && msstw.currSpan == len(msstw.keySpans)-1 {
-		// Skip this ClearRange, as it will be excised at ingestion time in the
-		// engine instead.
-		return nil
-	}
-	if err := msstw.currSST.ClearRawRange(
-		msstw.keySpans[msstw.currSpan].Key, msstw.keySpans[msstw.currSpan].EndKey,
-		true /* pointKeys */, true, /* rangeKeys */
-	); err != nil {
-		msstw.currSST.Close()
-		return errors.Wrap(err, "failed to clear range on sst file writer")
+	if !msstw.currSpanIsMVCCSpan() || (!msstw.skipClearForMVCCSpan && msstw.currSpan <= len(msstw.localKeySpans)) {
+		// We're either in a local key span, or we're in the first MVCC sstable
+		// span (before any splits). Add a RangeKeyDel for the whole span. If this
+		// is the MVCC span, we don't need to keep re-adding it to the fragmenter
+		// as the fragmenter will take care of splits. Note that currentSpan()
+		// will return the entire mvcc span in the case we're at an MVCC span.
+		startKey := storage.EngineKey{Key: msstw.currentSpan().Key}.Encode()
+		endKey := storage.EngineKey{Key: msstw.currentSpan().EndKey}.Encode()
+		trailer := pebble.MakeInternalKeyTrailer(0, pebble.InternalKeyKindRangeKeyDelete)
+		s := rangekey.Span{Start: startKey, End: endKey, Keys: []rangekey.Key{{Trailer: trailer}}}
+		msstw.rangeKeyFrag.Add(s)
 	}
 	return nil
 }
 
-func (msstw *multiSSTWriter) finalizeSST(ctx context.Context) error {
+// NB: when nextKey is non-nil, do not do anything in this function to cause
+// nextKey at the caller to escape to the heap.
+func (msstw *multiSSTWriter) finalizeSST(ctx context.Context, nextKey *storage.EngineKey) error {
+	currSpan := msstw.currentSpan()
+	if msstw.currSpanIsMVCCSpan() {
+		// We're in the MVCC span (ie. MVCC / user keys). If skipClearForMVCCSpan
+		// is true, we don't write a clearRange for the last span at all. Otherwise,
+		// we need to write a clearRange for all keys leading up to the current key
+		// we're writing.
+		currEngineSpan := msstw.mvccSSTSpans[msstw.currSpan-len(msstw.localKeySpans)]
+		if !msstw.skipClearForMVCCSpan {
+			if err := msstw.currSST.ClearEngineRange(
+				currEngineSpan.Start, currEngineSpan.End,
+			); err != nil {
+				msstw.currSST.Close()
+				return errors.Wrap(err, "failed to clear range on sst file writer")
+			}
+		}
+	} else {
+		if err := msstw.currSST.ClearRawRange(
+			currSpan.Key, currSpan.EndKey,
+			true /* pointKeys */, false, /* rangeKeys */
+		); err != nil {
+			msstw.currSST.Close()
+			return errors.Wrap(err, "failed to clear range on sst file writer")
+		}
+	}
+
+	// If we're at the last span, call Finish on the fragmenter. If we're not at the
+	// last span, call Truncate.
+	if msstw.currSpan == len(msstw.localKeySpans)+len(msstw.mvccSSTSpans)-1 {
+		msstw.rangeKeyFrag.Finish()
+	} else {
+		endKey := storage.EngineKey{Key: currSpan.EndKey}
+		if msstw.currSpanIsMVCCSpan() {
+			endKey = msstw.mvccSSTSpans[msstw.currSpan-len(msstw.localKeySpans)].End
+		}
+		msstw.rangeKeyFrag.Truncate(endKey.Encode())
+	}
+
 	err := msstw.currSST.Finish()
 	if err != nil {
 		return errors.Wrap(err, "failed to finish sst")
 	}
+	if nextKey != nil {
+		meta := msstw.currSST.Meta
+		encodedNextKey := nextKey.Encode()
+		// Use nextKeyCopy for the remainder of this function. Calling
+		// errors.Errorf with nextKey caused it to escape to the heap in the
+		// caller of finalizeSST (even when finalizeSST was not called), which was
+		// costly.
+		nextKeyCopy := *nextKey
+		if meta.HasPointKeys && storage.EngineKeyCompare(meta.LargestPoint.UserKey, encodedNextKey) > 0 {
+			metaEndKey, ok := storage.DecodeEngineKey(meta.LargestPoint.UserKey)
+			if !ok {
+				return errors.Errorf("multiSSTWriter created overlapping ingestion sstables: sstable largest point key %s > next sstable start key %s",
+					meta.LargestPoint.UserKey, nextKeyCopy)
+			}
+			return errors.Errorf("multiSSTWriter created overlapping ingestion sstables: sstable largest point key %s > next sstable start key %s",
+				metaEndKey, nextKeyCopy)
+		}
+		if meta.HasRangeDelKeys && storage.EngineKeyCompare(meta.LargestRangeDel.UserKey, encodedNextKey) > 0 {
+			metaEndKey, ok := storage.DecodeEngineKey(meta.LargestRangeDel.UserKey)
+			if !ok {
+				return errors.Errorf("multiSSTWriter created overlapping ingestion sstables: sstable largest range del %s > next sstable start key %s",
+					meta.LargestRangeDel.UserKey, nextKeyCopy)
+			}
+			return errors.Errorf("multiSSTWriter created overlapping ingestion sstables: sstable largest range del %s > next sstable start key %s",
+				metaEndKey, nextKeyCopy)
+		}
+		if meta.HasRangeKeys && storage.EngineKeyCompare(meta.LargestRangeKey.UserKey, encodedNextKey) > 0 {
+			metaEndKey, ok := storage.DecodeEngineKey(meta.LargestRangeKey.UserKey)
+			if !ok {
+				return errors.Errorf("multiSSTWriter created overlapping ingestion sstables: sstable largest range key %s > next sstable start key %s",
+					meta.LargestRangeKey.UserKey, nextKeyCopy)
+			}
+			return errors.Errorf("multiSSTWriter created overlapping ingestion sstables: sstable largest range key %s > next sstable start key %s",
+				metaEndKey, nextKeyCopy)
+		}
+	}
+	// Account for any additional bytes written other than the KV data.
+	msstw.writeBytes += int64(msstw.currSST.Meta.Size) - msstw.currSST.DataSize
 	msstw.dataSize += msstw.currSST.DataSize
 	msstw.sstSize += int64(msstw.currSST.Meta.Size)
 	msstw.currSpan++
@@ -197,22 +354,22 @@ func (msstw *multiSSTWriter) finalizeSST(ctx context.Context) error {
 	return nil
 }
 
-// addRangeDelForLastSpan allows us to explicitly add a deletion tombstone
-// for the last span in the msstw, if it was instantiated with the expectation
+// addClearForMVCCSpan allows us to explicitly add a deletion tombstone
+// for the mvcc span in the msstw, if it was instantiated with the expectation
 // that no tombstone was necessary.
-func (msstw *multiSSTWriter) addRangeDelForLastSpan() error {
-	if !msstw.skipRangeDelForLastSpan {
+func (msstw *multiSSTWriter) addClearForMVCCSpan() error {
+	if !msstw.skipClearForMVCCSpan {
 		// Nothing to do.
 		return nil
 	}
-	if msstw.currSpan < len(msstw.keySpans)-1 {
-		// When we switch to the last key span, we will just add a rangedel for it.
-		// Set skipRangeDelForLastSpan to false.
-		msstw.skipRangeDelForLastSpan = false
+	if msstw.currSpan < len(msstw.localKeySpans) {
+		// When we switch to the mvcc key span, we will just add a rangedel for it.
+		// Set skipClearForMVCCSpan to false.
+		msstw.skipClearForMVCCSpan = false
 		return nil
 	}
-	if msstw.currSpan > len(msstw.keySpans)-1 {
-		panic("cannot addRangeDel if sst writer has moved past user keys")
+	if msstw.currSpan >= len(msstw.localKeySpans) {
+		panic("cannot clearEngineRange if sst writer has moved past user keys")
 	}
 	panic("multiSSTWriter already added keys to sstable that cannot be deleted by a rangedel/rangekeydel within it")
 }
@@ -221,36 +378,64 @@ func (msstw *multiSSTWriter) addRangeDelForLastSpan() error {
 // writer for writing a point/range key at key. For point keys, endKey and key
 // must equal each other.
 func (msstw *multiSSTWriter) rolloverSST(
-	ctx context.Context, key roachpb.Key, endKey roachpb.Key,
+	ctx context.Context, key storage.EngineKey, endKey storage.EngineKey,
 ) error {
-	for msstw.keySpans[msstw.currSpan].EndKey.Compare(key) <= 0 {
+	for msstw.currentSpan().EndKey.Compare(key.Key) <= 0 {
 		// Finish the current SST, write to the file, and move to the next key
 		// range.
-		if err := msstw.finalizeSST(ctx); err != nil {
+		if err := msstw.finalizeSST(ctx, &key); err != nil {
 			return err
 		}
 		if err := msstw.initSST(ctx); err != nil {
 			return err
 		}
 	}
-	if msstw.keySpans[msstw.currSpan].Key.Compare(key) > 0 ||
-		msstw.keySpans[msstw.currSpan].EndKey.Compare(endKey) < 0 {
-		if !key.Equal(endKey) {
-			return errors.AssertionFailedf("client error: expected %s to fall in one of %s",
-				roachpb.Span{Key: key, EndKey: endKey}, msstw.keySpans)
+	currSpan := msstw.currentSpan()
+	if currSpan.Key.Compare(key.Key) > 0 || currSpan.EndKey.Compare(endKey.Key) < 0 {
+		if !key.Key.Equal(endKey.Key) {
+			return errors.AssertionFailedf("client error: expected %s to fall in one of %s or %s",
+				roachpb.Span{Key: key.Key, EndKey: endKey.Key}, msstw.localKeySpans, msstw.mvccKeySpan)
 		}
-		return errors.AssertionFailedf("client error: expected %s to fall in one of %s", key, msstw.keySpans)
+		return errors.AssertionFailedf("client error: expected %s to fall in one of %s or %s", key, msstw.localKeySpans, msstw.mvccKeySpan)
+	}
+	if msstw.currSpanIsMVCCSpan() && msstw.maxSSTSize > 0 && msstw.currSST.DataSize > msstw.maxSSTSize {
+		// We're in an MVCC / user keys span, and the current sstable has exceeded
+		// the max size for MVCC sstables that we should be creating. Split this
+		// sstable into smaller ones. We do this by splitting the mvccKeySpan
+		// from [oldStartKey, oldEndKey) to [oldStartKey, key) and [key, oldEndKey).
+		// The split spans are added to msstw.mvccSSTSpans.
+		currSpan := &msstw.mvccSSTSpans[msstw.currSpan-len(msstw.localKeySpans)]
+		if bytes.Equal(currSpan.Start.Key, key.Key) && bytes.Equal(currSpan.Start.Version, key.Version) {
+			panic("unexpectedly reached max sstable size at start of an mvcc sstable span")
+		}
+		oldEndKey := currSpan.End
+		currSpan.End = key.Copy()
+		newSpan := storage.EngineKeyRange{Start: currSpan.End, End: oldEndKey}
+		msstw.mvccSSTSpans = append(msstw.mvccSSTSpans, newSpan)
+		if msstw.currSpan < len(msstw.localKeySpans)+len(msstw.mvccSSTSpans)-2 {
+			// This should never happen; we only split sstables when we're at the end
+			// of mvccSSTSpans.
+			panic("unexpectedly split an earlier mvcc sstable span in multiSSTWriter")
+		}
+		if err := msstw.finalizeSST(ctx, &key); err != nil {
+			return err
+		}
+		if err := msstw.initSST(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (msstw *multiSSTWriter) Put(ctx context.Context, key storage.EngineKey, value []byte) error {
-	if err := msstw.rolloverSST(ctx, key.Key, key.Key); err != nil {
+	if err := msstw.rolloverSST(ctx, key, key); err != nil {
 		return err
 	}
+	prevWriteBytes := msstw.currSST.EstimatedSize()
 	if err := msstw.currSST.PutEngineKey(key, value); err != nil {
 		return errors.Wrap(err, "failed to put in sst")
 	}
+	msstw.writeBytes += int64(msstw.currSST.EstimatedSize() - prevWriteBytes)
 	return nil
 }
 
@@ -261,9 +446,10 @@ func (msstw *multiSSTWriter) PutInternalPointKey(
 	if !ok {
 		return errors.New("cannot decode engine key")
 	}
-	if err := msstw.rolloverSST(ctx, decodedKey.Key, decodedKey.Key); err != nil {
+	if err := msstw.rolloverSST(ctx, decodedKey, decodedKey); err != nil {
 		return err
 	}
+	prevWriteBytes := msstw.currSST.EstimatedSize()
 	var err error
 	switch kind {
 	case pebble.InternalKeyKindSet, pebble.InternalKeyKindSetWithDelete:
@@ -276,6 +462,7 @@ func (msstw *multiSSTWriter) PutInternalPointKey(
 	if err != nil {
 		return errors.Wrap(err, "failed to put in sst")
 	}
+	msstw.writeBytes += int64(msstw.currSST.EstimatedSize() - prevWriteBytes)
 	return nil
 }
 
@@ -298,32 +485,42 @@ func decodeRangeStartEnd(
 }
 
 func (msstw *multiSSTWriter) PutInternalRangeDelete(ctx context.Context, start, end []byte) error {
+	if !msstw.skipClearForMVCCSpan {
+		panic("can only add internal range deletes to multiSSTWriter if skipClearForMVCCSpan is true")
+	}
 	decodedStart, decodedEnd, err := decodeRangeStartEnd(start, end)
 	if err != nil {
 		return err
 	}
-	if err := msstw.rolloverSST(ctx, decodedStart.Key, decodedEnd.Key); err != nil {
+	if err := msstw.rolloverSST(ctx, decodedStart, decodedEnd); err != nil {
 		return err
 	}
+	prevWriteBytes := msstw.currSST.EstimatedSize()
 	if err := msstw.currSST.ClearRawEncodedRange(start, end); err != nil {
 		return errors.Wrap(err, "failed to put range delete in sst")
 	}
+	msstw.writeBytes += int64(msstw.currSST.EstimatedSize() - prevWriteBytes)
 	return nil
 }
 
 func (msstw *multiSSTWriter) PutInternalRangeKey(
 	ctx context.Context, start, end []byte, key rangekey.Key,
 ) error {
+	if !msstw.skipClearForMVCCSpan {
+		panic("can only add internal range deletes to multiSSTWriter if skipClearForMVCCSpan is true")
+	}
 	decodedStart, decodedEnd, err := decodeRangeStartEnd(start, end)
 	if err != nil {
 		return err
 	}
-	if err := msstw.rolloverSST(ctx, decodedStart.Key, decodedEnd.Key); err != nil {
+	if err := msstw.rolloverSST(ctx, decodedStart, decodedEnd); err != nil {
 		return err
 	}
+	prevWriteBytes := msstw.currSST.EstimatedSize()
 	if err := msstw.currSST.PutInternalRangeKey(start, end, key); err != nil {
 		return errors.Wrap(err, "failed to put range key in sst")
 	}
+	msstw.writeBytes += int64(msstw.currSST.EstimatedSize() - prevWriteBytes)
 	return nil
 }
 
@@ -333,22 +530,36 @@ func (msstw *multiSSTWriter) PutRangeKey(
 	if start.Compare(end) >= 0 {
 		return errors.AssertionFailedf("start key %s must be before end key %s", end, start)
 	}
-	if err := msstw.rolloverSST(ctx, start, end); err != nil {
+	if err := msstw.rolloverSST(ctx, storage.EngineKey{Key: start}, storage.EngineKey{Key: end}); err != nil {
 		return err
 	}
-	if err := msstw.currSST.PutEngineRangeKey(start, end, suffix, value); err != nil {
-		return errors.Wrap(err, "failed to put range key in sst")
+	if msstw.skipClearForMVCCSpan {
+		prevWriteBytes := msstw.currSST.EstimatedSize()
+		// Skip the fragmenter. See the comment in skipClearForMVCCSpan.
+		if err := msstw.currSST.PutEngineRangeKey(start, end, suffix, value); err != nil {
+			return errors.Wrap(err, "failed to put range key in sst")
+		}
+		msstw.writeBytes += int64(msstw.currSST.EstimatedSize() - prevWriteBytes)
+		return nil
 	}
+
+	startKey, endKey := storage.EngineKey{Key: start}.Encode(), storage.EngineKey{Key: end}.Encode()
+	startTrailer := pebble.MakeInternalKeyTrailer(0, pebble.InternalKeyKindRangeKeySet)
+	msstw.rangeKeyFrag.Add(rangekey.Span{
+		Start: startKey,
+		End:   endKey,
+		Keys:  []rangekey.Key{{Trailer: startTrailer, Suffix: suffix, Value: value}},
+	})
 	return nil
 }
 
 func (msstw *multiSSTWriter) Finish(ctx context.Context) (int64, error) {
-	if msstw.currSpan < len(msstw.keySpans) {
+	if msstw.currSpan < (len(msstw.localKeySpans) + len(msstw.mvccSSTSpans)) {
 		for {
-			if err := msstw.finalizeSST(ctx); err != nil {
+			if err := msstw.finalizeSST(ctx, nil /* nextKey */); err != nil {
 				return 0, err
 			}
-			if msstw.currSpan >= len(msstw.keySpans) {
+			if msstw.currSpan >= (len(msstw.localKeySpans) + len(msstw.mvccSSTSpans)) {
 				break
 			}
 			if err := msstw.initSST(ctx); err != nil {
@@ -494,8 +705,7 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 	// TODO(jeffreyxiao): Re-evaluate as the default range size grows.
 	keyRanges := rditer.MakeReplicatedKeySpans(header.State.Desc)
 
-	doExcise := header.SharedReplicate || (storage.UseExciseForSnapshots.Get(&s.ClusterSettings().SV) &&
-		s.cfg.Settings.Version.IsActive(ctx, clusterversion.V23_2_EnablePebbleFormatVirtualSSTables))
+	doExcise := header.SharedReplicate || header.ExternalReplicate || storage.UseExciseForSnapshots.Get(&s.ClusterSettings().SV)
 	if header.SharedReplicate && !s.cfg.SharedStorageEnabled {
 		return noSnap, sendSnapshotError(ctx, s, stream, errors.New("cannot accept shared sstables"))
 	}
@@ -512,7 +722,14 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 			return noSnap, errors.AssertionFailedf("last span in multiSSTWriter did not equal the user key span: %s", keyRanges[len(keyRanges)-1].String())
 		}
 	}
-	msstw, err := newMultiSSTWriter(ctx, kvSS.st, kvSS.scratch, keyRanges, kvSS.sstChunkSize, doExcise)
+
+	// TODO(aaditya): Remove once we support flushableIngests for shared and
+	// external files in the engine.
+	skipClearForMVCCSpan := doExcise && (header.SharedReplicate || header.ExternalReplicate)
+	// The last key range is the user key span.
+	localRanges := keyRanges[:len(keyRanges)-1]
+	mvccRange := keyRanges[len(keyRanges)-1]
+	msstw, err := newMultiSSTWriter(ctx, kvSS.st, kvSS.scratch, localRanges, mvccRange, kvSS.sstChunkSize, skipClearForMVCCSpan, header.RangeKeysInOrder)
 	if err != nil {
 		return noSnap, err
 	}
@@ -521,6 +738,18 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 	log.Event(ctx, "waiting for snapshot batches to begin")
 
 	var sharedSSTs []pebble.SharedSSTMeta
+	var externalSSTs []pebble.ExternalFile
+	var prevWriteBytes int64
+
+	snapshotQ := s.cfg.KVAdmissionController.GetSnapshotQueue(s.StoreID())
+	if snapshotQ == nil {
+		log.Errorf(ctx, "unable to find snapshot queue for store: %s", s.StoreID())
+	}
+	// Using a nil pacer is effectively a noop if snapshot control is disabled.
+	var pacer *admission.SnapshotPacer = nil
+	if admission.DiskBandwidthForSnapshotIngest.Get(&s.cfg.Settings.SV) && snapshotQ != nil {
+		pacer = admission.NewSnapshotPacer(snapshotQ)
+	}
 
 	for {
 		timingTag.start("recv")
@@ -536,7 +765,8 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 		if req.TransitionFromSharedToRegularReplicate {
 			doExcise = false
 			sharedSSTs = nil
-			if err := msstw.addRangeDelForLastSpan(); err != nil {
+			externalSSTs = nil
+			if err := msstw.addClearForMVCCSpan(); err != nil {
 				return noSnap, errors.Wrap(err, "adding tombstone for last span")
 			}
 		}
@@ -549,15 +779,32 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 			}
 
 			timingTag.start("sst")
+			verifyCheckSum := snapshotChecksumVerification.Get(&s.ClusterSettings().SV)
 			// All batch operations are guaranteed to be point key or range key puts.
 			for batchReader.Next() {
+				// TODO(lyang24): maybe avoid decoding engine key twice.
+				// msstw calls (i.e. PutInternalPointKey) can use the decoded engine key here as input.
+
+				writeBytes := msstw.writeBytes - prevWriteBytes
+				// Calling nil pacer is a noop.
+				if err := pacer.Pace(ctx, writeBytes, false /* final */); err != nil {
+					return noSnap, errors.Wrapf(err, "snapshot admission pacer")
+				}
+				prevWriteBytes = msstw.writeBytes
+
+				ek, err := batchReader.EngineKey()
+				if err != nil {
+					return noSnap, err
+				}
+				// Verify value checksum to catch data corruption.
+				if verifyCheckSum {
+					if err = ek.Verify(batchReader.Value()); err != nil {
+						return noSnap, errors.Wrap(err, "verifying value checksum")
+					}
+				}
 				switch batchReader.KeyKind() {
 				case pebble.InternalKeyKindSet, pebble.InternalKeyKindSetWithDelete:
-					key, err := batchReader.EngineKey()
-					if err != nil {
-						return noSnap, err
-					}
-					if err := msstw.Put(ctx, key, batchReader.Value()); err != nil {
+					if err := msstw.Put(ctx, ek, batchReader.Value()); err != nil {
 						return noSnap, errors.Wrapf(err, "writing sst for raft snapshot")
 					}
 				case pebble.InternalKeyKindDelete, pebble.InternalKeyKindDeleteSized:
@@ -600,10 +847,7 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 						}
 					}
 				case pebble.InternalKeyKindRangeKeySet:
-					start, err := batchReader.EngineKey()
-					if err != nil {
-						return noSnap, err
-					}
+					start := ek
 					end, err := batchReader.EngineEndKey()
 					if err != nil {
 						return noSnap, err
@@ -631,16 +875,37 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 		if len(req.SharedTables) > 0 && doExcise {
 			for i := range req.SharedTables {
 				sst := req.SharedTables[i]
+				pbToInternalKey := func(k *kvserverpb.SnapshotRequest_SharedTable_InternalKey) pebble.InternalKey {
+					return pebble.InternalKey{UserKey: k.UserKey, Trailer: pebble.InternalKeyTrailer(k.Trailer)}
+				}
 				sharedSSTs = append(sharedSSTs, pebble.SharedSSTMeta{
 					Backing:          stubBackingHandle{sst.Backing},
-					Smallest:         pebble.InternalKey{UserKey: sst.Smallest.UserKey, Trailer: sst.Smallest.Trailer},
-					Largest:          pebble.InternalKey{UserKey: sst.Largest.UserKey, Trailer: sst.Largest.Trailer},
-					SmallestRangeKey: pebble.InternalKey{UserKey: sst.SmallestRangeKey.UserKey, Trailer: sst.SmallestRangeKey.Trailer},
-					LargestRangeKey:  pebble.InternalKey{UserKey: sst.LargestRangeKey.UserKey, Trailer: sst.LargestRangeKey.Trailer},
-					SmallestPointKey: pebble.InternalKey{UserKey: sst.SmallestPointKey.UserKey, Trailer: sst.SmallestPointKey.Trailer},
-					LargestPointKey:  pebble.InternalKey{UserKey: sst.LargestPointKey.UserKey, Trailer: sst.LargestPointKey.Trailer},
+					Smallest:         pbToInternalKey(sst.Smallest),
+					Largest:          pbToInternalKey(sst.Largest),
+					SmallestRangeKey: pbToInternalKey(sst.SmallestRangeKey),
+					LargestRangeKey:  pbToInternalKey(sst.LargestRangeKey),
+					SmallestPointKey: pbToInternalKey(sst.SmallestPointKey),
+					LargestPointKey:  pbToInternalKey(sst.LargestPointKey),
 					Level:            uint8(sst.Level),
 					Size:             sst.Size_,
+				})
+			}
+		}
+		if len(req.ExternalTables) > 0 && doExcise {
+			for i := range req.ExternalTables {
+				sst := req.ExternalTables[i]
+				externalSSTs = append(externalSSTs, pebble.ExternalFile{
+					Locator:           remote.Locator(sst.Locator),
+					ObjName:           sst.ObjectName,
+					StartKey:          sst.StartKey,
+					EndKey:            sst.EndKey,
+					EndKeyIsInclusive: sst.EndKeyIsInclusive,
+					HasPointKey:       sst.HasPointKey,
+					HasRangeKey:       sst.HasRangeKey,
+					SyntheticPrefix:   sst.SyntheticPrefix,
+					SyntheticSuffix:   sst.SyntheticSuffix,
+					Level:             uint8(sst.Level),
+					Size:              sst.Size_,
 				})
 			}
 		}
@@ -654,6 +919,12 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 			sstSize := msstw.sstSize
 			if err != nil {
 				return noSnap, errors.Wrapf(err, "finishing sst for raft snapshot")
+			}
+			// Defensive call to account for any discrepancies. The SST sizes should
+			// have been updated upon closing.
+			additionalWrites := sstSize - msstw.writeBytes
+			if err := pacer.Pace(ctx, additionalWrites, true /* final */); err != nil {
+				return noSnap, errors.Wrapf(err, "snapshot admission pacer")
 			}
 			msstw.Close()
 			timingTag.stop("sst")
@@ -670,23 +941,25 @@ func (kvSS *kvBatchSnapshotStrategy) Receive(
 			}
 
 			inSnap := IncomingSnapshot{
-				SnapUUID:          snapUUID,
-				SSTStorageScratch: kvSS.scratch,
-				FromReplica:       header.RaftMessageRequest.FromReplica,
-				Desc:              header.State.Desc,
-				DataSize:          dataSize,
-				SSTSize:           sstSize,
-				SharedSize:        sharedSize,
-				raftAppliedIndex:  header.State.RaftAppliedIndex,
-				msgAppRespCh:      make(chan raftpb.Message, 1),
-				sharedSSTs:        sharedSSTs,
-				doExcise:          doExcise,
-				clearedSpans:      keyRanges,
+				SnapUUID:                    snapUUID,
+				SSTStorageScratch:           kvSS.scratch,
+				FromReplica:                 header.RaftMessageRequest.FromReplica,
+				Desc:                        header.State.Desc,
+				DataSize:                    dataSize,
+				SSTSize:                     sstSize,
+				SharedSize:                  sharedSize,
+				raftAppliedIndex:            header.State.RaftAppliedIndex,
+				msgAppRespCh:                make(chan raftpb.Message, 1),
+				sharedSSTs:                  sharedSSTs,
+				externalSSTs:                externalSSTs,
+				doExcise:                    doExcise,
+				includesRangeDelForLastSpan: !skipClearForMVCCSpan,
+				clearedSpans:                keyRanges,
 			}
 
 			timingTag.stop("totalTime")
 
-			kvSS.status = redact.Sprintf("local ssts: %d, shared ssts: %d", len(kvSS.scratch.SSTs()), len(sharedSSTs))
+			kvSS.status = redact.Sprintf("local ssts: %d, shared ssts: %d, external ssts: %d", len(kvSS.scratch.SSTs()), len(sharedSSTs), len(externalSSTs))
 			return inSnap, nil
 		}
 	}
@@ -704,7 +977,7 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 	// not reflect the log entries sent (which are never sent in newer versions of
 	// CRDB, as of VersionUnreplicatedTruncatedState).
 	var bytesSent int64
-	var kvs, rangeKVs, sharedSSTs int
+	var kvs, rangeKVs, sharedSSTCount, externalSSTCount int
 
 	// These stopwatches allow us to time the various components of Send().
 	// - totalTimeStopwatch measures the total time spent within this function.
@@ -730,7 +1003,8 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 	// Iterate over all keys (point keys and range keys) and stream out batches of
 	// key-values.
 	var b storage.WriteBatch
-	var ssts []kvserverpb.SnapshotRequest_SharedTable
+	var sharedSSTs []kvserverpb.SnapshotRequest_SharedTable
+	var externalSSTs []kvserverpb.SnapshotRequest_ExternalTable
 	var transitionFromSharedToRegularReplicate bool
 	defer func() {
 		if b != nil {
@@ -739,7 +1013,7 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 	}()
 
 	flushBatch := func() error {
-		if err := kvSS.sendBatch(ctx, stream, b, ssts, transitionFromSharedToRegularReplicate, timingTag); err != nil {
+		if err := kvSS.sendBatch(ctx, stream, b, sharedSSTs, externalSSTs, transitionFromSharedToRegularReplicate, timingTag); err != nil {
 			return err
 		}
 		bLen := int64(b.Len())
@@ -747,7 +1021,8 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 		recordBytesSent(bLen)
 		b.Close()
 		b = nil
-		ssts = ssts[:0]
+		sharedSSTs = sharedSSTs[:0]
+		externalSSTs = externalSSTs[:0]
 		transitionFromSharedToRegularReplicate = false
 		return nil
 	}
@@ -763,19 +1038,39 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 	// non-system range, take advantage of shared storage to minimize the amount
 	// of data we're iterating on and sending over the network.
 	sharedReplicate := header.SharedReplicate && rditer.IterateReplicaKeySpansShared != nil
+	externalReplicate := header.ExternalReplicate && rditer.IterateReplicaKeySpansShared != nil
 	replicatedFilter := rditer.ReplicatedSpansAll
-	if sharedReplicate {
+	if sharedReplicate || externalReplicate {
 		replicatedFilter = rditer.ReplicatedSpansExcludeUser
 	}
 
-	iterateRKSpansVisitor := func(iter storage.EngineIterator, _ roachpb.Span, keyType storage.IterKeyType) error {
+	iterateRKSpansVisitor := func(iter storage.EngineIterator, _ roachpb.Span) error {
 		timingTag.start("iter")
 		defer timingTag.stop("iter")
 
 		var err error
-		switch keyType {
-		case storage.IterKeyTypePointsOnly:
-			for ok := true; ok && err == nil; ok, err = iter.NextEngineKey() {
+		for ok := true; ok && err == nil; ok, err = iter.NextEngineKey() {
+			hasPoint, hasRange := iter.HasPointAndRange()
+			if hasRange && iter.RangeKeyChanged() {
+				bounds, err := iter.EngineRangeBounds()
+				if err != nil {
+					return err
+				}
+				for _, rkv := range iter.EngineRangeKeys() {
+					rangeKVs++
+					if b == nil {
+						b = kvSS.newWriteBatch()
+					}
+					err := b.PutEngineRangeKey(bounds.Key, bounds.EndKey, rkv.Version, rkv.Value)
+					if err != nil {
+						return err
+					}
+					if err = maybeFlushBatch(); err != nil {
+						return err
+					}
+				}
+			}
+			if hasPoint {
 				kvs++
 				if b == nil {
 					b = kvSS.newWriteBatch()
@@ -795,30 +1090,6 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 					return err
 				}
 			}
-
-		case storage.IterKeyTypeRangesOnly:
-			for ok := true; ok && err == nil; ok, err = iter.NextEngineKey() {
-				bounds, err := iter.EngineRangeBounds()
-				if err != nil {
-					return err
-				}
-				for _, rkv := range iter.EngineRangeKeys() {
-					rangeKVs++
-					if b == nil {
-						b = kvSS.newWriteBatch()
-					}
-					err := b.PutEngineRangeKey(bounds.Key, bounds.EndKey, rkv.Version, rkv.Value)
-					if err != nil {
-						return err
-					}
-					if err = maybeFlushBatch(); err != nil {
-						return err
-					}
-				}
-			}
-
-		default:
-			return errors.AssertionFailedf("unexpected key type %v", keyType)
 		}
 		return err
 	}
@@ -829,7 +1100,56 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 	}
 
 	var valBuf []byte
-	if sharedReplicate {
+	if sharedReplicate || externalReplicate {
+		var sharedVisitor func(sst *pebble.SharedSSTMeta) error
+		if sharedReplicate {
+			sharedVisitor = func(sst *pebble.SharedSSTMeta) error {
+				sharedSSTCount++
+				snap.sharedBackings = append(snap.sharedBackings, sst.Backing)
+				backing, err := sst.Backing.Get()
+				if err != nil {
+					return err
+				}
+				ikeyToPb := func(ik pebble.InternalKey) *kvserverpb.SnapshotRequest_SharedTable_InternalKey {
+					return &kvserverpb.SnapshotRequest_SharedTable_InternalKey{
+						UserKey: ik.UserKey,
+						Trailer: uint64(ik.Trailer),
+					}
+				}
+				sharedSSTs = append(sharedSSTs, kvserverpb.SnapshotRequest_SharedTable{
+					Backing:          backing,
+					Smallest:         ikeyToPb(sst.Smallest),
+					Largest:          ikeyToPb(sst.Largest),
+					SmallestRangeKey: ikeyToPb(sst.SmallestRangeKey),
+					LargestRangeKey:  ikeyToPb(sst.LargestRangeKey),
+					SmallestPointKey: ikeyToPb(sst.SmallestPointKey),
+					LargestPointKey:  ikeyToPb(sst.LargestPointKey),
+					Level:            int32(sst.Level),
+					Size_:            sst.Size,
+				})
+				return nil
+			}
+		}
+		var externalVisitor func(sst *pebble.ExternalFile) error
+		if externalReplicate {
+			externalVisitor = func(sst *pebble.ExternalFile) error {
+				externalSSTCount++
+				externalSSTs = append(externalSSTs, kvserverpb.SnapshotRequest_ExternalTable{
+					Locator:           []byte(sst.Locator),
+					ObjectName:        sst.ObjName,
+					Size_:             sst.Size,
+					StartKey:          sst.StartKey,
+					EndKey:            sst.EndKey,
+					EndKeyIsInclusive: sst.EndKeyIsInclusive,
+					HasPointKey:       sst.HasPointKey,
+					HasRangeKey:       sst.HasRangeKey,
+					SyntheticPrefix:   sst.SyntheticPrefix,
+					SyntheticSuffix:   sst.SyntheticSuffix,
+					Level:             int32(sst.Level),
+				})
+				return nil
+			}
+		}
 		err := rditer.IterateReplicaKeySpansShared(ctx, snap.State.Desc, kvSS.st, kvSS.clusterID, snap.EngineSnap, func(key *pebble.InternalKey, value pebble.LazyValue, _ pebble.IteratorLevel) error {
 			kvs++
 			if b == nil {
@@ -852,7 +1172,7 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 				return err
 			}
 			return maybeFlushBatch()
-		}, func(start, end []byte, seqNum uint64) error {
+		}, func(start, end []byte, seqNum pebble.SeqNum) error {
 			kvs++
 			if b == nil {
 				b = kvSS.newWriteBatch()
@@ -873,32 +1193,7 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 				}
 			}
 			return maybeFlushBatch()
-		}, func(sst *pebble.SharedSSTMeta) error {
-			sharedSSTs++
-			snap.sharedBackings = append(snap.sharedBackings, sst.Backing)
-			backing, err := sst.Backing.Get()
-			if err != nil {
-				return err
-			}
-			ikeyToPb := func(ik pebble.InternalKey) *kvserverpb.SnapshotRequest_SharedTable_InternalKey {
-				return &kvserverpb.SnapshotRequest_SharedTable_InternalKey{
-					UserKey: ik.UserKey,
-					Trailer: ik.Trailer,
-				}
-			}
-			ssts = append(ssts, kvserverpb.SnapshotRequest_SharedTable{
-				Backing:          backing,
-				Smallest:         ikeyToPb(sst.Smallest),
-				Largest:          ikeyToPb(sst.Largest),
-				SmallestRangeKey: ikeyToPb(sst.SmallestRangeKey),
-				LargestRangeKey:  ikeyToPb(sst.LargestRangeKey),
-				SmallestPointKey: ikeyToPb(sst.SmallestPointKey),
-				LargestPointKey:  ikeyToPb(sst.LargestPointKey),
-				Level:            int32(sst.Level),
-				Size_:            sst.Size,
-			})
-			return nil
-		})
+		}, sharedVisitor, externalVisitor)
 		if err != nil && errors.Is(err, pebble.ErrInvalidSkipSharedIteration) {
 			transitionFromSharedToRegularReplicate = true
 			err = rditer.IterateReplicaKeySpans(ctx, snap.State.Desc, snap.EngineSnap, true, /* replicatedOnly */
@@ -917,7 +1212,7 @@ func (kvSS *kvBatchSnapshotStrategy) Send(
 	timingTag.stop("totalTime")
 	log.Eventf(ctx, "finished sending snapshot batches, sent a total of %d bytes", bytesSent)
 
-	kvSS.status = redact.Sprintf("kvs=%d rangeKVs=%d sharedSSTs=%d", kvs, rangeKVs, sharedSSTs)
+	kvSS.status = redact.Sprintf("kvs=%d rangeKVs=%d sharedSSTs=%d, externalSSTs=%d", kvs, rangeKVs, sharedSSTCount, externalSSTCount)
 	return bytesSent, nil
 }
 
@@ -925,7 +1220,8 @@ func (kvSS *kvBatchSnapshotStrategy) sendBatch(
 	ctx context.Context,
 	stream outgoingSnapshotStream,
 	batch storage.WriteBatch,
-	ssts []kvserverpb.SnapshotRequest_SharedTable,
+	sharedSSTs []kvserverpb.SnapshotRequest_SharedTable,
+	externalSSTs []kvserverpb.SnapshotRequest_ExternalTable,
 	transitionToRegularReplicate bool,
 	timerTag *snapshotTimingTag,
 ) error {
@@ -938,7 +1234,8 @@ func (kvSS *kvBatchSnapshotStrategy) sendBatch(
 	timerTag.start("send")
 	res := stream.Send(&kvserverpb.SnapshotRequest{
 		KVBatch:                                batch.Repr(),
-		SharedTables:                           ssts,
+		SharedTables:                           sharedSSTs,
+		ExternalTables:                         externalSSTs,
 		TransitionFromSharedToRegularReplicate: transitionToRegularReplicate,
 	})
 	timerTag.stop("send")
@@ -1153,7 +1450,7 @@ func (s *Store) canAcceptSnapshotLocked(
 	existingRepl.raftMu.AssertHeld()
 
 	existingRepl.mu.RLock()
-	existingDesc := existingRepl.mu.state.Desc
+	existingDesc := existingRepl.shMu.state.Desc
 	existingIsInitialized := existingDesc.IsInitialized()
 	existingDestroyStatus := existingRepl.mu.destroyStatus
 	existingRepl.mu.RUnlock()
@@ -1392,12 +1689,10 @@ func (s *Store) receiveSnapshot(
 		} else if header.SenderQueueName == kvserverpb.SnapshotRequest_OTHER {
 			s.metrics.RangeSnapshotRebalancingRcvdBytes.Inc(inc)
 		} else {
-			// TODO(baptist): This logic is pretty messy. Consider refactoring all the
-			// snapshot related metrics.
 			// Replicate queue does both types, so split based on priority.
 			// See AllocatorAction.Priority
 			if header.SenderQueuePriority > 0 {
-				s.metrics.RangeSnapshotRecoveryRcvdBytes.Inc(inc)
+				s.metrics.RangeSnapshotUpreplicationRcvdBytes.Inc(inc)
 			} else {
 				s.metrics.RangeSnapshotRebalancingRcvdBytes.Inc(inc)
 			}
@@ -1604,6 +1899,15 @@ var snapshotSSTWriteSyncRate = settings.RegisterByteSizeSetting(
 	settings.PositiveInt,
 )
 
+// snapshotChecksumVerification enables/disables value checksums verification
+// when receiving snapshots.
+var snapshotChecksumVerification = settings.RegisterBoolSetting(
+	settings.SystemOnly,
+	"kv.snapshot_receiver.checksum_verification.enabled",
+	"verify value checksums on receiving a raft snapshot",
+	true,
+)
+
 // SendEmptySnapshot creates an OutgoingSnapshot for the input range
 // descriptor and seeds it with an empty range. Then, it sends this
 // snapshot to the replica specified in the input.
@@ -1623,7 +1927,7 @@ func SendEmptySnapshot(
 		storage.InMemory(),
 		cluster.MakeClusterSettings(),
 		storage.CacheSize(1<<20 /* 1 MiB */),
-		storage.MaxSize(512<<20 /* 512 MiB */))
+		storage.MaxSizeBytes(512<<20 /* 512 MiB */))
 	if err != nil {
 		return err
 	}
@@ -1661,15 +1965,7 @@ func SendEmptySnapshot(
 	// explicitly for snapshots going out to followers.
 	state.DeprecatedUsingAppliedStateKey = true
 
-	hs, err := sl.LoadHardState(ctx, eng)
-	if err != nil {
-		return err
-	}
-
-	snapUUID, err := uuid.NewV4()
-	if err != nil {
-		return err
-	}
+	snapUUID := uuid.NewV4()
 
 	// The snapshot must use a Pebble snapshot, since it requires consistent
 	// iterators.
@@ -1706,9 +2002,9 @@ func SendEmptySnapshot(
 		ToReplica:   to,
 		Message: raftpb.Message{
 			Type:     raftpb.MsgSnap,
-			To:       uint64(to.ReplicaID),
-			From:     uint64(from.ReplicaID),
-			Term:     hs.Term,
+			To:       raftpb.PeerID(to.ReplicaID),
+			From:     raftpb.PeerID(from.ReplicaID),
+			Term:     outgoingSnap.RaftSnap.Metadata.Term,
 			Snapshot: &outgoingSnap.RaftSnap,
 		},
 	}
@@ -1717,6 +2013,7 @@ func SendEmptySnapshot(
 		State:              state,
 		RaftMessageRequest: req,
 		RangeSize:          ms.Total(),
+		RangeKeysInOrder:   true,
 	}
 
 	stream, err := NewMultiRaftClient(cc).RaftSnapshot(ctx)

@@ -1,21 +1,16 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ctxutil
 
 import (
 	"context"
+	"fmt"
 	_ "unsafe" // Must import unsafe to enable linkname.
 
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // WhenDoneFunc is the callback invoked by context when it becomes done.
@@ -54,7 +49,7 @@ func WhenDone(parent context.Context, done WhenDoneFunc) bool {
 	// But, be safe and loudly fail tests in case somebody introduces strange
 	// context implementation.
 	if buildutil.CrdbTestBuild && !CanDirectlyDetectCancellation(parent) {
-		log.Fatalf(parent, "expected context that supports direct cancellation detection, found %T", parent)
+		panic(fmt.Sprintf("expected context that supports direct cancellation detection, found %T", parent))
 	}
 
 	propagateCancel(parent, done)

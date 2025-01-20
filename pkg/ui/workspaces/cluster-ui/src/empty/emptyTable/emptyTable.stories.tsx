@@ -1,21 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { storiesOf } from "@storybook/react";
+import React from "react";
 
-import { EmptyTable } from "./emptyTable";
+import { Button } from "src/button";
+
 import emptyListResultsImg from "../../assets/emptyState/empty-list-results.svg";
 import notFoundImg from "../../assets/emptyState/not-found-404.svg";
-import { Button } from "src/button";
 import SpinIcon from "../../icon/spin";
+
+import { EmptyTable } from "./emptyTable";
 
 storiesOf("EmptyTablePlaceholder", module)
   .add("default", () => <EmptyTable />)

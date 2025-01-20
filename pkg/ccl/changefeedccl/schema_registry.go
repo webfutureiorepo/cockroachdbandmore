@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -92,7 +89,7 @@ func getAndDeleteParams(u *url.URL) (*schemaRegistryParams, error) {
 		changefeedbase.RegistryParamClientKey} {
 		if stringParam := query.Get(k); stringParam != "" {
 			var decoded []byte
-			err := decodeBase64FromString(stringParam, &decoded)
+			err := changefeedbase.DecodeBase64FromString(stringParam, &decoded)
 			if err != nil {
 				return nil, errors.Wrapf(err, "param %s must be base 64 encoded", k)
 			}

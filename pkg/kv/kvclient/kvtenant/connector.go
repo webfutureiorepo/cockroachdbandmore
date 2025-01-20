@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvtenant
 
@@ -23,9 +18,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
+	"github.com/cockroachdb/cockroach/pkg/multitenant/mtinfo"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/mtinfopb"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitiespb"
@@ -36,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/settingswatcher"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
+	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
@@ -74,11 +72,16 @@ type Connector interface {
 	// an update channel to track changes
 	TenantInfo() (tenantcapabilities.Entry, <-chan struct{})
 
+	// ReadFromTenantInfoAccessor allows retrieving the other tenant, if any, from
+	// which the calling tenant should configure itself to read, along with the
+	// latest timestamp at which it should perform such reads at this time.
+	mtinfo.ReadFromTenantInfoAccessor
+
 	// NodeDescStore provides information on each of the KV nodes in the cluster
 	// in the form of NodeDescriptors and StoreDescriptors. This obviates the
 	// need for SQL-only tenant servers to join the cluster-wide gossip
 	// network.
-	kvcoord.NodeDescStore
+	kvclient.NodeDescStore
 
 	// RangeDescriptorDB provides range addressing information in the form of
 	// RangeDescriptors through delegated RangeLookup requests. This is
@@ -130,6 +133,11 @@ type Connector interface {
 	// mixed version 21.2->22.1 state where the tenant has not yet configured
 	// its own zones.
 	config.SystemConfigProvider
+
+	// GetClusterInitGracePeriodTS will return the timestamp used to signal the
+	// end of the grace period for clusters with a license. The timestamp is
+	// represented as the number of seconds since the Unix epoch.
+	GetClusterInitGracePeriodTS() int64
 }
 
 // TokenBucketProvider supplies an endpoint (to tenants) for the TokenBucket API
@@ -209,10 +217,11 @@ type connector struct {
 		// metadata bits has been received.
 		receivedFirstMetadata bool
 
-		tenantName   roachpb.TenantName
-		dataState    mtinfopb.TenantDataState
-		serviceMode  mtinfopb.TenantServiceMode
-		capabilities *tenantcapabilitiespb.TenantCapabilities
+		tenantName               roachpb.TenantName
+		dataState                mtinfopb.TenantDataState
+		serviceMode              mtinfopb.TenantServiceMode
+		capabilities             *tenantcapabilitiespb.TenantCapabilities
+		clusterInitGracePeriodTS int64
 
 		// notifyCh is closed when there are changes to the metadata.
 		notifyCh chan struct{}
@@ -230,7 +239,7 @@ type client struct {
 // connector is capable of providing information on each of the KV nodes in the
 // cluster in the form of NodeDescriptors. This obviates the need for SQL-only
 // tenant servers to join the cluster-wide gossip network.
-var _ kvcoord.NodeDescStore = (*connector)(nil)
+var _ kvclient.NodeDescStore = (*connector)(nil)
 
 // connector is capable of providing Range addressing information in the form of
 // RangeDescriptors through delegated RangeLookup requests. This is necessary
@@ -510,7 +519,7 @@ func (c *connector) updateStoreMap(ctx context.Context, key string, content roac
 	c.mu.storeDescs[desc.StoreID] = desc
 }
 
-// GetNodeDescriptor implements the kvcoord.NodeDescStore interface.
+// GetNodeDescriptor implements the kvclient.NodeDescStore interface.
 func (c *connector) GetNodeDescriptor(nodeID roachpb.NodeID) (*roachpb.NodeDescriptor, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -521,14 +530,14 @@ func (c *connector) GetNodeDescriptor(nodeID roachpb.NodeID) (*roachpb.NodeDescr
 	return desc, nil
 }
 
-// GetNodeDescriptorCount implements the kvcoord.NodeDescStore interface.
+// GetNodeDescriptorCount implements the kvclient.NodeDescStore interface.
 func (c *connector) GetNodeDescriptorCount() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.mu.nodeDescs)
 }
 
-// GetStoreDescriptor implements the kvcoord.NodeDescStore interface.
+// GetStoreDescriptor implements the kvclient.NodeDescStore interface.
 func (c *connector) GetStoreDescriptor(storeID roachpb.StoreID) (*roachpb.StoreDescriptor, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -653,12 +662,34 @@ func (c *connector) Regions(
 	return
 }
 
+// Ranges implements the serverpb.TenantStatusServer interface
+func (c *connector) Ranges(
+	ctx context.Context, req *serverpb.RangesRequest,
+) (resp *serverpb.RangesResponse, retErr error) {
+	retErr = c.withClient(ctx, func(ctx context.Context, client *client) (err error) {
+		resp, err = client.Ranges(ctx, req)
+		return
+	})
+	return
+}
+
 // TenantRanges implements the serverpb.TenantStatusServer interface
 func (c *connector) TenantRanges(
 	ctx context.Context, req *serverpb.TenantRangesRequest,
 ) (resp *serverpb.TenantRangesResponse, retErr error) {
 	retErr = c.withClient(ctx, func(ctx context.Context, client *client) (err error) {
 		resp, err = client.TenantRanges(ctx, req)
+		return
+	})
+	return
+}
+
+// NetworkConnectivity implements the serverpb.TenantStatusServer interface
+func (c *connector) NetworkConnectivity(
+	ctx context.Context, req *serverpb.NetworkConnectivityRequest,
+) (resp *serverpb.NetworkConnectivityResponse, retErr error) {
+	retErr = c.withClient(ctx, func(ctx context.Context, client *client) (err error) {
+		resp, err = client.NetworkConnectivity(ctx, req)
 		return
 	})
 	return
@@ -900,8 +931,13 @@ func (c *connector) HotRangesV2(
 func (c *connector) DownloadSpan(
 	ctx context.Context, req *serverpb.DownloadSpanRequest,
 ) (*serverpb.DownloadSpanResponse, error) {
-	if !roachpb.IsSystemTenantID(c.tenantID.InternalValue) {
-		return nil, status.Errorf(codes.PermissionDenied, "only the system tenant can issue download span requests")
+	if !c.tenantID.IsSystem() {
+		tSpan := keys.MakeTenantSpan(c.tenantID)
+		for i := range req.Spans {
+			if !tSpan.Contains(req.Spans[i]) {
+				return nil, status.Errorf(codes.PermissionDenied, "only the system tenant can issue download span requests for another tenant")
+			}
+		}
 	}
 	var resp *serverpb.DownloadSpanResponse
 	if err := c.withClient(ctx, func(ctx context.Context, c *client) error {
@@ -916,6 +952,11 @@ func (c *connector) DownloadSpan(
 
 // WithTxn implements the spanconfig.KVAccessor interface.
 func (c *connector) WithTxn(context.Context, *kv.Txn) spanconfig.KVAccessor {
+	panic("not applicable")
+}
+
+// WithISQLTxn is part of the spanconfig.KVAccessor interface.
+func (c *connector) WithISQLTxn(context.Context, isql.Txn) spanconfig.KVAccessor {
 	panic("not applicable")
 }
 
@@ -1002,10 +1043,10 @@ func (c *connector) dialAddrs(ctx context.Context) (*client, error) {
 
 func (c *connector) dialAddr(ctx context.Context, addr string) (conn *grpc.ClientConn, err error) {
 	if c.rpcDialTimeout == 0 {
-		return c.rpcContext.GRPCUnvalidatedDial(addr).Connect(ctx)
+		return c.rpcContext.GRPCUnvalidatedDial(addr, roachpb.Locality{}).Connect(ctx)
 	}
 	err = timeutil.RunWithTimeout(ctx, "dial addr", c.rpcDialTimeout, func(ctx context.Context) error {
-		conn, err = c.rpcContext.GRPCUnvalidatedDial(addr).Connect(ctx)
+		conn, err = c.rpcContext.GRPCUnvalidatedDial(addr, roachpb.Locality{}).Connect(ctx)
 		return err
 	})
 	return conn, err
@@ -1049,13 +1090,13 @@ func (c *connector) Query(
 // AddressResolver wraps a NodeDescStore interface in an adapter that allows it
 // be used as a nodedialer.AddressResolver. Addresses are resolved to a node's
 // address.
-func AddressResolver(s kvcoord.NodeDescStore) nodedialer.AddressResolver {
-	return func(nodeID roachpb.NodeID) (net.Addr, error) {
+func AddressResolver(s kvclient.NodeDescStore) nodedialer.AddressResolver {
+	return func(nodeID roachpb.NodeID) (net.Addr, roachpb.Locality, error) {
 		nd, err := s.GetNodeDescriptor(nodeID)
 		if err != nil {
-			return nil, err
+			return nil, roachpb.Locality{}, err
 		}
-		return &nd.Address, nil
+		return &nd.Address, nd.Locality, nil
 	}
 }
 

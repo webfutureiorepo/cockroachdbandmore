@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigmanager_test
 
@@ -308,7 +303,7 @@ func TestReconciliationJobErrorAndRecovery(t *testing.T) {
 				ManagerDisableJobCreation:                      true, // disable the automatic job creation
 				JobDisableInternalRetry:                        true,
 				SQLWatcherCheckpointNoopsEveryDurationOverride: 100 * time.Millisecond,
-				JobOnCheckpointInterceptor: func() error {
+				JobOnCheckpointInterceptor: func(_ hlc.Timestamp) error {
 					mu.Lock()
 					defer mu.Unlock()
 
@@ -393,7 +388,7 @@ func TestReconciliationUsesRightCheckpoint(t *testing.T) {
 				},
 				ManagerDisableJobCreation:                      true, // disable the automatic job creation
 				SQLWatcherCheckpointNoopsEveryDurationOverride: 10 * time.Millisecond,
-				JobOnCheckpointInterceptor: func() error {
+				JobOnCheckpointInterceptor: func(_ hlc.Timestamp) error {
 					select {
 					case err := <-errCh:
 						return err

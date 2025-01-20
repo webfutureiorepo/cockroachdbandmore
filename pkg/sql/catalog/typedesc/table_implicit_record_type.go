@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package typedesc
 
@@ -155,7 +150,9 @@ func (v *tableImplicitRecordType) NewBuilder() catalog.DescriptorBuilder {
 }
 
 // GetReferencedDescIDs implements the catalog.Descriptor interface.
-func (v *tableImplicitRecordType) GetReferencedDescIDs() (catalog.DescriptorIDSet, error) {
+func (v *tableImplicitRecordType) GetReferencedDescIDs(
+	catalog.ValidationLevel,
+) (catalog.DescriptorIDSet, error) {
 	return catalog.DescriptorIDSet{}, errors.AssertionFailedf(
 		"GetReferencedDescIDs are unsupported for implicit table record types")
 }
@@ -192,6 +189,9 @@ func (v *tableImplicitRecordType) ForEachUDTDependentForHydration(_ func(t *type
 	return nil
 }
 
+// MaybeRequiresTypeHydration implements the catalog.Descriptor interface.
+func (v *tableImplicitRecordType) MaybeRequiresTypeHydration() bool { return false }
+
 // TypeDesc implements the catalog.TypeDescriptor interface.
 func (v *tableImplicitRecordType) TypeDesc() *descpb.TypeDescriptor {
 	v.panicNotSupported("TypeDesc")
@@ -204,7 +204,7 @@ func (v *tableImplicitRecordType) AsTypesT() *types.T {
 	typs := make([]*types.T, len(cols))
 	names := make([]string, len(cols))
 	for i, col := range cols {
-		typs[i] = col.GetType()
+		typs[i] = col.GetType().CopyForHydrate()
 		names[i] = col.GetName()
 	}
 	// the catalog.TypeDescriptor will be an alias to this Tuple type, which contains
@@ -344,4 +344,9 @@ func (v *tableImplicitRecordType) AsTableImplicitRecordTypeDescriptor() catalog.
 // catalog.TableImplicitRecordTypeDescriptor interface.
 func (v *tableImplicitRecordType) UnderlyingTableDescriptor() catalog.TableDescriptor {
 	return v.desc
+}
+
+// GetReplicatedPCRVersion is a part of the catalog.Descriptor
+func (v *tableImplicitRecordType) GetReplicatedPCRVersion() descpb.DescriptorVersion {
+	return v.desc.GetReplicatedPCRVersion()
 }

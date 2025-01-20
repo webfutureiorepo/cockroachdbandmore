@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -17,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	tracezipper "github.com/cockroachdb/cockroach/pkg/util/tracing/zipper"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/jackc/pgconn"
 	"github.com/marusama/semaphore"
 	"github.com/spf13/cobra"
@@ -63,6 +60,23 @@ type debugZipContext struct {
 	sem semaphore.Semaphore
 }
 
+var filterFlags = map[string]struct{}{
+	"cert-principal-map":                {},
+	"certs-dir":                         {},
+	"cluster-name":                      {},
+	"disable-cluster-name-verification": {},
+	"format":                            {},
+	"host":                              {},
+	"url":                               {},
+	"enterprise-require-fips-ready":     {},
+	"log":                               {},
+	"log-config-file":                   {},
+	"log-config-vars":                   {},
+	"log-dir":                           {},
+	"logtostderr":                       {},
+	"vmodule":                           {},
+}
+
 func (zc *debugZipContext) runZipFn(
 	ctx context.Context, s *zipReporter, fn func(ctx context.Context) error,
 ) error {
@@ -80,7 +94,7 @@ func (zc *debugZipContext) runZipFnWithTimeout(
 // runZipRequest runs a zipRequest and stores its JSON result or error
 // message in the output zip.
 func (zc *debugZipContext) runZipRequest(ctx context.Context, zr *zipReporter, r zipRequest) error {
-	s := zr.start("requesting data for %s", r.pathName)
+	s := zr.start(redact.Sprintf("requesting data for %s", r.pathName))
 	var data interface{}
 	err := zc.runZipFn(ctx, s, func(ctx context.Context) error {
 		thisData, err := r.fn(ctx)
@@ -94,7 +108,8 @@ func (zc *debugZipContext) runZipRequest(ctx context.Context, zr *zipReporter, r
 func (zc *debugZipContext) forAllNodes(
 	ctx context.Context,
 	nodesList *serverpb.NodesListResponse,
-	fn func(ctx context.Context, nodeDetails serverpb.NodeDetails, nodeStatus *statuspb.NodeStatus) error,
+	redactedNodesList *serverpb.NodesListResponse,
+	fn func(ctx context.Context, nodeDetails serverpb.NodeDetails, nodeStatus *statuspb.NodeStatus, redactedNodeDetails serverpb.NodeDetails) error,
 ) error {
 	if nodesList == nil {
 		// Nothing to do, return
@@ -104,7 +119,7 @@ func (zc *debugZipContext) forAllNodes(
 		// Sequential case. Simplify.
 		for _, nodeDetails := range nodesList.Nodes {
 			var nodeStatus *statuspb.NodeStatus
-			if err := fn(ctx, nodeDetails, nodeStatus); err != nil {
+			if err := fn(ctx, nodeDetails, nodeStatus, zc.getRedactedNodeDetails(redactedNodesList, nodeDetails.NodeID)); err != nil {
 				return err
 			}
 		}
@@ -128,7 +143,7 @@ func (zc *debugZipContext) forAllNodes(
 			}
 			defer zc.sem.Release(1)
 
-			nodeErrs <- fn(ctx, nodeDetails, nodeStatus)
+			nodeErrs <- fn(ctx, nodeDetails, nodeStatus, zc.getRedactedNodeDetails(redactedNodesList, nodeDetails.NodeID))
 		}(nodeDetails, nodeStatus)
 	}
 	wg.Wait()
@@ -139,6 +154,27 @@ func (zc *debugZipContext) forAllNodes(
 		err = errors.CombineErrors(err, <-nodeErrs)
 	}
 	return err
+}
+
+// getRedactedNodeDetails finds out matching redacted node details using node Id.
+// When we have a redacted nodelist response and unredacted nodelist response,
+// there is no guarantee that the objects in the list are going to be in the same
+// order by node Id. Hence, we are explicitly extracting the required object by node
+// id.
+func (zc *debugZipContext) getRedactedNodeDetails(
+	redactedNodesList *serverpb.NodesListResponse, nodeId int32,
+) serverpb.NodeDetails {
+	if redactedNodesList == nil {
+		return serverpb.NodeDetails{}
+	}
+
+	for i := range redactedNodesList.Nodes {
+		if redactedNodesList.Nodes[i].NodeID == nodeId {
+			return redactedNodesList.Nodes[i]
+		}
+	}
+
+	return serverpb.NodeDetails{}
 }
 
 type nodeLivenesses = map[roachpb.NodeID]livenesspb.NodeLivenessStatus
@@ -200,7 +236,7 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	dirName := args[0]
-	s := zr.start("creating output file %s", dirName)
+	s := zr.start(redact.Sprintf("creating output file %s", dirName))
 	out, err := os.Create(dirName)
 	if err != nil {
 		return s.fail(err)
@@ -219,7 +255,7 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			cfg.AdvertiseAddr = tenant.RpcAddr
 			sqlAddr := tenant.SqlAddr
 
-			s := zr.start("establishing RPC connection to %s", cfg.AdvertiseAddr)
+			s := zr.start(redact.Sprintf("establishing RPC connection to %s", cfg.AdvertiseAddr))
 			conn, finish, err := getClientGRPCConn(ctx, cfg)
 			if err != nil {
 				return s.fail(err)
@@ -235,7 +271,7 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 				// SQL and RPC.
 				sqlAddr = tenant.RpcAddr
 			}
-			s = zr.start("using SQL address: %s", sqlAddr)
+			s = zr.start(redact.Sprintf("using SQL address: %s", sqlAddr))
 
 			cliCtx.clientOpts.ServerHost, cliCtx.clientOpts.ServerPort, err = net.SplitHostPort(sqlAddr)
 			if err != nil {
@@ -290,7 +326,7 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			// For a SQL only server, the nodeList will be a list of SQL nodes
 			// and livenessByNodeID is null. For a KV server, the nodeList will
 			// be a list of KV nodes along with the corresponding node liveness data.
-			nodesList, livenessByNodeID, err := zc.collectClusterData(ctx)
+			nodesList, redactedNodesList, livenessByNodeID, err := zc.collectClusterData(ctx)
 			if err != nil {
 				return err
 			}
@@ -301,8 +337,8 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			}
 
 			// Collect the per-node data.
-			if err := zc.forAllNodes(ctx, nodesList, func(ctx context.Context, nodeDetails serverpb.NodeDetails, nodesStatus *statuspb.NodeStatus) error {
-				return zc.collectPerNodeData(ctx, nodeDetails, nodesStatus, livenessByNodeID)
+			if err := zc.forAllNodes(ctx, nodesList, redactedNodesList, func(ctx context.Context, nodeDetails serverpb.NodeDetails, nodesStatus *statuspb.NodeStatus, redactedNodeDetails serverpb.NodeDetails) error {
+				return zc.collectPerNodeData(ctx, nodeDetails, nodesStatus, livenessByNodeID, redactedNodeDetails)
 			}); err != nil {
 				return err
 			}
@@ -310,7 +346,7 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			// Add a little helper script to draw attention to the existence of tags in
 			// the profiles.
 			{
-				s := zc.clusterPrinter.start("pprof summary script")
+				s = zc.clusterPrinter.start("pprof summary script")
 				if err := z.createRaw(s, zc.prefix+"/pprof-summary.sh", []byte(`#!/bin/sh
 find . -name cpu.pprof -print0 | xargs -0 go tool pprof -tags
 `)); err != nil {
@@ -320,7 +356,7 @@ find . -name cpu.pprof -print0 | xargs -0 go tool pprof -tags
 
 			// A script to summarize the hottest ranges for a storage server's range reports.
 			if zipCtx.includeRangeInfo {
-				s := zc.clusterPrinter.start("hot range summary script")
+				s = zc.clusterPrinter.start("hot range summary script")
 				if err := z.createRaw(s, zc.prefix+"/hot-ranges.sh", []byte(`#!/bin/sh
 for stat in "queries" "writes" "reads" "write_bytes" "read_bytes" "cpu_time"; do
 	echo "$stat"
@@ -333,7 +369,7 @@ done
 
 			// A script to summarize the hottest ranges for a tenant's range report.
 			if zipCtx.includeRangeInfo {
-				s := zc.clusterPrinter.start("tenant hot range summary script")
+				s = zc.clusterPrinter.start("tenant hot range summary script")
 				if err := z.createRaw(s, zc.prefix+"/hot-ranges-tenant.sh", []byte(`#!/bin/sh
 for stat in "queries" "writes" "reads" "write_bytes" "read_bytes" "cpu_time"; do
     echo "$stat"_per_second
@@ -343,6 +379,17 @@ done
 					return err
 				}
 			}
+
+			s = zr.start("capture debug zip flags")
+			flags := getCLIClusterFlags(true, cmd, func(flag string) bool {
+				_, filter := filterFlags[flag]
+				return filter
+			})
+
+			if err := z.createRaw(s, zc.prefix+"/debug_zip_command_flags.txt", []byte(flags)); err != nil {
+				return err
+			}
+
 			return nil
 		}(); err != nil {
 			return err
@@ -448,7 +495,7 @@ INNER JOIN latestprogress ON j.id = latestprogress.job_id;`,
 
 			ts := timeutil.Now().Format(`20060102150405`)
 			name := fmt.Sprintf("%s/jobs/%d/%s/trace.zip", zc.prefix, jobTrace.jobID, ts)
-			s := zc.clusterPrinter.start("requesting traces for job %d", jobTrace.jobID)
+			s := zc.clusterPrinter.start(redact.Sprintf("requesting traces for job %d", jobTrace.jobID))
 			if err := zc.z.createRaw(s, name, jobZip); err != nil {
 				log.Warningf(ctx, "failed to write inflight trace zip for job %d to file %s: %v",
 					jobTrace.jobID, name, err)
@@ -468,14 +515,23 @@ INNER JOIN latestprogress ON j.id = latestprogress.job_id;`,
 // An error is returned by this function if it is unable to write to
 // the output file or some other unrecoverable error is encountered.
 func (zc *debugZipContext) dumpTableDataForZip(
-	zr *zipReporter, conn clisqlclient.Conn, base, table, query string,
+	zr *zipReporter, conn clisqlclient.Conn, base, table string, tableQuery TableQuery,
 ) error {
 	ctx := context.Background()
-	baseName := base + "/" + sanitizeFilename(table)
-
-	s := zr.start("retrieving SQL data for %s", table)
+	fileName := sanitizeFilename(table)
+	baseName := path.Join(base, fileName)
+	fileNameWithExtension := fileName + "." + zc.clusterPrinter.sqlOutputFilenameExtension
+	if !zipCtx.files.shouldIncludeFile(fileNameWithExtension) {
+		zr.info("skipping table data for %s due to file filters", table)
+		return nil
+	}
+	s := zr.start(redact.Sprintf("retrieving SQL data for %s", table))
 	const maxRetries = 5
 	suffix := ""
+
+	query := tableQuery.query
+	fallback := tableQuery.fallback != ""
+
 	for numRetries := 1; numRetries <= maxRetries; numRetries++ {
 		name := baseName + suffix + "." + zc.clusterPrinter.sqlOutputFilenameExtension
 		s.progress("writing output: %s", name)
@@ -523,13 +579,24 @@ func (zc *debugZipContext) dumpTableDataForZip(
 				break
 			}
 			if pgcode.MakeCode(pgErr.Code) != pgcode.SerializationFailure {
-				// A non-retry error. We've printed the error, and
+				// A non-retry error. If we have a fallback, try with that.
+				if fallback {
+					fallback = false
+
+					query = tableQuery.fallback
+					numRetries = 1 // Reset counter since this is a different query.
+					baseName = baseName + ".fallback"
+					s = zr.start(redact.Sprintf("retrieving SQL data for %s (fallback)", table))
+
+					continue
+				}
+				// A non-retry error, no fallback. We've printed the error, and
 				// there's nothing to retry. Stop here.
 				break
 			}
 			// We've encountered a retry error. Add a suffix then loop.
 			suffix = fmt.Sprintf(".%d", numRetries)
-			s = zr.start("retrying %s", table)
+			s = zr.start(redact.Sprintf("retrying %s", table))
 			continue
 		}
 		s.done()

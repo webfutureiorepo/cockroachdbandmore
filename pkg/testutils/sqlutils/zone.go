@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlutils
 
@@ -16,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 )
 
@@ -63,16 +57,16 @@ func DeleteZoneConfig(t testing.TB, sqlDB *SQLRunner, target string) {
 // SetZoneConfig updates the specified zone config through the SQL interface.
 func SetZoneConfig(t testing.TB, sqlDB *SQLRunner, target string, config string) {
 	t.Helper()
-	sqlDB.Exec(t, fmt.Sprintf("ALTER %s CONFIGURE ZONE = %s",
-		target, lexbase.EscapeSQLString(config)))
+	sqlDB.Exec(t, fmt.Sprintf("ALTER %s CONFIGURE ZONE USING %s",
+		target, config))
 }
 
 // TxnSetZoneConfig updates the specified zone config through the SQL interface
 // using the provided transaction.
 func TxnSetZoneConfig(t testing.TB, sqlDB *SQLRunner, txn *gosql.Tx, target string, config string) {
 	t.Helper()
-	_, err := txn.Exec(fmt.Sprintf("ALTER %s CONFIGURE ZONE = %s",
-		target, lexbase.EscapeSQLString(config)))
+	_, err := txn.Exec(fmt.Sprintf("ALTER %s CONFIGURE ZONE USING %s",
+		target, config))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package upgrades contains the implementation of upgrades. It is imported
 // by the server library.
@@ -24,28 +19,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	// Import for the side effect of registering the MVCC statistics update job.
 	_ "github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
 )
 
-func createMVCCStatisticsTableAndJobMigration(
+func createMVCCStatisticsJob(
 	ctx context.Context, _ clusterversion.ClusterVersion, d upgrade.TenantDeps,
 ) error {
-
-	// Create the table.
-	err := createSystemTable(
-		ctx,
-		d.DB.KV(),
-		d.Settings,
-		d.Codec,
-		systemschema.SystemMVCCStatisticsTable,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Bake the job.
 	if d.TestingKnobs != nil && d.TestingKnobs.SkipMVCCStatisticsJobBootstrap {
 		return nil
 	}

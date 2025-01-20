@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlsmith
 
@@ -16,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -88,6 +84,9 @@ func makeAsOf(s *Smither) tree.AsOfClause {
 }
 
 func makeBackup(s *Smither) (tree.Statement, bool) {
+	if !s.bulkIOEnabled() {
+		return nil, false
+	}
 	name := fmt.Sprintf("%s/%s", s.bulkSrv.URL, s.name("backup"))
 	var targets tree.BackupTargetList
 	seen := map[tree.TableName]bool{}
@@ -125,6 +124,7 @@ func makeRestore(s *Smither) (tree.Statement, bool) {
 	func() {
 		s.lock.Lock()
 		defer s.lock.Unlock()
+		// TODO(yuzefovich): picking a backup target here is non-deterministic.
 		for name, targets = range s.bulkBackups {
 			break
 		}
@@ -148,7 +148,8 @@ func makeRestore(s *Smither) (tree.Statement, bool) {
 
 	return &tree.Restore{
 		Targets: targets,
-		From:    []tree.StringOrPlaceholderOptList{{tree.NewStrVal(name)}},
+		Subdir:  tree.NewStrVal("LATEST"),
+		From:    tree.StringOrPlaceholderOptList{tree.NewStrVal(name)},
 		AsOf:    makeAsOf(s),
 		Options: tree.RestoreOptions{
 			IntoDB: tree.NewStrVal("into_db"),
@@ -219,11 +220,16 @@ func makeImport(s *Smither) (tree.Statement, bool) {
 		}
 		expr := s.bulkExports[0]
 		s.bulkExports = s.bulkExports[1:]
-		var f tree.Exprs
+		var fileNames []string
 		for name := range s.bulkFiles {
 			if strings.Contains(name, expr+"/") && !strings.HasSuffix(name, exportSchema) {
-				f = append(f, tree.NewStrVal(s.bulkSrv.URL+name))
+				fileNames = append(fileNames, name)
 			}
+		}
+		sort.Strings(fileNames)
+		var f tree.Exprs
+		for _, name := range fileNames {
+			f = append(f, tree.NewStrVal(s.bulkSrv.URL+name))
 		}
 		return f, expr
 	}()

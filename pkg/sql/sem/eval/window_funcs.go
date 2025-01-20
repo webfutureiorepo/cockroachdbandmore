@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package eval
 
@@ -156,7 +151,7 @@ func (wfr *WindowFrameRun) FrameStartIdx(ctx context.Context, evalCtx *Context) 
 						wfr.err = err
 						return false
 					}
-					cmp, err := compareForWindow(evalCtx, valueAt, value)
+					cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 					if err != nil {
 						wfr.err = err
 						return false
@@ -176,7 +171,7 @@ func (wfr *WindowFrameRun) FrameStartIdx(ctx context.Context, evalCtx *Context) 
 					wfr.err = err
 					return false
 				}
-				cmp, err := compareForWindow(evalCtx, valueAt, value)
+				cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 				if err != nil {
 					wfr.err = err
 					return false
@@ -203,7 +198,7 @@ func (wfr *WindowFrameRun) FrameStartIdx(ctx context.Context, evalCtx *Context) 
 						wfr.err = err
 						return false
 					}
-					cmp, err := compareForWindow(evalCtx, valueAt, value)
+					cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 					if err != nil {
 						wfr.err = err
 						return false
@@ -222,7 +217,7 @@ func (wfr *WindowFrameRun) FrameStartIdx(ctx context.Context, evalCtx *Context) 
 					wfr.err = err
 					return false
 				}
-				cmp, err := compareForWindow(evalCtx, valueAt, value)
+				cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 				if err != nil {
 					wfr.err = err
 					return false
@@ -328,7 +323,7 @@ func (wfr *WindowFrameRun) FrameEndIdx(ctx context.Context, evalCtx *Context) (i
 						wfr.err = err
 						return false
 					}
-					cmp, err := compareForWindow(evalCtx, valueAt, value)
+					cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 					if err != nil {
 						wfr.err = err
 						return false
@@ -350,7 +345,7 @@ func (wfr *WindowFrameRun) FrameEndIdx(ctx context.Context, evalCtx *Context) (i
 					wfr.err = err
 					return false
 				}
-				cmp, err := compareForWindow(evalCtx, valueAt, value)
+				cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 				if err != nil {
 					wfr.err = err
 					return false
@@ -377,7 +372,7 @@ func (wfr *WindowFrameRun) FrameEndIdx(ctx context.Context, evalCtx *Context) (i
 						wfr.err = err
 						return false
 					}
-					cmp, err := compareForWindow(evalCtx, valueAt, value)
+					cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 					if err != nil {
 						wfr.err = err
 						return false
@@ -396,7 +391,7 @@ func (wfr *WindowFrameRun) FrameEndIdx(ctx context.Context, evalCtx *Context) (i
 					wfr.err = err
 					return false
 				}
-				cmp, err := compareForWindow(evalCtx, valueAt, value)
+				cmp, err := compareForWindow(ctx, evalCtx, valueAt, value)
 				if err != nil {
 					wfr.err = err
 					return false
@@ -685,11 +680,11 @@ func (wfr *WindowFrameRun) IsRowSkipped(ctx context.Context, idx int) (bool, err
 // compareForWindow wraps the Datum Compare method so that casts can be
 // performed up front. This allows us to return an expected error in the event
 // of an invalid comparison, rather than panicking.
-func compareForWindow(evalCtx *Context, left, right tree.Datum) (int, error) {
-	if types.IsDateTimeType(left.ResolvedType()) && left.ResolvedType() != types.Interval {
+func compareForWindow(ctx context.Context, evalCtx *Context, left, right tree.Datum) (int, error) {
+	if types.IsDateTimeType(left.ResolvedType()) && !left.ResolvedType().Identical(types.Interval) {
 		// Datetime values (other than Intervals) are converted to timestamps for
 		// comparison. Note that the right side never needs to be casted.
-		ts, err := tree.TimeFromDatumForComparison(evalCtx, left)
+		ts, err := tree.TimeFromDatumForComparison(ctx, evalCtx, left)
 		if err != nil {
 			return 0, err
 		}
@@ -698,5 +693,5 @@ func compareForWindow(evalCtx *Context, left, right tree.Datum) (int, error) {
 			return 0, err
 		}
 	}
-	return left.CompareError(evalCtx, right)
+	return left.Compare(ctx, evalCtx, right)
 }

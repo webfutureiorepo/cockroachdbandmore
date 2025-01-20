@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server_test
 
@@ -331,7 +326,7 @@ func TestJoinVersionGate(t *testing.T) {
 
 	knobs := base.TestingKnobs{
 		Server: &server.TestingKnobs{
-			BinaryVersionOverride: oldVersion,
+			ClusterVersionOverride: oldVersion,
 		},
 	}
 
@@ -383,7 +378,7 @@ func TestDecommissionedNodeCannotConnect(t *testing.T) {
 
 			// Within a short period of time, the cluster (n1, n2) will refuse to reach out to n3.
 			_, err := clusterSrv.RPCContext().GRPCDialNode(
-				decomSrv.RPCAddr(), decomSrv.NodeID(), rpc.DefaultClass,
+				decomSrv.RPCAddr(), decomSrv.NodeID(), decomSrv.Locality(), rpc.DefaultClass,
 			).Connect(ctx)
 			s, ok := grpcstatus.FromError(errors.UnwrapAll(err))
 			if !ok || s.Code() != codes.FailedPrecondition {
@@ -394,7 +389,7 @@ func TestDecommissionedNodeCannotConnect(t *testing.T) {
 
 			// And similarly, n3 will be refused by n1, n2.
 			_, err = decomSrv.RPCContext().GRPCDialNode(
-				clusterSrv.RPCAddr(), clusterSrv.NodeID(), rpc.DefaultClass,
+				clusterSrv.RPCAddr(), clusterSrv.NodeID(), clusterSrv.Locality(), rpc.DefaultClass,
 			).Connect(ctx)
 			s, ok = grpcstatus.FromError(errors.UnwrapAll(err))
 			if !ok || s.Code() != codes.PermissionDenied {

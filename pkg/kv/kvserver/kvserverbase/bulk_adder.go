@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserverbase
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/errors"
 )
 
 // BulkAdderOptions is used to configure the behavior of a BulkAdder.
@@ -69,6 +65,15 @@ type BulkAdderOptions struct {
 	// the first buffer to pick split points in the hope it is a representative
 	// sample of the overall input.
 	InitialSplitsIfUnordered int
+
+	// ImportEpoch specifies the ImportEpoch of the table the BulkAdder
+	// is ingesting data into as part of an IMPORT INTO job. If specified, the Bulk
+	// Adder's SSTBatcher will write the import epoch to each versioned value's
+	// metadata.
+	//
+	// Callers should check that the cluster is at or above
+	// version 24.1 before setting this option.
+	ImportEpoch uint32
 }
 
 // BulkAdderFactory describes a factory function for BulkAdders.
@@ -102,7 +107,17 @@ type DuplicateKeyError struct {
 }
 
 func (d *DuplicateKeyError) Error() string {
-	return fmt.Sprintf("duplicate key: %s", d.Key)
+	return fmt.Sprint(d)
+}
+
+// Format implements fmt.Formatter.
+func (d *DuplicateKeyError) Format(s fmt.State, verb rune) {
+	errors.FormatError(d, s, verb)
+}
+
+func (d *DuplicateKeyError) SafeFormatError(p errors.Printer) (next error) {
+	p.Printf("duplicate key: %s", d.Key)
+	return nil
 }
 
 // NewDuplicateKeyError constructs a DuplicateKeyError, copying its input.

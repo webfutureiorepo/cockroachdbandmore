@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstorage
 
@@ -17,20 +12,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 // LoadedReplicaState represents the state of a Replica loaded from storage, and
 // is used to initialize the in-memory Replica instance.
 // TODO(pavelkalinnikov): integrate with kvstorage.Replica.
 type LoadedReplicaState struct {
-	ReplicaID roachpb.ReplicaID
-	LastIndex kvpb.RaftIndex
-	ReplState kvserverpb.ReplicaState
+	ReplicaID  roachpb.ReplicaID
+	LastIndex  kvpb.RaftIndex
+	ReplState  kvserverpb.ReplicaState
+	TruncState kvserverpb.RaftTruncatedState
 
 	hardState raftpb.HardState
 }
@@ -58,6 +54,9 @@ func LoadReplicaState(
 
 	ls := LoadedReplicaState{ReplicaID: replicaID}
 	if ls.hardState, err = sl.LoadHardState(ctx, eng); err != nil {
+		return LoadedReplicaState{}, err
+	}
+	if ls.TruncState, err = sl.LoadRaftTruncatedState(ctx, eng); err != nil {
 		return LoadedReplicaState{}, err
 	}
 	if ls.LastIndex, err = sl.LoadLastIndex(ctx, eng); err != nil {

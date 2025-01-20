@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scexec
 
@@ -15,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -44,7 +40,30 @@ func executeBackfillOps(ctx context.Context, deps Dependencies, execute []scop.O
 	if err != nil {
 		return err
 	}
-	return runBackfiller(ctx, deps, tracker, backfillProgresses, mergeProgresses, deps.TransactionalJobRegistry().CurrentJob(), tables)
+	if err := runBackfiller(ctx, deps, tracker, backfillProgresses, mergeProgresses, deps.TransactionalJobRegistry().CurrentJob(), tables); err != nil {
+		if errors.HasType(err, (*kvpb.InsufficientSpaceError)(nil)) {
+			return jobs.MarkPauseRequestError(errors.UnwrapAll(err))
+		}
+		if errors.HasType(err, (*kvpb.BatchTimestampBeforeGCError)(nil)) {
+			// We will not ever move the timestamp forward so this will fail forever.
+			// Mark as a permanent error.
+			if scerrors.HasSchemaChangerUserError(err) {
+				// We need to unwrap this so that the PermanentJobError is marked
+				// at the correct level.
+				err = scerrors.UnwrapSchemaChangerUserError(err)
+			}
+			return scerrors.SchemaChangerUserError(
+				jobs.MarkAsPermanentJobError(
+					errors.Wrap(
+						err,
+						"unable to retry backfill since fixed timestamp is before the GC timestamp",
+					),
+				),
+			)
+		}
+		return err
+	}
+	return nil
 }
 
 func getTableDescriptorsForBackfillsAndMerges(

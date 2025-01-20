@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package settingswatcher provides utilities to update cluster settings using
 // a range feed.
@@ -15,6 +10,7 @@ package settingswatcher
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -92,7 +88,7 @@ type SettingsWatcher struct {
 
 	// rfc provides access to the underlying rangefeedcache.Watcher for
 	// testing.
-	rfc *rangefeedcache.Watcher
+	rfc *rangefeedcache.Watcher[*kvpb.RangeFeedValue]
 }
 
 // Storage is used to write a snapshot of KVs out to disk for use upon restart.
@@ -181,7 +177,7 @@ func (s *SettingsWatcher) Start(ctx context.Context) error {
 	}{
 		ch: make(chan struct{}),
 	}
-	noteUpdate := func(update rangefeedcache.Update) {
+	noteUpdate := func(update rangefeedcache.Update[*kvpb.RangeFeedValue]) {
 		if update.Type != rangefeedcache.CompleteUpdate {
 			return
 		}
@@ -249,22 +245,33 @@ func (s *SettingsWatcher) Start(ctx context.Context) error {
 		[]roachpb.Span{settingsTableSpan},
 		false, // withPrevValue
 		true,  // withRowTSInInitialScan
-		func(ctx context.Context, kv *kvpb.RangeFeedValue) rangefeedbuffer.Event {
+		func(ctx context.Context, kv *kvpb.RangeFeedValue) (*kvpb.RangeFeedValue, bool) {
 			return s.handleKV(ctx, kv)
 		},
-		func(ctx context.Context, update rangefeedcache.Update) {
+		func(ctx context.Context, update rangefeedcache.Update[*kvpb.RangeFeedValue]) {
 			noteUpdate(update)
 		},
 		s.testingWatcherKnobs,
 	)
 	s.rfc = c
 
+	allowedFailures := 10
+
 	// Kick off the rangefeedcache which will retry until the stopper stops.
 	if err := rangefeedcache.Start(ctx, s.stopper, c, func(err error) {
 		if !initialScan.done {
-			initialScan.err = err
-			initialScan.done = true
-			close(initialScan.ch)
+			// TODO(dt): ideally the auth checker, which makes rejection decisions
+			// based on cached data that is updated async via rangefeed, would block
+			// for some amount of time before rejecting a request if it can determine
+			// that its information is old/maybe stale, to avoid spurious rejections
+			// while making correct rejection potentially slightly slower to return.
+			if strings.Contains(err.Error(), `operation not allowed when in service mode "none"`) && allowedFailures > 0 {
+				allowedFailures--
+			} else {
+				initialScan.err = err
+				initialScan.done = true
+				close(initialScan.ch)
+			}
 		} else {
 			s.resetUpdater()
 		}
@@ -328,7 +335,7 @@ func (s *SettingsWatcher) TestingRestart() {
 
 func (s *SettingsWatcher) handleKV(
 	ctx context.Context, kv *kvpb.RangeFeedValue,
-) rangefeedbuffer.Event {
+) (*kvpb.RangeFeedValue, bool) {
 	rkv := roachpb.KeyValue{
 		Key:   kv.Key,
 		Value: kv.Value,
@@ -340,19 +347,19 @@ func (s *SettingsWatcher) handleKV(
 		// This should never happen: the rangefeed should only ever deliver valid SQL rows.
 		err = errors.NewAssertionErrorWithWrappedErrf(err, "failed to decode settings row %v", kv.Key)
 		logcrash.ReportOrPanic(ctx, &s.settings.SV, "%w", err)
-		return nil
+		return nil, false
 	}
 	settingKey := settings.InternalKey(settingKeyS)
 
 	setting, ok := settings.LookupForLocalAccessByKey(settingKey, s.codec.ForSystemTenant())
 	if !ok {
 		log.Warningf(ctx, "unknown setting %s, skipping update", settingKey)
-		return nil
+		return nil, false
 	}
 	if !s.codec.ForSystemTenant() {
 		if setting.Class() != settings.ApplicationLevel {
 			log.Warningf(ctx, "ignoring read-only setting %s", settingKey)
-			return nil
+			return nil, false
 		}
 	}
 
@@ -377,9 +384,9 @@ func (s *SettingsWatcher) handleKV(
 		tombstone: tombstone,
 	}, setting.Class())
 	if s.storage != nil {
-		return kv
+		return kv, true
 	}
-	return nil
+	return nil, false
 }
 
 // maybeSet will update the stored value and the corresponding setting
@@ -633,7 +640,23 @@ func (s *SettingsWatcher) setSystemVisibleDefault(ctx context.Context, key setti
 
 	log.VEventf(ctx, 1, "propagating read-only default %+v", payload)
 
-	s.notifySystemVisibleChange(ctx, []kvpb.TenantSetting{payload})
+	// Inject the current cluster version in the overrides to work
+	// around the possibility of incorrect data in the
+	// `system.tenant_settings` table. See #125702 for details.
+	//
+	// TODO(multitenant): remove this logic once the minimum supported
+	// version is 24.2+.
+	overrides := []kvpb.TenantSetting{
+		payload,
+		{
+			InternalKey: clusterversion.KeyVersionSetting,
+			Value: settings.EncodedValue{
+				Type:  settings.VersionSettingValueType,
+				Value: s.settings.Version.ActiveVersion(ctx).String(),
+			},
+		},
+	}
+	s.notifySystemVisibleChange(ctx, overrides)
 }
 
 func (s *SettingsWatcher) getSettingAndValue(key settings.InternalKey) (bool, kvpb.TenantSetting) {

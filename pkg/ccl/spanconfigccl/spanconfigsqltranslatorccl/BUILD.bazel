@@ -2,16 +2,13 @@ load("@io_bazel_rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "spanconfigsqltranslatorccl_test",
+    size = "large",
     srcs = [
         "datadriven_test.go",
         "main_test.go",
     ],
     data = glob(["testdata/**"]),
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "large"},
-    }),
-    tags = ["ccl_test"],
+    exec_properties = {"test.Pool": "large"},
     deps = [
         "//pkg/base",
         "//pkg/ccl",

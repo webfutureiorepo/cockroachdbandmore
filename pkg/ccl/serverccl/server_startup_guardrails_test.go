@@ -1,10 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package serverccl
 
@@ -37,7 +34,7 @@ func TestServerStartupGuardrails(t *testing.T) {
 
 	prev := func(v roachpb.Version) roachpb.Version {
 		t.Helper()
-		if v.Minor < 1 || v.Minor > 2 || v.Patch != 0 || v.Internal != 0 {
+		if v.Minor < 1 || v.Minor > 4 || v.Patch != 0 || v.Internal != 0 {
 			t.Fatalf("invalid version %v", v)
 		}
 		if v.Minor > 1 {
@@ -97,7 +94,7 @@ func TestServerStartupGuardrails(t *testing.T) {
 				Settings:          storageSettings,
 				Knobs: base.TestingKnobs{
 					Server: &server.TestingKnobs{
-						BinaryVersionOverride:          test.storageBinaryVersion,
+						ClusterVersionOverride:         test.storageBinaryVersion,
 						DisableAutomaticVersionUpgrade: make(chan struct{}),
 					},
 					SQLEvalContext: &eval.TestingKnobs{
@@ -124,7 +121,7 @@ func TestServerStartupGuardrails(t *testing.T) {
 					TenantID: serverutils.TestTenantID(),
 					TestingKnobs: base.TestingKnobs{
 						Server: &server.TestingKnobs{
-							BinaryVersionOverride:          test.tenantBinaryVersion,
+							ClusterVersionOverride:         test.tenantBinaryVersion,
 							DisableAutomaticVersionUpgrade: make(chan struct{}),
 						},
 					},

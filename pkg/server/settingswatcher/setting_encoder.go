@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settingswatcher
 
@@ -38,22 +33,19 @@ func EncodeSettingValue(rawValue []byte, valueType string) ([]byte, error) {
 	if tuple, err = valueside.Encode(tuple,
 		valueside.MakeColumnIDDelta(descpb.ColumnID(encoding.NoColumnID),
 			systemschema.SettingsTable.PublicColumns()[1].GetID()),
-		tree.NewDString(string(rawValue)),
-		nil); err != nil {
+		tree.NewDString(string(rawValue))); err != nil {
 		return nil, err
 	}
 	if tuple, err = valueside.Encode(tuple,
 		valueside.MakeColumnIDDelta(systemschema.SettingsTable.PublicColumns()[1].GetID(),
 			systemschema.SettingsTable.PublicColumns()[2].GetID()),
-		tree.MustMakeDTimestamp(timeutil.Now(), time.Microsecond),
-		nil); err != nil {
+		tree.MustMakeDTimestamp(timeutil.Now(), time.Microsecond)); err != nil {
 		return nil, err
 	}
 	if tuple, err = valueside.Encode(tuple,
 		valueside.MakeColumnIDDelta(systemschema.SettingsTable.PublicColumns()[2].GetID(),
 			systemschema.SettingsTable.PublicColumns()[3].GetID()),
-		tree.NewDString(valueType),
-		nil); err != nil {
+		tree.NewDString(valueType)); err != nil {
 		return nil, err
 	}
 	return tuple, nil

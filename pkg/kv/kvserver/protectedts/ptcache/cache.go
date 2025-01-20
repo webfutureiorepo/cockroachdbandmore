@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ptcache
 
@@ -30,6 +25,7 @@ import (
 )
 
 // Cache implements protectedts.Cache.
+// TODO(#119243): delete this in 24.2
 type Cache struct {
 	db       isql.DB
 	storage  protectedts.Manager
@@ -168,7 +164,7 @@ func (c *Cache) periodicallyRefreshProtectedtsCache(ctx context.Context) {
 		default:
 		}
 	})
-	timer := timeutil.NewTimer()
+	var timer timeutil.Timer
 	defer timer.Stop()
 	timer.Reset(0) // Read immediately upon startup
 	var lastReset time.Time

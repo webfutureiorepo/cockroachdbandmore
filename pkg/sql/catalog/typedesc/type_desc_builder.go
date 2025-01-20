@@ -1,19 +1,16 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package typedesc
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
@@ -145,6 +142,31 @@ func (tdb *typeDescriptorBuilder) StripDanglingBackReferences(
 	if sliceIdx < len(tdb.maybeModified.ReferencingDescriptorIDs) {
 		tdb.maybeModified.ReferencingDescriptorIDs = tdb.maybeModified.ReferencingDescriptorIDs[:sliceIdx]
 		tdb.changes.Add(catalog.StrippedDanglingBackReferences)
+	}
+	return nil
+}
+
+// StripNonExistentRoles implements the catalog.DescriptorBuilder
+// interface.
+func (tdb *typeDescriptorBuilder) StripNonExistentRoles(
+	roleExists func(role username.SQLUsername) bool,
+) error {
+	// If the owner doesn't exist, change the owner to admin.
+	if !roleExists(tdb.maybeModified.GetPrivileges().Owner()) {
+		tdb.maybeModified.Privileges.OwnerProto = username.AdminRoleName().EncodeProto()
+		tdb.changes.Add(catalog.StrippedNonExistentRoles)
+	}
+	// Remove any non-existent roles from the privileges.
+	newPrivs := make([]catpb.UserPrivileges, 0, len(tdb.maybeModified.Privileges.Users))
+	for _, priv := range tdb.maybeModified.Privileges.Users {
+		exists := roleExists(priv.UserProto.Decode())
+		if exists {
+			newPrivs = append(newPrivs, priv)
+		}
+	}
+	if len(newPrivs) != len(tdb.maybeModified.Privileges.Users) {
+		tdb.maybeModified.Privileges.Users = newPrivs
+		tdb.changes.Add(catalog.StrippedNonExistentRoles)
 	}
 	return nil
 }

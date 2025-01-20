@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdctest
 
@@ -35,6 +32,23 @@ import (
 func MakeRangeFeedValueReader(
 	t testing.TB, execCfgI interface{}, desc catalog.TableDescriptor,
 ) (func(t testing.TB) *kvpb.RangeFeedValue, func()) {
+	reader, cleanup := MakeRangeFeedValueReaderExtended(t, execCfgI, desc)
+	wrapMultiPurposeReader := func(t testing.TB) *kvpb.RangeFeedValue {
+		val, delRange := reader(t)
+		if delRange != nil {
+			t.Fatal("RangeFeedDeleteRange encountered but is not supported by the caller. " +
+				"Use MakeRangeFeedValueReaderExtended instead.")
+		}
+		return val
+	}
+	return wrapMultiPurposeReader, cleanup
+}
+
+// MakeRangeFeedValueReaderExtended is like MakeRangeFeedValueReader,
+// but it can return a RangeFeedDeleteRange too.
+func MakeRangeFeedValueReaderExtended(
+	t testing.TB, execCfgI interface{}, desc catalog.TableDescriptor,
+) (func(t testing.TB) (*kvpb.RangeFeedValue, *kvpb.RangeFeedDeleteRange), func()) {
 	t.Helper()
 	execCfg := execCfgI.(sql.ExecutorConfig)
 
@@ -46,6 +60,7 @@ func MakeRangeFeedValueReader(
 
 	rows := make(chan *kvpb.RangeFeedValue)
 	ctx, cleanup := context.WithCancel(context.Background())
+	deleteRangeC := make(chan *kvpb.RangeFeedDeleteRange)
 
 	_, err := execCfg.RangeFeedFactory.RangeFeed(ctx, "feed-"+desc.GetName(),
 		[]roachpb.Span{desc.PrimaryIndexSpan(execCfg.Codec)},
@@ -57,6 +72,12 @@ func MakeRangeFeedValueReader(
 			}
 		},
 		rangefeed.WithDiff(true),
+		rangefeed.WithOnDeleteRange(func(ctx context.Context, e *kvpb.RangeFeedDeleteRange) {
+			select {
+			case deleteRangeC <- e:
+			case <-ctx.Done():
+			}
+		}),
 	)
 	require.NoError(t, err)
 
@@ -67,7 +88,7 @@ func MakeRangeFeedValueReader(
 
 	// Helper to read next rangefeed value.
 	dups := make(map[string]struct{})
-	return func(t testing.TB) *kvpb.RangeFeedValue {
+	return func(t testing.TB) (*kvpb.RangeFeedValue, *kvpb.RangeFeedDeleteRange) {
 		t.Helper()
 		for {
 			select {
@@ -79,10 +100,12 @@ func MakeRangeFeedValueReader(
 				}
 				log.Infof(context.Background(), "Read row %s", roachpb.PrettyPrintKey(nil, r.Key))
 				dups[rowKey] = struct{}{}
-				return r
+				return r, nil
+			case d := <-deleteRangeC:
+				return nil, d
 			case <-time.After(timeout):
 				t.Fatal("timeout reading row")
-				return nil
+				return nil, nil
 			}
 		}
 	}, cleanup

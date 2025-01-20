@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package movr
 
@@ -37,10 +32,7 @@ type movrWorker struct {
 }
 
 func (m *movrWorker) getRandomUser(city string) (string, error) {
-	id, err := uuid.NewV4()
-	if err != nil {
-		return "", err
-	}
+	id := uuid.NewV4()
 	var user string
 	q := `
 		SELECT
@@ -53,15 +45,12 @@ func (m *movrWorker) getRandomUser(city string) (string, error) {
 					(SELECT id FROM users WHERE city = $1 ORDER BY id LIMIT 1) AS b
 			);
 		`
-	err = m.db.QueryRow(q, city, id.String()).Scan(&user)
+	err := m.db.QueryRow(q, city, id.String()).Scan(&user)
 	return user, err
 }
 
 func (m *movrWorker) getRandomPromoCode() (string, error) {
-	id, err := uuid.NewV4()
-	if err != nil {
-		return "", err
-	}
+	id := uuid.NewV4()
 	q := `
 		SELECT
 			IFNULL(a, b)
@@ -74,15 +63,12 @@ func (m *movrWorker) getRandomPromoCode() (string, error) {
 			);
 		`
 	var code string
-	err = m.db.QueryRow(q, id.String()).Scan(&code)
+	err := m.db.QueryRow(q, id.String()).Scan(&code)
 	return code, err
 }
 
 func (m *movrWorker) getRandomVehicle(city string) (string, error) {
-	id, err := uuid.NewV4()
-	if err != nil {
-		return "", err
-	}
+	id := uuid.NewV4()
 	q := `
 		SELECT
 			IFNULL(a, b)
@@ -95,7 +81,7 @@ func (m *movrWorker) getRandomVehicle(city string) (string, error) {
 			);
 		`
 	var vehicle string
-	err = m.db.QueryRow(q, city, id.String()).Scan(&vehicle)
+	err := m.db.QueryRow(q, city, id.String()).Scan(&vehicle)
 	return vehicle, err
 }
 
@@ -263,10 +249,7 @@ func (m *movrWorker) generateWorkSimulation() func(context.Context) error {
 
 	return func(ctx context.Context) error {
 		activeCity := randCity(m.rng)
-		id, err := uuid.NewV4()
-		if err != nil {
-			return err
-		}
+		id := uuid.NewV4()
 		// Our workload is as follows: with 95% chance, do a simple read operation.
 		// Else, update all active vehicle locations, then pick a random "write" operation
 		// weighted by the weights in movrWorkloadFns.
@@ -275,7 +258,7 @@ func (m *movrWorker) generateWorkSimulation() func(context.Context) error {
 				return m.readVehicles(activeCity)
 			})
 		}
-		err = runAndRecord("updateActiveRides", func() error {
+		err := runAndRecord("updateActiveRides", func() error {
 			return m.updateActiveRides()
 		})
 		if err != nil {
@@ -303,11 +286,7 @@ func (m *movr) Ops(
 	m.fakerOnce.Do(func() {
 		m.faker = faker.NewFaker()
 	})
-	sqlDatabase, err := workload.SanitizeUrls(m, m.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	db, err := workload.NewRoundRobinDB(urls)
 	if err != nil {
 		return workload.QueryLoad{}, err

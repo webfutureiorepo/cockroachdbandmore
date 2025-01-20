@@ -1,18 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemachanger_test
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,13 +17,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/slices"
 )
 
 // phaseOrdinal uniquely identifies a stage. The stageIdx cannot be used
@@ -121,6 +117,9 @@ type testCase struct {
 	schemaChange string
 	expectedErr  string
 	skipIssue    int
+	// Optional: If you want a query to run at each stage, you can include it here.
+	// We don't evaluate the results; we simply assert that the query executes without errors.
+	query string
 }
 
 // Captures testCase before t.Parallel is called.
@@ -171,6 +170,67 @@ func TestAlterTableDMLInjection(t *testing.T) {
 			expectedErr:  "cannot evaluate scalar expressions containing sequence operations in this context",
 		},
 		{
+			desc:         "add column default serial rowid",
+			setup:        []string{"SET serial_normalization=rowid"},
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col SERIAL",
+		},
+		{
+			desc:         "add column default serial unordered_rowid",
+			setup:        []string{"SET serial_normalization=unordered_rowid"},
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col SERIAL",
+		},
+		{
+			desc:         "add column default serial sql_sequence",
+			setup:        []string{"SET serial_normalization=sql_sequence"},
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col SERIAL",
+			expectedErr:  "cannot evaluate scalar expressions containing sequence operations in this context",
+		},
+		{
+			desc:         "add column default serial sql_sequence_cached",
+			setup:        []string{"SET serial_normalization=sql_sequence_cached"},
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col SERIAL",
+			expectedErr:  "cannot evaluate scalar expressions containing sequence operations in this context",
+		},
+		{
+			desc:         "add column default serial sql_sequence_cached_node",
+			setup:        []string{"SET serial_normalization=sql_sequence_cached_node"},
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col SERIAL",
+			expectedErr:  "cannot evaluate scalar expressions containing sequence operations in this context",
+		},
+		{
+			desc:         "add column default serial virtual_sequence",
+			setup:        []string{"SET serial_normalization=virtual_sequence"},
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col SERIAL",
+			expectedErr:  "cannot evaluate scalar expressions containing sequence operations in this context",
+		},
+		{
+			desc:         "alter column type trivial",
+			setup:        []string{"ALTER TABLE tbl ADD COLUMN new_col SMALLINT NOT NULL DEFAULT 100"},
+			schemaChange: "ALTER TABLE tbl ALTER COLUMN new_col SET DATA TYPE BIGINT",
+		},
+		{
+			desc:         "alter column type validate",
+			setup:        []string{"ALTER TABLE tbl ADD COLUMN new_col BIGINT NOT NULL DEFAULT 100"},
+			schemaChange: "ALTER TABLE tbl ALTER COLUMN new_col SET DATA TYPE SMALLINT",
+		},
+		{
+			desc: "alter column type general",
+			setup: []string{
+				"ALTER TABLE tbl ADD COLUMN new_col BIGINT NOT NULL DEFAULT 100",
+			},
+			schemaChange: "ALTER TABLE tbl ALTER COLUMN new_col SET DATA TYPE TEXT",
+			query:        "SELECT new_col FROM tbl LIMIT 1",
+		},
+		{
+			desc: "alter column type general compute",
+			setup: []string{
+				"ALTER TABLE tbl ADD COLUMN new_col DATE NOT NULL DEFAULT '2013-05-06', " +
+					"ADD COLUMN new_comp DATE AS (new_col) STORED",
+			},
+			schemaChange: "ALTER TABLE tbl ALTER COLUMN new_comp SET DATA TYPE DATE USING '2021-05-06'",
+			query:        "SELECT new_comp FROM tbl LIMIT 1",
+		},
+		{
 			desc:         "add column default udf",
 			setup:        []string{"CREATE FUNCTION f() RETURNS INT LANGUAGE SQL AS $$ SELECT 1 $$"},
 			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col INT NOT NULL DEFAULT f()",
@@ -184,6 +244,11 @@ func TestAlterTableDMLInjection(t *testing.T) {
 			},
 			schemaChange: "ALTER TABLE tbl DROP COLUMN new_col",
 			skipIssue:    87699,
+		},
+		{
+			desc:         "add column unique not null",
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col TEXT NOT NULL UNIQUE",
+			expectedErr:  "null value in column \"new_col\" violates not-null constraint",
 		},
 		{
 			desc:         "add column default unique",
@@ -207,6 +272,11 @@ func TestAlterTableDMLInjection(t *testing.T) {
 			desc:         "drop column stored family",
 			setup:        []string{"ALTER TABLE tbl ADD COLUMN new_col TEXT NOT NULL AS (insert_phase_ordinal) STORED CREATE FAMILY fam"},
 			schemaChange: "ALTER TABLE tbl DROP COLUMN new_col",
+		},
+		{
+			desc:         "add column virtual NOT NULL",
+			schemaChange: "ALTER TABLE tbl ADD COLUMN new_col TEXT NOT NULL AS (NULL::TEXT) VIRTUAL",
+			expectedErr:  "validation of column \"new_col\" NOT NULL failed on row: insert_phase_ordinal='pre-schema-change', operation_phase_ordinal='n/a', operation='n/a', val=1, new_col=NULL",
 		},
 		{
 			desc:         "add column virtual",
@@ -290,6 +360,17 @@ func TestAlterTableDMLInjection(t *testing.T) {
 			schemaChange: "ALTER TABLE tbl ALTER PRIMARY KEY USING COLUMNS (insert_phase_ordinal, operation_phase_ordinal, operation)",
 		},
 		{
+			desc:        "alter primary key and replace rowid in PK",
+			createTable: createTableNoPK,
+			setup: []string{
+				"CREATE INDEX i1 ON tbl (val)",
+			},
+			// Run a query against the secondary index at each stage.
+			query:        "SELECT operation FROM tbl@i1",
+			schemaChange: "ALTER TABLE tbl ALTER PRIMARY KEY USING COLUMNS (insert_phase_ordinal, operation_phase_ordinal, operation)",
+			skipIssue:    133129,
+		},
+		{
 			desc:        "alter primary key using columns using hash",
 			createTable: createTableNoPK,
 			setup: []string{
@@ -297,6 +378,14 @@ func TestAlterTableDMLInjection(t *testing.T) {
 				"ALTER TABLE tbl ADD PRIMARY KEY (id)",
 			},
 			schemaChange: "ALTER TABLE tbl ALTER PRIMARY KEY USING COLUMNS (insert_phase_ordinal, operation_phase_ordinal, operation) USING HASH",
+		},
+		{
+			desc: "drop a column with a check constraint while querying pg_constraint",
+			setup: []string{
+				"ALTER TABLE tbl ADD COLUMN i INT CHECK (i is NOT NULL) DEFAULT 10",
+			},
+			schemaChange: "ALTER TABLE tbl DROP COLUMN i",
+			query:        "select * from pg_catalog.pg_constraint",
 		},
 		{
 			desc:         "create index",
@@ -335,7 +424,6 @@ func TestAlterTableDMLInjection(t *testing.T) {
 				"CREATE INDEX idx ON tbl (i) USING HASH",
 			},
 			schemaChange: "ALTER TABLE tbl DROP COLUMN i CASCADE",
-			skipIssue:    111619,
 		},
 		{
 			desc: "drop column with composite index + fk",
@@ -397,7 +485,6 @@ func TestAlterTableDMLInjection(t *testing.T) {
 				"CREATE INDEX idx ON tbl ((i + 1))",
 			},
 			schemaChange: "ALTER TABLE tbl DROP COLUMN i CASCADE",
-			skipIssue:    111608,
 		},
 		{
 			desc:         "create materialized view from index",
@@ -435,6 +522,11 @@ func TestAlterTableDMLInjection(t *testing.T) {
 			testCluster := serverutils.StartCluster(t, 1, base.TestClusterArgs{
 				ServerArgs: base.TestServerArgs{
 					Knobs: base.TestingKnobs{
+						SQLEvalContext: &eval.TestingKnobs{
+							// We disable the randomization of some batch sizes because with
+							// some low values the test takes much longer.
+							ForceProductionValues: true,
+						},
 						SQLDeclarativeSchemaChanger: &scexec.TestingKnobs{
 							BeforeStage: func(p scplan.Plan, stageIdx int) error {
 								if !clusterCreated.Load() {
@@ -496,14 +588,11 @@ func TestAlterTableDMLInjection(t *testing.T) {
 									}
 								}
 								// Sort expectedResults to match order returned by SELECT.
-								slices.SortFunc(expectedResults, func(a, b []string) bool {
+								slices.SortFunc(expectedResults, func(a, b []string) int {
 									require.Equal(t, len(a), len(b), errorMessage)
 									for i := 0; i < len(a); i++ {
-										switch strings.Compare(a[i], b[i]) {
-										case -1:
-											return true
-										case 1:
-											return false
+										if c := strings.Compare(a[i], b[i]); c != 0 {
+											return c
 										}
 									}
 									panic(fmt.Sprintf("slice contains duplicate elements a=%s b=%s %s", a, b, errorMessage))
@@ -517,6 +606,12 @@ func TestAlterTableDMLInjection(t *testing.T) {
 								// Use subset instead of equals for better error output.
 								require.Subset(t, expectedResults, actualResults, errorMessage)
 								require.Subset(t, actualResults, expectedResults, errorMessage)
+
+								// If a query is provided, run it without checking the results—just
+								// ensure it doesn't fail.
+								if tc.query != "" {
+									sqlDB.Exec(t, tc.query)
+								}
 
 								for i := 0; i < poIdx; i++ {
 									insertPO := poSlice[i]

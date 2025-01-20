@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -249,24 +244,23 @@ func (b *Builder) getColName(expr tree.SelectExpr) string {
 // nil, then finishBuildScalar synthesizes a new output column in outScope with
 // the expression as its value.
 //
-// texpr     The given scalar expression. The expression is any scalar
+//   - texpr:
+//     The given scalar expression. The expression is any scalar expression except
+//     for a bare variable or aggregate (those are handled separately in
+//     buildVariableProjection and buildFunction).
 //
-//	expression except for a bare variable or aggregate (those are
-//	handled separately in buildVariableProjection and
-//	buildFunction).
+//   - scalar:
+//     The memo expression that has already been built for the given typed
+//     expression.
 //
-// scalar    The memo expression that has already been built for the given
-//
-//	typed expression.
-//
-// outCol    The output column of the scalar which is being built. It can be
-//
-//	nil if outScope is nil.
+//   - outCol:
+//     The output column of the scalar which is being built. It can be nil if
+//     outScope is nil.
 //
 // See Builder.buildStmt for a description of the remaining input and return
 // values.
 func (b *Builder) finishBuildScalar(
-	texpr tree.TypedExpr, scalar opt.ScalarExpr, inScope, outScope *scope, outCol *scopeColumn,
+	texpr tree.TypedExpr, scalar opt.ScalarExpr, outScope *scope, outCol *scopeColumn,
 ) (out opt.ScalarExpr) {
 	b.maybeTrackRegclassDependenciesForViews(texpr)
 	b.maybeTrackUserDefinedTypeDepsForViews(texpr)

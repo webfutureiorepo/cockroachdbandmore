@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -22,7 +17,7 @@ import (
 // limitNode represents a node that limits the number of rows
 // returned or only return them past a given number (offset).
 type limitNode struct {
-	plan       planNode
+	singleInputPlanNode
 	countExpr  tree.TypedExpr
 	offsetExpr tree.TypedExpr
 }
@@ -40,7 +35,7 @@ func (n *limitNode) Values() tree.Datums {
 }
 
 func (n *limitNode) Close(ctx context.Context) {
-	n.plan.Close(ctx)
+	n.input.Close(ctx)
 }
 
 // evalLimit evaluates the Count and Offset fields. If Count is missing, the

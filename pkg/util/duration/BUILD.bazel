@@ -16,6 +16,7 @@ go_library(
         "//pkg/sql/pgwire/pgerror",
         "//pkg/sql/types",
         "//pkg/util/arith",
+        "//pkg/util/timeutil/pgdate",
         "@com_github_cockroachdb_apd_v3//:apd",
         "@com_github_cockroachdb_errors//:errors",
     ],
@@ -29,10 +30,6 @@ go_test(
         "parse_test.go",
     ],
     embed = [":duration"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/sql/types",
         "//pkg/util/leaktest",

@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package settings
 
@@ -57,8 +52,8 @@ func (s *StringSetting) Default() string {
 }
 
 // DefaultString returns the default value for the setting as a string.
-func (s *StringSetting) DefaultString() (string, error) {
-	return s.DecodeToString(s.EncodedDefault())
+func (s *StringSetting) DefaultString() string {
+	return s.defaultValue
 }
 
 // Defeat the linter.
@@ -87,11 +82,11 @@ func (s *StringSetting) Validate(sv *Values, v string) error {
 // it passes validation.
 func (s *StringSetting) Override(ctx context.Context, sv *Values, v string) {
 	sv.setValueOrigin(ctx, s.slot, OriginOverride)
-	_ = s.set(ctx, sv, v)
+	_ = s.decodeAndSet(ctx, sv, v)
 	sv.setDefaultOverride(s.slot, v)
 }
 
-func (s *StringSetting) set(ctx context.Context, sv *Values, v string) error {
+func (s *StringSetting) decodeAndSet(ctx context.Context, sv *Values, v string) error {
 	if err := s.Validate(sv, v); err != nil {
 		return err
 	}
@@ -101,15 +96,22 @@ func (s *StringSetting) set(ctx context.Context, sv *Values, v string) error {
 	return nil
 }
 
+func (s *StringSetting) decodeAndSetDefaultOverride(
+	ctx context.Context, sv *Values, v string,
+) error {
+	sv.setDefaultOverride(s.slot, v)
+	return nil
+}
+
 func (s *StringSetting) setToDefault(ctx context.Context, sv *Values) {
 	// See if the default value was overridden.
 	if val := sv.getDefaultOverride(s.slot); val != nil {
 		// As per the semantics of override, these values don't go through
 		// validation.
-		_ = s.set(ctx, sv, val.(string))
+		_ = s.decodeAndSet(ctx, sv, val.(string))
 		return
 	}
-	if err := s.set(ctx, sv, s.defaultValue); err != nil {
+	if err := s.decodeAndSet(ctx, sv, s.defaultValue); err != nil {
 		panic(err)
 	}
 }

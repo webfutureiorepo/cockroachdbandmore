@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Cannot be proto3 because we use nullable primitives.
 syntax = "proto2";
@@ -17,6 +12,8 @@ import "gogoproto/gogo.proto";
 import "sql/types/types.proto";
 import "sql/catalog/catenumpb/index.proto";
 import "geo/geopb/config.proto";
+import "util/hlc/timestamp.proto";
+import "roachpb/data.proto";
 
 // IndexFetchSpec contains the subset of information (from TableDescriptor and
 // IndexDescriptor) that is necessary to decode KVs into SQL keys and values.
@@ -111,7 +108,7 @@ message IndexFetchSpec {
   optional uint32 max_keys_per_row = 10 [(gogoproto.nullable) = false];
 
   // KeyPrefixLength is the length of the key prefix that encodes the table and
-  // index ID.
+  // index ID. It is used to speed up the decoding process.
   optional uint32 key_prefix_length = 11 [(gogoproto.nullable) = false];
 
   optional uint32 max_family_id = 12 [(gogoproto.nullable) = false,
@@ -131,4 +128,20 @@ message IndexFetchSpec {
   //
   // Any other column IDs present in the fetched KVs will be ignored.
   repeated Column fetched_columns = 15 [(gogoproto.nullable) = false];
+
+  message ExternalRowData {
+    optional util.hlc.Timestamp as_of = 1 [(gogoproto.nullable) = false];
+    // TenantID is the new tenant ID to use in keys when fetching external data
+    // from KV.
+    optional roachpb.TenantID tenant_id = 2 [(gogoproto.nullable) = false,  (gogoproto.customname) = "TenantID"];
+    // TableID is the new table ID to use in keys when fetching external data
+    // from KV.
+    optional uint32 table_id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "TableID",
+                                  (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/sem/catid.DescID"];
+  }
+  // External, if set, indicates where the row data for this object is stored if
+  // it is stored outside the span of the object.
+  optional ExternalRowData external  = 17 [(gogoproto.nullable) = true];
+
+  // NEXT ID 18.
 }

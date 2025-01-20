@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -79,7 +74,7 @@ func (sm *streamMerger) NextBatch(
 	}
 
 	cmp, err := CompareEncDatumRowForMerge(
-		sm.left.types, lrow, rrow, sm.left.ordering, sm.right.ordering,
+		ctx, sm.left.types, sm.right.types, lrow, rrow, sm.left.ordering, sm.right.ordering,
 		sm.nullEquality, &sm.datumAlloc, evalCtx,
 	)
 	if err != nil {
@@ -108,7 +103,8 @@ func (sm *streamMerger) NextBatch(
 // a DatumAlloc which is used for decoding if any underlying EncDatum is not
 // yet decoded.
 func CompareEncDatumRowForMerge(
-	lhsTypes []*types.T,
+	ctx context.Context,
+	lhsTypes, rhsTypes []*types.T,
 	lhs, rhs rowenc.EncDatumRow,
 	leftOrdering, rightOrdering colinfo.ColumnOrdering,
 	nullEquality bool,
@@ -144,7 +140,7 @@ func CompareEncDatumRowForMerge(
 			}
 			continue
 		}
-		cmp, err := lhs[lIdx].Compare(lhsTypes[lIdx], da, evalCtx, &rhs[rIdx])
+		cmp, err := lhs[lIdx].CompareEx(ctx, lhsTypes[lIdx], da, evalCtx, &rhs[rIdx], rhsTypes[rIdx])
 		if err != nil {
 			return 0, err
 		}
@@ -176,12 +172,12 @@ func makeStreamMerger(
 	memMonitor *mon.BytesMonitor,
 ) (streamMerger, error) {
 	if len(leftOrdering) != len(rightOrdering) {
-		return streamMerger{}, errors.Errorf(
+		return streamMerger{}, errors.AssertionFailedf(
 			"ordering lengths don't match: %d and %d", len(leftOrdering), len(rightOrdering))
 	}
 	for i, ord := range leftOrdering {
 		if ord.Direction != rightOrdering[i].Direction {
-			return streamMerger{}, errors.New("ordering mismatch")
+			return streamMerger{}, errors.AssertionFailedf("ordering mismatch")
 		}
 	}
 

@@ -1,14 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import {
+  connectRouter,
+  routerMiddleware,
+  RouterState,
+} from "connected-react-router";
+import { History } from "history";
+import identity from "lodash/identity";
 import {
   createStore,
   combineReducers,
@@ -19,27 +21,22 @@ import {
 } from "redux";
 import createSagaMiddleware from "redux-saga";
 import thunk, { ThunkDispatch } from "redux-thunk";
-import {
-  connectRouter,
-  routerMiddleware,
-  RouterState,
-} from "connected-react-router";
-import { History } from "history";
+import { createSelector } from "reselect";
 
+import { DataFromServer } from "src/util/dataFromServer";
+
+import { initializeAnalytics } from "./analytics";
 import { apiReducersReducer, APIReducersState } from "./apiReducers";
 import { hoverReducer, HoverState } from "./hover";
 import { localSettingsReducer, LocalSettingsState } from "./localsettings";
+import { loginReducer, LoginAPIState } from "./login";
 import { metricsReducer, MetricsState } from "./metrics";
 import { queryManagerReducer, QueryManagerState } from "./queryManager/reducer";
+import rootSaga from "./sagas";
 import { timeScaleReducer, TimeScaleState } from "./timeScale";
 import { uiDataReducer, UIDataState } from "./uiData";
-import { loginReducer, LoginAPIState } from "./login";
-import rootSaga from "./sagas";
-import { initializeAnalytics } from "./analytics";
-import { DataFromServer } from "src/util/dataFromServer";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+
 import FeatureFlags = cockroach.server.serverpb.FeatureFlags;
-import { createSelector } from "reselect";
 
 export interface AdminUIState {
   cachedData: APIReducersState;
@@ -66,6 +63,9 @@ const emptyDataFromServer: DataFromServer = {
   OIDCGenerateJWTAuthTokenEnabled: false,
   Tag: "",
   Version: "",
+  LicenseType: "OSS",
+  SecondsUntilLicenseExpiry: 0,
+  IsManaged: false,
 };
 
 export const featureFlagSelector = createSelector(
@@ -130,7 +130,7 @@ export function createAdminUIStore(
               },
             },
           })
-        : _.identity,
+        : identity,
     ),
   );
 

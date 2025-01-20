@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package regions_test
 
@@ -211,6 +206,18 @@ func (f fakeLeaseManager) Acquire(
 	return ld, nil
 }
 
+func (f fakeLeaseManager) IncGaugeAfterLeaseDuration(gauge lease.AfterLeaseDurationGauge) func() {
+	return func() {}
+}
+
+func (f fakeLeaseManager) GetSafeReplicationTS() hlc.Timestamp {
+	return hlc.Timestamp{}
+}
+
+func (f fakeLeaseManager) GetLeaseGeneration() int64 {
+	return 0
+}
+
 var _ descs.LeaseManager = (*fakeLeaseManager)(nil)
 
 type fakeSystemDatabase struct {
@@ -237,6 +244,7 @@ func (d fakeSystemDatabase) Adding() bool               { return false }
 func (d fakeSystemDatabase) ForEachUDTDependentForHydration(func(t *types.T) error) error {
 	return nil
 }
+func (d fakeSystemDatabase) MaybeRequiresTypeHydration() bool { return false }
 
 type fakeLeasedDescriptor struct {
 	catalog.Descriptor
@@ -245,7 +253,7 @@ type fakeLeasedDescriptor struct {
 func (f fakeLeasedDescriptor) Underlying() catalog.Descriptor {
 	return f.Descriptor
 }
-func (f fakeLeasedDescriptor) Expiration() hlc.Timestamp {
+func (f fakeLeasedDescriptor) Expiration(_ context.Context) hlc.Timestamp {
 	return hlc.MaxTimestamp
 }
 func (f fakeLeasedDescriptor) Release(ctx context.Context) {
@@ -280,6 +288,7 @@ func (d fakeRegionEnum) Adding() bool               { return false }
 func (d fakeRegionEnum) ForEachUDTDependentForHydration(func(t *types.T) error) error {
 	return nil
 }
+func (d fakeRegionEnum) MaybeRequiresTypeHydration() bool { return false }
 func (d fakeRegionEnum) AsEnumTypeDescriptor() catalog.EnumTypeDescriptor {
 	if d.isNotEnum {
 		return nil

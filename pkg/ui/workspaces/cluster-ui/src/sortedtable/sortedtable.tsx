@@ -1,28 +1,24 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
-import _ from "lodash";
-import * as Long from "long";
+import { Tooltip } from "@cockroachlabs/ui-components";
+import classNames from "classnames/bind";
 import { History } from "history";
+import orderBy from "lodash/orderBy";
+import times from "lodash/times";
+import * as Long from "long";
 import { Moment } from "moment-timezone";
+import React from "react";
 import { createSelector } from "reselect";
 
-import times from "lodash/times";
 import { EmptyPanel, EmptyPanelProps } from "../empty";
+
 import styles from "./sortedtable.module.scss";
-import classNames from "classnames/bind";
-import { TableSpinner } from "./tableSpinner";
 import { TableHead } from "./tableHead";
 import { TableRow } from "./tableRow";
-import { Tooltip } from "@cockroachlabs/ui-components";
+import { TableSpinner } from "./tableSpinner";
 
 export interface ISortedTablePagination {
   current: number;
@@ -145,7 +141,7 @@ export interface SortableColumn {
   // Unique key that identifies this column from others, for the purpose of
   // indicating sort order. If not provided, the column is not considered
   // sortable.
-  columnTitle?: any;
+  columnTitle?: string;
   // className is a classname to apply to the td elements
   className?: string;
   titleAlign?: "left" | "right" | "center";
@@ -189,8 +185,8 @@ export class SortedTable<T> extends React.Component<
   SortedTableProps<T>,
   SortedTableState
 > {
-  static defaultProps: Partial<SortedTableProps<any>> = {
-    rowClass: (_obj: any) => "",
+  static defaultProps: Partial<SortedTableProps<unknown>> = {
+    rowClass: (_obj: unknown) => "",
     columns: [],
     sortSetting: {
       ascending: false,
@@ -239,11 +235,7 @@ export class SortedTable<T> extends React.Component<
         return this.paginatedData();
       }
       return this.paginatedData(
-        _.orderBy(
-          data,
-          sortColumn.sort,
-          sortSetting.ascending ? "asc" : "desc",
-        ),
+        orderBy(data, sortColumn.sort, sortSetting.ascending ? "asc" : "desc"),
       );
     },
   );

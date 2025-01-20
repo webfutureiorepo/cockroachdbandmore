@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
-	"math/rand"
 	"net/url"
 	"strings"
 	"sync"
@@ -29,6 +23,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -36,10 +34,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/lib/pq"
 	"github.com/petermattis/goid"
 	"github.com/stretchr/testify/require"
 )
@@ -58,7 +59,7 @@ func TestCancelDistSQLQuery(t *testing.T) {
 
 	var queryLatency *time.Duration
 	sem := make(chan struct{}, 1)
-	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+	rng, _ := randutil.NewTestRand()
 	tc := serverutils.StartCluster(t, 2, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
@@ -488,6 +489,89 @@ func TestIdleInSessionTimeout(t *testing.T) {
 		t.Fatal("expected the connection to be killed " +
 			"but the connection is still alive")
 	}
+}
+
+func TestIdleInSessionTimeoutDuringSchemaChange(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	skip.UnderDuress(t, "slow test")
+	ctx := context.Background()
+
+	var blockSchemaChange atomic.Bool
+	startWaitOfSchemaChange := make(chan any)
+	endWaitOfSchemaChange := make(chan any)
+
+	srv, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			SQLDeclarativeSchemaChanger: &scexec.TestingKnobs{
+				BeforeStage: func(p scplan.Plan, stageIdx int) error {
+					// We only block in the first stage of the PostCommitPhase.
+					if !blockSchemaChange.Load() || p.Params.ExecutionPhase != scop.PostCommitPhase || stageIdx != 0 {
+						return nil
+					}
+					// Notify foreground thread that we are now waiting
+					startWaitOfSchemaChange <- true
+					// Wait for the foreground thread to release us
+					<-endWaitOfSchemaChange
+					return nil
+				},
+			},
+		},
+	})
+	defer srv.Stopper().Stop(ctx)
+
+	runner := sqlutils.MakeSQLRunner(sqlDB)
+	runner.Exec(t, "CREATE TABLE t1()")
+
+	const sessionTimeoutInSeconds = 1
+	acquireConn := func() *gosql.Conn {
+		conn, err := sqlDB.Conn(ctx)
+		require.NoError(t, err)
+		_, err = conn.ExecContext(ctx, fmt.Sprintf("SET idle_in_session_timeout = '%ds'", sessionTimeoutInSeconds))
+		require.NoError(t, err)
+		return conn
+	}
+	conn := acquireConn()
+
+	checkConnectionAndReconnect := func(expectConnection bool) {
+		// Test the connection
+		_, err := conn.ExecContext(ctx, `SELECT 1`)
+		if expectConnection {
+			require.NoError(t, err, "expected the connection to be valid, but it's not: %v", err)
+		} else {
+			require.Error(t, err, "expected the connection to be dead, but it's still alive")
+			// Reestablish the connection
+			conn = acquireConn()
+		}
+	}
+	time.Sleep(2 * sessionTimeoutInSeconds * time.Second)
+	checkConnectionAndReconnect(false)
+
+	// Kick off a background thread that will block doing a schema change. It
+	// should be immune to the idle session timeout.
+	defer close(endWaitOfSchemaChange) // Close channel to unblock background thread if foreground fails
+	grp := ctxgroup.WithContext(ctx)
+	grp.GoCtx(func(ctx context.Context) error {
+		defer close(startWaitOfSchemaChange) // In case we fail before adding to this channel
+		blockSchemaChange.Swap(true)
+		_, err := conn.ExecContext(ctx, `ALTER TABLE t1 ADD COLUMN C2 BIGINT`)
+		return err
+	})
+
+	<-startWaitOfSchemaChange
+	blockSchemaChange.Swap(false) // Disable so that we don't block for another stage
+	// We are now waiting for the schema change to complete. Waiting for twice the
+	// session timeout ensures that the schema change is not affected by the idle
+	// session timeout.
+	time.Sleep(2 * sessionTimeoutInSeconds * time.Second)
+	// Tell the background thread to continue
+	endWaitOfSchemaChange <- true
+	require.NoError(t, grp.Wait())
+
+	// Test that the idle session timer is reset after the schema change.
+	checkConnectionAndReconnect(true)
+	time.Sleep(2 * sessionTimeoutInSeconds * time.Second)
+	checkConnectionAndReconnect(false)
 }
 
 func TestIdleInTransactionSessionTimeout(t *testing.T) {
@@ -967,4 +1051,73 @@ func TestTenantStatementTimeoutAdmissionQueueCancellation(t *testing.T) {
 	log.Infof(ctx, "unblocked blockers")
 	wg.Wait()
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
+// TestStatementTimeoutForSchemaChangeCommit confirms that waiting for the job
+// phase of the schema change respects statement timeout.
+func TestStatementTimeoutForSchemaChangeCommit(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	skip.UnderDuress(t, "sets a long timeout")
+
+	for _, implicitTxn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("implicitTxn=%t", implicitTxn),
+			func(t *testing.T) {
+				numNodes := 1
+				var blockSchemaChange atomic.Bool
+				waitForTimeout := make(chan struct{})
+				tc := serverutils.StartCluster(t, numNodes,
+					base.TestClusterArgs{
+						ServerArgs: base.TestServerArgs{
+							Knobs: base.TestingKnobs{
+								SQLDeclarativeSchemaChanger: &scexec.TestingKnobs{
+									AfterStage: func(p scplan.Plan, stageIdx int) error {
+										if blockSchemaChange.Load() && p.Params.ExecutionPhase == scop.PostCommitPhase {
+											<-waitForTimeout
+										}
+										return nil
+									},
+								},
+							},
+						},
+					})
+				defer tc.Stopper().Stop(ctx)
+
+				url, cleanup := tc.ApplicationLayer(0).PGUrl(t)
+				defer cleanup()
+				baseConn, err := pq.NewConnector(url.String())
+				require.NoError(t, err)
+				actualNotices := make([]string, 0)
+				connector := pq.ConnectorWithNoticeHandler(baseConn, func(n *pq.Error) {
+					actualNotices = append(actualNotices, n.Message)
+				})
+				dbWithHandler := gosql.OpenDB(connector)
+				defer dbWithHandler.Close()
+				conn := sqlutils.MakeSQLRunner(dbWithHandler)
+				conn.Exec(t, "CREATE TABLE t1 (n int primary key)")
+				conn.Exec(t, `SET statement_timeout = '1s'`)
+				require.NoError(t, err)
+				// Test implicit transactions first.
+				blockSchemaChange.Swap(true)
+				defer func() {
+					close(waitForTimeout)
+					blockSchemaChange.Swap(false)
+				}()
+				if implicitTxn {
+					_, err := conn.DB.ExecContext(ctx, "ALTER TABLE t1 ADD COLUMN j INT DEFAULT 32")
+					require.ErrorContains(t, err, sqlerrors.QueryTimeoutError.Error())
+					require.Equal(t, 1, len(actualNotices))
+					require.Regexp(t,
+						"The statement has timed out, but the following background jobs have been created and will continue running: \\d+",
+						actualNotices[0])
+				} else {
+					txn := conn.Begin(t)
+					_, err := txn.Exec("ALTER TABLE t1 ADD COLUMN j INT DEFAULT 32")
+					require.NoError(t, err)
+					err = txn.Commit()
+					require.NoError(t, err)
+				}
+			})
+	}
 }

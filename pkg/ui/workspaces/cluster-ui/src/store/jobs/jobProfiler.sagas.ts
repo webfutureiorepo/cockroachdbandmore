@@ -1,21 +1,20 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { PayloadAction } from "@reduxjs/toolkit";
-import { actions } from "./jobProfiler.reducer";
 import { call, put, all, takeEvery } from "redux-saga/effects";
+
 import {
   ListJobProfilerExecutionDetailsRequest,
   collectExecutionDetails,
   listExecutionDetailFiles,
 } from "src/api";
+
+import { maybeError } from "../../util";
+
+import { actions } from "./jobProfiler.reducer";
 
 export function* refreshJobProfilerSaga(
   action: PayloadAction<ListJobProfilerExecutionDetailsRequest>,
@@ -30,7 +29,7 @@ export function* requestJobProfilerSaga(
     const result = yield call(listExecutionDetailFiles, action.payload);
     yield put(actions.received(result));
   } catch (e) {
-    yield put(actions.failed(e));
+    yield put(actions.failed(maybeError(e)));
   }
 }
 
@@ -44,7 +43,7 @@ export function* collectExecutionDetailsSaga(
     // requested statement.
     yield put(actions.request());
   } catch (e) {
-    yield put(actions.collectExecutionDetailsFailed(e));
+    yield put(actions.collectExecutionDetailsFailed(maybeError(e)));
   }
 }
 

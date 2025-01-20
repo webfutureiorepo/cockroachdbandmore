@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package stmtdiagnostics_test
 
@@ -46,7 +41,7 @@ func TestDiagnosticsRequest(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	skip.UnderShort(t)
-	skip.UnderDeadlock(t, "the test is too slow")
+	skip.UnderDuress(t, "the test is too slow")
 
 	srv, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	ctx := context.Background()
@@ -145,7 +140,7 @@ func TestDiagnosticsRequest(t *testing.T) {
 	// Verify that EXECUTE triggers diagnostics collection (#66048).
 	t.Run("execute", func(t *testing.T) {
 		id, err := registry.InsertRequestInternal(
-			ctx, "SELECT x + $1 FROM test", anyPlan, noAntiMatch,
+			ctx, "SELECT x + _ FROM test", anyPlan, noAntiMatch,
 			sampleAll, noLatencyThreshold, noExpiration,
 		)
 		require.NoError(t, err)
@@ -163,15 +158,16 @@ func TestDiagnosticsRequest(t *testing.T) {
 		require.NoError(t, err)
 		checkNotCompleted(reqID)
 
-		// Set the statement timeout (as well as clean it up in a defer).
+		// Set the statement timeout.
 		runner.Exec(t, "SET statement_timeout = '100ms';")
-		defer func() {
-			runner.Exec(t, "RESET statement_timeout;")
-		}()
 
 		// Run the query that times out.
 		_, err = db.Exec("SELECT pg_sleep(999999)")
 		require.True(t, strings.Contains(err.Error(), sqlerrors.QueryTimeoutError.Error()))
+
+		// Reset the stmt timeout so that it doesn't affect the query in
+		// checkCompleted.
+		runner.Exec(t, "RESET statement_timeout;")
 		checkCompleted(reqID)
 	})
 
@@ -219,7 +215,7 @@ func TestDiagnosticsRequest(t *testing.T) {
 	t.Run("conditional with concurrency", func(t *testing.T) {
 		minExecutionLatency := 100 * time.Millisecond
 		reqID, err := registry.InsertRequestInternal(
-			ctx, "SELECT pg_sleep($1)", anyPlan, noAntiMatch,
+			ctx, "SELECT pg_sleep(_)", anyPlan, noAntiMatch,
 			sampleAll, minExecutionLatency, noExpiration,
 		)
 		require.NoError(t, err)
@@ -483,7 +479,7 @@ func TestDiagnosticsRequest(t *testing.T) {
 		runner.Exec(t, "ANALYZE small;")
 		runner.Exec(t, "CREATE TABLE large (v INT, INDEX (v));")
 		runner.Exec(t, "INSERT INTO large VALUES (1);")
-		runner.Exec(t, "INSERT INTO large SELECT 2 FROM generate_series(1, 10000);")
+		runner.Exec(t, "INSERT INTO large SELECT 2 FROM generate_series(1, 100);")
 		runner.Exec(t, "ANALYZE large;")
 
 		// query1 results in scan + lookup join whereas query2 does two scans +

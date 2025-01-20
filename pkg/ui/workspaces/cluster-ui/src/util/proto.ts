@@ -1,16 +1,10 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-import _ from "lodash";
-
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import has from "lodash/has";
+import sumBy from "lodash/sumBy";
 
 export type INodeStatus = cockroach.server.status.statuspb.INodeStatus;
 const nodeStatus: INodeStatus = null;
@@ -28,7 +22,7 @@ export function rollupStoreMetrics(ns: INodeStatus): StatusMetrics {
     .map(ss => ss.metrics)
     .reduce((acc, i) => {
       for (const k in i) {
-        acc[k] = _.has(acc, k) ? acc[k] + i[k] : i[k];
+        acc[k] = has(acc, k) ? acc[k] + i[k] : i[k];
       }
       return acc;
     }, ns.metrics);
@@ -103,7 +97,7 @@ export function BytesUsed(s: INodeStatus): number {
   if (usedCapacity !== 0) {
     return usedCapacity;
   }
-  return _.sumBy(aggregateByteKeys, (key: string) => {
+  return sumBy(aggregateByteKeys, (key: string) => {
     return s.metrics[key];
   });
 }

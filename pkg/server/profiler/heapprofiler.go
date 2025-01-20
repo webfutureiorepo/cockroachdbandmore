@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package profiler
 
@@ -16,6 +11,7 @@ import (
 	"runtime/pprof"
 
 	"github.com/cockroachdb/cockroach/pkg/server/dumpstore"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -38,6 +34,23 @@ const heapFileNamePrefix = "memprof"
 
 // heapFileNameSuffix is the suffix of files containing pprof data.
 const heapFileNameSuffix = ".pprof"
+
+var maxCombinedFileSize = settings.RegisterByteSizeSetting(
+	settings.ApplicationLevel,
+	"server.mem_profile.total_dump_size_limit",
+	"maximum combined disk size of preserved memory profiles",
+	256<<20, // 256MiB
+)
+
+func init() {
+	_ = settings.RegisterByteSizeSetting(
+		settings.ApplicationLevel,
+		"server.heap_profile.total_dump_size_limit",
+		"use server.mem_profile.total_dump_size_limit instead",
+		256<<20, // 256MiB
+		settings.Retired,
+	)
+}
 
 // NewHeapProfiler creates a HeapProfiler. dir is the directory in which
 // profiles are to be stored.

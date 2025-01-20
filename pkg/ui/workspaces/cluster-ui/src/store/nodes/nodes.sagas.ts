@@ -1,21 +1,18 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { all, call, put, delay, takeLatest } from "redux-saga/effects";
-import { getNodes } from "src/api/nodesApi";
-import { actions } from "./nodes.reducer";
-
-import { CACHE_INVALIDATION_PERIOD, throttleWithReset } from "src/store/utils";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+import { all, call, put, delay, takeLatest } from "redux-saga/effects";
 
+import { getNodes } from "src/api/nodesApi";
+import { CACHE_INVALIDATION_PERIOD, throttleWithReset } from "src/store/utils";
+
+import { maybeError } from "../../util";
 import { rootActions } from "../rootActions";
+
+import { actions } from "./nodes.reducer";
 
 export function* refreshNodesSaga() {
   yield put(actions.request());
@@ -23,12 +20,11 @@ export function* refreshNodesSaga() {
 
 export function* requestNodesSaga() {
   try {
-    const result: cockroach.server.serverpb.NodesResponse = yield call(
-      getNodes,
-    );
+    const result: cockroach.server.serverpb.NodesResponse =
+      yield call(getNodes);
     yield put(actions.received(result.nodes));
   } catch (e) {
-    yield put(actions.failed(e));
+    yield put(actions.failed(maybeError(e)));
   }
 }
 

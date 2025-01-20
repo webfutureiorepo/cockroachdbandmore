@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -14,6 +9,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/errors"
 )
 
 // batchedPlanNode is an interface that complements planNode to
@@ -127,6 +123,17 @@ func (s *serializeNode) Next(params runParams) (bool, error) {
 func (s *serializeNode) Values() tree.Datums       { return s.source.BatchedValues(s.rowIdx) }
 func (s *serializeNode) Close(ctx context.Context) { s.source.Close(ctx) }
 
+func (s *serializeNode) InputCount() int {
+	return 1
+}
+
+func (s *serializeNode) Input(i int) (planNode, error) {
+	if i == 0 {
+		return s.source, nil
+	}
+	return nil, errors.AssertionFailedf("input index %d is out of range", i)
+}
+
 // FastPathResults implements the planNodeFastPath interface.
 func (s *serializeNode) FastPathResults() (int, bool) {
 	return s.rowCount, s.fastPath
@@ -182,6 +189,17 @@ func (r *rowCountNode) startExec(params runParams) error {
 func (r *rowCountNode) Next(params runParams) (bool, error) { return false, nil }
 func (r *rowCountNode) Values() tree.Datums                 { return nil }
 func (r *rowCountNode) Close(ctx context.Context)           { r.source.Close(ctx) }
+
+func (r *rowCountNode) InputCount() int {
+	return 1
+}
+
+func (r *rowCountNode) Input(i int) (planNode, error) {
+	if i == 0 {
+		return r.source, nil
+	}
+	return nil, errors.AssertionFailedf("input index %d is out of range", i)
+}
 
 // FastPathResults implements the planNodeFastPath interface.
 func (r *rowCountNode) FastPathResults() (int, bool) { return r.rowCount, true }

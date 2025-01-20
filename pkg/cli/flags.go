@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -28,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli/clienturl"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflagcfg"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/configprofiles"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -66,6 +60,7 @@ var startBackground bool
 var storeSpecs base.StoreSpecList
 var goMemLimit int64
 var tenantIDFile string
+var localityFile string
 
 // initPreFlagsDefaults initializes the values of the global variables
 // defined above.
@@ -98,6 +93,7 @@ func initPreFlagsDefaults() {
 	goMemLimit = 0
 
 	tenantIDFile = ""
+	localityFile = ""
 }
 
 // AddPersistentPreRunE add 'fn' as a persistent pre-run function to 'cmd'.
@@ -186,6 +182,41 @@ func (t tenantIDSetter) Set(v string) error {
 			return err
 		}
 		*t.tenantIDs = append(*t.tenantIDs, tenantID)
+	}
+	return nil
+}
+
+// tenantNameSetter wraps a list of roachpb.TenantNames and enables setting
+// them via a command-line flag.
+type tenantNameSetter struct {
+	tenantNames *[]roachpb.TenantName
+}
+
+// String implements the pflag.Value interface.
+func (t tenantNameSetter) String() string {
+	var tenantString strings.Builder
+	separator := ""
+	for _, tName := range *t.tenantNames {
+		tenantString.WriteString(separator)
+		tenantString.WriteString(string(tName))
+		separator = ","
+	}
+	return tenantString.String()
+}
+
+// Type implements the pflag.Value interface.
+func (t tenantNameSetter) Type() string { return "<[]TenantName>" }
+
+// Set implements the pflag.Value interface.
+func (t tenantNameSetter) Set(v string) error {
+	*t.tenantNames = []roachpb.TenantName{}
+	tenantScopes := strings.Split(v, "," /* separator */)
+	for _, tenantScope := range tenantScopes {
+		tenant := roachpb.TenantName(tenantScope)
+		if err := tenant.IsValid(); err != nil {
+			return err
+		}
+		*t.tenantNames = append(*t.tenantNames, roachpb.TenantName(tenantScope))
 	}
 	return nil
 }
@@ -389,10 +420,6 @@ func init() {
 		// attributes too? Would this be useful for e.g. SQL query
 		// planning?
 		cliflagcfg.StringFlag(f, &serverCfg.Attrs, cliflags.Attrs)
-		// Cluster initialization. We only do this for a regular start command;
-		// SQL-only servers get their initialization payload from their tenant
-		// configuration.
-		cliflagcfg.VarFlag(f, configprofiles.NewProfileSetter(&serverCfg.AutoConfigProvider), cliflags.ConfigProfile)
 	}
 
 	// Flags common to the start commands, the connect command, and the node join
@@ -418,6 +445,8 @@ func init() {
 		cliflagcfg.VarFlag(f, addr.NewAddrSetter(&serverHTTPAddr, &serverHTTPPort), cliflags.ListenHTTPAddr)
 		cliflagcfg.VarFlag(f, addr.NewAddrSetter(&serverHTTPAdvertiseAddr, &serverHTTPAdvertisePort), cliflags.HTTPAdvertiseAddr)
 
+		cliflagcfg.BoolFlag(f, &serverCfg.AcceptProxyProtocolHeaders, cliflags.AcceptProxyProtocolHeaders)
+
 		// Certificates directory. Use a server-specific flag and value to ignore environment
 		// variables, but share the same default.
 		cliflagcfg.StringFlag(f, &startCtx.serverSSLCertsDir, cliflags.ServerCertsDir)
@@ -431,6 +460,7 @@ func init() {
 			_ = f.MarkHidden(cliflags.AdvertiseAddr.Name)
 			_ = f.MarkHidden(cliflags.SQLAdvertiseAddr.Name)
 			_ = f.MarkHidden(cliflags.HTTPAdvertiseAddr.Name)
+			_ = f.MarkHidden(cliflags.AcceptProxyProtocolHeaders.Name)
 		}
 
 		if cmd == startCmd || cmd == startSingleNodeCmd {
@@ -474,9 +504,11 @@ func init() {
 		}
 
 		cliflagcfg.VarFlag(f, &serverCfg.Locality, cliflags.Locality)
+		cliflagcfg.StringFlag(f, &localityFile, cliflags.LocalityFile)
 
 		cliflagcfg.VarFlag(f, &storeSpecs, cliflags.Store)
 		cliflagcfg.VarFlag(f, &serverCfg.StorageEngine, cliflags.StorageEngine)
+		cliflagcfg.VarFlag(f, &serverCfg.WALFailover, cliflags.WALFailover)
 		cliflagcfg.StringFlag(f, &serverCfg.SharedStorage, cliflags.SharedStorage)
 		cliflagcfg.VarFlag(f, &serverCfg.SecondaryCache, cliflags.SecondaryCache)
 		cliflagcfg.VarFlag(f, &serverCfg.MaxOffset, cliflags.MaxOffset)
@@ -496,6 +528,12 @@ func init() {
 
 		// Certificate principal map.
 		cliflagcfg.StringSliceFlag(f, &startCtx.serverCertPrincipalMap, cliflags.CertPrincipalMap)
+
+		// Root cert distinguished name
+		cliflagcfg.StringFlag(f, &startCtx.serverRootCertDN, cliflags.RootCertDistinguishedName)
+
+		// Node cert distinguished name
+		cliflagcfg.StringFlag(f, &startCtx.serverNodeCertDN, cliflags.NodeCertDistinguishedName)
 
 		// Cluster name verification.
 		cliflagcfg.VarFlag(f, clusterNameSetter{&baseCfg.ClusterName}, cliflags.ClusterName)
@@ -517,6 +555,7 @@ func init() {
 		cliflagcfg.VarFlag(f, &startCtx.sqlSizeValue, cliflags.SQLMem)
 		cliflagcfg.VarFlag(f, &startCtx.goMemLimitValue, cliflags.GoMemLimit)
 		cliflagcfg.VarFlag(f, &startCtx.tsdbSizeValue, cliflags.TSDBMem)
+		cliflagcfg.IntFlag(f, &startCtx.goGCPercent, cliflags.GoGCPercent)
 		// N.B. diskTempStorageSizeValue.Resolve() will be called after the
 		// stores flag has been parsed and the storage device that a
 		// percentage refers to becomes known.
@@ -534,6 +573,12 @@ func init() {
 		_ = f.MarkHidden(cliflags.ApplicationInternalRPCPortRange.Name)
 	}
 
+	{
+		f := initCmd.Flags()
+		cliflagcfg.BoolFlag(f, &initCmdOptions.virtualized, cliflags.Virtualized)
+		cliflagcfg.BoolFlag(f, &initCmdOptions.virtualizedEmpty, cliflags.VirtualizedEmpty)
+	}
+
 	// Multi-tenancy start-sql command flags.
 	{
 		f := mtStartSQLCmd.Flags()
@@ -546,10 +591,6 @@ func init() {
 	telemetryEnabledCmds := append(serverCmds, demoCmd, statementBundleRecreateCmd)
 	telemetryEnabledCmds = append(telemetryEnabledCmds, demoCmd.Commands()...)
 	for _, cmd := range telemetryEnabledCmds {
-		f := cmd.Flags()
-		cliflagcfg.StringFlag(f, &serverCfg.ObsServiceAddr, cliflags.ObsServiceAddr)
-		_ = f.MarkHidden(cliflags.ObsServiceAddr.Name)
-
 		// Report flag usage for server commands in telemetry. We do this
 		// only for server commands, as there is no point in accumulating
 		// telemetry if there's no telemetry reporting loop being started.
@@ -573,6 +614,12 @@ func init() {
 
 		// All certs command want to map CNs to SQL principals.
 		cliflagcfg.StringSliceFlag(f, &certCtx.certPrincipalMap, cliflags.CertPrincipalMap)
+
+		// Root cert distinguished name
+		cliflagcfg.StringFlag(f, &startCtx.serverRootCertDN, cliflags.RootCertDistinguishedName)
+
+		// Node cert distinguished name
+		cliflagcfg.StringFlag(f, &startCtx.serverNodeCertDN, cliflags.NodeCertDistinguishedName)
 
 		if cmd == listCertsCmd {
 			// The 'list' subcommand does not write to files and thus does
@@ -599,6 +646,8 @@ func init() {
 
 		if cmd == createClientCertCmd {
 			cliflagcfg.VarFlag(f, &tenantIDSetter{tenantIDs: &certCtx.tenantScope}, cliflags.TenantScope)
+			cliflagcfg.VarFlag(f, &tenantNameSetter{tenantNames: &certCtx.tenantNameScope}, cliflags.TenantScopeByNames)
+			_ = f.MarkHidden(cliflags.TenantScopeByNames.Name)
 
 			// PKCS8 key format is only available for the client cert command.
 			cliflagcfg.BoolFlag(f, &certCtx.generatePKCS8Key, cliflags.GeneratePKCS8Key)
@@ -608,6 +657,7 @@ func init() {
 
 	clientCmds := []*cobra.Command{
 		debugJobTraceFromClusterCmd,
+		debugJobCleanupInfoRows,
 		debugGossipValuesCmd,
 		debugTimeSeriesDumpCmd,
 		debugZipCmd,
@@ -721,6 +771,7 @@ func init() {
 		f := drainNodeCmd.Flags()
 		cliflagcfg.DurationFlag(f, &drainCtx.drainWait, cliflags.DrainWait)
 		cliflagcfg.BoolFlag(f, &drainCtx.nodeDrainSelf, cliflags.NodeDrainSelf)
+		cliflagcfg.BoolFlag(f, &drainCtx.shutdown, cliflags.NodeDrainShutdown)
 	}
 
 	// Commands that establish a SQL connection.
@@ -728,6 +779,7 @@ func init() {
 		sqlShellCmd,
 		demoCmd,
 		debugJobTraceFromClusterCmd,
+		debugJobCleanupInfoRows,
 		doctorExamineClusterCmd,
 		doctorExamineFallbackClusterCmd,
 		doctorRecreateClusterCmd,
@@ -758,6 +810,12 @@ func init() {
 		}
 
 		f := cmd.PersistentFlags()
+
+		// The strict TLS validation below fails if the client cert names don't match
+		// the username. But if the user flag isn't hooked up, it will always expect
+		// 'root'.
+		cliflagcfg.StringFlag(f, &cliCtx.clientOpts.User, cliflags.User)
+
 		cliflagcfg.VarFlag(f, clienturl.NewURLParser(cmd, &cliCtx.clientOpts, true /* strictTLS */, func(format string, args ...interface{}) {
 			fmt.Fprintf(stderr, format, args...)
 		}), cliflags.URL)
@@ -832,7 +890,6 @@ func init() {
 		cliflagcfg.IntFlag(f, &demoCtx.HTTPPort, cliflags.DemoHTTPPort)
 		cliflagcfg.StringFlag(f, &demoCtx.ListeningURLFile, cliflags.ListeningURLFile)
 		cliflagcfg.StringFlag(f, &demoCtx.pidFile, cliflags.PIDFile)
-		cliflagcfg.VarFlag(f, configprofiles.NewProfileSetter(&demoCtx.AutoConfigProvider), cliflags.ConfigProfile)
 	}
 
 	{
@@ -907,6 +964,7 @@ func init() {
 		f := debugRangeDataCmd.Flags()
 		cliflagcfg.BoolFlag(f, &debugCtx.replicated, cliflags.Replicated)
 		cliflagcfg.IntFlag(f, &debugCtx.maxResults, cliflags.Limit)
+		cliflagcfg.StringFlag(f, &serverCfg.SharedStorage, cliflags.SharedStorage)
 	}
 	{
 		f := debugGossipValuesCmd.Flags()
@@ -1078,6 +1136,12 @@ func extraServerFlagInit(cmd *cobra.Command) error {
 	if err := security.SetCertPrincipalMap(startCtx.serverCertPrincipalMap); err != nil {
 		return err
 	}
+	if err := security.SetRootSubject(startCtx.serverRootCertDN); err != nil {
+		return err
+	}
+	if err := security.SetNodeSubject(startCtx.serverNodeCertDN); err != nil {
+		return err
+	}
 	serverCfg.User = username.NodeUserName()
 	serverCfg.Insecure = startCtx.serverInsecure
 	serverCfg.SSLCertsDir = startCtx.serverSSLCertsDir
@@ -1234,6 +1298,53 @@ func extraServerFlagInit(cmd *cobra.Command) error {
 	// Ensure that diagnostic reporting is enabled for server startup commands.
 	serverCfg.StartDiagnosticsReporting = true
 
+	// --locality-file and --locality cannot be used together.
+	if changed(fs, cliflags.LocalityFile.Name) && changed(fs, cliflags.Locality.Name) {
+		return errors.Newf(
+			"--%s is incompatible with --%s",
+			cliflags.Locality.Name,
+			cliflags.LocalityFile.Name,
+		)
+	}
+
+	// Only read locality-file if tenant-id-file is not present. The presence
+	// of the tenant-id-file flag (which only exists in `mt start-sql`) will
+	// defer reading the locality-file until the tenant ID has been read.
+	if !changed(fs, cliflags.TenantIDFile.Name) {
+		if err := tryReadLocalityFileFlag(fs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tryReadLocalityFileFlag reads the file from the --locality-file flag if
+// specified, and populates the server config's Locality field.
+func tryReadLocalityFileFlag(fs *pflag.FlagSet) error {
+	fl := fs.Lookup(cliflags.LocalityFile.Name)
+	if fl != nil && fl.Changed {
+		localityFileName := fl.Value.String()
+
+		content, err := os.ReadFile(localityFileName)
+		if err != nil {
+			return errors.Wrapf(
+				err,
+				"invalid argument %q for %q flag",
+				localityFileName,
+				cliflags.LocalityFile.Name,
+			)
+		}
+		s := strings.TrimSpace(string(content))
+		if err := serverCfg.Locality.Set(s); err != nil {
+			return errors.Wrapf(
+				err,
+				"invalid locality data %q in %q for %q flag",
+				s,
+				localityFileName,
+				cliflags.LocalityFile.Name,
+			)
+		}
+	}
 	return nil
 }
 
@@ -1250,19 +1361,34 @@ func extraStoreFlagInit(cmd *cobra.Command) error {
 	}
 	// Convert all the store paths to absolute paths. We want this to
 	// ensure canonical directories across invocations; and also to
-	// benefit from the check in GetAbsoluteStorePath() that the user
+	// benefit from the check in GetAbsoluteFSPath() that the user
 	// didn't mistakenly assume a heading '~' would get translated by
 	// CockroachDB. (The shell should be responsible for that.)
 	for i, ss := range serverCfg.Stores.Specs {
 		if ss.InMemory {
 			continue
 		}
-		absPath, err := base.GetAbsoluteStorePath("path", ss.Path)
+		absPath, err := base.GetAbsoluteFSPath("path", ss.Path)
 		if err != nil {
 			return err
 		}
 		ss.Path = absPath
 		serverCfg.Stores.Specs[i] = ss
+	}
+
+	if serverCfg.WALFailover.Path.IsSet() {
+		absPath, err := base.GetAbsoluteFSPath("wal-failover.path", serverCfg.WALFailover.Path.Path)
+		if err != nil {
+			return err
+		}
+		serverCfg.WALFailover.Path.Path = absPath
+	}
+	if serverCfg.WALFailover.PrevPath.IsSet() {
+		absPath, err := base.GetAbsoluteFSPath("wal-failover.prev_path", serverCfg.WALFailover.PrevPath.Path)
+		if err != nil {
+			return err
+		}
+		serverCfg.WALFailover.PrevPath.Path = absPath
 	}
 
 	// Configure the external I/O directory.
@@ -1279,7 +1405,7 @@ func extraStoreFlagInit(cmd *cobra.Command) error {
 	if startCtx.externalIODir != "" {
 		// Make the directory name absolute.
 		var err error
-		startCtx.externalIODir, err = base.GetAbsoluteStorePath(cliflags.ExternalIODir.Name, startCtx.externalIODir)
+		startCtx.externalIODir, err = base.GetAbsoluteFSPath(cliflags.ExternalIODir.Name, startCtx.externalIODir)
 		if err != nil {
 			return err
 		}

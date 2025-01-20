@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opgen
 
@@ -30,7 +25,7 @@ type target struct {
 // Target.
 type transition struct {
 	from, to   scpb.Status
-	revertible bool
+	revertible RevertibleFn
 	canFail    bool
 	ops        opsFunc
 	opType     scop.Type
@@ -74,7 +69,7 @@ func makeTarget(e scpb.Element, spec targetSpec) (t target, err error) {
 		return t, errors.Wrap(err, "failed to construct query")
 	}
 	t.iterateFunc = func(database *rel.Database, f func(*screl.Node) error) error {
-		return q.Iterate(database, func(r rel.Result) error {
+		return q.Iterate(database, nil, func(r rel.Result) error {
 			return f(r.Var(node).(*screl.Node))
 		})
 	}
@@ -158,7 +153,7 @@ func makeTransitions(e scpb.Element, spec targetSpec) (ret []transition, err err
 
 type transitionBuildState struct {
 	from         scpb.Status
-	isRevertible bool
+	isRevertible RevertibleFn
 
 	isEquivMapped map[scpb.Status]bool
 	isTo          map[scpb.Status]bool
@@ -168,7 +163,7 @@ type transitionBuildState struct {
 func makeTransitionBuildState(from scpb.Status) transitionBuildState {
 	return transitionBuildState{
 		from:          from,
-		isRevertible:  true,
+		isRevertible:  nil,
 		isEquivMapped: map[scpb.Status]bool{from: true},
 		isTo:          map[scpb.Status]bool{},
 		isFrom:        map[scpb.Status]bool{},
@@ -186,7 +181,14 @@ func (tbs *transitionBuildState) withTransition(s transitionSpec, isFirst bool) 
 		return errors.Errorf("%s was featured as 'from' in a previous equivalence mapping", s.to)
 	}
 
-	tbs.isRevertible = tbs.isRevertible && s.revertible
+	if tbs.isRevertible != nil && s.revertible != nil {
+		oldRevertibleFn := tbs.isRevertible
+		tbs.isRevertible = func(e scpb.Element, state *opGenContext) bool {
+			return oldRevertibleFn(e, state) && s.revertible(e, state)
+		}
+	} else if tbs.isRevertible == nil {
+		tbs.isRevertible = s.revertible
+	}
 	tbs.isEquivMapped[tbs.from] = true
 	tbs.isTo[s.to] = true
 	tbs.isFrom[tbs.from] = true
@@ -207,8 +209,9 @@ func (tbs *transitionBuildState) withEquivTransition(s transitionSpec) error {
 		return errors.Errorf("%s was featured as 'from' in a previous equivalence mapping", s.from)
 	}
 
-	// Check for absence of phase and revertibility constraints
-	if !s.revertible {
+	// The transition above is equivalent, so it cannot override the revertibility
+	// in any way.
+	if s.revertible != nil {
 		return errors.Errorf("must be revertible")
 	}
 

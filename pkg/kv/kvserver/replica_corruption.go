@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -51,7 +46,7 @@ func (r *Replica) setCorruptRaftMuLocked(
 	r.mu.destroyStatus.Set(cErr, destroyReasonRemoved)
 
 	auxDir := r.store.TODOEngine().GetAuxiliaryDir()
-	_ = r.store.TODOEngine().MkdirAll(auxDir, os.ModePerm)
+	_ = r.store.TODOEngine().Env().MkdirAll(auxDir, os.ModePerm)
 	path := base.PreventedStartupFile(auxDir)
 
 	preventStartupMsg := fmt.Sprintf(`ATTENTION:
@@ -64,7 +59,7 @@ A file preventing this node from restarting was placed at:
 %s
 `, r, path)
 
-	if err := fs.WriteFile(r.store.TODOEngine(), path, []byte(preventStartupMsg)); err != nil {
+	if err := fs.WriteFile(r.store.TODOEngine().Env(), path, []byte(preventStartupMsg), fs.UnspecifiedWriteCategory); err != nil {
 		log.Warningf(ctx, "%v", err)
 	}
 

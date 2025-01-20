@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // The Column and Index backfill primitives.
 
@@ -223,6 +218,8 @@ func (cb *ColumnBackfiller) InitForDistributedUse(
 	mon *mon.BytesMonitor,
 ) error {
 	cb.initCols(desc)
+	// We'll be modifying the eval.Context in RunColumnBackfillChunk, so we need
+	// to make a copy.
 	evalCtx := flowCtx.NewEvalCtx()
 	var defaultExprs, computedExprs []tree.TypedExpr
 	// Install type metadata in the target descriptors, as well as resolve any
@@ -234,8 +231,7 @@ func (cb *ColumnBackfiller) InitForDistributedUse(
 			return err
 		}
 		// Set up a SemaContext to type check the default and computed expressions.
-		semaCtx := tree.MakeSemaContext()
-		semaCtx.TypeResolver = &resolver
+		semaCtx := tree.MakeSemaContext(&resolver)
 		semaCtx.UnsupportedTypeChecker = eval.NewUnsupportedTypeChecker(evalCtx.Settings.Version)
 		var err error
 		defaultExprs, err = schemaexpr.MakeDefaultExprs(
@@ -301,6 +297,7 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 		txn,
 		cb.evalCtx.Codec,
 		tableDesc,
+		nil, /* uniqueWithTombstoneIndexes */
 		cb.updateCols,
 		requestedCols,
 		row.UpdaterOnlyColumns,
@@ -362,7 +359,7 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 	}
 
 	for i := int64(0); i < int64(chunkSize); i++ {
-		ok, err := cb.fetcher.NextRowDecodedInto(ctx, fetchedValues, cb.colIdxMap)
+		ok, _, err := cb.fetcher.NextRowDecodedInto(ctx, fetchedValues, cb.colIdxMap)
 		if err != nil {
 			return roachpb.Key{}, err
 		}
@@ -403,7 +400,7 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 		// case.
 		var pm row.PartialIndexUpdateHelper
 		if _, err := ru.UpdateRow(
-			ctx, b, oldValues, updateValues, pm, traceKV,
+			ctx, b, oldValues, updateValues, pm, nil, traceKV,
 		); err != nil {
 			return roachpb.Key{}, err
 		}
@@ -655,6 +652,8 @@ func (ib *IndexBackfiller) InitForDistributedUse(
 		return err
 	}
 
+	// We'll be modifying the eval.Context in BuildIndexEntriesChunk, so we need
+	// to make a copy.
 	evalCtx := flowCtx.NewEvalCtx()
 	var predicates map[descpb.IndexID]tree.TypedExpr
 	var colExprs map[descpb.ColumnID]tree.TypedExpr
@@ -669,8 +668,7 @@ func (ib *IndexBackfiller) InitForDistributedUse(
 			return err
 		}
 		// Set up a SemaContext to type check the default and computed expressions.
-		semaCtx := tree.MakeSemaContext()
-		semaCtx.TypeResolver = &resolver
+		semaCtx := tree.MakeSemaContext(&resolver)
 		semaCtx.UnsupportedTypeChecker = eval.NewUnsupportedTypeChecker(evalCtx.Settings.Version)
 		// Convert any partial index predicate strings into expressions.
 		predicates, colExprs, referencedColumns, err = constructExprs(
@@ -694,7 +692,8 @@ func (ib *IndexBackfiller) InitForDistributedUse(
 	return ib.init(evalCtx, predicates, colExprs, mon)
 }
 
-// Close releases the resources used by the IndexBackfiller.
+// Close releases the resources used by the IndexBackfiller. It can be called
+// multiple times.
 func (ib *IndexBackfiller) Close(ctx context.Context) {
 	if ib.mon != nil {
 		func() {
@@ -703,6 +702,7 @@ func (ib *IndexBackfiller) Close(ctx context.Context) {
 			ib.muBoundAccount.boundAccount.Close(ctx)
 		}()
 		ib.mon.Stop(ctx)
+		ib.mon = nil
 	}
 }
 
@@ -711,8 +711,7 @@ func (ib *IndexBackfiller) Close(ctx context.Context) {
 func (ib *IndexBackfiller) GrowBoundAccount(ctx context.Context, growBy int64) error {
 	ib.muBoundAccount.Lock()
 	defer ib.muBoundAccount.Unlock()
-	err := ib.muBoundAccount.boundAccount.Grow(ctx, growBy)
-	return err
+	return ib.muBoundAccount.boundAccount.Grow(ctx, growBy)
 }
 
 // ShrinkBoundAccount shrinks the mutex protected bound account backing the
@@ -796,9 +795,9 @@ func (ib *IndexBackfiller) init(
 // provided, and builds all the added indexes.
 // The method accounts for the memory used by the index entries for this chunk
 // using the memory monitor associated with ib and returns the amount of memory
-// that needs to be freed once the returned IndexEntry slice is freed.
-// It is the callers responsibility to clear the associated bound account when
-// appropriate.
+// that needs to be freed once the returned IndexEntry slice is freed. This is
+// returned for the successful and failure cases. It is the callers responsibility
+// to clear the associated bound account when appropriate.
 func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 	ctx context.Context,
 	txn *kv.Txn,
@@ -847,7 +846,7 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 	if err := rowenc.InitIndexFetchSpec(
 		&spec, ib.evalCtx.Codec, tableDesc, tableDesc.GetPrimaryIndex(), fetcherCols,
 	); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, memUsedPerChunk, err
 	}
 	var fetcher row.Fetcher
 	if err := fetcher.Init(
@@ -861,7 +860,7 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 			ForceProductionKVBatchSize: ib.evalCtx.TestingKnobs.ForceProductionValues,
 		},
 	); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, memUsedPerChunk, err
 	}
 	defer fetcher.Close(ctx)
 	if err := fetcher.StartScan(
@@ -870,7 +869,7 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		initBufferSize,
 	); err != nil {
 		log.Errorf(ctx, "scan error: %s", err)
-		return nil, nil, 0, err
+		return nil, nil, memUsedPerChunk, err
 	}
 
 	iv := &schemaexpr.RowIndexedVarContainer{
@@ -881,7 +880,7 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 
 	indexEntriesPerRowInitialBufferSize := int64(len(ib.added)) * sizeOfIndexEntry
 	if err := ib.GrowBoundAccount(ctx, indexEntriesPerRowInitialBufferSize); err != nil {
-		return nil, nil, 0, errors.Wrap(err,
+		return nil, nil, memUsedPerChunk, errors.Wrap(err,
 			"failed to initialize empty buffer to store the index entries of a single row")
 	}
 	memUsedPerChunk += indexEntriesPerRowInitialBufferSize
@@ -919,9 +918,9 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		return nil
 	}
 	for i := int64(0); i < chunkSize; i++ {
-		ok, err := fetcher.NextRowDecodedInto(ctx, ib.rowVals, ib.colIdxMap)
+		ok, _, err := fetcher.NextRowDecodedInto(ctx, ib.rowVals, ib.colIdxMap)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, memUsedPerChunk, err
 		}
 		if !ok {
 			break
@@ -932,10 +931,10 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		// may reference default values.
 		if len(ib.colExprs) > 0 {
 			if err := evaluateExprs(ib.addedCols); err != nil {
-				return nil, nil, 0, err
+				return nil, nil, memUsedPerChunk, err
 			}
 			if err := evaluateExprs(ib.computedCols); err != nil {
-				return nil, nil, 0, err
+				return nil, nil, memUsedPerChunk, err
 			}
 		}
 
@@ -957,7 +956,7 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 
 				val, err := eval.Expr(ctx, ib.evalCtx, texpr)
 				if err != nil {
-					return nil, nil, 0, err
+					return nil, nil, memUsedPerChunk, err
 				}
 
 				if val == tree.DBoolTrue {
@@ -990,10 +989,11 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 				&ib.muBoundAccount.boundAccount,
 			)
 		}(buffer)
-		if err != nil {
-			return nil, nil, 0, err
-		}
+		// Account for memory use prior to error checking
 		memUsedPerChunk += memUsedDuringEncoding
+		if err != nil {
+			return nil, nil, memUsedPerChunk, err
+		}
 
 		// The memory monitor has already accounted for cap(entries). If the number
 		// of index entries are going to cause the entries buffer to re-slice, then
@@ -1002,7 +1002,7 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		if cap(entries)-len(entries) < len(buffer) {
 			resliceSize := sizeOfIndexEntry * int64(cap(entries))
 			if err := ib.GrowBoundAccount(ctx, resliceSize); err != nil {
-				return nil, nil, 0, err
+				return nil, nil, memUsedPerChunk, err
 			}
 			memUsedPerChunk += resliceSize
 		}
@@ -1046,9 +1046,13 @@ func (ib *IndexBackfiller) RunIndexBackfillChunk(
 
 	for _, entry := range entries {
 		if traceKV {
-			log.VEventf(ctx, 2, "InitPut %s -> %s", entry.Key, entry.Value.PrettyPrint())
+			log.VEventf(ctx, 2, "CPut %s -> %s", entry.Key, entry.Value.PrettyPrint())
 		}
-		batch.InitPut(entry.Key, &entry.Value, false /* failOnTombstones */)
+		// Note that we generally don't expect the previous value to exist, so
+		// CPut with nil expValue would be sufficient. This is not the case when
+		// performing the primary key change where the previous value might
+		// exist.
+		batch.CPutAllowingIfNotExists(entry.Key, &entry.Value, entry.Value.TagAndDataBytes())
 	}
 	writeBatch := txn.Run
 	if alsoCommit {

@@ -1,18 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
+	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -27,25 +24,31 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/errors"
 )
 
 type alterFunctionOptionsNode struct {
+	zeroInputPlanNode
 	n *tree.AlterFunctionOptions
 }
 
 type alterFunctionRenameNode struct {
+	zeroInputPlanNode
 	n *tree.AlterRoutineRename
 }
 
 type alterFunctionSetOwnerNode struct {
+	zeroInputPlanNode
 	n *tree.AlterRoutineSetOwner
 }
 
 type alterFunctionSetSchemaNode struct {
+	zeroInputPlanNode
 	n *tree.AlterRoutineSetSchema
 }
 
 type alterFunctionDepExtensionNode struct {
+	zeroInputPlanNode
 	n *tree.AlterFunctionDepExtension
 }
 
@@ -180,10 +183,15 @@ func (n *alterFunctionRenameNode) startExec(params runParams) error {
 		return err
 	}
 
-	maybeExistingFuncObj := fnDesc.ToRoutineObj()
+	maybeExistingFuncObj, err := fnDesc.ToRoutineObj()
+	if err != nil {
+		return err
+	}
 	maybeExistingFuncObj.FuncName.ObjectName = n.n.NewName
-	existing, err := params.p.matchRoutine(params.ctx, maybeExistingFuncObj,
-		false /* required */, tree.UDFRoutine|tree.ProcedureRoutine)
+	existing, err := params.p.matchRoutine(
+		params.ctx, maybeExistingFuncObj, false, /* required */
+		tree.UDFRoutine|tree.ProcedureRoutine, false, /* inDropContext */
+	)
 	if err != nil {
 		return err
 	}
@@ -200,6 +208,34 @@ func (n *alterFunctionRenameNode) startExec(params runParams) error {
 				tree.AsString(maybeExistingFuncObj), scDesc.GetName(),
 			)
 		}
+	}
+
+	// Disallow renaming if this rename operation will break other UDF's invoking
+	// this one.
+	var dependentFuncs []string
+	for _, dep := range fnDesc.GetDependedOnBy() {
+		desc, err := params.p.Descriptors().ByIDWithoutLeased(params.p.Txn()).Get().Desc(params.ctx, dep.ID)
+		if err != nil {
+			return err
+		}
+		_, ok := desc.(catalog.FunctionDescriptor)
+		if !ok {
+			continue
+		}
+		fullyResolvedName, err := params.p.GetQualifiedFunctionNameByID(params.ctx, int64(dep.ID))
+		if err != nil {
+			return err
+		}
+		dependentFuncs = append(dependentFuncs, fullyResolvedName.FQString())
+	}
+	if len(dependentFuncs) > 0 {
+		return errors.UnimplementedErrorf(
+			errors.IssueLink{
+				IssueURL: build.MakeIssueURL(83233),
+				Detail:   "renames are disallowed because references are by name",
+			},
+			"cannot rename function %q because other functions ([%v]) still depend on it",
+			fnDesc.Name, strings.Join(dependentFuncs, ", "))
 	}
 
 	scDesc.RemoveFunction(fnDesc.GetName(), fnDesc.GetID())
@@ -347,6 +383,34 @@ func (n *alterFunctionSetSchemaNode) startExec(params runParams) error {
 	if err != nil {
 		return err
 	}
+	// Disallow renaming if this rename operation will break other UDF's invoking
+	// this one.
+	var dependentFuncs []string
+	for _, dep := range fnDesc.GetDependedOnBy() {
+		desc, err := params.p.Descriptors().ByIDWithoutLeased(params.p.Txn()).Get().Desc(params.ctx, dep.ID)
+		if err != nil {
+			return err
+		}
+		_, ok := desc.(catalog.FunctionDescriptor)
+		if !ok {
+			continue
+		}
+		fullyResolvedName, err := params.p.GetQualifiedFunctionNameByID(params.ctx, int64(dep.ID))
+		if err != nil {
+			return err
+		}
+		dependentFuncs = append(dependentFuncs, fullyResolvedName.FQString())
+	}
+	if len(dependentFuncs) > 0 {
+		return errors.UnimplementedErrorf(
+			errors.IssueLink{
+				IssueURL: build.MakeIssueURL(83233),
+				Detail: "set schema is disallowed because there are references from " +
+					"other objects by name",
+			},
+			"cannot set schema for function %q because other functions ([%v]) still depend on it",
+			fnDesc.Name, strings.Join(dependentFuncs, ", "))
+	}
 
 	switch sc.SchemaKind() {
 	case catalog.SchemaTemporary:
@@ -374,11 +438,16 @@ func (n *alterFunctionSetSchemaNode) startExec(params runParams) error {
 	}
 
 	// Check if there is a conflicting function exists.
-	maybeExistingFuncObj := fnDesc.ToRoutineObj()
+	maybeExistingFuncObj, err := fnDesc.ToRoutineObj()
+	if err != nil {
+		return err
+	}
 	maybeExistingFuncObj.FuncName.SchemaName = tree.Name(targetSc.GetName())
 	maybeExistingFuncObj.FuncName.ExplicitSchema = true
-	existing, err := params.p.matchRoutine(params.ctx, maybeExistingFuncObj,
-		false /* required */, tree.UDFRoutine|tree.ProcedureRoutine)
+	existing, err := params.p.matchRoutine(
+		params.ctx, maybeExistingFuncObj, false, /* required */
+		tree.UDFRoutine|tree.ProcedureRoutine, false, /* inDropContext */
+	)
 	if err != nil {
 		return err
 	}
@@ -441,7 +510,10 @@ func (n *alterFunctionDepExtensionNode) Close(ctx context.Context)           {}
 func (p *planner) mustGetMutableFunctionForAlter(
 	ctx context.Context, routineObj *tree.RoutineObj,
 ) (*funcdesc.Mutable, error) {
-	ol, err := p.matchRoutine(ctx, routineObj, true /*required*/, tree.UDFRoutine|tree.ProcedureRoutine)
+	ol, err := p.matchRoutine(
+		ctx, routineObj, true, /* required */
+		tree.UDFRoutine|tree.ProcedureRoutine, false, /* inDropContext */
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -456,13 +528,23 @@ func (p *planner) mustGetMutableFunctionForAlter(
 func toSchemaOverloadSignature(fnDesc *funcdesc.Mutable) descpb.SchemaDescriptor_FunctionSignature {
 	ret := descpb.SchemaDescriptor_FunctionSignature{
 		ID:          fnDesc.GetID(),
-		ArgTypes:    make([]*types.T, len(fnDesc.GetParams())),
+		ArgTypes:    make([]*types.T, 0, len(fnDesc.GetParams())),
 		ReturnType:  fnDesc.ReturnType.Type,
 		ReturnSet:   fnDesc.ReturnType.ReturnSet,
 		IsProcedure: fnDesc.IsProcedure(),
 	}
-	for i := range fnDesc.Params {
-		ret.ArgTypes[i] = fnDesc.Params[i].Type
+	for paramIdx, param := range fnDesc.Params {
+		class := funcdesc.ToTreeRoutineParamClass(param.Class)
+		if tree.IsInParamClass(class) {
+			ret.ArgTypes = append(ret.ArgTypes, param.Type)
+		}
+		if class == tree.RoutineParamOut {
+			ret.OutParamOrdinals = append(ret.OutParamOrdinals, int32(paramIdx))
+			ret.OutParamTypes = append(ret.OutParamTypes, param.Type)
+		}
+		if param.DefaultExpr != nil {
+			ret.DefaultExprs = append(ret.DefaultExprs, *param.DefaultExpr)
+		}
 	}
 	return ret
 }

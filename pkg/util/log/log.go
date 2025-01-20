@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package log
 
@@ -60,12 +55,18 @@ func V(level Level) bool {
 //	  log.VEventf(ctx, 2, msg)
 //	}
 func ExpensiveLogEnabled(ctx context.Context, level Level) bool {
+	return ExpensiveLogEnabledVDepth(ctx, 1 /* depth */, level)
+}
+
+// ExpensiveLogEnabledVDepth is like ExpensiveLogEnabled, and additionally
+// accepts a depth parameter for determining the caller's verbosity.
+func ExpensiveLogEnabledVDepth(ctx context.Context, depth int, level Level) bool {
 	if sp := tracing.SpanFromContext(ctx); sp != nil {
 		if sp.IsVerbose() || sp.Tracer().HasExternalSink() {
 			return true
 		}
 	}
-	if VDepth(level, 1 /* depth */) {
+	if VDepth(level, depth+1) {
 		return true
 	}
 	return false

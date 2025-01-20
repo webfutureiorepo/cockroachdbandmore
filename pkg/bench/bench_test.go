@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package bench
 
@@ -1225,6 +1220,22 @@ func BenchmarkWideTable(b *testing.B) {
 	})
 }
 
+func BenchmarkScanWideTable(b *testing.B) {
+	skip.UnderShort(b)
+	defer log.Scope(b).Close(b)
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		db.Exec(b, wideTableSchema)
+		var buf bytes.Buffer
+		s := rand.New(rand.NewSource(5432))
+		insertIntoWideTable(b, buf, 0, 10000, 10, s, db)
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			db.Exec(b, "SELECT * FROM bench.widetable WHERE f4 < 10")
+		}
+	})
+}
+
 func BenchmarkWideTableIgnoreColumns(b *testing.B) {
 	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
@@ -1235,7 +1246,6 @@ func BenchmarkWideTableIgnoreColumns(b *testing.B) {
 		insertIntoWideTable(b, buf, 0, 10000, 10, s, db)
 
 		b.ResetTimer()
-
 		for i := 0; i < b.N; i++ {
 			db.Exec(b, "SELECT count(*) FROM bench.widetable WHERE f4 < 10")
 		}
@@ -1510,7 +1520,7 @@ func BenchmarkFuncExprTypeCheck(b *testing.B) {
 	p, cleanup := sql.NewInternalPlanner(
 		"type-check-benchmark",
 		kvDB.NewTxn(ctx, "type-check-benchmark-planner"),
-		username.RootUserName(),
+		username.NodeUserName(),
 		&sql.MemoryMetrics{},
 		&execCfg,
 		sd,

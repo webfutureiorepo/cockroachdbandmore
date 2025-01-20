@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package partialidx_test
 
@@ -53,7 +48,8 @@ func TestImplicator(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	datadriven.Walk(t, tu.TestDataPath(t, "implicator"), func(t *testing.T, path string) {
-		semaCtx := tree.MakeSemaContext()
+		ctx := context.Background()
+		semaCtx := tree.MakeSemaContext(nil /* resolver */)
 		evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 
 		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
@@ -100,9 +96,15 @@ func TestImplicator(t *testing.T) {
 				d.Fatalf(t, "unexpected error while building predicate: %v\n", err)
 			}
 
+			// Build the computed columns map.
+			computedCols, err := makeComputedCols(sv, &semaCtx, &evalCtx, &f)
+			if err != nil {
+				d.Fatalf(t, "error building computed column expression: %v", err)
+			}
+
 			im := partialidx.Implicator{}
-			im.Init(&f, md, &evalCtx)
-			remainingFilters, ok := im.FiltersImplyPredicate(filters, pred)
+			im.Init(ctx, &f, md, &evalCtx)
+			remainingFilters, ok := im.FiltersImplyPredicate(filters, pred, computedCols)
 			if !ok {
 				return "false"
 			}
@@ -113,7 +115,7 @@ func TestImplicator(t *testing.T) {
 				buf.WriteString("none")
 			} else {
 				execBld := execbuilder.New(
-					context.Background(), nil /* factory */, nil, /* optimizer */
+					ctx, nil /* factory */, nil, /* optimizer */
 					f.Memo(), nil /* catalog */, &remainingFilters, &semaCtx, &evalCtx,
 					false /* allowAutoCommit */, false, /* isANSIDML */
 				)
@@ -230,6 +232,36 @@ func BenchmarkImplicator(b *testing.B) {
 			filters: "a < 0 OR b > 10 OR c >= 10 OR d = 4 OR e = 'foo'",
 			pred:    "b > 0 OR e = 'foo'",
 		},
+		{
+			name:    "single-exact-match-virtual",
+			vars:    "a jsonb, b int as ((a->>'x')::INT) virtual, c int as ((a->>'y')::INT) virtual, d int as ((a->>'z')::INT) virtual",
+			filters: "(a->>'z')::INT >= 10",
+			pred:    "(a->>'z')::INT >= 10",
+		},
+		{
+			name:    "single-inexact-match-virtual",
+			vars:    "a jsonb, b int as ((a->>'x')::INT) virtual, c int as ((a->>'y')::INT) virtual, d int as ((a->>'z')::INT) virtual",
+			filters: "(a->>'z')::INT > 10",
+			pred:    "(a->>'z')::INT > 0",
+		},
+		{
+			name:    "single-no-match-virtual",
+			vars:    "a jsonb, b int as ((a->>'x')::INT) virtual, c int as ((a->>'y')::INT) virtual, d int as ((a->>'z')::INT) virtual",
+			filters: "(a->>'a')::INT >= 10",
+			pred:    "(a->>'b')::INT >= 10",
+		},
+		{
+			name:    "and-filters-virtual",
+			vars:    "a jsonb, b int as ((a->>'x')::INT) virtual, c int as ((a->>'y')::INT) virtual, d int as ((a->>'z')::INT) virtual, e string",
+			filters: "(a->>'x')::INT > 10 AND (a->>'y')::INT = 10 AND (a->>'z')::INT = 4 AND e = 'foo'",
+			pred:    "(a->>'y')::INT > 0 AND e = 'bar'",
+		},
+		{
+			name:    "or-filters-virtual",
+			vars:    "a jsonb, b int as ((a->>'x')::INT) virtual, c int as ((a->>'y')::INT) virtual, d int as ((a->>'z')::INT) virtual, e string",
+			filters: "(a->>'x')::INT > 10 OR (a->>'y')::INT = 10 OR (a->>'z')::INT = 4 OR e = 'foo'",
+			pred:    "(a->>'y')::INT > 0 OR e = 'bar'",
+		},
 	}
 	// Generate a few test cases with many columns to show how performance
 	// scales with respect to the number of columns.
@@ -263,12 +295,13 @@ func BenchmarkImplicator(b *testing.B) {
 		testCases = append(testCases, tc)
 	}
 
-	semaCtx := tree.MakeSemaContext()
+	ctx := context.Background()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 
 	for _, tc := range testCases {
 		var f norm.Factory
-		f.Init(context.Background(), &evalCtx, nil /* catalog */)
+		f.Init(ctx, &evalCtx, nil /* catalog */)
 		md := f.Metadata()
 
 		// Parse the variable types.
@@ -290,8 +323,14 @@ func BenchmarkImplicator(b *testing.B) {
 			b.Fatalf("unexpected error while building predicate: %v\n", err)
 		}
 
+		// Build the computed columns map.
+		computedCols, err := makeComputedCols(sv, &semaCtx, &evalCtx, &f)
+		if err != nil {
+			b.Fatalf("error building computed column expression: %v\n", err)
+		}
+
 		im := partialidx.Implicator{}
-		im.Init(&f, md, &evalCtx)
+		im.Init(ctx, &f, md, &evalCtx)
 		b.Run(tc.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				// Reset the implicator every 10 iterations to simulate its
@@ -300,7 +339,7 @@ func BenchmarkImplicator(b *testing.B) {
 				if i%10 == 0 {
 					im.ClearCache()
 				}
-				_, _ = im.FiltersImplyPredicate(filters, pred)
+				_, _ = im.FiltersImplyPredicate(filters, pred, computedCols)
 			}
 		})
 	}
@@ -376,4 +415,24 @@ func makeFiltersExpr(
 	}
 
 	return memo.FiltersExpr{f.ConstructFiltersItem(root)}, nil
+}
+
+func makeComputedCols(
+	sv testutils.ScalarVars, semaCtx *tree.SemaContext, evalCtx *eval.Context, f *norm.Factory,
+) (map[opt.ColumnID]opt.ScalarExpr, error) {
+	if sv.ComputedCols() == nil {
+		return nil, nil
+	}
+	computedCols := make(map[opt.ColumnID]opt.ScalarExpr)
+	for col, expr := range sv.ComputedCols() {
+		b := optbuilder.NewScalar(context.Background(), semaCtx, evalCtx, f)
+		computedColExpr, err := b.Build(expr)
+		if err != nil {
+			return nil, err
+		}
+		computedCols[col] = computedColExpr
+		var sharedProps props.Shared
+		memo.BuildSharedProps(computedColExpr, &sharedProps, evalCtx)
+	}
+	return computedCols, nil
 }

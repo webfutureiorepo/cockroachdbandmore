@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -490,26 +485,26 @@ func runDistinctBenchmarks(
 		nRowsOptions = []int{coldata.BatchSize()}
 	}
 	bytesValueScratch := make([]byte, bytesValueLength)
-	setFirstValue := func(vec coldata.Vec) {
-		if typ := vec.Type(); typ == types.Int {
+	setFirstValue := func(vec *coldata.Vec) {
+		if typ := vec.Type(); typ.Identical(types.Int) {
 			vec.Int64()[0] = 0
-		} else if typ == types.Bytes {
+		} else if typ.Identical(types.Bytes) {
 			vec.Bytes().Set(0, bytesValueScratch)
 		} else {
 			colexecerror.InternalError(errors.AssertionFailedf("unsupported type %s", typ))
 		}
 	}
-	setIthValue := func(vec coldata.Vec, i int, newValueProbability float64) {
+	setIthValue := func(vec *coldata.Vec, i int, newValueProbability float64) {
 		if i == 0 {
 			colexecerror.InternalError(errors.New("setIthValue called with i == 0"))
 		}
-		if typ := vec.Type(); typ == types.Int {
+		if typ := vec.Type(); typ.Identical(types.Int) {
 			col := vec.Int64()
 			col[i] = col[i-1]
 			if rng.Float64() < newValueProbability {
 				col[i]++
 			}
-		} else if typ == types.Bytes {
+		} else if typ.Identical(types.Bytes) {
 			if rng.Float64() < newValueProbability {
 				copy(bytesValueScratch, vec.Bytes().Get(i-1))
 				for pos := 0; pos < bytesValueLength; pos++ {
@@ -540,10 +535,10 @@ func runDistinctBenchmarks(
 				}
 				for _, typ := range []*types.T{types.Int, types.Bytes} {
 					typs := make([]*types.T, nCols)
-					cols := make([]coldata.Vec, nCols)
+					cols := make([]*coldata.Vec, nCols)
 					for i := range typs {
 						typs[i] = typ
-						cols[i] = testAllocator.NewMemColumn(typs[i], nRows)
+						cols[i] = testAllocator.NewVec(typs[i], nRows)
 					}
 					numOrderedCols := getNumOrderedCols(nCols)
 					newValueProbability := getNewValueProbabilityForDistinct(newTupleProbability, nCols)
@@ -568,14 +563,14 @@ func runDistinctBenchmarks(
 							order[i], order[j] = order[j], order[i]
 						})
 						for colIdx, oldCol := range cols {
-							cols[colIdx] = testAllocator.NewMemColumn(typs[colIdx], nRows)
-							if typs[colIdx] == types.Int {
+							cols[colIdx] = testAllocator.NewVec(typs[colIdx], nRows)
+							if typs[colIdx].Identical(types.Int) {
 								oldInt64s := oldCol.Int64()
 								newInt64s := cols[colIdx].Int64()
 								for i := 0; i < nRows; i++ {
 									newInt64s[i] = oldInt64s[order[i]]
 								}
-							} else if typs[colIdx] == types.Bytes {
+							} else if typs[colIdx].Identical(types.Bytes) {
 								oldBytes := oldCol.Bytes()
 								newBytes := cols[colIdx].Bytes()
 								for i := 0; i < nRows; i++ {

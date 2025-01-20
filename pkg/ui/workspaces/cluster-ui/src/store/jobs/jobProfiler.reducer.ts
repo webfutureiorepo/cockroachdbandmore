@@ -1,22 +1,19 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
-import { DOMAIN_NAME, noopReducer } from "../utils";
 import moment from "moment-timezone";
-import { createInitialState, RequestState } from "src/api/types";
+
 import {
   CollectExecutionDetailsRequest,
   ListJobProfilerExecutionDetailsRequest,
   ListJobProfilerExecutionDetailsResponse,
 } from "src/api";
+import { createInitialState, RequestState } from "src/api/types";
+
+import { DOMAIN_NAME, noopReducer } from "../utils";
 
 export type JobProfilerExecutionDetailFilesState =
   RequestState<ListJobProfilerExecutionDetailsResponse>;

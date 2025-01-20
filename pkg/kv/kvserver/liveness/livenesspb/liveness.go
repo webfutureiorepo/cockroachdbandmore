@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package livenesspb
 
@@ -58,7 +53,7 @@ func (l Liveness) Compare(o Liveness) int {
 		}
 		return +1
 	}
-	if !l.Expiration.EqOrdering(o.Expiration) {
+	if l.Expiration != o.Expiration {
 		if l.Expiration.Less(o.Expiration) {
 			return -1
 		}
@@ -221,6 +216,21 @@ const (
 	LossOfQuorum
 	ReplicaGCQueue
 	DistSender
+	// TestingIsAliveAndHasHeartbeated is intended to be used by tests that want
+	// to ensure that a node is alive and has heartbeated its liveness record
+	// already.
+	//
+	// This is intended to be used in place of IsAliveNotification, whose usages
+	// aren't very principled, and sometimes expect that a node has heartbeated
+	// its liveness record (by checking the epoch is != 0). Previously, we could
+	// get away with these unprincipled usages because epoch based leases would
+	// proactively heartbeat liveness records when acquiring leases. However, when
+	// using leader leases, this doesn't happen, which then makes these tests
+	// flaky.
+	//
+	// At some point, we'll want to revisit IsAliveNotification and make sure
+	// returning true when the liveness epoch is 0 is indeed well motivated.
+	TestingIsAliveAndHasHeartbeated
 )
 
 func (nv NodeVitality) IsLive(usage VitalityUsage) bool {
@@ -282,6 +292,8 @@ func (nv NodeVitality) IsLive(usage VitalityUsage) bool {
 		return nv.isAlive()
 	case DistSender:
 		return nv.isAvailableNotDraining()
+	case TestingIsAliveAndHasHeartbeated:
+		return nv.testingIsAliveAndHasHeartbeated()
 	}
 
 	// TODO(baptist): Should be an assertion that we don't know this uasge.
@@ -344,6 +356,13 @@ func (nv NodeVitality) isAlive() bool {
 		return true
 	}
 	return nv.now.Less(nv.livenessExpiration)
+}
+
+// testingIsAliveAndHasHeartbeated is like isAlive except it also ensures that
+// the node has heartbeated its liveness epoch at least once. Also see the
+// comment on TestingIsAliveAndHasHeartbeated.
+func (nv NodeVitality) testingIsAliveAndHasHeartbeated() bool {
+	return nv.isAlive() && nv.livenessEpoch != 0
 }
 
 func (nv NodeVitality) IsDecommissioning() bool {

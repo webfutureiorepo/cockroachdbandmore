@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package encoding exposes some utilities for encoding data as bytes.
 package encoding
@@ -898,6 +893,16 @@ func prettyPrintInvertedIndexKey(b []byte) (string, []byte, error) {
 			outBytes = outBytes + strconv.Quote(UnsafeConvertBytesToString(tempB[:i])) + "/"
 		case escapedJSONArray:
 			outBytes = outBytes + "Arr/"
+			if i+2 >= len(tempB) {
+				// The key ends in an escaped JSON array byte, which is used in
+				// spans to scan over non-empty arrays.
+				return outBytes, nil, nil
+			}
+		case escaped00:
+			if i+2 >= len(tempB) {
+				// The key ends in an escaped NULL byte.
+				return outBytes, nil, nil
+			}
 		default:
 			return "", nil, errors.Errorf("malformed escape in buffer %#x", b)
 
@@ -1780,6 +1785,7 @@ const (
 	// Special case
 	JsonEmptyArray     Type = 42
 	JsonEmptyArrayDesc Type = 43
+	PGVector           Type = 44
 )
 
 // typMap maps an encoded type byte to a decoded Type. It's got 256 slots, one
@@ -2622,6 +2628,12 @@ func EncodeUntaggedFloatValue(appendTo []byte, f float64) []byte {
 	return EncodeUint64Ascending(appendTo, math.Float64bits(f))
 }
 
+// EncodeUntaggedFloat32Value encodes a float32 value, appends it to the supplied buffer,
+// and returns the final buffer.
+func EncodeUntaggedFloat32Value(appendTo []byte, f float32) []byte {
+	return EncodeUint32Ascending(appendTo, math.Float32bits(f))
+}
+
 // EncodeBytesValue encodes a byte array value with its value tag, appends it to
 // the supplied buffer, and returns the final buffer.
 func EncodeBytesValue(appendTo []byte, colID uint32, data []byte) []byte {
@@ -2820,6 +2832,14 @@ func EncodeTSVectorValue(appendTo []byte, colID uint32, data []byte) []byte {
 	return EncodeUntaggedBytesValue(appendTo, data)
 }
 
+// EncodePGVectorValue encodes an already-byte-encoded PGVector value with no
+// value tag but with a length prefix, appends it to the supplied buffer, and
+// returns the final buffer.
+func EncodePGVectorValue(appendTo []byte, colID uint32, data []byte) []byte {
+	appendTo = EncodeValueTag(appendTo, colID, PGVector)
+	return EncodeUntaggedBytesValue(appendTo, data)
+}
+
 // DecodeValueTag decodes a value encoded by EncodeValueTag, used as a prefix in
 // each of the other EncodeFooValue methods.
 //
@@ -2920,6 +2940,16 @@ func DecodeUntaggedFloatValue(b []byte) (remaining []byte, f float64, err error)
 	var i uint64
 	b, i, err = DecodeUint64Ascending(b)
 	return b, math.Float64frombits(i), err
+}
+
+// DecodeUntaggedFloat32Value decodes a value encoded by EncodeUntaggedFloat32Value.
+func DecodeUntaggedFloat32Value(b []byte) (remaining []byte, f float32, err error) {
+	if len(b) < 4 {
+		return b, 0, fmt.Errorf("float32 value should be exactly 4 bytes: %d", len(b))
+	}
+	var i uint32
+	b, i, err = DecodeUint32Ascending(b)
+	return b, math.Float32frombits(i), err
 }
 
 // DecodeBytesValue decodes a value encoded by EncodeBytesValue.
@@ -3132,6 +3162,9 @@ func DecodeUUIDValue(b []byte) (remaining []byte, u uuid.UUID, err error) {
 
 // DecodeUntaggedUUIDValue decodes a value encoded by EncodeUntaggedUUIDValue.
 func DecodeUntaggedUUIDValue(b []byte) (remaining []byte, u uuid.UUID, err error) {
+	if len(b) < uuidValueEncodedLength {
+		return b, uuid.UUID{}, errors.Errorf("invalid uuid length of %d", len(b))
+	}
 	u, err = uuid.FromBytes(b[:uuidValueEncodedLength])
 	if err != nil {
 		return b, uuid.UUID{}, err
@@ -3208,7 +3241,7 @@ func PeekValueLengthWithOffsetsAndType(b []byte, dataOffset int, typ Type) (leng
 		return dataOffset + n, err
 	case Float:
 		return dataOffset + floatValueEncodedLength, nil
-	case Bytes, Array, JSON, Geo, TSVector, TSQuery:
+	case Bytes, Array, JSON, Geo, TSVector, TSQuery, PGVector:
 		_, n, i, err := DecodeNonsortingUvarint(b)
 		return dataOffset + n + int(i), err
 	case Box2D:
@@ -3718,4 +3751,20 @@ func BytesPrevish(b []byte, length int) []byte {
 	buf[bLen-1]--
 	copy(buf[bLen:], bytes.Repeat([]byte{0xff}, length-bLen))
 	return buf
+}
+
+// unsafeWrapper is implementation of SafeFormatter. This is used to mark
+// arguments as unsafe for redaction. This would make sure that redact.Unsafe() is implementing SafeFormatter interface
+// without affecting invocations.
+// TODO(aa-joshi): This is a temporary solution to mark arguments as unsafe. We should move/update this into cockroachdb/redact package.
+type unsafeWrapper struct {
+	a any
+}
+
+func (uw unsafeWrapper) SafeFormat(w redact.SafePrinter, _ rune) {
+	w.Print(redact.Unsafe(uw.a))
+}
+
+func Unsafe(args any) any {
+	return unsafeWrapper{a: args}
 }

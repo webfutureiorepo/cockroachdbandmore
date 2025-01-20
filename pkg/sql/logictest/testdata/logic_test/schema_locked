@@ -32,6 +32,9 @@ t  CREATE TABLE public.t (
    ) WITH (schema_locked = true)
 
 statement ok
+ALTER TABLE t RESET (schema_locked)
+
+statement ok
 DROP TABLE t;
 
 # This subtest ensures storage parameter "schema_locked" can only be set/reset
@@ -51,13 +54,16 @@ statement error pq: "schema_locked" can only be set/reset on its own without oth
 ALTER TABLE t SET (schema_locked=f); CREATE TABLE t2 (i INT PRIMARY KEY);
 
 statement ok
-BEGIN;
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 statement error pq: "schema_locked" can only be set/reset on its own without other parameters in a single-statement implicit transaction.
 ALTER TABLE t SET (schema_locked=f);
 
 statement ok
 ROLLBACK
+
+statement ok
+ALTER TABLE t RESET (schema_locked)
 
 statement ok
 DROP TABLE t
@@ -69,7 +75,7 @@ DROP TABLE t
 subtest disallow_schema_changes_when_schema_is_locked
 
 statement ok
-CREATE TABLE t (i INT PRIMARY KEY, j INT, INDEX idx (j)) WITH (schema_locked = t);
+CREATE TABLE t (i INT PRIMARY KEY, j INT, UNIQUE INDEX idx (j)) WITH (schema_locked = t);
 
 statement ok
 INSERT INTO t SELECT i, i+1 FROM generate_series(1,10) AS tmp(i);
@@ -99,12 +105,36 @@ statement error pgcode 57000 schema changes are disallowed on table "t" because 
 CREATE INDEX idx2 ON t(j);
 
 statement ok
+CREATE TABLE ref (a INT PRIMARY KEY, b INT)
+
+# Locked tables cannot be referenced by foreign keys.
+statement error pgcode 57000 schema changes are disallowed on table "t" because it is locked
+ALTER TABLE ref ADD CONSTRAINT fk FOREIGN KEY (b) REFERENCES t(j);
+
+# GRANT statements are allowed on the table, as they only affect the
+# table's privilege descriptor.
+statement ok
 GRANT DELETE ON TABLE t TO testuser WITH GRANT OPTION;
 
+# COMMENT statements are allowed on the table, as they don't actually
+# touch the descriptor.
 statement ok
 COMMENT ON TABLE t IS 't is a table';
 COMMENT ON INDEX t@idx IS 'idx is an index';
 COMMENT ON COLUMN t.i IS 'i is a column';
 
 statement ok
+ALTER TABLE t RESET (schema_locked)
+
+statement ok
 DROP TABLE t;
+
+subtest zone_config
+
+statement ok
+ALTER TABLE ref SET (schema_locked = true);
+
+statement error pgcode 57000 schema changes are disallowed on table "ref" because it is locked
+ALTER TABLE ref CONFIGURE ZONE USING num_replicas = 11;
+
+subtest end

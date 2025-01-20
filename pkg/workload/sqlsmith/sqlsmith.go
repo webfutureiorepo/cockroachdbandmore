@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlsmith
 
@@ -71,6 +66,10 @@ func (*sqlSmith) Meta() workload.Meta { return sqlSmithMeta }
 // Flags implements the Flagser interface.
 func (g *sqlSmith) Flags() workload.Flags { return g.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (g *sqlSmith) ConnFlags() *workload.ConnFlags { return g.connFlags }
+
+// Hooks implements the Hookser interface.
 func (g *sqlSmith) Hooks() workload.Hooks {
 	return workload.Hooks{}
 }
@@ -80,7 +79,7 @@ func (g *sqlSmith) Tables() []workload.Table {
 	rng := rand.New(rand.NewSource(RandomSeed.Seed()))
 	var tables []workload.Table
 	for idx := 0; idx < g.tables; idx++ {
-		schema := randgen.RandCreateTable(rng, "table", idx, false /* isMultiRegion */)
+		schema := randgen.RandCreateTable(context.Background(), rng, "table", idx, randgen.TableOptNone)
 		// workload expects the schema to be missing the 'CREATE TABLE "name"', so
 		// we only want to format the schema, not the whole statement.
 		fmtCtx := tree.NewFmtCtx(tree.FmtSerializable)
@@ -130,10 +129,6 @@ func (g *sqlSmith) Ops(
 	if err := g.validateErrorSetting(); err != nil {
 		return workload.QueryLoad{}, err
 	}
-	sqlDatabase, err := workload.SanitizeUrls(g, g.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -142,7 +137,7 @@ func (g *sqlSmith) Ops(
 	db.SetMaxOpenConns(g.connFlags.Concurrency + 1)
 	db.SetMaxIdleConns(g.connFlags.Concurrency + 1)
 
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	for i := 0; i < g.connFlags.Concurrency; i++ {
 		rng := rand.New(rand.NewSource(RandomSeed.Seed() + int64(i)))
 		smither, err := sqlsmith.NewSmither(db, rng)

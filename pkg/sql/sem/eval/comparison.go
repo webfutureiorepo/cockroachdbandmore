@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package eval
 
@@ -136,7 +131,10 @@ func boolFromCmp(cmp int, op treecmp.ComparisonOperator) *tree.DBool {
 }
 
 func cmpOpTupleFn(
-	ctx tree.CompareContext, left, right tree.DTuple, op treecmp.ComparisonOperator,
+	ctx context.Context,
+	cmpCtx tree.CompareContext,
+	left, right tree.DTuple,
+	op treecmp.ComparisonOperator,
 ) (tree.Datum, error) {
 	cmp := 0
 	sawNull := false
@@ -170,7 +168,7 @@ func cmpOpTupleFn(
 			}
 		} else {
 			var err error
-			cmp, err = leftElem.CompareError(ctx, rightElem)
+			cmp, err = leftElem.Compare(ctx, cmpCtx, rightElem)
 			if err != nil {
 				return tree.DNull, err
 			}

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -60,7 +56,8 @@ func createTestClusterArgs(ctx context.Context, numReplicas, numVoters int32) ba
 	zoneCfg.NumVoters = proto.Int32(numVoters)
 
 	clusterSettings := cluster.MakeTestingClusterSettings()
-	kvserver.LoadBasedRebalancingMode.Override(ctx, &clusterSettings.SV, int64(kvserver.LBRebalancingOff))
+	kvserver.LoadBasedRebalancingMode.Override(ctx, &clusterSettings.SV, kvserver.LBRebalancingOff)
+	kvserverbase.MergeQueueEnabled.Override(ctx, &clusterSettings.SV, false)
 	return base.TestClusterArgs{
 		ServerArgs: base.TestServerArgs{
 			Settings: clusterSettings,
@@ -366,7 +363,7 @@ func (te tenantExpected) isSet() bool {
 }
 
 func (te tenantExpected) validate(
-	t *testing.T, runQuery func() (*gosql.Rows, error), message string,
+	t *testing.T, runQuery func() (_ *gosql.Rows, msg string, _ error),
 ) {
 	expectedErrorMessage := te.errorMessage
 	expectedResults := te.result
@@ -375,15 +372,29 @@ func (te tenantExpected) validate(
 	// query to make the test less flaky.
 	// See: https://github.com/cockroachdb/cockroach/issues/95252
 	testutils.SucceedsSoon(t, func() error {
-		rows, err := runQuery()
+		rows, message, err := runQuery()
 		if expectedErrorMessage == "" {
-			require.NoErrorf(t, err, message)
+			if err != nil {
+				return errors.WithMessagef(err, "msg=%s", message)
+			}
 			actualResults, err := sqlutils.RowsToStrMatrix(rows)
-			require.NoErrorf(t, err, message)
-			require.Equalf(t, len(expectedResults), len(actualResults), message)
+			if err != nil {
+				return errors.WithMessagef(err, "msg=%s", message)
+			}
+			if len(expectedResults) != len(actualResults) {
+				return errors.Newf(
+					"wrong number of results; %s expected=%d got=%d",
+					message, len(expectedResults), len(actualResults),
+				)
+			}
 			for i, actualRowResult := range actualResults {
 				expectedRowResult := expectedResults[i]
-				require.Equalf(t, len(expectedRowResult), len(actualRowResult), "%s row=%d\nexpected=%v\n  actual=%v", message, expectedRowResult, actualRowResult, i)
+				if len(expectedRowResult) != len(actualRowResult) {
+					return errors.Newf(
+						"wrong number of columns; %s row=%d expected=%v actual=%v",
+						message, i, len(expectedRowResult), len(actualRowResult),
+					)
+				}
 				for j, actualColResult := range actualRowResult {
 					expectedColResult := expectedRowResult[j]
 					switch expectedColResult {
@@ -397,14 +408,16 @@ func (te tenantExpected) validate(
 						}
 					default: // For deterministic results that should be non-empty.
 						if !strings.Contains(actualColResult, expectedColResult) {
-							return errors.Newf("expected %q contains %q %s row=%d col=%d", actualColResult, expectedColResult, message, i, j)
+							return errors.Newf("expected %q to be contained in result %q %s row=%d col=%d", expectedColResult, actualColResult, message, i, j)
 						}
 					}
 				}
 			}
 		} else {
-			require.Errorf(t, err, message)
-			require.Containsf(t, err.Error(), expectedErrorMessage, message)
+			if !testutils.IsError(err, expectedErrorMessage) {
+				// nolint:errwrap
+				return errors.Errorf("%s expected error %q, got %+v", message, expectedErrorMessage, err)
+			}
 		}
 		return nil
 	})
@@ -487,7 +500,7 @@ func TestMultiTenantAdminFunction(t *testing.T) {
 				errorMessage: "operation is disabled within a virtual cluster",
 			},
 			queryClusterSetting: sql.SecondaryTenantSplitAtEnabled,
-			setupCapability:     bcap(tenantcapabilities.CanAdminSplit, false),
+			setupCapability:     bcap(tenantcapabilities.CanAdminSplit, true),
 			queryCapability:     bcap(tenantcapabilities.CanAdminSplit, true),
 		},
 		{
@@ -555,7 +568,7 @@ func TestMultiTenantAdminFunction(t *testing.T) {
 				result: [][]string{{"\xf0\x8a", "/Table/104/2"}, {"\xf0\x8a", "/Table/104/2/1"}},
 			},
 			secondary: tenantExpected{
-				result: [][]string{{"\xfe\x92\xf0\x8a\x89", "/Tenant/10/Table/104/2/1"}},
+				result: [][]string{{"\xf0\x8a", "/Table/104/2"}, {"\xf0\x8a", "/Table/104/2/1"}},
 			},
 			secondaryWithoutCapability: tenantExpected{
 				errorMessage: `does not have capability "can_admin_unsplit"`,
@@ -591,7 +604,7 @@ func TestMultiTenantAdminFunction(t *testing.T) {
 				errorMessage: "operation is disabled within a virtual cluster",
 			},
 			queryClusterSetting: sql.SecondaryTenantScatterEnabled,
-			setupCapability:     bcap(tenantcapabilities.CanAdminScatter, false),
+			setupCapability:     bcap(tenantcapabilities.CanAdminScatter, true),
 			queryCapability:     bcap(tenantcapabilities.CanAdminScatter, true),
 		},
 	}
@@ -611,14 +624,14 @@ func TestMultiTenantAdminFunction(t *testing.T) {
 					message := fmt.Sprintf("tenant=%s", tenant)
 					for _, setup := range setups {
 						_, err := db.ExecContext(ctx, setup)
-						require.NoErrorf(t, err, setup, "%s setup=%s", message, setup)
+						require.NoErrorf(t, err, "%s setup=%s", message, setup)
 					}
 					tExp.validate(
 						t,
-						func() (*gosql.Rows, error) {
-							return db.QueryContext(ctx, tc.query)
+						func() (*gosql.Rows, string, error) {
+							rows, err := db.QueryContext(ctx, tc.query)
+							return rows, message, err
 						},
-						message,
 					)
 				},
 			)
@@ -661,7 +674,7 @@ func TestTruncateTable(t *testing.T) {
 
 			tExp.validate(
 				t,
-				func() (*gosql.Rows, error) {
+				func() (*gosql.Rows, string, error) {
 					// validateErr and validateRows come from separate queries for TRUNCATE.
 					_, validateErr := db.ExecContext(ctx, "TRUNCATE TABLE t;")
 					var validateRows *gosql.Rows
@@ -669,9 +682,8 @@ func TestTruncateTable(t *testing.T) {
 						validateRows, err = db.QueryContext(ctx, "SELECT start_key, end_key from [SHOW RANGES FROM INDEX t@primary];")
 						require.NoErrorf(t, err, message)
 					}
-					return validateRows, validateErr
+					return validateRows, message, validateErr
 				},
-				message,
 			)
 		},
 	)
@@ -736,32 +748,34 @@ func TestRelocateVoters(t *testing.T) {
 					require.NoErrorf(t, err, message)
 					err = testCluster.WaitForFullReplication()
 					require.NoErrorf(t, err, message)
+					testCluster.ToggleLeaseQueues(false)
 					testCluster.ToggleReplicateQueues(false)
-					replicaState := getReplicaState(
-						t,
-						ctx,
-						db,
-						expectedNumReplicas,
-						expectedNumVotingReplicas,
-						expectedNumNonVotingReplicas,
-						message,
-					)
-					replicas := replicaState.replicas
-					// Set toReplica to the node that does not have a voting replica for t.
-					toReplica := getToReplica(testCluster.NodeIDs(), replicas)
-					// Set fromReplica to the first non-leaseholder voting replica for t.
-					fromReplica := replicas[0]
-					if fromReplica == replicaState.leaseholder {
-						fromReplica = replicas[1]
-					}
-					query := fmt.Sprintf(tc.query, fromReplica, toReplica)
-					message = getReplicaStateMessage(tenant, query, replicaState, fromReplica, toReplica)
+					testCluster.ToggleSplitQueues(false)
 					tExp.validate(
 						t,
-						func() (*gosql.Rows, error) {
-							return db.QueryContext(ctx, query)
+						func() (_ *gosql.Rows, msg string, _ error) {
+							replicaState := getReplicaState(
+								t,
+								ctx,
+								db,
+								expectedNumReplicas,
+								expectedNumVotingReplicas,
+								expectedNumNonVotingReplicas,
+								message,
+							)
+							replicas := replicaState.replicas
+							// Set toReplica to the node that does not have a voting replica for t.
+							toReplica := getToReplica(testCluster.NodeIDs(), replicas)
+							// Set fromReplica to the first non-leaseholder voting replica for t.
+							fromReplica := replicas[0]
+							if fromReplica == replicaState.leaseholder {
+								fromReplica = replicas[1]
+							}
+							query := fmt.Sprintf(tc.query, fromReplica, toReplica)
+							message = getReplicaStateMessage(tenant, query, replicaState, fromReplica, toReplica)
+							rows, err := db.QueryContext(ctx, query)
+							return rows, message, err
 						},
-						message,
 					)
 				},
 			)
@@ -815,29 +829,31 @@ func TestExperimentalRelocateVoters(t *testing.T) {
 					require.NoErrorf(t, err, message)
 					err = testCluster.WaitForFullReplication()
 					require.NoErrorf(t, err, message)
+					testCluster.ToggleLeaseQueues(false)
 					testCluster.ToggleReplicateQueues(false)
-					replicaState := getReplicaState(
-						t,
-						ctx,
-						db,
-						expectedNumReplicas,
-						expectedNumVotingReplicas,
-						expectedNumNonVotingReplicas,
-						message,
-					)
-					votingReplicas := replicaState.votingReplicas
-					newVotingReplicas := make([]roachpb.NodeID, len(votingReplicas))
-					newVotingReplicas[0] = votingReplicas[0]
-					newVotingReplicas[1] = votingReplicas[1]
-					newVotingReplicas[2] = getToReplica(testCluster.NodeIDs(), votingReplicas)
-					query := fmt.Sprintf(tc.query, nodeIDsToArrayString(newVotingReplicas))
-					message = getReplicaStateMessage(tenant, query, replicaState, votingReplicas[2], newVotingReplicas[2])
+					testCluster.ToggleSplitQueues(false)
 					tExp.validate(
 						t,
-						func() (*gosql.Rows, error) {
-							return db.QueryContext(ctx, query)
+						func() (*gosql.Rows, string, error) {
+							replicaState := getReplicaState(
+								t,
+								ctx,
+								db,
+								expectedNumReplicas,
+								expectedNumVotingReplicas,
+								expectedNumNonVotingReplicas,
+								message,
+							)
+							votingReplicas := replicaState.votingReplicas
+							newVotingReplicas := make([]roachpb.NodeID, len(votingReplicas))
+							newVotingReplicas[0] = votingReplicas[0]
+							newVotingReplicas[1] = votingReplicas[1]
+							newVotingReplicas[2] = getToReplica(testCluster.NodeIDs(), votingReplicas)
+							query := fmt.Sprintf(tc.query, nodeIDsToArrayString(newVotingReplicas))
+							message = getReplicaStateMessage(tenant, query, replicaState, votingReplicas[2], newVotingReplicas[2])
+							rows, err := db.QueryContext(ctx, query)
+							return rows, message, err
 						},
-						message,
 					)
 				},
 			)
@@ -907,28 +923,30 @@ func TestRelocateNonVoters(t *testing.T) {
 					require.NoErrorf(t, err, message)
 					err = testCluster.WaitForFullReplication()
 					require.NoErrorf(t, err, message)
+					testCluster.ToggleLeaseQueues(false)
 					testCluster.ToggleReplicateQueues(false)
-					replicaState := getReplicaState(
-						t,
-						ctx,
-						db,
-						expectedNumReplicas,
-						expectedNumVotingReplicas,
-						expectedNumNonVotingReplicas,
-						message,
-					)
-					// Set toReplica to the node that does not have a voting replica for t.
-					toReplica := getToReplica(testCluster.NodeIDs(), replicaState.replicas)
-					// Set fromReplica to the first non-leaseholder voting replica for t.
-					fromReplica := replicaState.nonVotingReplicas[0]
-					query := fmt.Sprintf(tc.query, fromReplica, toReplica)
-					message = getReplicaStateMessage(tenant, query, replicaState, fromReplica, toReplica)
+					testCluster.ToggleSplitQueues(false)
 					tExp.validate(
 						t,
-						func() (*gosql.Rows, error) {
-							return db.QueryContext(ctx, query)
+						func() (*gosql.Rows, string, error) {
+							replicaState := getReplicaState(
+								t,
+								ctx,
+								db,
+								expectedNumReplicas,
+								expectedNumVotingReplicas,
+								expectedNumNonVotingReplicas,
+								message,
+							)
+							// Set toReplica to the node that does not have a voting replica for t.
+							toReplica := getToReplica(testCluster.NodeIDs(), replicaState.replicas)
+							// Set fromReplica to the first non-leaseholder voting replica for t.
+							fromReplica := replicaState.nonVotingReplicas[0]
+							query := fmt.Sprintf(tc.query, fromReplica, toReplica)
+							message = getReplicaStateMessage(tenant, query, replicaState, fromReplica, toReplica)
+							rows, err := db.QueryContext(ctx, query)
+							return rows, message, err
 						},
-						message,
 					)
 				},
 			)
@@ -980,25 +998,27 @@ func TestExperimentalRelocateNonVoters(t *testing.T) {
 					require.NoErrorf(t, err, message)
 					err = testCluster.WaitForFullReplication()
 					require.NoErrorf(t, err, message)
+					testCluster.ToggleLeaseQueues(false)
 					testCluster.ToggleReplicateQueues(false)
-					replicaState := getReplicaState(
-						t,
-						ctx,
-						db,
-						expectedNumReplicas,
-						expectedNumVotingReplicas,
-						expectedNumNonVotingReplicas,
-						message,
-					)
-					newNonVotingReplicas := []roachpb.NodeID{getToReplica(testCluster.NodeIDs(), replicaState.replicas)}
-					query := fmt.Sprintf(tc.query, nodeIDsToArrayString(newNonVotingReplicas))
-					message = getReplicaStateMessage(tenant, query, replicaState, replicaState.nonVotingReplicas[0], newNonVotingReplicas[0])
+					testCluster.ToggleSplitQueues(false)
 					tExp.validate(
 						t,
-						func() (*gosql.Rows, error) {
-							return db.QueryContext(ctx, query)
+						func() (*gosql.Rows, string, error) {
+							replicaState := getReplicaState(
+								t,
+								ctx,
+								db,
+								expectedNumReplicas,
+								expectedNumVotingReplicas,
+								expectedNumNonVotingReplicas,
+								message,
+							)
+							newNonVotingReplicas := []roachpb.NodeID{getToReplica(testCluster.NodeIDs(), replicaState.replicas)}
+							query := fmt.Sprintf(tc.query, nodeIDsToArrayString(newNonVotingReplicas))
+							message = getReplicaStateMessage(tenant, query, replicaState, replicaState.nonVotingReplicas[0], newNonVotingReplicas[0])
+							rows, err := db.QueryContext(ctx, query)
+							return rows, message, err
 						},
-						message,
 					)
 				},
 			)

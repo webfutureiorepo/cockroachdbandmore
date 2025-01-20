@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -26,7 +21,7 @@ var pgjdbcReleaseTagRegex = regexp.MustCompile(`^REL(?P<major>\d+)\.(?P<minor>\d
 
 // WARNING: DO NOT MODIFY the name of the below constant/variable without approval from the docs team.
 // This is used by docs automation to produce a list of supported versions for ORM's.
-var supportedPGJDBCTag = "REL42.3.3"
+var supportedPGJDBCTag = "REL42.7.3"
 
 // This test runs pgjdbc's full test suite against a single cockroach node.
 
@@ -41,7 +36,7 @@ func registerPgjdbc(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(install.SecureOption(true)), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -70,14 +65,13 @@ func registerPgjdbc(r registry.Registry) {
 			t.Fatal(err)
 		}
 
-		// TODO(rafi): use openjdk-11-jdk-headless once we are off of Ubuntu 16.
 		if err := repeatRunE(
 			ctx,
 			t,
 			c,
 			node,
 			"install dependencies",
-			`sudo apt-get -qq install default-jre openjdk-8-jdk-headless gradle`,
+			`sudo apt-get -qq install default-jre openjdk-17-jdk-headless gradle`,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -111,6 +105,21 @@ func registerPgjdbc(r registry.Registry) {
 			fmt.Sprintf(
 				"echo \"%s\" > /mnt/data1/pgjdbc/build.local.properties", pgjdbcDatabaseParams,
 			),
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		// Remove an unsupported deferrable qualifier (#31632) from the XA test
+		// suite setup. This prevents XADataSourceTest.mappingOfConstraintViolations
+		// from running properly (it fails either way), but it allows the rest of
+		// the XA tests to run.
+		if err := repeatRunE(
+			ctx,
+			t,
+			c,
+			node,
+			"removing unsupported deferrable qualifier from test",
+			"sed -i 's/ deferrable//' /mnt/data1/pgjdbc/pgjdbc/src/test/java/org/postgresql/test/xa/XADataSourceTest.java",
 		); err != nil {
 			t.Fatal(err)
 		}

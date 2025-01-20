@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
@@ -30,7 +24,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -40,6 +36,7 @@ import (
 )
 
 type createTypeNode struct {
+	zeroInputPlanNode
 	n        *tree.CreateType
 	typeName *tree.TypeName
 	dbDesc   catalog.DatabaseDescriptor
@@ -68,7 +65,7 @@ func (p *planner) CreateType(ctx context.Context, n *tree.CreateType) (planNode,
 	}
 
 	// Resolve the desired new type name.
-	typeName, db, err := resolveNewTypeName(p.RunParams(ctx), n.TypeName)
+	typeName, db, err := resolveNewTypeName(ctx, p, n.TypeName)
 	if err != nil {
 		return nil, err
 	}
@@ -108,15 +105,15 @@ func (n *createTypeNode) startExec(params runParams) error {
 }
 
 func resolveNewTypeName(
-	params runParams, name *tree.UnresolvedObjectName,
+	ctx context.Context, p *planner, name *tree.UnresolvedObjectName,
 ) (*tree.TypeName, catalog.DatabaseDescriptor, error) {
 	// Resolve the target schema and database.
-	db, _, prefix, err := params.p.ResolveTargetObject(params.ctx, name)
+	db, _, prefix, err := p.ResolveTargetObject(ctx, name)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := params.p.CheckPrivilege(params.ctx, db, privilege.CREATE); err != nil {
+	if err := p.CheckPrivilege(ctx, db, privilege.CREATE); err != nil {
 		return nil, nil, err
 	}
 
@@ -133,7 +130,7 @@ func resolveNewTypeName(
 // getCreateTypeParams performs some initial validation on the input new
 // TypeName and returns the ID of the parent schema.
 func getCreateTypeParams(
-	params runParams, name *tree.TypeName, db catalog.DatabaseDescriptor,
+	ctx context.Context, p *planner, name *tree.TypeName, db catalog.DatabaseDescriptor,
 ) (schema catalog.SchemaDescriptor, err error) {
 	// Check we are not creating a type which conflicts with an alias available
 	// as a built-in type in CockroachDB but an extension type on the public
@@ -145,14 +142,14 @@ func getCreateTypeParams(
 	}
 	// Get the ID of the schema the type is being created in.
 	dbID := db.GetID()
-	schema, err = params.p.getNonTemporarySchemaForCreate(params.ctx, db, name.Schema())
+	schema, err = p.getNonTemporarySchemaForCreate(ctx, db, name.Schema())
 	if err != nil {
 		return nil, err
 	}
 
 	// Check permissions on the schema.
-	if err := params.p.canCreateOnSchema(
-		params.ctx, schema.GetID(), dbID, params.p.User(), skipCheckPublicSchema); err != nil {
+	if err := p.canCreateOnSchema(
+		ctx, schema.GetID(), dbID, p.User(), skipCheckPublicSchema); err != nil {
 		return nil, err
 	}
 
@@ -161,9 +158,9 @@ func getCreateTypeParams(
 	}
 
 	err = descs.CheckObjectNameCollision(
-		params.ctx,
-		params.p.Descriptors(),
-		params.p.txn,
+		ctx,
+		p.Descriptors(),
+		p.txn,
 		db.GetID(),
 		schema.GetID(),
 		name,
@@ -206,7 +203,6 @@ func findFreeArrayTypeName(
 // CreateUserDefinedArrayTypeDesc creates a type descriptor for the array of the
 // given user-defined type.
 func CreateUserDefinedArrayTypeDesc(
-	params runParams,
 	typDesc *typedesc.Mutable,
 	db catalog.DatabaseDescriptor,
 	schemaID descpb.ID,
@@ -261,16 +257,17 @@ func CreateUserDefinedArrayTypeDesc(
 // createArrayType creates the implicit array type for the input TypeDescriptor
 // and returns the ID of the created type.
 func (p *planner) createArrayType(
-	params runParams,
+	ctx context.Context,
+	evalCtx *eval.Context,
 	typ *tree.TypeName,
 	typDesc *typedesc.Mutable,
 	db catalog.DatabaseDescriptor,
 	schemaID descpb.ID,
 ) (descpb.ID, error) {
 	arrayTypeName, err := findFreeArrayTypeName(
-		params.ctx,
-		params.p.txn,
-		params.p.Descriptors(),
+		ctx,
+		p.txn,
+		p.Descriptors(),
 		db.GetID(),
 		schemaID,
 		typ.Type(),
@@ -280,13 +277,12 @@ func (p *planner) createArrayType(
 	}
 
 	// Generate the stable ID for the array type.
-	id, err := params.EvalContext().DescIDGenerator.GenerateUniqueDescID(params.ctx)
+	id, err := evalCtx.DescIDGenerator.GenerateUniqueDescID(ctx)
 	if err != nil {
 		return 0, err
 	}
 
 	arrayTypDesc, err := CreateUserDefinedArrayTypeDesc(
-		params,
 		typDesc,
 		db,
 		schemaID,
@@ -297,7 +293,7 @@ func (p *planner) createArrayType(
 		return 0, err
 	}
 	jobStr := fmt.Sprintf("implicit array type creation for %s", typ)
-	if err := p.createDescriptor(params.ctx, arrayTypDesc, jobStr); err != nil {
+	if err := p.createDescriptor(ctx, arrayTypDesc, jobStr); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -312,14 +308,9 @@ func (p *planner) createUserDefinedType(params runParams, n *createTypeNode) err
 	switch n.n.Variety {
 	case tree.Enum:
 		return params.p.createEnumWithID(
-			params, id, n.n.EnumLabels, n.dbDesc, n.typeName, EnumTypeUserDefined,
+			params.ctx, params.EvalContext(), id, n.n.EnumLabels, n.dbDesc, n.typeName, EnumTypeUserDefined,
 		)
 	case tree.Composite:
-		if !p.execCfg.Settings.Version.IsActive(params.ctx, clusterversion.V23_1) {
-			return pgerror.Newf(pgcode.FeatureNotSupported,
-				"version %v must be finalized to create composite types",
-				clusterversion.V23_1)
-		}
 		return params.p.createCompositeWithID(
 			params, id, n.n.CompositeTypeList, n.dbDesc, n.typeName,
 		)
@@ -329,7 +320,7 @@ func (p *planner) createUserDefinedType(params runParams, n *createTypeNode) err
 
 // CreateEnumTypeDesc creates a new enum type descriptor.
 func CreateEnumTypeDesc(
-	params runParams,
+	sd *sessiondata.SessionData,
 	id descpb.ID,
 	enumLabels tree.EnumValueList,
 	dbDesc catalog.DatabaseDescriptor,
@@ -362,7 +353,7 @@ func CreateEnumTypeDesc(
 		dbDesc.GetDefaultPrivilegeDescriptor(),
 		schema.GetDefaultPrivilegeDescriptor(),
 		dbDesc.GetID(),
-		params.SessionData().User(),
+		sd.User(),
 		privilege.Types,
 	)
 	if err != nil {
@@ -400,8 +391,8 @@ func CreateEnumTypeDesc(
 	}).BuildCreatedMutableType(), nil
 }
 
-// CreateCompositeTypeDesc creates a new composite type descriptor.
-func CreateCompositeTypeDesc(
+// createCompositeTypeDesc creates a new composite type descriptor.
+func createCompositeTypeDesc(
 	params runParams,
 	id descpb.ID,
 	compositeTypeList []tree.CompositeTypeElem,
@@ -423,8 +414,10 @@ func CreateCompositeTypeDesc(
 		if err != nil {
 			return nil, err
 		}
-		err = tree.CheckUnsupportedType(params.ctx, &params.p.semaCtx, typ)
-		if err != nil {
+		if typ.Identical(types.Trigger) {
+			return nil, tree.CannotAcceptTriggerErr
+		}
+		if err = tree.CheckUnsupportedType(params.ctx, &params.p.semaCtx, typ); err != nil {
 			return nil, err
 		}
 		if typ.UserDefined() {
@@ -465,7 +458,8 @@ func CreateCompositeTypeDesc(
 }
 
 func (p *planner) createEnumWithID(
-	params runParams,
+	ctx context.Context,
+	evalCtx *eval.Context,
 	id descpb.ID,
 	enumLabels tree.EnumValueList,
 	dbDesc catalog.DatabaseDescriptor,
@@ -475,17 +469,17 @@ func (p *planner) createEnumWithID(
 	sqltelemetry.IncrementEnumCounter(sqltelemetry.EnumCreate)
 
 	// Generate a key in the namespace table and a new id for this type.
-	schema, err := getCreateTypeParams(params, typeName, dbDesc)
+	schema, err := getCreateTypeParams(ctx, p, typeName, dbDesc)
 	if err != nil {
 		return err
 	}
 
-	typeDesc, err := CreateEnumTypeDesc(params, id, enumLabels, dbDesc, schema, typeName, enumType)
+	typeDesc, err := CreateEnumTypeDesc(p.SessionData(), id, enumLabels, dbDesc, schema, typeName, enumType)
 	if err != nil {
 		return err
 	}
 
-	return p.finishCreateType(params, id, typeName, typeDesc, dbDesc, schema)
+	return p.finishCreateType(ctx, evalCtx, typeName, typeDesc, dbDesc, schema)
 }
 
 func (p *planner) createCompositeWithID(
@@ -496,36 +490,36 @@ func (p *planner) createCompositeWithID(
 	typeName *tree.TypeName,
 ) error {
 	// Generate a key in the namespace table and a new id for this type.
-	schema, err := getCreateTypeParams(params, typeName, dbDesc)
+	schema, err := getCreateTypeParams(params.ctx, p, typeName, dbDesc)
 	if err != nil {
 		return err
 	}
 
-	typeDesc, err := CreateCompositeTypeDesc(params, id, compositeTypeList, dbDesc, schema, typeName)
+	typeDesc, err := createCompositeTypeDesc(params, id, compositeTypeList, dbDesc, schema, typeName)
 	if err != nil {
 		return err
 	}
 
-	if err := p.finishCreateType(params, id, typeName, typeDesc, dbDesc, schema); err != nil {
+	if err := p.finishCreateType(params.ctx, params.EvalContext(), typeName, typeDesc, dbDesc, schema); err != nil {
 		return err
 	}
 	// Install back references to types used by this type.
-	if err := params.p.addBackRefsFromAllTypesInType(params.ctx, typeDesc); err != nil {
+	if err := p.addBackRefsFromAllTypesInType(params.ctx, typeDesc); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (p *planner) finishCreateType(
-	params runParams,
-	id descpb.ID,
+	ctx context.Context,
+	evalCtx *eval.Context,
 	typeName *tree.TypeName,
 	typeDesc *typedesc.Mutable,
 	dbDesc catalog.DatabaseDescriptor,
 	schema catalog.SchemaDescriptor,
 ) error {
 	// Create the implicit array type for this type before finishing the type.
-	arrayTypeID, err := p.createArrayType(params, typeName, typeDesc, dbDesc, schema.GetID())
+	arrayTypeID, err := p.createArrayType(ctx, evalCtx, typeName, typeDesc, dbDesc, schema.GetID())
 	if err != nil {
 		return err
 	}
@@ -534,12 +528,13 @@ func (p *planner) finishCreateType(
 	typeDesc.ArrayTypeID = arrayTypeID
 
 	// Now create the type after the implicit array type as been created.
-	if err := p.createDescriptor(params.ctx, typeDesc, typeName.String()); err != nil {
+	if err := p.createDescriptor(ctx, typeDesc, typeName.String()); err != nil {
 		return err
 	}
 
 	// Log the event.
-	return p.logEvent(params.ctx,
+	return p.logEvent(
+		ctx,
 		typeDesc.GetID(),
 		&eventpb.CreateType{
 			TypeName: typeName.FQString(),

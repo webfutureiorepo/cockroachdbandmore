@@ -80,7 +80,7 @@ CREATE DATABASE d2
 statement ok
 CREATE TABLE d1.t1 (k STRING PRIMARY KEY, v STRING)
 
-statement OK
+statement ok
 CREATE TABLE d2.t1 (k STRING PRIMARY KEY, v STRING)
 
 statement ok
@@ -263,19 +263,22 @@ statement error DROP DATABASE on non-empty database without explicit CASCADE
 DROP DATABASE foo
 
 statement ok
-SET sql_safe_updates = FALSE; DROP DATABASE foo
+SET sql_safe_updates = FALSE
+
+statement ok
+DROP DATABASE foo
 
 # Check that the default databases can be dropped and re-created like any other.
-statement OK
+statement ok
 DROP DATABASE defaultdb;
 
-statement OK
+statement ok
 DROP DATABASE postgres
 
 statement ok
 CREATE DATABASE defaultdb;
 
-statement OK
+statement ok
 CREATE DATABASE postgres
 
 # Test that an empty database doesn't get a GC job.
@@ -379,3 +382,25 @@ query I
 SELECT count(*) FROM system.namespace WHERE name LIKE 'w_51782'
 ----
 0
+
+subtest end
+
+# Regression test to make sure a database owner can drop the database.
+subtest regression_121808
+
+statement ok
+CREATE USER db_owner WITH CREATEDB
+
+statement ok
+SET ROLE db_owner
+
+statement ok
+CREATE DATABASE db_121808
+
+statement ok
+DROP DATABASE db_121808 RESTRICT
+
+statement ok
+RESET role
+
+subtest end

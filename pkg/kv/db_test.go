@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kv_test
 
@@ -271,38 +266,6 @@ func TestDB_CPutInline(t *testing.T) {
 	if result.Value != nil {
 		t.Fatalf("expected deleted value, got %x", result.ValueBytes())
 	}
-}
-
-func TestDB_InitPut(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	s, db := setup(t)
-	defer s.Stopper().Stop(context.Background())
-	ctx := context.Background()
-
-	if err := db.InitPut(ctx, "aa", "1", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.InitPut(ctx, "aa", "1", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.InitPut(ctx, "aa", "2", false); err == nil {
-		t.Fatal("expected error from init put")
-	}
-	if _, err := db.Del(ctx, "aa"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.InitPut(ctx, "aa", "2", true); err == nil {
-		t.Fatal("expected error from init put")
-	}
-	if err := db.InitPut(ctx, "aa", "1", false); err != nil {
-		t.Fatal(err)
-	}
-	result, err := db.Get(ctx, "aa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkResult(t, []byte("1"), result.ValueBytes())
 }
 
 func TestDB_Inc(t *testing.T) {
@@ -971,6 +934,51 @@ func testDBTxnRetry(t *testing.T, isoLevel isolation.Level, returnNil bool) {
 	require.NoError(t, err1)
 }
 
+// TestDB_TxnRetryLimit tests kv.transaction.internal.max_auto_retries.
+func TestDB_TxnRetryLimit(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	isolation.RunEachLevel(t, func(t *testing.T, isoLevel isolation.Level) {
+		testDBTxnRetryLimit(t, isoLevel)
+	})
+}
+
+func testDBTxnRetryLimit(t *testing.T, isoLevel isolation.Level) {
+	ctx := context.Background()
+	s, db := setup(t)
+	defer s.Stopper().Stop(ctx)
+
+	// Configure a low retry limit.
+	const maxRetries = 7
+	const maxAttempts = maxRetries + 1
+	kv.MaxInternalTxnAutoRetries.Override(ctx, &s.ClusterSettings().SV, maxRetries)
+
+	// Run the txn, aborting it on each attempt.
+	attempts := 0
+	err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		attempts++
+		require.NoError(t, txn.SetIsoLevel(isoLevel))
+		require.NoError(t, txn.Put(ctx, "a", "1"))
+
+		{
+			// High priority txn - will abort the other txn each attempt.
+			hpTxn := kv.NewTxn(ctx, db, 0)
+			require.NoError(t, hpTxn.SetUserPriority(roachpb.MaxUserPriority))
+			require.NoError(t, hpTxn.Put(ctx, "a", "hp txn"))
+			require.NoError(t, hpTxn.Commit(ctx))
+		}
+
+		// Read, so that we'll get a retryable error.
+		_, err := txn.Get(ctx, "a")
+		require.Error(t, err)
+		require.IsType(t, &kvpb.TransactionRetryWithProtoRefreshError{}, err)
+		return err
+	})
+	require.Error(t, err)
+	require.Regexp(t, "Terminating retry loop and returning error", err)
+	require.Equal(t, maxAttempts, attempts)
+}
+
 func TestPreservingSteppingOnSenderReplacement(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1098,8 +1106,7 @@ func TestBulkBatchAPI(t *testing.T) {
 
 	testF(func(b *kv.Batch) { b.PutBytes(&byteSliceBulkSource[[]byte]{kys, vals}) })
 	testF(func(b *kv.Batch) { b.PutTuples(&byteSliceBulkSource[[]byte]{kys, vals}) })
-	testF(func(b *kv.Batch) { b.InitPutBytes(&byteSliceBulkSource[[]byte]{kys, vals}) })
-	testF(func(b *kv.Batch) { b.InitPutTuples(&byteSliceBulkSource[[]byte]{kys, vals}) })
+	testF(func(b *kv.Batch) { b.CPutBytesEmpty(&byteSliceBulkSource[[]byte]{kys, vals}) })
 	testF(func(b *kv.Batch) { b.CPutTuplesEmpty(&byteSliceBulkSource[[]byte]{kys, vals}) })
 
 	values := make([]roachpb.Value, len(kys))
@@ -1112,7 +1119,7 @@ func TestBulkBatchAPI(t *testing.T) {
 	testF(func(b *kv.Batch) { b.CPutValuesEmpty(&byteSliceBulkSource[roachpb.Value]{kys, values}) })
 }
 
-func TestGetResults(t *testing.T) {
+func TestGetResult(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	s, db := setup(t)
@@ -1126,6 +1133,8 @@ func TestGetResults(t *testing.T) {
 	b := txn.NewBatch()
 	b.PutBytes(&byteSliceBulkSource[[]byte]{kys1, vals})
 	b.PutBytes(&byteSliceBulkSource[[]byte]{kys2, vals})
+	keyToDel := roachpb.Key("b")
+	b.Del(keyToDel)
 	err := txn.CommitInBatch(ctx, b)
 	require.NoError(t, err)
 	for i := 0; i < len(kys1)+len(kys2); i++ {
@@ -1134,12 +1143,17 @@ func TestGetResults(t *testing.T) {
 		require.Equal(t, row, b.Results[i/3].Rows[i%3])
 		require.NoError(t, err)
 	}
+	// test Del request (it uses Result.Keys rather than Result.Rows)
+	_, kv, err := b.GetResult(len(kys1) + len(kys2))
+	require.NoError(t, err)
+	require.Equal(t, keyToDel, kv.Key)
+	require.Nil(t, kv.Value)
 	// test EndTxn result
-	_, _, err = b.GetResult(len(kys1) + len(kys2))
+	_, _, err = b.GetResult(len(kys1) + len(kys2) + 1)
 	require.NoError(t, err)
 
 	// test out of bounds
-	_, _, err = b.GetResult(len(kys1) + len(kys2) + 1)
+	_, _, err = b.GetResult(len(kys1) + len(kys2) + 2)
 	require.Error(t, err)
 }
 

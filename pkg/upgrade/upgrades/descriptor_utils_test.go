@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades_test
 
@@ -21,8 +16,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
@@ -56,8 +53,10 @@ func TestCreateSystemTable(t *testing.T) {
 				DefaultColumnID: 0,
 			},
 		},
-		NextFamilyID: 1,
+		NextFamilyID:     1,
+		NextConstraintID: 2,
 		PrimaryIndex: descpb.IndexDescriptor{
+			ConstraintID:   1,
 			Name:           tabledesc.LegacyPrimaryKeyIndexName,
 			ID:             1,
 			Unique:         true,
@@ -73,6 +72,7 @@ func TestCreateSystemTable(t *testing.T) {
 			username.NodeUserName(),
 		),
 	}
+	fakeTable.Privileges.Version = catpb.OwnerVersion
 
 	table := tabledesc.NewBuilder(&fakeTable).BuildCreatedMutable().(catalog.TableDescriptor)
 
@@ -90,8 +90,9 @@ SELECT *
 			table.GetParentID(), table.GetParentSchemaID(), table.GetName())
 	}
 	require.Len(t, checkEntries(t), 0)
+	descDB := tc.Server(0).InternalDB().(descs.DB)
 	require.NoError(t, upgrades.CreateSystemTable(
-		ctx, tc.Server(0).DB(), tc.Server(0).ClusterSettings(), keys.SystemSQLCodec, table,
+		ctx, descDB, tc.Server(0).ClusterSettings(), keys.SystemSQLCodec, table, tree.LocalityLevelGlobal,
 	))
 	require.Len(t, checkEntries(t), 1)
 	sqlDB.CheckQueryResults(t,
@@ -100,7 +101,7 @@ SELECT *
 
 	// Make sure it's idempotent.
 	require.NoError(t, upgrades.CreateSystemTable(
-		ctx, tc.Server(0).DB(), tc.Server(0).ClusterSettings(), keys.SystemSQLCodec, table,
+		ctx, descDB, tc.Server(0).ClusterSettings(), keys.SystemSQLCodec, table, tree.LocalityLevelGlobal,
 	))
 	require.Len(t, checkEntries(t), 1)
 

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecbase_test
 
@@ -122,7 +117,7 @@ func TestSimpleProjectOpWithUnorderedSynchronizer(t *testing.T) {
 			for i := range parallelUnorderedSynchronizerInputs {
 				parallelUnorderedSynchronizerInputs[i].Root = inputs[i]
 			}
-			input = colexec.NewParallelUnorderedSynchronizer(&execinfra.FlowCtx{Local: true, Gateway: true}, 0 /* processorID */, testAllocator, parallelUnorderedSynchronizerInputs, &wg)
+			input = colexec.NewParallelUnorderedSynchronizer(&execinfra.FlowCtx{Local: true, Gateway: true}, 0 /* processorID */, testAllocator, inputTypes, parallelUnorderedSynchronizerInputs, &wg)
 			input = colexecbase.NewSimpleProjectOp(input, len(inputTypes), []uint32{0})
 			return colexecbase.NewConstOp(testAllocator, input, types.Int, constVal, 1)
 		})

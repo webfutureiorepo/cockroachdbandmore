@@ -42,8 +42,8 @@ go_test(
     embed = [":encoding"],
     # A test in this package allocates a 2GB array so we need the extra memory.
     exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "large"},
+        "//build/toolchains:is_heavy": {"test.Pool": "heavy"},
+        "//conditions:default": {"test.Pool": "large"},
     }),
     deps = [
         "//pkg/geo",
@@ -79,7 +79,7 @@ genrule(
        sed -e 's/type Type encodingtype.T/type Type int/' $(location encoding.go) > encoding_tmp.go && \
          $(location //pkg/build/bazel/util/tinystringer) -output=$@ -type=Type encoding_tmp.go
     """,
-    exec_tools = [
+    tools = [
         "//pkg/build/bazel/util/tinystringer",
     ],
     visibility = [

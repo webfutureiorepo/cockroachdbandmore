@@ -1,12 +1,8 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
 package scbuildstmt
 
 import (
@@ -37,12 +33,16 @@ import (
 )
 
 func alterTableAddConstraint(
-	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t *tree.AlterTableAddConstraint,
+	b BuildCtx,
+	tn *tree.TableName,
+	tbl *scpb.Table,
+	stmt tree.Statement,
+	t *tree.AlterTableAddConstraint,
 ) {
 	switch d := t.ConstraintDef.(type) {
 	case *tree.UniqueConstraintTableDef:
 		if d.PrimaryKey {
-			alterTableAddPrimaryKey(b, tn, tbl, t)
+			alterTableAddPrimaryKey(b, tn, tbl, stmt, t)
 		} else if d.WithoutIndex {
 			alterTableAddUniqueWithoutIndex(b, tn, tbl, t)
 		} else {
@@ -61,7 +61,7 @@ func alterTableAddConstraint(
 	case *tree.CheckConstraintTableDef:
 		alterTableAddCheck(b, tn, tbl, t)
 	case *tree.ForeignKeyConstraintTableDef:
-		alterTableAddForeignKey(b, tn, tbl, t)
+		alterTableAddForeignKey(b, tn, tbl, stmt, t)
 	}
 }
 
@@ -69,7 +69,11 @@ func alterTableAddConstraint(
 // `ALTER TABLE ... ADD PRIMARY KEY`.
 // It assumes `t` is such a command.
 func alterTableAddPrimaryKey(
-	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t *tree.AlterTableAddConstraint,
+	b BuildCtx,
+	tn *tree.TableName,
+	tbl *scpb.Table,
+	stmt tree.Statement,
+	t *tree.AlterTableAddConstraint,
 ) {
 	if t.ValidationBehavior == tree.ValidationSkip {
 		panic(sqlerrors.NewUnsupportedUnvalidatedConstraintError(catconstants.ConstraintTypePK))
@@ -83,7 +87,7 @@ func alterTableAddPrimaryKey(
 	) == nil {
 		panic(scerrors.NotImplementedError(t))
 	}
-	alterPrimaryKey(b, tn, tbl, alterPrimaryKeySpec{
+	alterPrimaryKey(b, tn, tbl, stmt, alterPrimaryKeySpec{
 		n:             t,
 		Columns:       d.Columns,
 		Sharded:       d.Sharded,
@@ -191,7 +195,11 @@ func getIndexIDForValidationForConstraint(b BuildCtx, tableID catid.DescID) (ret
 // `ALTER TABLE ... ADD FOREIGN KEY ... [NOT VALID]`.
 // It assumes `t` is such a command.
 func alterTableAddForeignKey(
-	b BuildCtx, tn *tree.TableName, tbl *scpb.Table, t *tree.AlterTableAddConstraint,
+	b BuildCtx,
+	tn *tree.TableName,
+	tbl *scpb.Table,
+	stmt tree.Statement,
+	t *tree.AlterTableAddConstraint,
 ) {
 	fkDef := t.ConstraintDef.(*tree.ForeignKeyConstraintTableDef)
 	// fromColsFRNames is fully resolved column names from `fkDef.FromCols`, and
@@ -252,7 +260,7 @@ func alterTableAddForeignKey(
 	var originColSet catalog.TableColSet
 	for i, colName := range fkDef.FromCols {
 		colID := getColumnIDFromColumnName(b, tbl.TableID, colName, true /* required */)
-		ensureColCanBeUsedInOutboundFK(b, tbl.TableID, colID)
+		ensureColCanBeUsedInOutboundFK(b, tbl.TableID, colID, fkDef.Actions)
 		if originColSet.Contains(colID) {
 			panic(pgerror.Newf(pgcode.InvalidForeignKey,
 				"foreign key contains duplicate column %q", fromColsFRNames[i]))
@@ -272,6 +280,8 @@ func alterTableAddForeignKey(
 		panic(scerrors.NotImplementedErrorf(t, "cross DB FK reference is a deprecated feature "+
 			"and is no longer supported."))
 	}
+	// Disallow schema change if the FK references a table whose schema is locked.
+	panicIfSchemaChangeIsDisallowed(b.QueryByID(referencedTableID), stmt)
 
 	// 6. Check that temporary tables can only reference temporary tables, or,
 	// permanent tables can only reference permanent tables.
@@ -347,8 +357,8 @@ func alterTableAddForeignKey(
 			b.EvalCtx().ClientNoticeSender.BufferClientNotice(b,
 				pgnotice.Newf(
 					"type of foreign key column %q (%s) is not identical to referenced column %q.%q (%s)",
-					originColName, originColType.String(),
-					referencedTableNamespaceElem.Name, referencedColName, referencedColType.String()),
+					originColName, originColType.SQLString(),
+					referencedTableNamespaceElem.Name, referencedColName, referencedColType.SQLString()),
 			)
 		}
 	}
@@ -381,7 +391,25 @@ func alterTableAddForeignKey(
 		))
 	}
 
-	// 12. (Finally!) Add a ForeignKey_Constraint, ConstraintName element to
+	// 12. Adding a foreign key dependency on a table with row-level TTL enabled can
+	// cause a slowdown in the TTL deletion job as the number of rows to be updated per
+	// deletion can go up. In such a case, flag a notice to the user advising them to
+	// update the ttl_delete_batch_size to avoid generating TTL deletion jobs with a high
+	// cardinality of rows being deleted.
+	// See https://github.com/cockroachdb/cockroach/issues/125103 for more details.
+	if b.QueryByID(referencedTableID).FilterRowLevelTTL() != nil {
+		// Use foreign key actions to determine upstream impact and flag a notice if the
+		// actions for delete involve cascading deletes.
+		if fkDef.Actions.Delete != tree.NoAction && fkDef.Actions.Delete != tree.Restrict {
+			b.EvalCtx().ClientNoticeSender.BufferClientNotice(
+				b,
+				pgnotice.Newf("Table %s has row level TTL enabled. This will make TTL deletion jobs"+
+					" more expensive as dependent rows will need to be updated as well."+
+					" To improve performance of the TTL job, consider reducing the value of ttl_delete_batch_size.",
+					referencedTableNamespaceElem.Name))
+		}
+	}
+	// 13. (Finally!) Add a ForeignKey_Constraint, ConstraintName element to
 	// builder state.
 	constraintID := b.NextTableConstraintID(tbl.TableID)
 	if t.ValidationBehavior == tree.ValidationDefault {
@@ -763,26 +791,28 @@ func iterateColNamesInExpr(
 func retrieveColumnDefaultExpressionElem(
 	b BuildCtx, tableID catid.DescID, columnID catid.ColumnID,
 ) *scpb.ColumnDefaultExpression {
-	_, _, ret := scpb.FindColumnDefaultExpression(b.QueryByID(tableID).Filter(hasColumnIDAttrFilter(columnID)))
-	return ret
+	return b.QueryByID(tableID).Filter(publicTargetFilter).FilterColumnDefaultExpression().
+		Filter(func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.ColumnDefaultExpression) bool {
+			return e.ColumnID == columnID
+		}).
+		MustGetZeroOrOneElement()
 }
 
 func retrieveColumnOnUpdateExpressionElem(
 	b BuildCtx, tableID catid.DescID, columnID catid.ColumnID,
 ) (columnOnUpdateExpression *scpb.ColumnOnUpdateExpression) {
-	scpb.ForEachColumnOnUpdateExpression(b.QueryByID(tableID), func(
-		current scpb.Status, target scpb.TargetStatus, e *scpb.ColumnOnUpdateExpression,
-	) {
-		if e.ColumnID == columnID {
-			columnOnUpdateExpression = e
-		}
-	})
-	return columnOnUpdateExpression
+	return b.QueryByID(tableID).Filter(publicTargetFilter).FilterColumnOnUpdateExpression().
+		Filter(func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.ColumnOnUpdateExpression) bool {
+			return e.ColumnID == columnID
+		}).
+		MustGetZeroOrOneElement()
 }
 
 // ensureColCanBeUsedInOutboundFK ensures the column can be used in an outbound
 // FK reference. Panic if it cannot.
-func ensureColCanBeUsedInOutboundFK(b BuildCtx, tableID catid.DescID, columnID catid.ColumnID) {
+func ensureColCanBeUsedInOutboundFK(
+	b BuildCtx, tableID catid.DescID, columnID catid.ColumnID, actions tree.ReferenceActions,
+) {
 	colNameElem := mustRetrieveColumnNameElem(b, tableID, columnID)
 	colTypeElem := mustRetrieveColumnTypeElem(b, tableID, columnID)
 	colElem := mustRetrieveColumnElem(b, tableID, columnID)
@@ -802,11 +832,13 @@ func ensureColCanBeUsedInOutboundFK(b BuildCtx, tableID catid.DescID, columnID c
 		))
 	}
 
-	if colTypeElem.ComputeExpr != nil {
-		panic(unimplemented.NewWithIssuef(
-			46672, "computed column %q cannot reference a foreign key",
-			colNameElem.Name,
-		))
+	// When a FK has a computed column, we block any ON UPDATE or ON DELETE
+	// actions that would try to change the computed value. Computed values cannot
+	// be altered directly, so attempts to set them to NULL or a DEFAULT value are
+	// blocked.
+	computeExpr := retrieveColumnComputeExpression(b, tableID, columnID)
+	if computeExpr != nil && actions.HasDisallowedActionForComputedFKCol() {
+		panic(sqlerrors.NewInvalidActionOnComputedFKColumnError(actions.HasUpdateAction()))
 	}
 }
 
@@ -832,8 +864,16 @@ func ensureColCanBeUsedInInboundFK(b BuildCtx, tableID catid.DescID, columnID ca
 	}
 }
 
+func retrieveTableElem(b BuildCtx, tableID catid.DescID) *scpb.Table {
+	return b.QueryByID(tableID).FilterTable().Filter(func(
+		current scpb.Status, target scpb.TargetStatus, e *scpb.Table,
+	) bool {
+		return e.TableID == tableID
+	}).MustGetZeroOrOneElement()
+}
+
 func mustRetrieveTableElem(b BuildCtx, tableID catid.DescID) *scpb.Table {
-	_, _, tblElem := scpb.FindTable(b.QueryByID(tableID))
+	tblElem := retrieveTableElem(b, tableID)
 	if tblElem == nil {
 		panic(errors.AssertionFailedf("programming error: cannot find a Table element for table %v", tableID))
 	}

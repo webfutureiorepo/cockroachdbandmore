@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -38,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +49,7 @@ func TestInternalExecutor(t *testing.T) {
 
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	row, err := ie.QueryRowEx(ctx, "test", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"SELECT 1")
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +69,7 @@ func TestInternalExecutor(t *testing.T) {
 	// The following statement will succeed on the 2nd try.
 	row, err = ie.QueryRowEx(
 		ctx, "test", nil, /* txn */
-		sessiondata.RootUserSessionDataOverride,
+		sessiondata.NodeUserSessionDataOverride,
 		"select case nextval('test.seq') when 1 then crdb_internal.force_retry('1h') else 99 end",
 	)
 	if err != nil {
@@ -99,7 +95,7 @@ func TestInternalExecutor(t *testing.T) {
 		cnt++
 		row, err = ie.QueryRowEx(
 			ctx, "test", txn,
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			"select case nextval('test.seq') when 2 then crdb_internal.force_retry('1h') else 99 end",
 		)
 		if cnt == 1 {
@@ -303,10 +299,10 @@ func TestInternalExecAppNameInitialization(t *testing.T) {
 
 type testInternalExecutor interface {
 	QueryRow(
-		ctx context.Context, opName string, txn *kv.Txn, stmt string, qargs ...interface{},
+		ctx context.Context, opName redact.RedactableString, txn *kv.Txn, stmt string, qargs ...interface{},
 	) (tree.Datums, error)
 	Exec(
-		ctx context.Context, opName string, txn *kv.Txn, stmt string, qargs ...interface{},
+		ctx context.Context, opName redact.RedactableString, txn *kv.Txn, stmt string, qargs ...interface{},
 	) (int, error)
 }
 
@@ -494,7 +490,7 @@ func TestInternalExecutorInLeafTxnDoesNotPanic(t *testing.T) {
 
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	_, err = ie.ExecEx(
-		ctx, "leaf-query", leafTxn, sessiondata.RootUserSessionDataOverride, "SELECT 1",
+		ctx, "leaf-query", leafTxn, sessiondata.NodeUserSessionDataOverride, "SELECT 1",
 	)
 	require.NoError(t, err)
 }
@@ -508,10 +504,10 @@ func TestInternalExecutorWithDefinedQoSOverrideDoesNotPanic(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
-	qosLevel := sessiondatapb.TTLLow
+	qosLevel := sessiondatapb.BulkLow
 	_, err := ie.ExecEx(
 		ctx, "defined_quality_of_service_level_does_not_panic", nil,
-		sessiondata.InternalExecutorOverride{User: username.RootUserName(), QualityOfService: &qosLevel},
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName(), QualityOfService: &qosLevel},
 		"SELECT 1",
 	)
 	require.NoError(t, err)
@@ -533,7 +529,7 @@ func TestInternalExecutorWithUndefinedQoSOverridePanics(t *testing.T) {
 			ctx,
 			"undefined_quality_of_service_level_panics",
 			nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: username.RootUserName(), QualityOfService: &qosLevel},
+			sessiondata.InternalExecutorOverride{User: username.NodeUserName(), QualityOfService: &qosLevel},
 			"SELECT 1",
 		)
 		require.Error(t, err)
@@ -553,7 +549,7 @@ func TestInternalDBWithOverrides(t *testing.T) {
 	_ = idb1.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		assert.Equal(t, 8, int(txn.SessionData().DefaultIntSize))
 		assert.Equal(t, sessiondatapb.DistSQLAuto, txn.SessionData().DistSQLMode)
-		assert.Equal(t, "root", string(txn.SessionData().UserProto))
+		assert.Equal(t, "node", string(txn.SessionData().UserProto))
 
 		row, err := txn.QueryRow(ctx, "test", txn.KV(), "show default_int_size")
 		require.NoError(t, err)
@@ -629,7 +625,7 @@ func TestInternalExecutorEncountersRetry(t *testing.T) {
 
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	ieo := sessiondata.InternalExecutorOverride{
-		User:                     username.RootUserName(),
+		User:                     username.NodeUserName(),
 		InjectRetryErrorsEnabled: true,
 	}
 

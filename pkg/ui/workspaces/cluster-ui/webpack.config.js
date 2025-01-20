@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 const path = require("path");
 const webpack = require("webpack");
@@ -169,11 +164,6 @@ module.exports = (env, argv) => {
         profile: true,
       }),
       new MomentLocalesPlugin(),
-      new webpack.NormalModuleReplacementPlugin(
-        /node_modules\/antd\/lib\/style\/index\.less/,
-        path.resolve(__dirname, "src/core/antd-patch.less"),
-      ),
-
       // Use MomentTimezoneDataPlugin to remove timezone data that we don't need.
       new MomentTimezoneDataPlugin({
         matchZones: ['Etc/UTC', 'America/New_York'],

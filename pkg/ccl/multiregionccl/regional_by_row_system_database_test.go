@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multiregionccl
 
@@ -61,7 +58,7 @@ UNION ALL SELECT create_statement FROM [SHOW CREATE TABLE system.namespace]
 	"lastUsedAt" TIMESTAMP NOT NULL DEFAULT now():::TIMESTAMP,
 	"auditInfo" STRING NULL,
 	user_id OID NOT NULL,
-	crdb_region system.public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::system.public.crdb_internal_region,
+	crdb_region public.crdb_internal_region NOT VISIBLE NOT NULL DEFAULT default_to_database_primary_region(gateway_region())::public.crdb_internal_region,
 	CONSTRAINT "primary" PRIMARY KEY (id ASC),
 	INDEX "web_sessions_expiresAt_idx" ("expiresAt" ASC),
 	INDEX "web_sessions_createdAt_idx" ("createdAt" ASC),

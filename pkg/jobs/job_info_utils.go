@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -38,8 +33,10 @@ func WriteChunkedFileToJobInfo(
 	jobInfo := InfoStorageForJob(txn, jobID)
 
 	// Clear any existing chunks with the same filename before writing new chunks.
-	// We clear all rows that with info keys in [filename, filename#_final~).
-	if err := jobInfo.DeleteRange(ctx, filename, finalChunkName+"~"); err != nil {
+	// We clear all rows that with info keys in [filename, filename#_final~). The
+	// trailing "~" makes the exclusive end-key inclusive of all possible chunks
+	// as "~" sorts after all digit.
+	if err := jobInfo.DeleteRange(ctx, filename, finalChunkName+"~", 0); err != nil {
 		return err
 	}
 

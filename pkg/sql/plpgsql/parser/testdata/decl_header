@@ -25,7 +25,7 @@ END foo;
  -- literals removed
 <<_>>
 DECLARE
-var1 INT8 := 30;
+_ INT8 := 30;
 BEGIN
 END _;
  -- identifiers removed
@@ -57,7 +57,7 @@ END foo;
  -- literals removed
 <<_>>
 DECLARE
-var1 CONSTANT INT8 COLLATE _ NOT NULL := 30;
+_ CONSTANT INT8 COLLATE _ NOT NULL := 30;
 BEGIN
 END _;
  -- identifiers removed
@@ -84,7 +84,34 @@ BEGIN
 END;
  -- literals removed
 DECLARE
-var1 CONSTANT INT8 COLLATE _ NOT NULL := 30;
+_ CONSTANT INT8 COLLATE _ NOT NULL := 30;
+BEGIN
+END;
+ -- identifiers removed
+
+parse
+DECLARE
+  "%_2jd9$f foo" integer := 30;
+BEGIN
+END
+----
+DECLARE
+"%_2jd9$f foo" INT8 := 30;
+BEGIN
+END;
+ -- normalized!
+DECLARE
+"%_2jd9$f foo" INT8 := (30);
+BEGIN
+END;
+ -- fully parenthesized
+DECLARE
+"%_2jd9$f foo" INT8 := _;
+BEGIN
+END;
+ -- literals removed
+DECLARE
+_ INT8 := 30;
 BEGIN
 END;
  -- identifiers removed
@@ -138,7 +165,7 @@ BEGIN
 END;
  -- literals removed
 DECLARE
-var1 CURSOR FOR SELECT * FROM _ WHERE _ = _;
+_ CURSOR FOR SELECT * FROM _ WHERE _ = _;
 BEGIN
 END;
  -- identifiers removed
@@ -175,16 +202,11 @@ DECLARE
 BEGIN
 END
 ----
-at or near "four": at or near ".": syntax error
+at or near "four": syntax error: unable to parse type of variable declaration
 DETAIL: source SQL:
-SET ROW (1::one.two.three.four)
-                         ^
---
-source SQL:
 DECLARE
   var1 one.two.three.four;
                      ^
-HINT: try \h SET SESSION
 
 error
 DECLARE
@@ -192,39 +214,64 @@ DECLARE
 BEGIN
 END
 ----
-at or near "four": at or near ".": syntax error
+at or near "four": syntax error: unable to parse type of variable declaration
 DETAIL: source SQL:
-SET ROW (1::one.two.three.four )
-                         ^
---
-source SQL:
 DECLARE
   var1 one.two.three.four := 0;
                      ^
-HINT: try \h SET SESSION
 
 error
-<<foo>>
+DECLARE
+  var1 1;
 BEGIN
-  SELECT 1;
-END bar
+END
 ----
-at or near "bar": syntax error: end label "bar" differs from block's label "foo"
+at or near "1": syntax error: unable to parse type of variable declaration
 DETAIL: source SQL:
-<<foo>>
-BEGIN
-  SELECT 1;
-END bar
-    ^
+DECLARE
+  var1 1;
+       ^
 
 error
+DECLARE
+  var1 'foo';
 BEGIN
-  SELECT 1;
-END foo
+END
 ----
-at or near "foo": syntax error: end label "foo" specified for unlabeled block
+at or near "foo": syntax error: unable to parse type of variable declaration
 DETAIL: source SQL:
+DECLARE
+  var1 'foo';
+       ^
+
+error
+DECLARE
+  var1 xy%ROWTYPE;
 BEGIN
-  SELECT 1;
-END foo
-    ^
+END
+----
+at or near "rowtype": syntax error: unable to parse type of variable declaration
+DETAIL: source SQL:
+DECLARE
+  var1 xy%ROWTYPE;
+          ^
+HINT: you may have attempted to use %TYPE or %ROWTYPE syntax, which is unsupported.
+--
+See: https://go.crdb.dev/issue-v/114676/
+
+error
+DECLARE
+  var1 INT;
+  var2 var1%TYPE;
+BEGIN
+END
+----
+at or near "type": syntax error: unable to parse type of variable declaration
+DETAIL: source SQL:
+DECLARE
+  var1 INT;
+  var2 var1%TYPE;
+            ^
+HINT: you may have attempted to use %TYPE or %ROWTYPE syntax, which is unsupported.
+--
+See: https://go.crdb.dev/issue-v/114676/

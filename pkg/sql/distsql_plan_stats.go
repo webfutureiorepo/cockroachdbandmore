@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -15,13 +10,14 @@ import (
 	"math"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -35,6 +31,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats/bounds"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
@@ -49,12 +47,15 @@ type requestedStat struct {
 
 // histogramSamples is the number of sample rows to be collected for histogram
 // construction. For larger tables, it may be beneficial to increase this number
-// to get a more accurate distribution.
+// to get a more accurate distribution. The default value is 0, which means that
+// we will automatically pick a reasonable default based on the table size.
 var histogramSamples = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
 	"sql.stats.histogram_samples.count",
-	"number of rows sampled for histogram construction during table statistics collection",
-	10000,
+	"number of rows sampled for histogram construction during table statistics collection. "+
+		"Not setting this or setting a value of 0 means that a reasonable sample size will be "+
+		"automatically picked based on the table size.",
+	0,
 	settings.NonNegativeIntWithMaximum(math.MaxUint32),
 	settings.WithPublic)
 
@@ -71,6 +72,80 @@ var maxTimestampAge = settings.RegisterDurationSetting(
 	5*time.Minute,
 )
 
+// minAutoHistogramSamples and maxAutoHistogramSamples are the bounds used by
+// computeNumberSamples to determine the number of samples to collect for
+// histogram construction.
+var minAutoHistogramSamples = settings.RegisterIntSetting(
+	settings.ApplicationLevel,
+	"sql.stats.histogram_samples.min",
+	"minimum sample size to be selected when sample size is automatically determined",
+	10000,
+	settings.NonNegativeIntWithMaximum(math.MaxUint32),
+	settings.WithVisibility(settings.Reserved))
+
+var maxAutoHistogramSamples = settings.RegisterIntSetting(
+	settings.ApplicationLevel,
+	"sql.stats.histogram_samples.max",
+	"maximum sample size to be selected when sample size is automatically determined",
+	300000,
+	settings.NonNegativeIntWithMaximum(math.MaxUint32),
+	settings.WithVisibility(settings.Reserved))
+
+// computeNumberSamples dynamically determines the number of samples to collect
+// based on the estimated number of rows in the table. The formula 582n^0.29 is
+// based on empirical data collected by running the sampler with different
+// sample sizes on a variety of table sizes and observing the proportion of
+// heavy hitters (most frequent elements) represented in the sample. It was
+// derived by fitting a best-fit curve to the table below. The number of samples
+// returned is bounded between minAutoHistogramSamples and
+// maxAutoHistogramSamples (10,000 and 300,000 by default).
+// +---------------+-------------+
+// | Table Size    | Sample Size |
+// +---------------+-------------+
+// | 10,000        | 10,000      |
+// | 100,000       | 15,000      |
+// | 1,000,000     | 30,000      |
+// | 10,000,000    | 60,000      |
+// | 100,000,000   | 100,000     |
+// | 1,000,000,000 | 300,000     |
+// +---------------+-------------+
+//
+// The sample sizes above empirically achieved the following coverage:
+//   - 100k rows/15k samples: ~100% coverage of multiplicities down to 100x,
+//     ~80% down to 10x
+//   - 1m rows/30k samples: ~100% coverage of multiplicities down to 1000x, ~95%
+//     down to 100x
+//   - 10m rows/60k samples: ~100% coverage of multiplicities down to 10000x,
+//     ~95% down to 1000x, ~50% down to 100x
+//   - 100m rows/100k samples: ~100% coverage of multiplicities down to 10000x,
+//     ~65% down to 1000x, ~10% down to 100x
+//   - 1b rows/300k samples: ~100% coverage of multiplicities down to 100000x,
+//     ~95% down to 10000x, ~25% down to 1000x
+func computeNumberSamples(ctx context.Context, numRows uint64, st *cluster.Settings) uint32 {
+	maxSampleSize := maxAutoHistogramSamples.Get(&st.SV)
+	minSampleSize := minAutoHistogramSamples.Get(&st.SV)
+
+	if maxSampleSize < minSampleSize {
+		log.Infof(
+			ctx,
+			"using default sample size bounds since max sample size %d is less than min sample size %d",
+			maxSampleSize,
+			minSampleSize,
+		)
+		maxSampleSize = maxAutoHistogramSamples.Default()
+		minSampleSize = minAutoHistogramSamples.Default()
+	}
+
+	numSamples := math.Max(
+		math.Min(
+			582.0*math.Pow(float64(numRows), 0.29),
+			float64(maxSampleSize),
+		),
+		float64(minSampleSize),
+	)
+	return uint32(numSamples)
+}
+
 func (dsp *DistSQLPlanner) createAndAttachSamplers(
 	ctx context.Context,
 	p *PhysicalPlan,
@@ -81,7 +156,33 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 	jobID jobspb.JobID,
 	reqStats []requestedStat,
 	sketchSpec, invSketchSpec []execinfrapb.SketchSpec,
+	numIndexes int,
+	curIndex int,
 ) *PhysicalPlan {
+	// Estimate the expected number of rows based on existing stats in the cache.
+	var rowsExpected uint64
+	if len(tableStats) > 0 {
+		overhead := stats.AutomaticStatisticsFractionStaleRows.Get(&dsp.st.SV)
+		if autoStatsFractionStaleRowsForTable, ok := desc.AutoStatsFractionStaleRows(); ok {
+			overhead = autoStatsFractionStaleRowsForTable
+		}
+		// Convert to a signed integer first to make the linter happy.
+		if details.UsingExtremes {
+			rowsExpected = uint64(int64(
+				// The total expected number of rows is the estimated number of stale
+				// rows since we're only collecting stats on rows outside the bounds of
+				// the most recent statistic.
+				float64(tableStats[0].RowCount) * overhead,
+			))
+		} else {
+			rowsExpected = uint64(int64(
+				// The total expected number of rows is the same number that was measured
+				// most recently, plus some overhead for possible insertions.
+				float64(tableStats[0].RowCount) * (1 + overhead),
+			))
+		}
+	}
+
 	// Set up the samplers.
 	sampler := &execinfrapb.SamplerSpec{
 		Sketches:         sketchSpec,
@@ -92,16 +193,26 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 	// since we only support one reqStat at a time.
 	for _, s := range reqStats {
 		if s.histogram {
-			if count, ok := desc.HistogramSamplesCount(); ok {
-				sampler.SampleSize = count
+			var histogramSamplesCount uint32
+			if tableSampleCount, ok := desc.HistogramSamplesCount(); ok {
+				histogramSamplesCount = tableSampleCount
+			} else if clusterSampleCount := histogramSamples.Get(&dsp.st.SV); clusterSampleCount != histogramSamples.Default() {
+				histogramSamplesCount = uint32(clusterSampleCount)
 			} else {
-				sampler.SampleSize = uint32(histogramSamples.Get(&dsp.st.SV))
+				histogramSamplesCount = computeNumberSamples(
+					ctx,
+					rowsExpected,
+					dsp.st,
+				)
+				log.Infof(ctx, "using computed sample size of %d for histogram construction", histogramSamplesCount)
 			}
+			sampler.SampleSize = histogramSamplesCount
 			// This could be anything >= 2 to produce a histogram, but the max number
 			// of buckets is probably also a reasonable minimum number of samples. (If
 			// there are fewer rows than this in the table, there will be fewer
 			// samples of course, which is fine.)
 			sampler.MinSampleSize = s.histogramMaxBuckets
+			break
 		}
 	}
 
@@ -134,21 +245,6 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 		execinfrapb.Ordering{},
 	)
 
-	// Estimate the expected number of rows based on existing stats in the cache.
-	var rowsExpected uint64
-	if len(tableStats) > 0 {
-		overhead := stats.AutomaticStatisticsFractionStaleRows.Get(&dsp.st.SV)
-		if autoStatsFractionStaleRowsForTable, ok := desc.AutoStatsFractionStaleRows(); ok {
-			overhead = autoStatsFractionStaleRowsForTable
-		}
-		// Convert to a signed integer first to make the linter happy.
-		rowsExpected = uint64(int64(
-			// The total expected number of rows is the same number that was measured
-			// most recently, plus some overhead for possible insertions.
-			float64(tableStats[0].RowCount) * (1 + overhead),
-		))
-	}
-
 	// Set up the final SampleAggregator stage.
 	agg := &execinfrapb.SampleAggregatorSpec{
 		Sketches:         sketchSpec,
@@ -160,6 +256,8 @@ func (dsp *DistSQLPlanner) createAndAttachSamplers(
 		JobID:            jobID,
 		RowsExpected:     rowsExpected,
 		DeleteOtherStats: details.DeleteOtherStats,
+		NumIndexes:       uint64(numIndexes),
+		CurIndex:         uint64(curIndex),
 	}
 	// Plan the SampleAggregator on the gateway, unless we have a single Sampler.
 	node := dsp.gatewaySQLInstanceID
@@ -184,14 +282,16 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 	reqStats []requestedStat,
 	jobID jobspb.JobID,
 	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) (*PhysicalPlan, error) {
-
-	// Currently, we limit the number of requests for partial statistics
-	// stats at a given point in time to 1.
-	// TODO (faizaanmadhani): Add support for multiple distinct requested
-	// partial stats in one job.
+	// Partial stats collections on multiple columns create different plans,
+	// so we only support one requested stat at a time here.
 	if len(reqStats) > 1 {
-		return nil, pgerror.Newf(pgcode.FeatureNotSupported, "cannot process multiple partial statistics at once")
+		return nil, unimplemented.NewWithIssue(
+			128904,
+			"cannot process multiple partial statistics requests at once",
+		)
 	}
 
 	reqStat := reqStats[0]
@@ -201,8 +301,13 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 		return nil, pgerror.Newf(pgcode.FeatureNotSupported, "multi-column partial statistics are not currently supported")
 	}
 
+	var typeResolver *descs.DistSQLTypeResolver
+	if p := planCtx.planner; p != nil {
+		r := descs.NewDistSQLTypeResolver(p.Descriptors(), p.Txn())
+		typeResolver = &r
+	}
 	// Fetch all stats for the table that matches the given table descriptor.
-	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc)
+	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc, typeResolver)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +339,9 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 	}
 
 	var sb span.Builder
-	sb.Init(planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index)
+	sb.InitAllowingExternalRowData(
+		planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index,
+	)
 
 	var stat *stats.TableStatistic
 	var histogram []cat.HistogramBucket
@@ -270,7 +377,7 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 			"column %s does not have a prior statistic",
 			column.GetName())
 	}
-	lowerBound, upperBound, err := bounds.GetUsingExtremesBounds(planCtx.EvalContext(), histogram)
+	lowerBound, upperBound, err := bounds.GetUsingExtremesBounds(ctx, planCtx.EvalContext(), histogram)
 	if err != nil {
 		return nil, err
 	}
@@ -356,16 +463,20 @@ func (dsp *DistSQLPlanner) createPartialStatsPlan(
 		sampledColumnIDs,
 		jobID,
 		reqStats,
-		sketchSpec, invSketchSpec), nil
+		sketchSpec, invSketchSpec,
+		numIndexes, curIndex), nil
 }
 
 func (dsp *DistSQLPlanner) createStatsPlan(
 	ctx context.Context,
 	planCtx *PlanningCtx,
+	semaCtx *tree.SemaContext,
 	desc catalog.TableDescriptor,
 	reqStats []requestedStat,
 	jobID jobspb.JobID,
 	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) (*PhysicalPlan, error) {
 	if len(reqStats) == 0 {
 		return nil, errors.New("no stats requested")
@@ -424,12 +535,20 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 
 	// Create the table readers; for this we initialize a dummy scanNode.
 	scan := scanNode{desc: desc}
+	if colCfg.wantedColumns == nil {
+		// wantedColumns cannot be left nil, and if it is nil at this point,
+		// then we only have virtual computed columns, so we'll allocate an
+		// empty slice.
+		colCfg.wantedColumns = []tree.ColumnID{}
+	}
 	err := scan.initDescDefaults(colCfg)
 	if err != nil {
 		return nil, err
 	}
 	var sb span.Builder
-	sb.Init(planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index)
+	sb.InitAllowingExternalRowData(
+		planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index,
+	)
 	scan.spans, err = sb.UnconstrainedSpans()
 	if err != nil {
 		return nil, err
@@ -453,7 +572,6 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	// Add rendering of virtual computed columns.
 	if len(virtComputedCols) != 0 {
 		// Resolve names and types.
-		semaCtx := tree.MakeSemaContext()
 		virtComputedExprs, _, err := schemaexpr.MakeComputedExprs(
 			ctx,
 			virtComputedCols,
@@ -461,7 +579,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 			desc,
 			tree.NewUnqualifiedTableName(tree.Name(desc.GetName())),
 			planCtx.EvalContext(),
-			&semaCtx,
+			semaCtx,
 		)
 		if err != nil {
 			return nil, err
@@ -473,6 +591,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 
 		ivh := tree.MakeIndexedVarHelper(nil /* container */, len(scan.cols))
 		var scanIdx, virtIdx int
+		var distSQLVisitor distSQLExprCheckVisitor
 		for i, col := range requestedCols {
 			if col.IsVirtual() {
 				if virtIdx >= len(virtComputedExprs) {
@@ -484,7 +603,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 				// Check that the virtual computed column expression can be distributed.
 				// TODO(michae2): Add the ability to run CREATE STATISTICS locally if a
 				// local-only virtual computed column expression is needed.
-				if err := checkExprForDistSQL(virtComputedExprs[virtIdx]); err != nil {
+				if err := checkExprForDistSQL(virtComputedExprs[virtIdx], &distSQLVisitor); err != nil {
 					return nil, err
 				}
 				exprs[i] = virtComputedExprs[virtIdx]
@@ -504,9 +623,6 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 
 		var rb renderBuilder
 		rb.init(exec.Node(planNode(&scan)), exec.OutputOrdering{})
-		for i, expr := range exprs {
-			exprs[i] = rb.r.ivarHelper.Rebind(expr)
-		}
 		rb.setOutput(exprs, resultCols)
 
 		err = dsp.createPlanForRender(ctx, p, rb.r, planCtx)
@@ -580,7 +696,12 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		}
 	}
 
-	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc)
+	var typeResolver *descs.DistSQLTypeResolver
+	if p := planCtx.planner; p != nil {
+		r := descs.NewDistSQLTypeResolver(p.Descriptors(), p.Txn())
+		typeResolver = &r
+	}
+	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(ctx, desc, typeResolver)
 	if err != nil {
 		return nil, err
 	}
@@ -594,11 +715,18 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		sampledColumnIDs,
 		jobID,
 		reqStats,
-		sketchSpecs, invSketchSpecs), nil
+		sketchSpecs, invSketchSpecs,
+		numIndexes, curIndex), nil
 }
 
 func (dsp *DistSQLPlanner) createPlanForCreateStats(
-	ctx context.Context, planCtx *PlanningCtx, jobID jobspb.JobID, details jobspb.CreateStatsDetails,
+	ctx context.Context,
+	planCtx *PlanningCtx,
+	semaCtx *tree.SemaContext,
+	jobID jobspb.JobID,
+	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) (*PhysicalPlan, error) {
 	reqStats := make([]requestedStat, len(details.ColumnStats))
 	histogramCollectionEnabled := stats.HistogramClusterMode.Get(&dsp.st.SV)
@@ -627,23 +755,26 @@ func (dsp *DistSQLPlanner) createPlanForCreateStats(
 	}
 
 	if details.UsingExtremes {
-		return dsp.createPartialStatsPlan(ctx, planCtx, tableDesc, reqStats, jobID, details)
+		return dsp.createPartialStatsPlan(ctx, planCtx, tableDesc, reqStats, jobID, details, numIndexes, curIndex)
 	}
-	return dsp.createStatsPlan(ctx, planCtx, tableDesc, reqStats, jobID, details)
+	return dsp.createStatsPlan(ctx, planCtx, semaCtx, tableDesc, reqStats, jobID, details, numIndexes, curIndex)
 }
 
 func (dsp *DistSQLPlanner) planAndRunCreateStats(
 	ctx context.Context,
 	evalCtx *extendedEvalContext,
 	planCtx *PlanningCtx,
+	semaCtx *tree.SemaContext,
 	txn *kv.Txn,
-	job *jobs.Job,
 	resultWriter *RowResultWriter,
+	jobId jobspb.JobID,
+	details jobspb.CreateStatsDetails,
+	numIndexes int,
+	curIndex int,
 ) error {
 	ctx = logtags.AddTag(ctx, "create-stats-distsql", nil)
 
-	details := job.Details().(jobspb.CreateStatsDetails)
-	physPlan, err := dsp.createPlanForCreateStats(ctx, planCtx, job.ID(), details)
+	physPlan, err := dsp.createPlanForCreateStats(ctx, planCtx, semaCtx, jobId, details, numIndexes, curIndex)
 	if err != nil {
 		return err
 	}

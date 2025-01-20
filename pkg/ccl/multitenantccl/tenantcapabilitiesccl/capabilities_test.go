@@ -1,16 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tenantcapabilitiesccl
 
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -115,7 +113,10 @@ func TestDataDriven(t *testing.T) {
 				})
 				_, err := tenantSQLDB.Exec(d.Input)
 				if err != nil {
-					return err.Error()
+					errStr := err.Error()
+					// Redact transaction IDs from error strings, for determinism.
+					errStr = regexp.MustCompile(`\[txn: [0-9a-f]+]`).ReplaceAllString(errStr, `[txn: ‹×›]`)
+					return errStr
 				}
 
 			case "exec-sql-tenant":

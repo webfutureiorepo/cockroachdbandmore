@@ -1,17 +1,13 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemadesc
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -42,11 +38,12 @@ type public struct {
 var _ catalog.SchemaDescriptor = public{}
 var _ privilege.Object = public{}
 
-func (p public) GetID() descpb.ID                     { return keys.PublicSchemaID }
-func (p public) GetParentID() descpb.ID               { return descpb.InvalidID }
-func (p public) GetName() string                      { return catconstants.PublicSchemaName }
-func (p public) SchemaDesc() *descpb.SchemaDescriptor { return makeSyntheticSchemaDesc(p) }
-func (p public) DescriptorProto() *descpb.Descriptor  { return makeSyntheticDesc(p) }
+func (p public) GetID() descpb.ID                                  { return keys.PublicSchemaID }
+func (p public) GetParentID() descpb.ID                            { return descpb.InvalidID }
+func (p public) GetName() string                                   { return catconstants.PublicSchemaName }
+func (p public) SchemaDesc() *descpb.SchemaDescriptor              { return makeSyntheticSchemaDesc(p) }
+func (p public) DescriptorProto() *descpb.Descriptor               { return makeSyntheticDesc(p) }
+func (p public) GetReplicatedPCRVersion() descpb.DescriptorVersion { return 0 }
 
 type publicBase struct{}
 
@@ -55,7 +52,10 @@ var _ syntheticBase = publicBase{}
 func (publicBase) kindName() string                 { return "public" }
 func (publicBase) kind() catalog.ResolvedSchemaKind { return catalog.SchemaPublic }
 func (publicBase) GetPrivileges() *catpb.PrivilegeDescriptor {
-	return catpb.NewPublicSchemaPrivilegeDescriptor(true /*includeCreatePriv*/)
+	// As of this writing (May 2024), it has been the case for many releases that
+	// the only usage of this synthetic public schema is for the system database,
+	// so it is owned by node.
+	return catpb.NewPublicSchemaPrivilegeDescriptor(username.NodeUserName(), true /*includeCreatePriv*/)
 }
 
 // publicDesc is a singleton returned by GetPublicSchema.

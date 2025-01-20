@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package security
 
@@ -100,6 +95,8 @@ func (p PemUsage) String() string {
 		return "Client"
 	case TenantPem:
 		return "Tenant Client"
+	case TenantSigningPem:
+		return "Tenant Signing"
 	default:
 		return "unknown"
 	}
@@ -413,11 +410,6 @@ func parseCertificate(ci *CertInfo) error {
 		}
 
 		if i == 0 {
-			// Only check details of the first certificate.
-			if err := validateCockroachCertificate(ci, x509Cert); err != nil {
-				return makeErrorf(err, "failed to validate certificate %d in file %s", i, ci.Filename)
-			}
-
 			// Expiration from the first certificate.
 			expires = x509Cert.NotAfter
 		}
@@ -426,49 +418,5 @@ func parseCertificate(ci *CertInfo) error {
 
 	ci.ParsedCertificates = certs
 	ci.ExpirationTime = expires
-	return nil
-}
-
-// validateDualPurposeNodeCert takes a CertInfo and a parsed certificate and checks the
-// values of certain fields.
-// This should only be called on the NodePem CertInfo when there is no specific
-// client certificate for the 'node' user.
-// Fields required for a valid server certificate are already checked.
-func validateDualPurposeNodeCert(ci *CertInfo) error {
-	if ci == nil {
-		return errors.Errorf("no node certificate found")
-	}
-
-	if ci.Error != nil {
-		return ci.Error
-	}
-
-	// The first certificate is used in client auth.
-	cert := ci.ParsedCertificates[0]
-	principals := getCertificatePrincipals(cert)
-	if !Contains(principals, username.NodeUser) {
-		return errors.Errorf("client/server node certificate has principals %q, expected %q",
-			principals, username.NodeUser)
-	}
-
-	return nil
-}
-
-// validateCockroachCertificate takes a CertInfo and a parsed certificate and checks the
-// values of certain fields.
-func validateCockroachCertificate(ci *CertInfo, cert *x509.Certificate) error {
-
-	switch ci.FileUsage {
-	case NodePem:
-		// Common Name is checked only if there is no client certificate for 'node'.
-		// This is done in validateDualPurposeNodeCert.
-	case ClientPem:
-		// Check that CommonName matches the username extracted from the filename.
-		principals := getCertificatePrincipals(cert)
-		if !Contains(principals, ci.Name) {
-			return errors.Errorf("client certificate has principals %q, expected %q",
-				principals, ci.Name)
-		}
-	}
 	return nil
 }

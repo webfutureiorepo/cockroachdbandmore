@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -35,6 +30,7 @@ import (
 // However, if the optimizer can prove that only a small number of rows will
 // be deleted, it'll enable autoCommit for delete range.
 type deleteRangeNode struct {
+	zeroInputPlanNode
 	// spans are the spans to delete.
 	spans roachpb.Spans
 	// desc is the table descriptor the delete is operating on.
@@ -121,7 +117,9 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 			b := params.p.txn.NewBatch()
 			b.Header.MaxSpanRequestKeys = row.TableTruncateChunkSize
 			b.Header.LockTimeout = params.SessionData().LockTimeout
+			b.Header.DeadlockTimeout = params.SessionData().DeadlockTimeout
 			d.deleteSpans(params, b, spans)
+			log.VEventf(ctx, 2, "fast delete: processing %d spans", len(spans))
 			if err := params.p.txn.Run(ctx, b); err != nil {
 				return row.ConvertBatchError(ctx, d.desc, b)
 			}
@@ -142,7 +140,9 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 		// keys to delete in this command are low, so we're made safe.
 		b := params.p.txn.NewBatch()
 		b.Header.LockTimeout = params.SessionData().LockTimeout
+		b.Header.DeadlockTimeout = params.SessionData().DeadlockTimeout
 		d.deleteSpans(params, b, spans)
+		log.VEventf(ctx, 2, "fast delete: processing %d spans and committing", len(spans))
 		if err := params.p.txn.CommitInBatch(ctx, b); err != nil {
 			return row.ConvertBatchError(ctx, d.desc, b)
 		}

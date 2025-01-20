@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -19,7 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -62,13 +57,13 @@ func DeleteTableWithPredicate(
 	codec keys.SQLCodec,
 	sv *settings.Values,
 	distSender *kvcoord.DistSender,
-	table catalog.TableDescriptor,
+	tableID catid.DescID,
 	predicates kvpb.DeleteRangePredicates,
 	batchSize int64,
 ) error {
 
-	log.Infof(ctx, "deleting data for table %d with predicate %s", table.GetID(), predicates.String())
-	tableKey := roachpb.RKey(codec.TablePrefix(uint32(table.GetID())))
+	log.Infof(ctx, "deleting data for table %d with predicate %s", tableID, predicates.String())
+	tableKey := roachpb.RKey(codec.TablePrefix(uint32(tableID)))
 	tableSpan := roachpb.RSpan{Key: tableKey, EndKey: tableKey.PrefixEnd()}
 
 	// To process the table in parallel, spin up a few workers and partition the
@@ -126,7 +121,7 @@ func DeleteTableWithPredicate(
 							delRangeRequest)
 
 						if err != nil {
-							log.Errorf(ctx, "delete range %s - %s failed: %s", span.Key, span.EndKey, err.String())
+							log.Errorf(ctx, "delete range %s - %s failed: %v", span.Key, span.EndKey, err)
 							return errors.Wrapf(err.GoError(), "delete range %s - %s", span.Key, span.EndKey)
 						}
 						span = nil

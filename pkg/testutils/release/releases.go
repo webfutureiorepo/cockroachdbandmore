@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package release
 
@@ -54,6 +49,62 @@ func parseReleases() (map[string]Series, error) {
 	}
 
 	return result, nil
+}
+
+// WithReleaseData overwrites the release mapping while the function
+// passed runs. Only used for tests and, needless to say, it is not
+// safe for concurrent use.
+func WithReleaseData(data map[string]Series, fn func() error) error {
+	oldReleaseData := releaseData
+	releaseData = data
+	defer func() {
+		releaseData = oldReleaseData
+	}()
+
+	return fn()
+}
+
+// IsWithdrawn returns whether the given version is known to be a
+// withdrawn release. Returns an error for invalid or unknown versions.
+func IsWithdrawn(v *version.Version) (bool, error) {
+	series, ok := releaseData[VersionSeries(v)]
+	if !ok {
+		return false, fmt.Errorf("no release data for version %s", v)
+	}
+
+	for _, w := range series.Withdrawn {
+		if fmt.Sprintf("v%s", w) == v.String() {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// MajorReleasesBetween returns the number of major releases between
+// any two versions passed. Returns an error when there is no
+// predecessor information for a release in the chain (which should
+// only happen if one of the versions passed is very old).
+func MajorReleasesBetween(v1, v2 *version.Version) (int, error) {
+	older, newer := v1, v2
+	if v1.AtLeast(v2) {
+		older, newer = v2, v1
+	}
+
+	var count int
+	currentSeries := VersionSeries(newer)
+
+	for currentSeries != VersionSeries(older) {
+		count++
+		seriesData, ok := releaseData[currentSeries]
+		if !ok {
+			return -1, fmt.Errorf("no release data for release series: %s", currentSeries)
+		}
+
+		currentSeries = seriesData.Predecessor
+	}
+
+	return count, nil
 }
 
 // LatestPatch returns the latest non-withdrawn patch release of
@@ -169,7 +220,7 @@ func activePatchReleases(releaseSeries Series) []string {
 // version passed. Returns an error if the data is not available.
 func predecessorSeries(v *version.Version) (Series, error) {
 	var empty Series
-	seriesStr := versionSeries(v)
+	seriesStr := VersionSeries(v)
 	series, ok := releaseData[seriesStr]
 	if !ok {
 		return empty, fmt.Errorf("no release information for %q (%q series)", v, seriesStr)
@@ -191,6 +242,6 @@ func mustParseVersion(str string) *version.Version {
 	return version.MustParse("v" + str)
 }
 
-func versionSeries(v *version.Version) string {
+func VersionSeries(v *version.Version) string {
 	return fmt.Sprintf("%d.%d", v.Major(), v.Minor())
 }

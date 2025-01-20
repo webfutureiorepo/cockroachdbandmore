@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package resolver
 
@@ -207,6 +202,8 @@ func ResolveExistingObject(
 				return nil, prefix, sqlerrors.NewUndefinedRelationError(un)
 			case tree.TypeObject:
 				return nil, prefix, sqlerrors.NewUndefinedTypeError(un)
+			case tree.AnyObject:
+				return nil, prefix, sqlerrors.NewUndefinedObjectError(un)
 			default:
 				return nil, prefix, errors.AssertionFailedf("unknown object kind %d", lookupFlags.DesiredObjectKind)
 			}
@@ -254,6 +251,8 @@ func ResolveExistingObject(
 		}
 
 		return obj.(catalog.TableDescriptor), prefix, nil
+	case tree.AnyObject:
+		return obj, prefix, nil
 	default:
 		return nil, prefix, errors.AssertionFailedf(
 			"unknown desired object kind %d", lookupFlags.DesiredObjectKind)

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 // APIs for distributed SQL; see docs/RFCS/distributed_sql.md
 
@@ -30,6 +25,7 @@ message SetupFlowRequest {
   reserved 1, 2;
 
   optional util.tracing.tracingpb.TraceInfo trace_info = 11;
+  // JobTag is only populated in distributed flows.
   optional string job_tag = 13 [(gogoproto.nullable) = false];
 
   // LeafTxnInputState is the input parameter for the *kv.Txn needed for
@@ -42,10 +38,12 @@ message SetupFlowRequest {
   // Version of distsqlrun protocol; a server accepts a certain range of
   // versions, up to its own version. See server.go for more details.
   optional uint32 version = 5 [(gogoproto.nullable) = false,
-    (gogoproto.casttype) = "DistSQLVersion"];
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/execversion.V"];
 
   optional FlowSpec flow = 3 [(gogoproto.nullable) = false];
 
+  // EvalContext contains a subset of the eval.Context that needs to be sent to
+  // remote nodes for proper execution.
   optional EvalContext eval_context = 6 [(gogoproto.nullable) = false];
 
   optional bool trace_kv = 8 [(gogoproto.nullable) = false,
@@ -126,11 +124,7 @@ message ConsumerHandshake {
   // dealine, this stream will be disconnected by the server-side.
   optional google.protobuf.Timestamp consumer_schedule_deadline = 2 [(gogoproto.stdtime) = true];
 
-  // The server's DistSQL version range.
-  optional uint32 version = 3 [(gogoproto.nullable) = false,
-    (gogoproto.casttype) = "DistSQLVersion"];
-  optional uint32 min_accepted_version = 4 [(gogoproto.nullable) = false,
-    (gogoproto.casttype) = "DistSQLVersion"];
+  reserved 3, 4;
 }
 
 // CancelDeadFlowsRequest is a request to cancel some flows that are running on

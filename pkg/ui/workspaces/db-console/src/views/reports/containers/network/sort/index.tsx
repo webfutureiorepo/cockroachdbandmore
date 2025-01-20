@@ -1,22 +1,16 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { Checkbox, Divider } from "antd";
-import "antd/lib/checkbox/style";
-import "antd/lib/divider/style";
-import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
 import React from "react";
 import { RouteComponentProps, withRouter } from "react-router-dom";
 
 import { trackNetworkSort } from "src/util/analytics";
 import { getMatchParamByName } from "src/util/query";
+import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
+
 import { NetworkFilter, NetworkSort } from "..";
 import { Filter } from "../filter";
 import "./sort.styl";

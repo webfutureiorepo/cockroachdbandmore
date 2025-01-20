@@ -1,16 +1,12 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package partition
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -25,10 +21,9 @@ import (
 )
 
 func TestPrefixSorter(t *testing.T) {
-
 	defer leaktest.AfterTest(t)()
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := eval.MakeTestingEvalContext(st)
+	ctx := context.Background()
+	evalCtx := eval.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	const (
 		local  = true
 		remote = false
@@ -109,7 +104,7 @@ func TestPrefixSorter(t *testing.T) {
 			index := &testcat.Index{}
 			index.SetPartitions(partitions)
 			// Make the PrefixSorter.
-			ps := GetSortedPrefixes(index, localPartitions, &evalCtx)
+			ps := GetSortedPrefixes(ctx, index, localPartitions, &evalCtx)
 
 			// Run the tests.
 			if res := ps.String(); res != tc.expected {

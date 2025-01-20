@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kv
 
@@ -97,6 +92,7 @@ type kv struct {
 	keySize                              int
 	insertCount                          int
 	txnQoS                               string
+	prepareReadOnly                      bool
 }
 
 func init() {
@@ -122,16 +118,17 @@ var kvMeta = workload.Meta{
 		g := &kv{}
 		g.flags.FlagSet = pflag.NewFlagSet(`kv`, pflag.ContinueOnError)
 		g.flags.Meta = map[string]workload.FlagMeta{
-			`batch`:          {RuntimeOnly: true},
-			`sfu-wait-delay`: {RuntimeOnly: true},
-			`sfu-writes`:     {RuntimeOnly: true},
-			`read-percent`:   {RuntimeOnly: true},
-			`span-percent`:   {RuntimeOnly: true},
-			`span-limit`:     {RuntimeOnly: true},
-			`del-percent`:    {RuntimeOnly: true},
-			`splits`:         {RuntimeOnly: true},
-			`scatter`:        {RuntimeOnly: true},
-			`timeout`:        {RuntimeOnly: true},
+			`batch`:             {RuntimeOnly: true},
+			`sfu-wait-delay`:    {RuntimeOnly: true},
+			`sfu-writes`:        {RuntimeOnly: true},
+			`read-percent`:      {RuntimeOnly: true},
+			`span-percent`:      {RuntimeOnly: true},
+			`span-limit`:        {RuntimeOnly: true},
+			`del-percent`:       {RuntimeOnly: true},
+			`splits`:            {RuntimeOnly: true},
+			`scatter`:           {RuntimeOnly: true},
+			`timeout`:           {RuntimeOnly: true},
+			`prepare-read-only`: {RuntimeOnly: true},
 		}
 		g.flags.IntVar(&g.batchSize, `batch`, 1,
 			`Number of blocks to read/insert in a single SQL statement.`)
@@ -185,6 +182,7 @@ var kvMeta = workload.Meta{
 		g.flags.StringVar(&g.txnQoS, `txn-qos`, `regular`,
 			`Set default_transaction_quality_of_service session variable, accepted`+
 				`values are 'background', 'regular' and 'critical'.`)
+		g.flags.BoolVar(&g.prepareReadOnly, `prepare-read-only`, false, `Prepare and perform only read statements.`)
 		g.connFlags = workload.NewConnFlags(&g.flags)
 		return g
 	},
@@ -195,6 +193,9 @@ func (*kv) Meta() workload.Meta { return kvMeta }
 
 // Flags implements the Flagser interface.
 func (w *kv) Flags() workload.Flags { return w.flags }
+
+// ConnFlags implements the ConnFlagser interface.
+func (w *kv) ConnFlags() *workload.ConnFlags { return w.connFlags }
 
 // Hooks implements the Hookser interface.
 func (w *kv) Hooks() workload.Hooks {
@@ -244,6 +245,9 @@ func (w *kv) validateConfig() (err error) {
 	}
 	if w.readPercent+w.spanPercent+w.delPercent > 100 {
 		return errors.New("'read-percent', 'span-percent' and 'del-precent' combined exceed 100%")
+	}
+	if w.prepareReadOnly && w.readPercent < 100 {
+		return errors.New("'prepare-read-only' can only be used with 'read-percent' set to 100")
 	}
 	if w.targetCompressionRatio < 1.0 || math.IsNaN(w.targetCompressionRatio) {
 		return errors.New("'target-compression-ratio' must be a number >= 1.0")
@@ -446,10 +450,6 @@ func (w *kv) Tables() []workload.Table {
 func (w *kv) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	cfg := workload.NewMultiConnPoolCfgFromFlags(w.connFlags)
 	cfg.MaxTotalConnections = w.connFlags.Concurrency + 1
 	mcp, err := workload.NewMultiConnPool(ctx, cfg, urls...)
@@ -534,7 +534,7 @@ func (w *kv) Ops(
 	delStmtStr := buf.String()
 
 	gen, _, kt, _ := w.createKeyGenerator()
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	var numEmptyResults atomic.Int64
 	for i := 0; i < w.connFlags.Concurrency; i++ {
 		op := &kvOp{
@@ -544,8 +544,10 @@ func (w *kv) Ops(
 		}
 		op.readStmt = op.sr.Define(readStmtStr)
 		op.followerReadStmt = op.sr.Define(followerReadStmtStr)
-		op.writeStmt = op.sr.Define(writeStmtStr)
-		if len(sfuStmtStr) > 0 {
+		if !op.config.prepareReadOnly {
+			op.writeStmt = op.sr.Define(writeStmtStr)
+		}
+		if len(sfuStmtStr) > 0 && !op.config.prepareReadOnly {
 			op.sfuStmt = op.sr.Define(sfuStmtStr)
 		}
 		op.spanStmt = op.sr.Define(spanStmtStr)
@@ -554,7 +556,9 @@ func (w *kv) Ops(
 				" SET default_transaction_quality_of_service = %s", w.txnQoS))
 			op.qosStmt = &stmt
 		}
-		op.delStmt = op.sr.Define(delStmtStr)
+		if !op.config.prepareReadOnly {
+			op.delStmt = op.sr.Define(delStmtStr)
+		}
 		if err := op.sr.Init(ctx, "kv", mcp); err != nil {
 			return workload.QueryLoad{}, err
 		}
@@ -605,9 +609,11 @@ func (o *kvOp) run(ctx context.Context) (retErr error) {
 		}
 		start := timeutil.Now()
 		readStmt := o.readStmt
+		opName := `read`
 
 		if o.g.rand().Intn(100) < o.config.followerReadPercent {
 			readStmt = o.followerReadStmt
+			opName = `follower-read`
 		}
 		rows, err := readStmt.Query(ctx, args...)
 		if err != nil {
@@ -621,7 +627,7 @@ func (o *kvOp) run(ctx context.Context) (retErr error) {
 			o.numEmptyResults.Add(1)
 		}
 		elapsed := timeutil.Since(start)
-		o.hists.Get(`read`).Record(elapsed)
+		o.hists.Get(opName).Record(elapsed)
 		return rows.Err()
 	}
 	// Since we know the statement is not a read, we recalibrate

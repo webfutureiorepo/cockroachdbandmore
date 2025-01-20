@@ -1,48 +1,46 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React, { useEffect, useState } from "react";
+import { InlineAlert } from "@cockroachlabs/ui-components";
 import classNames from "classnames/bind";
+import moment, { Moment } from "moment-timezone";
+import React, { useEffect, useState } from "react";
 import { useHistory } from "react-router-dom";
-import {
-  ISortedTablePagination,
-  SortSetting,
-} from "src/sortedtable/sortedtable";
-import { Loading } from "src/loading/loading";
-import { PageConfig, PageConfigItem } from "src/pageConfig/pageConfig";
-import { Search } from "src/search/search";
+
 import {
   ActiveTransaction,
   ActiveStatementFilters,
   ActiveTransactionFilters,
   ExecutionStatus,
 } from "src/activeExecutions";
+import { ActiveTransactionsSection } from "src/activeExecutions/activeTransactionsSection";
+import { RefreshControl } from "src/activeExecutions/refreshControl";
+import { Loading } from "src/loading/loading";
+import { PageConfig, PageConfigItem } from "src/pageConfig/pageConfig";
+import { Pagination } from "src/pagination";
+import { getActiveTransactionFiltersFromURL } from "src/queryFilter/utils";
+import { Search } from "src/search/search";
+import { getTableSortFromURL } from "src/sortedtable/getTableSortFromURL";
+import {
+  ISortedTablePagination,
+  SortSetting,
+} from "src/sortedtable/sortedtable";
 import LoadingError from "src/sqlActivity/errorComponent";
+import { queryByName, syncHistory } from "src/util/query";
+
+import {
+  filterActiveTransactions,
+  getAppsFromActiveExecutions,
+} from "../activeExecutions/activeStatementUtils";
 import {
   calculateActiveFilters,
   Filter,
   getFullFiltersAsStringRecord,
   inactiveFiltersState,
 } from "../queryFilter";
-import { getAppsFromActiveExecutions } from "../activeExecutions/activeStatementUtils";
-import { ActiveTransactionsSection } from "src/activeExecutions/activeTransactionsSection";
-import { Pagination } from "src/pagination";
-
 import styles from "../statementsPage/statementsPage.module.scss";
-import { queryByName, syncHistory } from "src/util/query";
-import { getTableSortFromURL } from "src/sortedtable/getTableSortFromURL";
-import { getActiveTransactionFiltersFromURL } from "src/queryFilter/utils";
-import { filterActiveTransactions } from "../activeExecutions/activeStatementUtils";
-import { InlineAlert } from "@cockroachlabs/ui-components";
-import { RefreshControl } from "src/activeExecutions/refreshControl";
-import moment, { Moment } from "moment-timezone";
 
 const cx = classNames.bind(styles);
 
@@ -218,6 +216,7 @@ export const ActiveTransactionsView: React.FC<ActiveTransactionsViewProps> = ({
   const onSubmitToggleAutoRefresh = () => {
     // Refresh immediately when toggling auto-refresh on.
     if (!isAutoRefreshEnabled) {
+      setDisplayRefreshAlert(false);
       refreshLiveWorkload();
     }
     onAutoRefreshToggle(!isAutoRefreshEnabled);

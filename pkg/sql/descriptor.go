@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -63,7 +58,7 @@ func (p *planner) createDatabase(
 	if dbID, err := p.Descriptors().LookupDatabaseID(ctx, p.txn, dbName); err == nil && dbID != descpb.InvalidID {
 		if database.IfNotExists {
 			// Check if the database is in a dropping state
-			desc, err := p.Descriptors().ByID(p.txn).Get().Database(ctx, dbID)
+			desc, err := p.Descriptors().ByIDWithoutLeased(p.txn).Get().Database(ctx, dbID)
 			if err != nil {
 				return nil, false, err
 			}
@@ -139,7 +134,7 @@ func (p *planner) createDatabase(
 		ParentID:   id,
 		Name:       catconstants.PublicSchemaName,
 		ID:         publicSchemaID,
-		Privileges: catpb.NewPublicSchemaPrivilegeDescriptor(includeCreatePriv),
+		Privileges: catpb.NewPublicSchemaPrivilegeDescriptor(owner, includeCreatePriv),
 		Version:    1,
 	}).BuildCreatedMutableSchema()
 
@@ -191,11 +186,6 @@ func (p *planner) createDatabase(
 			return nil, false, err
 		}
 
-	}
-
-	// TODO(jeffswenson): delete once region_livess is implemented (#107966)
-	if err := p.maybeUpdateSystemDBSurvivalGoal(ctx); err != nil {
-		return nil, false, err
 	}
 
 	return db, true, nil
@@ -292,7 +282,11 @@ func (p *planner) checkRegionIsCurrentlyActive(
 ) error {
 	var liveRegions LiveClusterRegions
 	if !p.execCfg.Codec.ForSystemTenant() && isSystemDatabase {
-		systemRegions, err := p.regionsProvider().GetSystemRegions(ctx)
+		provider := p.regionsProvider()
+		if provider == nil {
+			return errors.AssertionFailedf("no regions provider available")
+		}
+		systemRegions, err := provider.GetSystemRegions(ctx)
 		if err != nil {
 			return err
 		}
@@ -342,7 +336,7 @@ var SecondaryTenantsMultiRegionAbstractionsEnabled = settings.RegisterBoolSettin
 	settings.SystemVisible,
 	"sql.multi_region.allow_abstractions_for_secondary_tenants.enabled", // internal key, name defined above
 	"allow the use of multi-region abstractions and syntax in virtual clusters",
-	false,
+	true,
 	settings.WithName(SecondaryTenantsMultiRegionAbstractionsEnabledSettingName),
 )
 

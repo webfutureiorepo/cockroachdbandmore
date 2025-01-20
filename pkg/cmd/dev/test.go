@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -180,6 +175,7 @@ func (d *dev) test(cmd *cobra.Command, commandLine []string) error {
 		extraRewritablePaths = []struct{ pkg, path string }{
 			{"pkg/ccl/logictestccl", "pkg/sql/logictest"},
 			{"pkg/ccl/logictestccl", "pkg/sql/opt/exec/execbuilder"},
+			{"pkg/ccl/schemachangerccl", "pkg/sql/schemachanger/testdata"},
 			{"pkg/sql/opt/memo", "pkg/sql/opt/testutils/opttester/testfixtures"},
 			{"pkg/sql/opt/norm", "pkg/sql/opt/testutils/opttester/testfixtures"},
 			{"pkg/sql/opt/xform", "pkg/sql/opt/testutils/opttester/testfixtures"},
@@ -229,9 +225,7 @@ func (d *dev) test(cmd *cobra.Command, commandLine []string) error {
 	var args []string
 	var goTags []string
 	args = append(args, "test")
-	if numCPUs != 0 {
-		args = append(args, fmt.Sprintf("--local_cpu_resources=%d", numCPUs))
-	}
+	addCommonBazelArguments(&args)
 	if race {
 		args = append(args, "--config=race", "--test_sharding_strategy=disabled")
 	}

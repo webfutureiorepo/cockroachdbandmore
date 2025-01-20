@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstreamer_test
 
@@ -45,9 +40,9 @@ SELECT
     c.*
 FROM
     crdb_internal.jobs AS j
-    INNER LOOKUP JOIN system.comments AS c ON c.type = (j.num_runs - 1)::INT8
+    INNER LOOKUP JOIN system.comments AS c ON c.type = (j.coordinator_id - 1)::INT8
 WHERE
-    j.num_runs = 1;
+    j.coordinator_id = 1;
 `)
 	runner.Exec(t, "SET tracing = off")
 

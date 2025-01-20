@@ -1,18 +1,17 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { chain, orderBy } from "lodash";
-import { createSelector } from "reselect";
-import { AdminUIState } from "src/redux/state";
 import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
+import flow from "lodash/flow";
+import groupBy from "lodash/groupBy";
+import mapValues from "lodash/mapValues";
+import orderBy from "lodash/orderBy";
 import moment from "moment-timezone";
+import { createSelector } from "reselect";
+
+import { AdminUIState } from "src/redux/state";
 
 export const selectStatementByFingerprint = createSelector(
   (state: AdminUIState) => state.cachedData.statements.data?.statements,
@@ -59,11 +58,14 @@ export const selectDiagnosticsReportsPerStatement = createSelector(
   selectStatementDiagnosticsReports,
   (
     diagnosticsReports: clusterUiApi.StatementDiagnosticsReport[],
-  ): StatementDiagnosticsDictionary =>
-    chain(diagnosticsReports)
-      .groupBy(diagnosticsReport => diagnosticsReport.statement_fingerprint)
-      .mapValues(diagnostics =>
-        orderBy(diagnostics, d => moment(d.requested_at).unix(), ["desc"]),
-      )
-      .value(),
+  ): StatementDiagnosticsDictionary => {
+    return flow(
+      (reports: clusterUiApi.StatementDiagnosticsReport[]) =>
+        groupBy(reports, report => report.statement_fingerprint),
+      diagnosticsByFingerprint =>
+        mapValues(diagnosticsByFingerprint, diagnostics =>
+          orderBy(diagnostics, d => moment(d.requested_at).unix(), ["desc"]),
+        ),
+    )(diagnosticsReports);
+  },
 );

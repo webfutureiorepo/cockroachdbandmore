@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package schemaexpr
 
@@ -19,10 +14,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinsregistry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // DequalifyColumnRefs returns a serialized expression with database and table
@@ -83,6 +81,7 @@ func FormatColumnForDisplay(
 	ctx context.Context,
 	tbl catalog.TableDescriptor,
 	col catalog.Column,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	redactableValues bool,
@@ -119,7 +118,7 @@ func FormatColumnForDisplay(
 
 		} else {
 			f.WriteString(" DEFAULT ")
-			defExpr, err := FormatExprForDisplay(ctx, tbl, col.GetDefaultExpr(), semaCtx, sessionData, fmtFlags)
+			defExpr, err := FormatExprForDisplay(ctx, tbl, col.GetDefaultExpr(), evalCtx, semaCtx, sessionData, fmtFlags)
 			if err != nil {
 				return "", err
 			}
@@ -128,7 +127,7 @@ func FormatColumnForDisplay(
 	}
 	if col.HasOnUpdate() {
 		f.WriteString(" ON UPDATE ")
-		onUpdateExpr, err := FormatExprForDisplay(ctx, tbl, col.GetOnUpdateExpr(), semaCtx, sessionData, fmtFlags)
+		onUpdateExpr, err := FormatExprForDisplay(ctx, tbl, col.GetOnUpdateExpr(), evalCtx, semaCtx, sessionData, fmtFlags)
 		if err != nil {
 			return "", err
 		}
@@ -136,7 +135,7 @@ func FormatColumnForDisplay(
 	}
 	if col.IsComputed() {
 		f.WriteString(" AS (")
-		compExpr, err := FormatExprForDisplay(ctx, tbl, col.GetComputeExpr(), semaCtx, sessionData, fmtFlags)
+		compExpr, err := FormatExprForDisplay(ctx, tbl, col.GetComputeExpr(), evalCtx, semaCtx, sessionData, fmtFlags)
 		if err != nil {
 			return "", err
 		}
@@ -262,6 +261,8 @@ func (d *dummyColumn) ResolvedType() *types.T {
 	return d.typ
 }
 
+type ColumnLookupFn func(columnName tree.Name) (exists bool, accessible bool, id catid.ColumnID, typ *types.T)
+
 // ReplaceColumnVars replaces the occurrences of column names in an expression with
 // dummyColumns containing their type, so that they may be type-checked. It
 // returns this new expression tree alongside a set containing the ColumnID of
@@ -273,8 +274,7 @@ func (d *dummyColumn) ResolvedType() *types.T {
 // The column lookup function allows looking up columns both in the descriptor
 // or in declarative schema changer elements.
 func ReplaceColumnVars(
-	rootExpr tree.Expr,
-	columnLookupFn func(columnName tree.Name) (exists bool, accessible bool, id catid.ColumnID, typ *types.T),
+	rootExpr tree.Expr, columnLookupFn ColumnLookupFn,
 ) (tree.Expr, catalog.TableColSet, error) {
 	var colIDs catalog.TableColSet
 
@@ -311,20 +311,6 @@ func ReplaceColumnVars(
 	})
 
 	return newExpr, colIDs, err
-}
-
-// replaceColumnVars is a convenience function for ReplaceColumnVars.
-func replaceColumnVars(
-	tbl catalog.TableDescriptor, rootExpr tree.Expr,
-) (tree.Expr, catalog.TableColSet, error) {
-	lookupFn := func(columnName tree.Name) (exists bool, accessible bool, id catid.ColumnID, typ *types.T) {
-		col, err := catalog.MustFindColumnByTreeName(tbl, columnName)
-		if err != nil || col.Dropped() {
-			return false, false, 0, nil
-		}
-		return true, !col.IsInaccessible(), col.GetID(), col.GetType()
-	}
-	return ReplaceColumnVars(rootExpr, lookupFn)
 }
 
 // ReplaceSequenceIDsWithFQNames walks the given expr and replaces occurrences
@@ -397,4 +383,33 @@ func formatGeneratedAsIdentitySequenceOption(seqOpt string) string {
 		return ""
 	}
 	return fmt.Sprintf(" (%s)", seqOpt)
+}
+
+// wrapWithAssignmentCast wraps the given typed expression with an assignment
+// cast to the given column's type if the expression's type is not identical to
+// the column's type.
+func wrapWithAssignmentCast(
+	ctx context.Context, typedExpr tree.TypedExpr, col catalog.Column, semaCtx *tree.SemaContext,
+) (tree.TypedExpr, error) {
+	origExpr := typedExpr
+	if !typedExpr.ResolvedType().Identical(col.GetType()) {
+		const fnName = "crdb_internal.assignment_cast"
+		funcRef := tree.WrapFunction(fnName)
+		props, overloads := builtinsregistry.GetBuiltinProperties(fnName)
+		var err error
+		if typedExpr, err = tree.TypeCheck(ctx, tree.NewTypedFuncExpr(
+			funcRef,
+			0, /* aggQualifier */
+			tree.TypedExprs{typedExpr, tree.NewTypedCastExpr(tree.DNull, col.GetType())},
+			nil, /* filter */
+			nil, /* windowDef */
+			col.GetType(),
+			props,
+			&overloads[0],
+		), semaCtx, col.GetType()); err != nil {
+			return nil, errors.NewAssertionErrorWithWrappedErrf(err,
+				"failed to type check the cast of %v to %v", origExpr, col.GetType())
+		}
+	}
+	return typedExpr, nil
 }

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package ssmemstorage
 
@@ -71,7 +66,6 @@ func (s *StmtStatsIterator) Next() bool {
 
 	stmtKey := s.stmtKeys[s.idx]
 
-	stmtFingerprintID := constructStatementFingerprintIDFromStmtKey(stmtKey)
 	statementStats, _, _ :=
 		s.container.getStatsForStmtWithKey(stmtKey, invalidStmtFingerprintID, false /* createIfNonexistent */)
 
@@ -99,13 +93,12 @@ func (s *StmtStatsIterator) Next() bool {
 			Vec:                      vectorized,
 			ImplicitTxn:              stmtKey.implicitTxn,
 			FullScan:                 fullScan,
-			Failed:                   stmtKey.failed,
 			App:                      s.container.appName,
 			Database:                 database,
 			PlanHash:                 stmtKey.planHash,
 			TransactionFingerprintID: stmtKey.transactionFingerprintID,
 		},
-		ID:    stmtFingerprintID,
+		ID:    statementStats.ID,
 		Stats: data,
 	}
 

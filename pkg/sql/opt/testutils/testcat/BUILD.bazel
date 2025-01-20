@@ -15,6 +15,7 @@ go_library(
         "set_zone_config.go",
         "table_expr.go",
         "test_catalog.go",
+        "trigger.go",
         "types.go",
         "vtable.go",
     ],
@@ -34,7 +35,6 @@ go_library(
         "//pkg/sql/catalog/tabledesc",
         "//pkg/sql/catalog/typedesc",
         "//pkg/sql/enum",
-        "//pkg/sql/oidext",
         "//pkg/sql/opt/cat",
         "//pkg/sql/parser",
         "//pkg/sql/parser/statements",
@@ -68,10 +68,6 @@ go_test(
     size = "small",
     srcs = ["test_catalog_test.go"],
     data = glob(["testdata/**"]),
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         ":testcat",
         "//pkg/sql/opt/testutils/opttester",

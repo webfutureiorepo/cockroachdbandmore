@@ -1,30 +1,29 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import debounce from "lodash/debounce";
+import isEmpty from "lodash/isEmpty";
 import React from "react";
 import { Link } from "react-router-dom";
+
+import { cockroach } from "src/js/protos";
+import { LocalityTier, LocalityTree } from "src/redux/localities";
+import { LocationTree } from "src/redux/locations";
+import { LivenessStatus } from "src/redux/nodes";
+import { CLUSTERVIZ_ROOT } from "src/routes/visualization";
+import { generateLocalityRoute, getLocalityLabel } from "src/util/localities";
+import { trustIcon } from "src/util/trust";
+import InstructionsBox, {
+  showInstructionsBox,
+} from "src/views/clusterviz/components/instructionsBox";
 
 import { CircleLayout } from "./circleLayout";
 import { renderAsMap } from "./layout";
 import { MapLayout } from "./mapLayout";
 
-import { LivenessStatus } from "src/redux/nodes";
-import { LocalityTier, LocalityTree } from "src/redux/localities";
-import { LocationTree } from "src/redux/locations";
-import { CLUSTERVIZ_ROOT } from "src/routes/visualization";
-import { generateLocalityRoute, getLocalityLabel } from "src/util/localities";
 import arrowUpIcon from "!!raw-loader!assets/arrowUp.svg";
-import { trustIcon } from "src/util/trust";
-import { cockroach } from "src/js/protos";
-import InstructionsBox, {
-  showInstructionsBox,
-} from "src/views/clusterviz/components/instructionsBox";
 
 type Liveness = cockroach.kv.kvserver.liveness.livenesspb.ILiveness;
 
@@ -53,7 +52,7 @@ export class NodeCanvas extends React.Component<
     super(props);
 
     // Add debounced resize listener.
-    this.debouncedOnResize = _.debounce(this.onResize, 200);
+    this.debouncedOnResize = debounce(this.onResize, 200);
   }
 
   updateViewport = () => {
@@ -110,7 +109,7 @@ export class NodeCanvas extends React.Component<
   renderBackButton() {
     const { tiers } = this.props;
 
-    if (!this.state || _.isEmpty(tiers)) {
+    if (!this.state || isEmpty(tiers)) {
       return null;
     }
 

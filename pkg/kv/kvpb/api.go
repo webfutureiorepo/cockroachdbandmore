@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvpb
 
@@ -30,7 +25,7 @@ import (
 	"github.com/dustin/go-humanize"
 )
 
-//go:generate mockgen -package=kvpbmock -destination=kvpbmock/mocks_generated.go . InternalClient,Internal_RangeFeedClient,Internal_MuxRangeFeedClient
+//go:generate mockgen -package=kvpbmock -destination=kvpbmock/mocks_generated.go . InternalClient,Internal_MuxRangeFeedClient
 
 // SupportsBatch determines whether the methods in the provided batch
 // are supported by the ReadConsistencyType, returning an error if not.
@@ -75,15 +70,19 @@ const (
 	canSkipLocked                                             // commands which can evaluate under the SkipLocked wait policy
 	bypassesReplicaCircuitBreaker                             // commands which bypass the replica circuit breaker, i.e. opt out of fail-fast
 	requiresClosedTSOlderThanStorageSnapshot                  // commands which read a replica's closed timestamp that is older than the state of the storage engine
+	canPipeline                                               // commands which can be pipelined
+	canParallelCommit                                         // commands which can be part of a parallel commit batch
 )
 
 // flagDependencies specifies flag dependencies, asserted by TestFlagCombinations.
 var flagDependencies = map[flag][]flag{
-	isAdmin:         {isAlone},
-	isLocking:       {isTxn},
-	isIntentWrite:   {isWrite, isLocking},
-	appliesTSCache:  {isWrite},
-	skipsLeaseCheck: {isAlone},
+	isAdmin:           {isAlone},
+	isLocking:         {isTxn},
+	isIntentWrite:     {isWrite, isLocking},
+	canPipeline:       {isLocking},
+	canParallelCommit: {canPipeline, isIntentWrite},
+	appliesTSCache:    {isWrite},
+	skipsLeaseCheck:   {isAlone},
 }
 
 // flagExclusions specifies flag incompatibilities, asserted by TestFlagCombinations.
@@ -178,6 +177,17 @@ func CanSkipLocked(args Request) bool {
 // addressed to an unavailable range (instead of failing fast).
 func BypassesReplicaCircuitBreaker(args Request) bool {
 	return (args.flags() & bypassesReplicaCircuitBreaker) != 0
+}
+
+// CanPipeline returns true iff the command can be pipelined.
+func CanPipeline(args Request) bool {
+	return (args.flags() & canPipeline) != 0
+}
+
+// CanParallelCommit returns true iff the command can be part of a batch that is
+// committed in parallel.
+func CanParallelCommit(args Request) bool {
+	return (args.flags() & canParallelCommit) != 0
 }
 
 // Request is an interface for RPC requests.
@@ -358,6 +368,8 @@ type Response interface {
 	Header() ResponseHeader
 	// SetHeader sets the response header.
 	SetHeader(ResponseHeader)
+	// ShallowCopy returns a shallow copy of the receiver.
+	ShallowCopy() Response
 	// Verify verifies response integrity, as applicable.
 	Verify(req Request) error
 }
@@ -956,6 +968,9 @@ func (*AdminScatterRequest) Method() Method { return AdminScatter }
 func (*AddSSTableRequest) Method() Method { return AddSSTable }
 
 // Method implements the Request interface.
+func (*LinkExternalSSTableRequest) Method() Method { return LinkExternalSSTable }
+
+// Method implements the Request interface.
 func (*MigrateRequest) Method() Method { return Migrate }
 
 // Method implements the Request interface.
@@ -1216,6 +1231,12 @@ func (r *AddSSTableRequest) ShallowCopy() Request {
 }
 
 // ShallowCopy implements the Request interface.
+func (r *LinkExternalSSTableRequest) ShallowCopy() Request {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
 func (r *MigrateRequest) ShallowCopy() Request {
 	shallowCopy := *r
 	return &shallowCopy
@@ -1271,6 +1292,298 @@ func (r *BarrierRequest) ShallowCopy() Request {
 
 // ShallowCopy implements the Request interface.
 func (r *IsSpanEmptyRequest) ShallowCopy() Request {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (gr *GetResponse) ShallowCopy() Response {
+	shallowCopy := *gr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (pr *PutResponse) ShallowCopy() Response {
+	shallowCopy := *pr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (cpr *ConditionalPutResponse) ShallowCopy() Response {
+	shallowCopy := *cpr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (pr *InitPutResponse) ShallowCopy() Response {
+	shallowCopy := *pr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (ir *IncrementResponse) ShallowCopy() Response {
+	shallowCopy := *ir
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (dr *DeleteResponse) ShallowCopy() Response {
+	shallowCopy := *dr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (drr *DeleteRangeResponse) ShallowCopy() Response {
+	shallowCopy := *drr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (crr *ClearRangeResponse) ShallowCopy() Response {
+	shallowCopy := *crr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (crr *RevertRangeResponse) ShallowCopy() Response {
+	shallowCopy := *crr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (sr *ScanResponse) ShallowCopy() Response {
+	shallowCopy := *sr
+	shallowCopy.BatchResponses = append([][]byte(nil), sr.BatchResponses...)
+	shallowCopy.ColBatches.ColBatches = append([]coldata.Batch(nil), sr.ColBatches.ColBatches...)
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (rsr *ReverseScanResponse) ShallowCopy() Response {
+	shallowCopy := *rsr
+	shallowCopy.BatchResponses = append([][]byte(nil), rsr.BatchResponses...)
+	shallowCopy.ColBatches.ColBatches = append([]coldata.Batch(nil), rsr.ColBatches.ColBatches...)
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (ccr *CheckConsistencyResponse) ShallowCopy() Response {
+	shallowCopy := *ccr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (etr *EndTxnResponse) ShallowCopy() Response {
+	shallowCopy := *etr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (asr *AdminSplitResponse) ShallowCopy() Response {
+	shallowCopy := *asr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (aur *AdminUnsplitResponse) ShallowCopy() Response {
+	shallowCopy := *aur
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (amr *AdminMergeResponse) ShallowCopy() Response {
+	shallowCopy := *amr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (atlr *AdminTransferLeaseResponse) ShallowCopy() Response {
+	shallowCopy := *atlr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (acrr *AdminChangeReplicasResponse) ShallowCopy() Response {
+	shallowCopy := *acrr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (acrr *AdminRelocateRangeResponse) ShallowCopy() Response {
+	shallowCopy := *acrr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (htr *HeartbeatTxnResponse) ShallowCopy() Response {
+	shallowCopy := *htr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (gcr *GCResponse) ShallowCopy() Response {
+	shallowCopy := *gcr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (ptr *PushTxnResponse) ShallowCopy() Response {
+	shallowCopy := *ptr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (rtr *RecoverTxnResponse) ShallowCopy() Response {
+	shallowCopy := *rtr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (qtr *QueryTxnResponse) ShallowCopy() Response {
+	shallowCopy := *qtr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (pir *QueryIntentResponse) ShallowCopy() Response {
+	shallowCopy := *pir
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (pir *QueryLocksResponse) ShallowCopy() Response {
+	shallowCopy := *pir
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (rir *ResolveIntentResponse) ShallowCopy() Response {
+	shallowCopy := *rir
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (rirr *ResolveIntentRangeResponse) ShallowCopy() Response {
+	shallowCopy := *rirr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (mr *MergeResponse) ShallowCopy() Response {
+	shallowCopy := *mr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (tlr *TruncateLogResponse) ShallowCopy() Response {
+	shallowCopy := *tlr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (rlr *RequestLeaseResponse) ShallowCopy() Response {
+	shallowCopy := *rlr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *ProbeResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (lt *LeaseInfoResponse) ShallowCopy() Response {
+	shallowCopy := *lt
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (ccr *ComputeChecksumResponse) ShallowCopy() Response {
+	shallowCopy := *ccr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (ekr *ExportResponse) ShallowCopy() Response {
+	shallowCopy := *ekr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *AdminScatterResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *AddSSTableResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *LinkExternalSSTableResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *MigrateResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *RecomputeStatsResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *RefreshResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *RefreshRangeResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *SubsumeResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *RangeStatsResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *AdminVerifyProtectedTimestampResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *QueryResolvedTimestampResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *BarrierResponse) ShallowCopy() Response {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Response interface.
+func (r *IsSpanEmptyResponse) ShallowCopy() Response {
 	shallowCopy := *r
 	return &shallowCopy
 }
@@ -1374,22 +1687,6 @@ func NewConditionalPutInline(
 		ExpBytes:            expValue,
 		AllowIfDoesNotExist: allowNotExist,
 		Inline:              true,
-	}
-}
-
-// NewInitPut returns a Request initialized to put the value at key, as long as
-// the key doesn't exist, returning a ConditionFailedError if the key exists and
-// the existing value is different from value. If failOnTombstones is set to
-// true, tombstones count as mismatched values and will cause a
-// ConditionFailedError.
-func NewInitPut(key roachpb.Key, value roachpb.Value, failOnTombstones bool) Request {
-	value.InitChecksum(key)
-	return &InitPutRequest{
-		RequestHeader: RequestHeader{
-			Key: key,
-		},
-		Value:            value,
-		FailOnTombstones: failOnTombstones,
 	}
 }
 
@@ -1557,7 +1854,7 @@ func flagForLockStrength(l lock.Strength) flag {
 
 func flagForLockDurability(d lock.Durability) flag {
 	if d == lock.Replicated {
-		return isWrite
+		return isWrite | canPipeline
 	}
 	return 0
 }
@@ -1569,7 +1866,8 @@ func (gr *GetRequest) flags() flag {
 }
 
 func (*PutRequest) flags() flag {
-	return isWrite | isTxn | isLocking | isIntentWrite | appliesTSCache | canBackpressure
+	return isWrite | isTxn | isLocking | isIntentWrite | appliesTSCache | canBackpressure |
+		canPipeline | canParallelCommit
 }
 
 // ConditionalPut effectively reads without writing if it hits a
@@ -1579,7 +1877,8 @@ func (*PutRequest) flags() flag {
 // transaction to be retried at end transaction.
 func (*ConditionalPutRequest) flags() flag {
 	return isRead | isWrite | isTxn | isLocking | isIntentWrite |
-		appliesTSCache | updatesTSCache | updatesTSCacheOnErr | canBackpressure
+		appliesTSCache | updatesTSCache | updatesTSCacheOnErr | canBackpressure | canPipeline |
+		canParallelCommit
 }
 
 // InitPut, like ConditionalPut, effectively reads without writing if it hits a
@@ -1589,7 +1888,8 @@ func (*ConditionalPutRequest) flags() flag {
 // to be retried at end transaction.
 func (*InitPutRequest) flags() flag {
 	return isRead | isWrite | isTxn | isLocking | isIntentWrite |
-		appliesTSCache | updatesTSCache | updatesTSCacheOnErr | canBackpressure
+		appliesTSCache | updatesTSCache | updatesTSCacheOnErr | canBackpressure |
+		canPipeline | canParallelCommit
 }
 
 // Increment reads the existing value, but always leaves an intent so
@@ -1598,7 +1898,8 @@ func (*InitPutRequest) flags() flag {
 // error immediately instead of continuing a serializable transaction
 // to be retried at end transaction.
 func (*IncrementRequest) flags() flag {
-	return isRead | isWrite | isTxn | isLocking | isIntentWrite | appliesTSCache | canBackpressure
+	return isRead | isWrite | isTxn | isLocking | isIntentWrite | appliesTSCache | canBackpressure |
+		canPipeline | canParallelCommit
 }
 
 func (*DeleteRequest) flags() flag {
@@ -1606,7 +1907,8 @@ func (*DeleteRequest) flags() flag {
 	// an existing key was deleted at the read timestamp. isIntentWrite allows
 	// omitting needsRefresh. For background, see:
 	// https://github.com/cockroachdb/cockroach/pull/89375
-	return isRead | isWrite | isTxn | isLocking | isIntentWrite | appliesTSCache | canBackpressure
+	return isRead | isWrite | isTxn | isLocking | isIntentWrite | appliesTSCache | canBackpressure |
+		canPipeline | canParallelCommit
 }
 
 func (drr *DeleteRangeRequest) flags() flag {
@@ -1622,6 +1924,10 @@ func (drr *DeleteRangeRequest) flags() flag {
 	// transaction by TxnCoordSender, which can occur if the command spans
 	// multiple ranges.
 	//
+	// As inline deletes cannot be part of a transaction, and don't go through the
+	// TxnCoordSender stack, there's no pipelining to speak of. As such, they
+	// don't set the canPipeline flag as well.
+	//
 	// TODO(mrtracy): The behavior of DeleteRangeRequest with "inline" set has
 	// likely diverged enough that it should be promoted into its own command.
 	// However, it is complicated to plumb a new command through the system,
@@ -1631,6 +1937,22 @@ func (drr *DeleteRangeRequest) flags() flag {
 	if drr.Inline {
 		return isRead | isWrite | isRange | isAlone
 	}
+
+	maybeCanPipeline := flag(0)
+	// DeleteRange requests operate over a range of keys. As such, we only
+	// know the actual keys that were deleted on the response path, not on the
+	// request path. This prevents them from being part of a batch that can be
+	// committed using parallel commits -- that's because for parallel commit
+	// recovery we need the entire in-flight write set to plop on the txn record,
+	// and we don't have that on the request path if the batch contains a
+	// DeleteRange request.
+	//
+	// We'll only know the actual keys that were deleted on the response path if
+	// they're returned to us. This is contingent on the ReturnKeys flag being set
+	// on the request.
+	if drr.ReturnKeys {
+		maybeCanPipeline = canPipeline
+	}
 	// DeleteRange updates the timestamp cache as it doesn't leave intents or
 	// tombstones for keys which don't yet exist or keys that already have
 	// tombstones on them, but still wants to prevent anybody from writing under
@@ -1638,7 +1960,7 @@ func (drr *DeleteRangeRequest) flags() flag {
 	// that exist would not be lost (since the DeleteRange leaves intents on
 	// those keys), but deletes of "empty space" would.
 	return isRead | isWrite | isTxn | isLocking | isIntentWrite | isRange |
-		appliesTSCache | updatesTSCache | needsRefresh | canBackpressure
+		appliesTSCache | updatesTSCache | needsRefresh | canBackpressure | maybeCanPipeline
 }
 
 // Note that ClearRange commands cannot be part of a transaction as
@@ -1757,6 +2079,13 @@ func (r *AddSSTableRequest) flags() flag {
 	}
 	return flags
 }
+func (r *LinkExternalSSTableRequest) flags() flag {
+	flags := isWrite | isRange | isAlone | isUnsplittable | canBackpressure | bypassesReplicaCircuitBreaker
+	if r.ExternalFile.UseSyntheticSuffix {
+		flags |= appliesTSCache
+	}
+	return flags
+}
 func (*MigrateRequest) flags() flag { return isWrite | isRange | isAlone }
 
 // RefreshRequest and RefreshRangeRequest both determine which timestamp cache
@@ -1768,7 +2097,7 @@ func (r *RefreshRangeRequest) flags() flag {
 	return isRead | isTxn | isRange | updatesTSCache
 }
 
-func (*SubsumeRequest) flags() flag    { return isRead | isAlone | updatesTSCache }
+func (*SubsumeRequest) flags() flag    { return isWrite | isAlone | updatesTSCache }
 func (*RangeStatsRequest) flags() flag { return isRead }
 func (*QueryResolvedTimestampRequest) flags() flag {
 	return isRead | isRange | requiresClosedTSOlderThanStorageSnapshot
@@ -1799,8 +2128,6 @@ func BulkOpSummaryID(tableID, indexID uint64) uint64 {
 func (b *BulkOpSummary) Add(other BulkOpSummary) {
 	b.DataSize += other.DataSize
 	b.SSTDataSize += other.SSTDataSize
-	b.DeprecatedRows += other.DeprecatedRows
-	b.DeprecatedIndexEntries += other.DeprecatedIndexEntries
 
 	if other.EntryCounts != nil && b.EntryCounts == nil {
 		b.EntryCounts = make(map[uint64]int64, len(other.EntryCounts))
@@ -1943,6 +2270,21 @@ func (acrr *AdminChangeReplicasRequest) Changes() []ReplicationChange {
 	return sl
 }
 
+// StrengthOrDefault returns the strength of the lock being queried by the
+// QueryIntentRequest.
+func (qir *QueryIntentRequest) StrengthOrDefault() lock.Strength {
+	// TODO(arul): the Strength field on QueryIntentRequest was introduced in
+	// v24.1. Prior to that, rather unsurprisingly, QueryIntentRequest would only
+	// query replicated locks with strength. To maintain compatibility between
+	// v23.2 <-> v24.1 nodes, if this field is unset, we assume it's lock.Intent.
+	// In the future, once compatibility with v23.2 is no longer a concern, we
+	// should be able to get rid of this logic.
+	if qir.Strength == lock.None {
+		return lock.Intent
+	}
+	return qir.Strength
+}
+
 // AsLockUpdate creates a lock update message corresponding to the given resolve
 // intent request.
 func (rir *ResolveIntentRequest) AsLockUpdate() roachpb.LockUpdate {
@@ -2026,6 +2368,7 @@ func (c *TenantConsumption) Add(other *TenantConsumption) {
 	c.ExternalIOIngressBytes += other.ExternalIOIngressBytes
 	c.ExternalIOEgressBytes += other.ExternalIOEgressBytes
 	c.CrossRegionNetworkRU += other.CrossRegionNetworkRU
+	c.EstimatedCPUSeconds += other.EstimatedCPUSeconds
 }
 
 // Sub subtracts consumption, making sure no fields become negative.
@@ -2107,6 +2450,12 @@ func (c *TenantConsumption) Sub(other *TenantConsumption) {
 	} else {
 		c.CrossRegionNetworkRU -= other.CrossRegionNetworkRU
 	}
+
+	if c.EstimatedCPUSeconds < other.EstimatedCPUSeconds {
+		c.EstimatedCPUSeconds = 0
+	} else {
+		c.EstimatedCPUSeconds -= other.EstimatedCPUSeconds
+	}
 }
 
 func humanizeCount(n uint64) redact.SafeString {
@@ -2116,11 +2465,12 @@ func humanizeCount(n uint64) redact.SafeString {
 
 // SafeFormat implements redact.SafeFormatter.
 func (s *ScanStats) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("scan stats: stepped %s times (%s internal); seeked %s times (%s internal); "+
+	w.Printf("n%d scan stats: stepped %s times (%s internal); seeked %s times (%s internal); "+
 		"block-bytes: (total %s, cached %s, duration %v); "+
 		"points: (count %s, key-bytes %s, value-bytes %s, tombstoned: %s) "+
 		"ranges: (count %s), (contained-points %s, skipped-points %s) "+
 		"evaluated requests: %s gets, %s scans, %s reverse scans",
+		s.NodeID,
 		humanizeCount(s.NumInterfaceSteps),
 		humanizeCount(s.NumInternalSteps),
 		humanizeCount(s.NumInterfaceSeeks),
@@ -2154,8 +2504,13 @@ func (s *ScanStats) String() string {
 
 // RangeFeedEventSink is an interface for sending a single rangefeed event.
 type RangeFeedEventSink interface {
-	Context() context.Context
-	Send(*RangeFeedEvent) error
+	// SendUnbuffered blocks until it sends the RangeFeedEvent, the stream is
+	// done, or the stream breaks. Send must be safe to call on the same stream in
+	// different goroutines.
+	SendUnbuffered(*RangeFeedEvent) error
+	// SendUnbufferedIsThreadSafe is a no-op declaration method. It is a contract
+	// that the interface has a thread-safe Send method.
+	SendUnbufferedIsThreadSafe()
 }
 
 // RangeFeedEventProducer is an adapter for receiving rangefeed events with either
@@ -2168,3 +2523,26 @@ type RangeFeedEventProducer interface {
 
 // SafeValue implements the redact.SafeValue interface.
 func (PushTxnType) SafeValue() {}
+
+func (writeOptions *WriteOptions) GetOriginID() uint32 {
+	if writeOptions == nil {
+		return 0
+	}
+	return writeOptions.OriginID
+}
+
+func (writeOptions *WriteOptions) GetOriginTimestamp() hlc.Timestamp {
+	if writeOptions == nil {
+		return hlc.Timestamp{}
+	}
+	return writeOptions.OriginTimestamp
+}
+
+func (r *ConditionalPutRequest) Validate() error {
+	if !r.OriginTimestamp.IsEmpty() {
+		if r.AllowIfDoesNotExist {
+			return errors.AssertionFailedf("invalid ConditionalPutRequest: AllowIfDoesNotExist and non-empty OriginTimestamp are incompatible")
+		}
+	}
+	return nil
+}

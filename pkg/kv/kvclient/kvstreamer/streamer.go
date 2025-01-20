@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvstreamer
 
@@ -222,6 +217,7 @@ func (r Result) Release(ctx context.Context) {
 // TODO(yuzefovich): support pipelining of Enqueue and GetResults calls.
 type Streamer struct {
 	distSender *kvcoord.DistSender
+	metrics    *Metrics
 	stopper    *stop.Stopper
 	// sd can be nil in tests.
 	sd *sessiondata.SessionData
@@ -306,8 +302,12 @@ type Streamer struct {
 
 type streamerStatistics struct {
 	atomics struct {
-		kvPairsRead         *int64
-		batchRequestsIssued *int64
+		kvPairsRead *int64
+		// batchRequestsIssued tracks the number of BatchRequests issued by the
+		// Streamer. Note that this number is only used for the logging done by
+		// the Streamer itself and is separate from any possible bookkeeping
+		// done by the caller.
+		batchRequestsIssued int64
 		// resumeBatchRequests tracks the number of BatchRequests created for
 		// the ResumeSpans throughout the lifetime of the Streamer.
 		resumeBatchRequests int64
@@ -336,21 +336,31 @@ type streamerStatistics struct {
 	enqueuedSingleRangeRequests int
 }
 
+const (
+	// The default scaling factor for the number of asynchronous requests per
+	// Streamer per vCPU. The value for this setting is chosen arbitrarily as
+	// 1/4th of the default value for the DefaultSenderStreamsPerVCPU.
+	defaultStreamerStreamsPerVCPU = kvcoord.DefaultSenderStreamsPerVCPU / 4
+)
+
 // streamerConcurrencyLimit is an upper bound on the number of asynchronous
-// requests that a single Streamer can have in flight. The default value for
-// this setting is chosen arbitrarily as 1/8th of the default value for the
-// senderConcurrencyLimit.
+// requests that a single Streamer can have in flight.
 var streamerConcurrencyLimit = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
 	"kv.streamer.concurrency_limit",
 	"maximum number of asynchronous requests by a single streamer",
-	max(128, int64(8*runtime.GOMAXPROCS(0))),
+	defaultStreamerStreamsPerVCPU*max(kvcoord.MinViableProcs, int64(runtime.GOMAXPROCS(0))),
 	settings.PositiveInt,
 )
+
+type sendFn func(context.Context, *kvpb.BatchRequest) (*kvpb.BatchResponse, error)
 
 // NewStreamer creates a new Streamer.
 //
 // txn must be a LeafTxn that is not used by anything other than this Streamer.
+//
+// sendFn is a function that will be used for issuing BatchRequests. Normally,
+// it is txn.Send, possibly with some extra bookkeeping.
 //
 // limitBytes determines the maximum amount of memory this Streamer is allowed
 // to use (i.e. it'll be used lazily, as needed). The more memory it has, the
@@ -367,25 +377,31 @@ var streamerConcurrencyLimit = settings.RegisterIntSetting(
 //
 // kvPairsRead should be incremented atomically with the sum of NumKeys
 // parameters of all received responses.
-//
-// batchRequestsIssued should be incremented atomically every time a new
-// BatchRequest is sent.
 func NewStreamer(
 	distSender *kvcoord.DistSender,
+	metrics *Metrics,
 	stopper *stop.Stopper,
 	txn *kv.Txn,
+	sendFn func(context.Context, *kvpb.BatchRequest) (*kvpb.BatchResponse, error),
 	st *cluster.Settings,
 	sd *sessiondata.SessionData,
 	lockWaitPolicy lock.WaitPolicy,
 	limitBytes int64,
 	acc *mon.BoundAccount,
 	kvPairsRead *int64,
-	batchRequestsIssued *int64,
 	lockStrength lock.Strength,
 	lockDurability lock.Durability,
 ) *Streamer {
 	if txn.Type() != kv.LeafTxn {
 		panic(errors.AssertionFailedf("RootTxn is given to the Streamer"))
+	}
+	if lockDurability == lock.Replicated {
+		// Replicated lock durability is not supported by the Streamer. If we want
+		// to support it in the future, we'll need to make sure we're not re-using
+		// request memory after the request has been sent. This is because
+		// replicated lock pipelining retains references to requests even after
+		// their response has been returned.
+		panic(errors.AssertionFailedf("Replicated lock durability is given to the Streamer"))
 	}
 	// sd can be nil in tests.
 	headOfLineOnlyFraction := 0.8
@@ -394,6 +410,7 @@ func NewStreamer(
 	}
 	s := &Streamer{
 		distSender:             distSender,
+		metrics:                metrics,
 		stopper:                stopper,
 		sd:                     sd,
 		headOfLineOnlyFraction: headOfLineOnlyFraction,
@@ -401,18 +418,15 @@ func NewStreamer(
 		lockStrength:           lockStrength,
 		lockDurability:         lockDurability,
 	}
+	s.metrics.OperatorsCount.Inc(1)
 
 	if kvPairsRead == nil {
 		kvPairsRead = new(int64)
 	}
-	if batchRequestsIssued == nil {
-		batchRequestsIssued = new(int64)
-	}
 	s.atomics.kvPairsRead = kvPairsRead
-	s.atomics.batchRequestsIssued = batchRequestsIssued
 	s.coordinator = workerCoordinator{
 		s:                      s,
-		txn:                    txn,
+		sendFn:                 sendFn,
 		lockWaitPolicy:         lockWaitPolicy,
 		requestAdmissionHeader: txn.AdmissionHeader(),
 		responseAdmissionQ:     txn.DB().SQLKVResponseAdmissionQ,
@@ -573,9 +587,11 @@ func (s *Streamer) Enqueue(ctx context.Context, reqs []kvpb.RequestUnion) (retEr
 		// ranges.
 		if s.truncationHelper == nil {
 			// The streamer can process the responses in an arbitrary order, so
-			// we don't require the helper to preserve the order of requests and
-			// allow it to reorder the reqs slice too.
-			const mustPreserveOrder = false
+			// we don't require the helper to preserve the order of requests,
+			// unless we're in the InOrder mode when we must maintain increasing
+			// positions. We unconditionally allow reordering of the reqs slice
+			// though.
+			var mustPreserveOrder = s.mode == InOrder
 			const canReorderRequestsSlice = true
 			s.truncationHelper, err = kvcoord.NewBatchTruncationHelper(
 				scanDir, reqs, mustPreserveOrder, canReorderRequestsSlice,
@@ -815,6 +831,7 @@ func (s *Streamer) Close(ctx context.Context) {
 		// exited.
 		s.results.close(ctx)
 	}
+	s.metrics.OperatorsCount.Dec(1)
 	*s = Streamer{}
 }
 
@@ -854,7 +871,7 @@ func (s *Streamer) adjustNumRequestsInFlight(delta int) {
 
 type workerCoordinator struct {
 	s              *Streamer
-	txn            *kv.Txn
+	sendFn         sendFn
 	lockWaitPolicy lock.WaitPolicy
 
 	asyncSem *quotapool.IntPool
@@ -879,7 +896,6 @@ func (w *workerCoordinator) mainLoop(ctx context.Context) {
 			return
 		}
 
-		w.s.requestsToServe.Lock()
 		// The coordinator goroutine is the only one that removes requests from
 		// w.s.requestsToServe, so we can keep the reference to next request
 		// without holding the lock.
@@ -888,8 +904,11 @@ func (w *workerCoordinator) mainLoop(ctx context.Context) {
 		// issueRequestsForAsyncProcessing() another request with higher urgency
 		// is added; however, this is not a problem - we wait for available
 		// budget here on a best-effort basis.
-		nextReq := w.s.requestsToServe.nextLocked()
-		w.s.requestsToServe.Unlock()
+		nextReq := func() singleRangeBatch {
+			w.s.requestsToServe.Lock()
+			defer w.s.requestsToServe.Unlock()
+			return w.s.requestsToServe.nextLocked()
+		}()
 		// If we already have minTargetBytes set on the first request to be
 		// issued, then use that.
 		atLeastBytes := nextReq.minTargetBytes
@@ -943,7 +962,7 @@ func (w *workerCoordinator) logStatistics(ctx context.Context) {
 			w.s.enqueuedRequests,
 			w.s.enqueuedSingleRangeRequests,
 			atomic.LoadInt64(w.s.atomics.kvPairsRead),
-			atomic.LoadInt64(w.s.atomics.batchRequestsIssued),
+			atomic.LoadInt64(&w.s.atomics.batchRequestsIssued),
 			atomic.LoadInt64(&w.s.atomics.resumeBatchRequests),
 			atomic.LoadInt64(&w.s.atomics.resumeSingleRangeRequests),
 			w.s.results.numSpilledResults(),
@@ -1057,6 +1076,13 @@ func (w *workerCoordinator) getMaxNumRequestsToIssue(ctx context.Context) (_ int
 	}
 	// The whole quota is currently used up, so we blockingly acquire a quota of
 	// 1.
+	numBatches := func() int64 {
+		w.s.requestsToServe.Lock()
+		defer w.s.requestsToServe.Unlock()
+		return int64(w.s.requestsToServe.lengthLocked())
+	}()
+	w.s.metrics.BatchesThrottled.Inc(numBatches)
+	defer w.s.metrics.BatchesThrottled.Dec(numBatches)
 	alloc, err := w.asyncSem.Acquire(ctx, 1)
 	if err != nil {
 		w.s.results.setError(err)
@@ -1347,6 +1373,10 @@ func (w *workerCoordinator) performRequestAsync(
 		},
 		func(ctx context.Context) {
 			defer w.asyncRequestCleanup(false /* budgetMuAlreadyLocked */)
+			w.s.metrics.BatchesSent.Inc(1)
+			w.s.metrics.BatchesInProgress.Inc(1)
+			defer w.s.metrics.BatchesInProgress.Dec(1)
+
 			ba := &kvpb.BatchRequest{}
 			ba.Header.WaitPolicy = w.lockWaitPolicy
 			ba.Header.TargetBytes = targetBytes
@@ -1359,6 +1389,20 @@ func (w *workerCoordinator) performRequestAsync(
 			// regardless of the value of headOfLine.
 			ba.AdmissionHeader.NoMemoryReservedAtSource = false
 			ba.Requests = req.reqs
+
+			if buildutil.CrdbTestBuild {
+				if w.s.mode == InOrder {
+					for i := range req.positions[:len(req.positions)-1] {
+						if req.positions[i] >= req.positions[i+1] {
+							w.s.results.setError(errors.AssertionFailedf(
+								"positions aren't ascending: %d before %d at index %d",
+								req.positions[i], req.positions[i+1], i,
+							))
+							return
+						}
+					}
+				}
+			}
 
 			// TODO(yuzefovich): in Enqueue we split all requests into
 			// single-range batches, so ideally ba touches a single range in
@@ -1374,17 +1418,22 @@ func (w *workerCoordinator) performRequestAsync(
 			// unnecessary blocking (due to sequential evaluation of sub-batches
 			// by the DistSender). For the initial implementation it doesn't
 			// seem important though.
-			br, pErr := w.txn.Send(ctx, ba)
-			if pErr != nil {
+
+			// Note that we don't add a separate log.VEventf here before calling
+			// Send since we create a separate tracing span for each async
+			// request which is sufficient to highlight where the handoff from
+			// SQL occurred.
+			br, err := w.sendFn(ctx, ba)
+			if err != nil {
 				// TODO(yuzefovich): if err is
 				// ReadWithinUncertaintyIntervalError and there is only a single
 				// Streamer in a single local flow, attempt to transparently
 				// refresh.
-				log.VEventf(ctx, 2, "dropping response: error from kv: %v", pErr.GoError())
-				w.s.results.setError(pErr.GoError())
+				log.VEventf(ctx, 2, "dropping response: error from kv: %v", err)
+				w.s.results.setError(err)
 				return
 			}
-			atomic.AddInt64(w.s.atomics.batchRequestsIssued, 1)
+			atomic.AddInt64(&w.s.atomics.batchRequestsIssued, 1)
 
 			// First, we have to reconcile the memory budget. We do it
 			// separately from processing the results because we want to know
@@ -1482,6 +1531,13 @@ func (w *workerCoordinator) performRequestAsync(
 
 			// Finally, process the results and add the ResumeSpans to be
 			// processed as well.
+			log.VEventf(ctx, 2,
+				"responses:%d targetBytes:%d {footprint:%v overhead:%v resumeMem:%v gets:%v scans:%v incpGets:%v "+
+					"incpScans:%v startedScans:%v kvs:%v}",
+				len(br.Responses), targetBytes, fp.memoryFootprintBytes, fp.responsesOverhead,
+				fp.resumeReqsMemUsage, fp.numGetResults, fp.numScanResults, fp.numIncompleteGets,
+				fp.numIncompleteScans, fp.numStartedScans, fp.kvPairsRead,
+			)
 			processSingleRangeResponse(ctx, w.s, req, br, fp)
 		}); err != nil {
 		// The new goroutine for the request wasn't spun up, so we have to
@@ -1627,13 +1683,6 @@ func processSingleRangeResults(
 	br *kvpb.BatchResponse,
 	fp singleRangeBatchResponseFootprint,
 ) {
-	log.VEventf(ctx, 2,
-		"responses:%d {footprint:%v overhead:%v resumeMem:%v gets:%v scans:%v incpGets:%v "+
-			"incpScans:%v startedScans:%v kvs:%v}",
-		len(br.Responses), fp.memoryFootprintBytes, fp.responsesOverhead, fp.resumeReqsMemUsage,
-		fp.numGetResults, fp.numScanResults, fp.numIncompleteGets, fp.numIncompleteScans,
-		fp.numStartedScans, fp.kvPairsRead,
-	)
 	// If there are no results, this function has nothing to do.
 	if !fp.hasResults() {
 		log.VEvent(ctx, 2, "no results")
@@ -1795,6 +1844,9 @@ func buildResumeSingleRangeBatch(
 	// We've already reconciled the budget with the actual reservation for the
 	// requests with the ResumeSpans.
 	resumeReq.reqsReservedBytes = fp.resumeReqsMemUsage
+	// TODO(yuzefovich): add heuristic for making fresh allocation of slices
+	// whenever only a fraction of them will be used by the resume batch. This
+	// will allow us to return most of overheadAccountedFor to the budget.
 	resumeReq.overheadAccountedFor = req.overheadAccountedFor
 	// Note that due to limitations of the KV layer (#75452) we cannot reuse
 	// original requests because the KV doesn't allow mutability (and all

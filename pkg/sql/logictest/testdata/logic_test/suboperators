@@ -122,7 +122,7 @@ SELECT 1 = ANY(ARRAY['foo'] || 'bar'::string)
 # Note that this relatively poor error message is caused by the fact that
 # strings are constant castable to string arrays. Postgres also makes this
 # same minor mistake in error generation.
-query error unsupported binary operator: <string\[\]> || <string> (desired <int\[\]>)
+query error unsupported binary operator: <string\[\]> || <string> (returning <int\[\]>)
 SELECT 1 = ANY(ARRAY['foo'] || 'bar')
 
 # ANY/SOME with subqueries.
@@ -495,8 +495,16 @@ SELECT a, b FROM abc WHERE (a, b) = ANY(ARRAY(SELECT ROW(a, b) FROM abc LIMIT 1)
 ----
 1  10
 
+# The next query might error out when spilling to disk in the row-by-row engine,
+# so we only use vectorized engine for it.
+statement ok
+SET vectorize = on;
+
 query T rowsort
 SELECT * FROM comp WHERE v IN (SELECT v FROM comp);
 ----
 (1,2)
 (3,4)
+
+statement ok
+RESET vectorize;

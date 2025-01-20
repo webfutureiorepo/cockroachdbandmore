@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -15,8 +10,10 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime/trace"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,12 +22,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
+	"github.com/cockroachdb/cockroach/pkg/roachprod"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
+	"github.com/cockroachdb/cockroach/pkg/util/allstacks"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -42,7 +42,9 @@ func registerGossip(r registry.Registry) {
 		startOpts := option.DefaultStartOpts()
 		startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs, "--vmodule=*=1")
 		c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.All())
-		err := WaitFor3XReplication(ctx, t, c.Conn(ctx, t.L(), 1))
+		conn := c.Conn(ctx, t.L(), 1)
+		defer conn.Close()
+		err := roachtestutil.WaitFor3XReplication(ctx, t.L(), conn)
 		require.NoError(t, err)
 
 		gossipNetworkAccordingTo := func(node int) (nodes []int) {
@@ -55,8 +57,14 @@ SELECT node_id
  WHERE expiration > now();
 `
 
+			tBeforePing := timeutil.Now()
 			db := c.Conn(ctx, t.L(), node)
 			defer db.Close()
+			require.NoError(t, db.Ping())
+			tAfterPing := timeutil.Now()
+			if pingDur := tAfterPing.Sub(tBeforePing); pingDur > 20*time.Second {
+				t.L().Printf("sql connection ready after %.2fs", pingDur.Seconds())
+			}
 
 			rows, err := db.Query(query)
 			if err != nil {
@@ -69,7 +77,11 @@ SELECT node_id
 				require.NotZero(t, nodeID)
 				nodes = append(nodes, nodeID)
 			}
+			require.NoError(t, rows.Err())
 			sort.Ints(nodes)
+			if scanDur := timeutil.Since(tAfterPing); scanDur > 20*time.Second {
+				t.L().Printf("query processed after %.2fs", scanDur.Seconds())
+			}
 			return nodes
 		}
 
@@ -96,6 +108,7 @@ SELECT node_id
 				}
 
 				if len(expLiveNodes) == 0 {
+					t.L().Printf("%d: found %d live nodes\n", i, len(liveNodes))
 					expLiveNodes = liveNodes
 					continue
 				}
@@ -119,22 +132,50 @@ SELECT node_id
 		}
 
 		waitForGossip := func(deadNode int) {
-			t.Status("waiting for gossip to exclude dead node")
+			t.Status(fmt.Sprintf("waiting for gossip to exclude dead node %d", deadNode))
 			start := timeutil.Now()
 			for {
+				t.L().Printf("checking if gossip excludes dead node %d (%.0fs)\n",
+					deadNode, timeutil.Since(start).Seconds())
 				if gossipOK(start, deadNode) {
 					return
 				}
-				time.Sleep(time.Second)
+				const sleepDur = 1 * time.Second
+				timer := time.AfterFunc(2*time.Second, func() {
+					// This is an attempt to debug a rare issue in which either the `Printf`
+					// or the `time.Sleep()` surprisingly take >>20s which causes the test
+					// to fail.
+					//
+					// See https://github.com/cockroachdb/cockroach/issues/130737#issuecomment-2352473436.
+					_, _ = fmt.Fprintf(os.Stderr, "%s", allstacks.Get())
+					t.L().Printf("sleep took too long, dumped stacks to Stderr")
+				})
+				t.L().Printf("sleeping for %s (%.0fs)\n", sleepDur, timeutil.Since(start).Seconds())
+				time.Sleep(sleepDur)
+				timer.Stop()
 			}
 		}
 
 		waitForGossip(0)
 		nodes := c.All()
+
 		for j := 0; j < 10; j++ {
+			traceFile := filepath.Join(t.ArtifactsDir(), "trace_"+strconv.Itoa(j)+".bin")
+			f, err := os.Create(traceFile)
+			require.NoError(t, err)
+			if err := trace.Start(f); err != nil {
+				_ = f.Close()
+				f = nil
+				_ = os.Remove(traceFile)
+			}
 			deadNode := nodes.RandNode()[0]
 			c.Stop(ctx, t.L(), option.DefaultStopOpts(), c.Node(deadNode))
 			waitForGossip(deadNode)
+			if f != nil {
+				trace.Stop()
+				_ = f.Close()
+				t.L().Printf("execution trace: %s", traceFile)
+			}
 			c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings(), c.Node(deadNode))
 		}
 	}
@@ -142,7 +183,7 @@ SELECT node_id
 	r.Add(registry.TestSpec{
 		Name:             "gossip/chaos/nodes=9",
 		Owner:            registry.OwnerKV,
-		Cluster:          r.MakeClusterSpec(9),
+		Cluster:          r.MakeClusterSpec(9, spec.TerminateOnMigration()),
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		Leases:           registry.MetamorphicLeases,
@@ -153,9 +194,10 @@ SELECT node_id
 }
 
 type gossipUtil struct {
-	waitTime time.Duration
-	urlMap   map[int]string
-	conn     func(ctx context.Context, l *logger.Logger, i int, opts ...func(*option.ConnOption)) *gosql.DB
+	waitTime   time.Duration
+	urlMap     map[int]string
+	conn       func(ctx context.Context, l *logger.Logger, i int, opts ...option.OptionFunc) *gosql.DB
+	httpClient *roachtestutil.RoachtestHTTPClient
 }
 
 func newGossipUtil(ctx context.Context, t test.Test, c cluster.Cluster) *gossipUtil {
@@ -168,9 +210,10 @@ func newGossipUtil(ctx context.Context, t test.Test, c cluster.Cluster) *gossipU
 		urlMap[i+1] = `http://` + addr
 	}
 	return &gossipUtil{
-		waitTime: 30 * time.Second,
-		urlMap:   urlMap,
-		conn:     c.Conn,
+		waitTime:   30 * time.Second,
+		urlMap:     urlMap,
+		conn:       c.Conn,
+		httpClient: roachtestutil.DefaultHTTPClient(c, t.L()),
 	}
 }
 
@@ -179,12 +222,14 @@ type checkGossipFunc func(map[string]gossip.Info) error
 // checkGossip fetches the gossip infoStore from each node and invokes the
 // given function. The test passes if the function returns 0 for every node,
 // retrying for up to the given duration.
-func (g *gossipUtil) check(ctx context.Context, c cluster.Cluster, f checkGossipFunc) error {
+func (g *gossipUtil) check(
+	ctx context.Context, c cluster.Cluster, f checkGossipFunc, l *logger.Logger,
+) error {
 	return retry.ForDuration(g.waitTime, func() error {
 		var infoStatus gossip.InfoStatus
 		for i := 1; i <= c.Spec().NodeCount; i++ {
 			url := g.urlMap[i] + `/_status/gossip/local`
-			if err := httputil.GetJSON(http.Client{}, url, &infoStatus); err != nil {
+			if err := g.httpClient.GetJSON(ctx, url, &infoStatus); err != nil {
 				return errors.Wrapf(err, "failed to get gossip status from node %d", i)
 			}
 			if err := f(infoStatus.Infos); err != nil {
@@ -233,13 +278,13 @@ func (g *gossipUtil) checkConnectedAndFunctional(
 	ctx context.Context, t test.Test, c cluster.Cluster,
 ) {
 	t.L().Printf("waiting for gossip to be connected\n")
-	if err := g.check(ctx, c, g.hasPeers(c.Spec().NodeCount)); err != nil {
+	if err := g.check(ctx, c, g.hasPeers(c.Spec().NodeCount), t.L()); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.check(ctx, c, g.hasClusterID); err != nil {
+	if err := g.check(ctx, c, g.hasClusterID, t.L()); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.check(ctx, c, g.hasSentinel); err != nil {
+	if err := g.check(ctx, c, g.hasSentinel, t.L()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -286,14 +331,14 @@ func runGossipPeerings(ctx context.Context, t test.Test, c cluster.Cluster) {
 	deadline := timeutil.Now().Add(time.Minute)
 
 	for i := 1; timeutil.Now().Before(deadline); i++ {
-		WaitForReady(ctx, t, c, c.All())
-		if err := g.check(ctx, c, g.hasPeers(c.Spec().NodeCount)); err != nil {
+		roachtestutil.WaitForReady(ctx, t, c, c.All())
+		if err := g.check(ctx, c, g.hasPeers(c.Spec().NodeCount), t.L()); err != nil {
 			t.Fatal(err)
 		}
-		if err := g.check(ctx, c, g.hasClusterID); err != nil {
+		if err := g.check(ctx, c, g.hasClusterID, t.L()); err != nil {
 			t.Fatal(err)
 		}
-		if err := g.check(ctx, c, g.hasSentinel); err != nil {
+		if err := g.check(ctx, c, g.hasSentinel, t.L()); err != nil {
 			t.Fatal(err)
 		}
 		t.L().Printf("%d: OK\n", i)
@@ -321,14 +366,15 @@ func runGossipRestart(ctx context.Context, t test.Test, c cluster.Cluster) {
 	deadline := timeutil.Now().Add(time.Minute)
 
 	for i := 1; timeutil.Now().Before(deadline); i++ {
-		WaitForReady(ctx, t, c, c.All())
+		roachtestutil.WaitForReady(ctx, t, c, c.All())
 		g.checkConnectedAndFunctional(ctx, t, c)
 		t.L().Printf("%d: OK\n", i)
 
 		t.L().Printf("%d: killing all nodes\n", i)
 		c.Stop(ctx, t.L(), option.DefaultStopOpts())
-
 		t.L().Printf("%d: restarting all nodes\n", i)
+		// Tell the httpClient our saved session cookies are no longer valid after a restart.
+		g.httpClient.ResetSession()
 		c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
 	}
 }
@@ -434,10 +480,11 @@ SELECT count(replicas)
 	// connections. This will require node 1 to reach out to the other nodes in
 	// the cluster for gossip info.
 	err = c.RunE(ctx, option.WithNodes(c.Node(1)),
-		` ./cockroach start --insecure --background --store={store-dir} `+
+		` ./cockroach start --background --store={store-dir} `+
 			`--log-dir={log-dir} --cache=10% --max-sql-memory=10% `+
 			fmt.Sprintf(`--listen-addr=:$[{pgport:1}+1000] --http-port=%d `, adminPorts[0])+
 			`--join={pghost:1}:{pgport:1} `+
+			fmt.Sprintf(`--certs-dir=%s `, install.CockroachNodeCertsDir)+
 			`--advertise-addr={pghost:1}:$[{pgport:1}+1000] `+
 			`> {log-dir}/cockroach.stdout 2> {log-dir}/cockroach.stderr`)
 	if err != nil {
@@ -456,11 +503,11 @@ SELECT count(replicas)
 	// current infrastructure which doesn't know about cockroach nodes started on
 	// non-standard ports.
 	g := newGossipUtil(ctx, t, c)
-	g.conn = func(ctx context.Context, l *logger.Logger, i int, opts ...func(*option.ConnOption)) *gosql.DB {
+	g.conn = func(ctx context.Context, l *logger.Logger, i int, _ ...option.OptionFunc) *gosql.DB {
 		if i != 1 {
 			return c.Conn(ctx, l, i)
 		}
-		urls, err := c.ExternalPGUrl(ctx, l, c.Node(1), "" /* tenant */, 0 /* sqlInstance */)
+		urls, err := c.ExternalPGUrl(ctx, l, c.Node(1), roachprod.PGURLOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

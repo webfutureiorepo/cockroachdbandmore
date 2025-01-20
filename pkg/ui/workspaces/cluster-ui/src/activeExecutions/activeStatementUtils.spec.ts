@@ -1,13 +1,21 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import * as protos from "@cockroachlabs/crdb-protobuf-client";
+import Long from "long";
+import moment from "moment-timezone";
+
+import { TimestampToMoment } from "../util";
+
+import {
+  getActiveExecutionsFromSessions,
+  getAppsFromActiveExecutions,
+  filterActiveStatements,
+  filterActiveTransactions,
+  INTERNAL_APP_NAME_PREFIX,
+} from "./activeStatementUtils";
 import {
   ActiveStatementPhase,
   SessionsResponse,
@@ -18,17 +26,6 @@ import {
   ActiveTransactionFilters,
   ExecutionStatus,
 } from "./types";
-import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import moment from "moment-timezone";
-import { TimestampToMoment } from "../util";
-import Long from "long";
-import {
-  getActiveExecutionsFromSessions,
-  getAppsFromActiveExecutions,
-  filterActiveStatements,
-  filterActiveTransactions,
-  INTERNAL_APP_NAME_PREFIX,
-} from "./activeStatementUtils";
 
 type ActiveQuery = protos.cockroach.server.serverpb.ActiveQuery;
 const Timestamp = protos.google.protobuf.Timestamp;

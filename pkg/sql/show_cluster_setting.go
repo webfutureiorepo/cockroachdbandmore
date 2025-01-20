@@ -1,19 +1,13 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -34,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // getCurrentEncodedVersionSettingValue returns the encoded value of
@@ -54,7 +49,7 @@ func (p *planner) getCurrentEncodedVersionSettingValue(
 	// the same time guaranteeing that a node reporting a certain version has
 	// also processed the corresponding version bump (which is important as only
 	// then does the node update its persisted state; see #22796).
-	if err := timeutil.RunWithTimeout(ctx, fmt.Sprintf("show cluster setting %s", name), 2*time.Minute,
+	if err := timeutil.RunWithTimeout(ctx, redact.Sprintf("show cluster setting %s", name), 2*time.Minute,
 		func(ctx context.Context) error {
 			tBegin := timeutil.Now()
 
@@ -64,7 +59,7 @@ func (p *planner) getCurrentEncodedVersionSettingValue(
 					datums, err := txn.QueryRowEx(
 						ctx, "read-setting",
 						txn.KV(),
-						sessiondata.RootUserSessionDataOverride,
+						sessiondata.NodeUserSessionDataOverride,
 						"SELECT value FROM system.settings WHERE name = $1", key,
 					)
 					if err != nil {
@@ -141,10 +136,15 @@ func checkClusterSettingValuesAreEquivalent(localRawVal, kvRawVal []byte) error 
 	}
 	decodedLocal, localVal, localOk := maybeDecodeVersion(localRawVal)
 	decodedKV, kvVal, kvOk := maybeDecodeVersion(kvRawVal)
-	if localOk && kvOk && decodedLocal.Internal%2 == 1 /* isFence */ {
-		predecessor := decodedLocal
-		predecessor.Internal--
-		if predecessor.Equal(decodedKV) {
+	if localOk && kvOk && decodedLocal.IsFence() {
+		// NB: The internal version is -1 for the fence version of all final cluster
+		// versions. In these cases, we cannot simply check that the local version
+		// is off-by-one from the KV version, since (for example's sake) we would be
+		// comparing (24,1,12) to (24,2,-1). Instead, we can use ListBetween to
+		// verify that there are no cluster versions in between the local and KV
+		// versions.
+		versionsBetween := clusterversion.ListBetween(decodedKV.Version, decodedLocal.Version)
+		if len(versionsBetween) == 0 {
 			return nil
 		}
 	}
@@ -153,8 +153,8 @@ func checkClusterSettingValuesAreEquivalent(localRawVal, kvRawVal []byte) error 
 		localVal, kvVal)
 }
 
-func settingNameDeprecationNotice(oldName, newName settings.SettingName) pgnotice.Notice {
-	return pgnotice.Newf("the name %q is deprecated; use %q instead", oldName, newName)
+func settingAlternateNameNotice(oldName, newName settings.SettingName) pgnotice.Notice {
+	return pgnotice.Newf("%q is now an alias for %q, the preferred setting name", oldName, newName)
 }
 
 func (p *planner) ShowClusterSetting(
@@ -170,7 +170,7 @@ func (p *planner) ShowClusterSetting(
 		return nil, errors.Errorf("unknown setting: %q", name)
 	}
 	if nameStatus != settings.NameActive {
-		p.BufferClientNotice(ctx, settingNameDeprecationNotice(name, setting.Name()))
+		p.BufferClientNotice(ctx, settingAlternateNameNotice(name, setting.Name()))
 		name = setting.Name()
 	}
 
@@ -218,7 +218,7 @@ func getShowClusterSettingPlanColumns(
 	switch val.(type) {
 	case *settings.IntSetting:
 		dType = types.Int
-	case *settings.StringSetting, *settings.ByteSizeSetting, *settings.VersionSetting, *settings.EnumSetting, *settings.ProtobufSetting:
+	case *settings.StringSetting, *settings.ByteSizeSetting, *settings.VersionSetting, settings.AnyEnumSetting, *settings.ProtobufSetting:
 		dType = types.String
 	case *settings.BoolSetting:
 		dType = types.Bool
@@ -256,7 +256,7 @@ func planShowClusterSetting(
 			if isNotNull {
 				switch s := val.(type) {
 				case *settings.IntSetting:
-					v, err := s.DecodeValue(encoded)
+					v, err := s.DecodeNumericValue(encoded)
 					if err != nil {
 						return nil, err
 					}

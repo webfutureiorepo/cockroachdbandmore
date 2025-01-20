@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scmutationexec
 
@@ -29,6 +24,9 @@ func (i *immediateVisitor) CreateFunctionDescriptor(
 			Class: param.Class.Class,
 			Name:  param.Name,
 			Type:  param.Type.Type,
+		}
+		if param.DefaultExpr != "" {
+			params[i].DefaultExpr = &param.DefaultExpr
 		}
 	}
 
@@ -101,11 +99,13 @@ func (i *immediateVisitor) SetFunctionBody(ctx context.Context, op scop.SetFunct
 	return nil
 }
 
-func (i *immediateVisitor) SetFunctionParamDefaultExpr(
-	ctx context.Context, op scop.SetFunctionParamDefaultExpr,
+func (i *immediateVisitor) SetFunctionSecurity(
+	ctx context.Context, op scop.SetFunctionSecurity,
 ) error {
-	// TODO(chengxiong): when default parameter value is supported, we need to
-	// address references here because functions, types and sequences can be used
-	// with a default value expression.
+	fn, err := i.checkOutFunction(ctx, op.FunctionID)
+	if err != nil {
+		return err
+	}
+	fn.SetSecurity(op.Security)
 	return nil
 }

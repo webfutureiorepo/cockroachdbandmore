@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobsprotectedts
 
@@ -25,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
@@ -112,22 +108,28 @@ func (p *Manager) TryToProtectBeforeGC(
 	protectedTSInstallCancel := make(chan struct{})
 	var unprotectCallback Cleaner
 	waitGrp.GoCtx(func(ctx context.Context) error {
-		// If we are starting up the system config can be nil, we are okay letting
-		// the job restart, due to the GC interval and lack of protected timestamp.
+		// If we are starting up, the system config can be nil. We are okay letting
+		// the job restart due to the GC interval and lack of protected timestamp.
 		systemConfig := p.systemConfig.GetSystemConfig()
 		if systemConfig == nil {
 			return nil
 		}
 		// Determine what the GC interval is on the table, which will help us
-		// figure out when to apply a protected timestamp, as a percentage of this
-		// time.
+		// figure out when to apply a protected timestamp as a percentage of the
+		// time until GC can occur.
 		zoneCfg, err := systemConfig.GetZoneConfigForObject(p.codec,
 			config.ObjectID(tableDesc.GetID()))
 		if err != nil {
 			return err
 		}
-		waitBeforeProtectedTS := time.Duration((time.Duration(zoneCfg.GC.TTLSeconds) * time.Second).Seconds() *
-			timedProtectTimeStampGCPct)
+		waitBeforeProtectedTS := time.Duration(0)
+		now := timeutil.Now()
+		readAsOfTime := timeutil.Unix(0, readAsOf.WallTime)
+		gcTTL := time.Duration(zoneCfg.GC.TTLSeconds) * time.Second
+		if readAsOfTime.Add(gcTTL).After(now) {
+			timeUntilGC := readAsOfTime.Add(gcTTL).Sub(now)
+			waitBeforeProtectedTS = time.Duration(float64(timeUntilGC) * timedProtectTimeStampGCPct)
+		}
 
 		select {
 		case <-time.After(waitBeforeProtectedTS):

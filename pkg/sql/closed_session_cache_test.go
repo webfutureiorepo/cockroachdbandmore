@@ -1,19 +1,13 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -51,19 +45,14 @@ func TestSessionCacheBasic(t *testing.T) {
 				d.ScanArgs(t, "timeToLive", &timeToLive)
 
 				st := &cluster.Settings{}
-				monitor := mon.NewUnlimitedMonitor(
-					ctx,
-					"test",
-					mon.MemoryResource,
-					nil, /* currCount */
-					nil, /* maxHist */
-					math.MaxInt64,
-					st,
-				)
+				monitor := mon.NewUnlimitedMonitor(ctx, mon.Options{
+					Name:     mon.MakeMonitorName("test"),
+					Settings: st,
+				})
 				cache = NewClosedSessionCache(st, monitor, time.Now)
 
-				ClosedSessionCacheCapacity.Override(ctx, &st.SV, int64(capacity))
-				ClosedSessionCacheTimeToLive.Override(ctx, &st.SV, int64(timeToLive))
+				closedSessionCacheCapacity.Override(ctx, &st.SV, int64(capacity))
+				closedSessionCacheTimeToLive.Override(ctx, &st.SV, int64(timeToLive))
 
 				return fmt.Sprintf("cache_size: %d", cache.size())
 			case "addSession":

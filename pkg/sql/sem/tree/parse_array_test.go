@@ -1,17 +1,13 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tree
 
 import (
 	"bytes"
+	"context"
 	"math/rand"
 	"testing"
 
@@ -133,7 +129,9 @@ lo}`, types.String, Datums{NewDString(`hel`), NewDString(`lo`)}},
 			if err != nil {
 				t.Fatalf("ARRAY %s: got error %s, expected %s", td.str, err.Error(), expected)
 			}
-			if actual.Compare(noopUnwrapCompareContext{}, expected) != 0 {
+			if cmp, err := actual.Compare(context.Background(), noopUnwrapCompareContext{}, expected); err != nil {
+				t.Fatal(err)
+			} else if cmp != 0 {
 				t.Fatalf("ARRAY %s: got %s, expected %s", td.str, actual, expected)
 			}
 		})
@@ -144,7 +142,7 @@ type noopUnwrapCompareContext struct {
 	CompareContext
 }
 
-func (noopUnwrapCompareContext) UnwrapDatum(d Datum) Datum { return d }
+func (noopUnwrapCompareContext) UnwrapDatum(ctx context.Context, d Datum) Datum { return d }
 
 const randomArrayIterations = 1000
 const randomArrayMaxLength = 10

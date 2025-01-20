@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecutils
 
@@ -131,7 +126,7 @@ func TestSpillingBuffer(t *testing.T) {
 		testBatch := coldata.NewMemBatchNoCols(typesToStore, 0 /* capacity */)
 		oracleBatch := coldata.NewMemBatchNoCols(typesToStore, 0 /* capacity */)
 		checkWindowAtIndex := func(startIdx int) (nextIdx int) {
-			var vec coldata.Vec
+			var vec *coldata.Vec
 			var idx, length int
 			for i, colIdx := range colsToStore {
 				vec, idx, length = buf.GetVecWithTuple(ctx, i, startIdx)

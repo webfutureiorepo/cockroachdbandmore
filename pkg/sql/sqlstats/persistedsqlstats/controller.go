@@ -1,26 +1,20 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package persistedsqlstats
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/redact"
 )
 
 // Controller implements the SQL Stats subsystem control plane. This exposes
@@ -77,10 +71,6 @@ func (s *Controller) ResetClusterSQLStats(ctx context.Context) error {
 // ResetActivityTables implements the tree.SQLStatsController interface. This
 // method resets the {statement|transaction}_activity system tables.
 func (s *Controller) ResetActivityTables(ctx context.Context) error {
-	if !s.st.Version.IsActive(ctx, clusterversion.Permanent_V23_1CreateSystemActivityUpdateJob) {
-		return nil
-	}
-
 	if err := s.resetSysTableStats(ctx, "system.statement_activity"); err != nil {
 		return err
 	}
@@ -91,10 +81,6 @@ func (s *Controller) ResetActivityTables(ctx context.Context) error {
 // ResetInsightsTables implements the tree.SQLStatsController interface. This
 // method reset the {statement|transaction}_execution_insights tables.
 func (s *Controller) ResetInsightsTables(ctx context.Context) error {
-	if !s.st.Version.IsActive(ctx, clusterversion.V23_2_AddSystemExecInsightsTable) {
-		return nil
-	}
-
 	if err := s.resetSysTableStats(ctx, "system.statement_execution_insights"); err != nil {
 		return err
 	}
@@ -106,7 +92,7 @@ func (s *Controller) resetSysTableStats(ctx context.Context, tableName string) (
 	ex := s.db.Executor()
 	_, err = ex.ExecEx(
 		ctx,
-		fmt.Sprintf("reset-%s", tableName),
+		redact.Sprintf("reset-%s", tableName),
 		nil, /* txn */
 		sessiondata.NodeUserSessionDataOverride,
 		"TRUNCATE "+tableName)

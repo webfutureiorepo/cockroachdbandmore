@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -47,7 +42,7 @@ type ParseNodeIDFn func(string) (roachpb.NodeID, bool, error)
 
 // GetNodeIDHTTPAddressFn is a callback to look up HTTP addresses
 // for a given NodeID. It exists to prevent a dependency on `gossip`.
-type GetNodeIDHTTPAddressFn func(roachpb.NodeID) (*util.UnresolvedAddr, error)
+type GetNodeIDHTTPAddressFn func(roachpb.NodeID) (*util.UnresolvedAddr, roachpb.Locality, error)
 
 // nodeProxyHandler is expected to return responses that will be inspected
 // by customers directly (for instance, by third party software that
@@ -114,7 +109,7 @@ func (np *nodeProxy) getNodeIDFromRequest(
 func (np *nodeProxy) routeToNode(
 	w http.ResponseWriter, r *http.Request, clearCookieOnError bool, nodeID roachpb.NodeID,
 ) {
-	addr, err := np.getNodeIDHTTPAddress(nodeID)
+	addr, _, err := np.getNodeIDHTTPAddress(nodeID)
 	if err != nil {
 		httpErr := errors.Wrapf(err, "unable to get address for n%d", nodeID)
 		log.Errorf(r.Context(), "%v", httpErr)

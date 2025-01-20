@@ -1,23 +1,19 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { Store } from "redux";
-import moment from "moment-timezone";
 import { createHashHistory } from "history";
+import Long from "long";
+import moment from "moment-timezone";
+import { Store } from "redux";
 
 import * as protos from "src/js/protos";
 import { cockroach } from "src/js/protos";
+import { versionsSelector } from "src/redux/nodes";
 import { API_PREFIX } from "src/util/api";
 import fetchMock from "src/util/fetch-mock";
 
-import { AdminUIState, AppDispatch, createAdminUIStore } from "./state";
 import {
   AlertLevel,
   alertDataSync,
@@ -32,13 +28,6 @@ import {
   clusterPreserveDowngradeOptionDismissedSetting,
   clusterPreserveDowngradeOptionOvertimeSelector,
 } from "./alerts";
-import { versionsSelector } from "src/redux/nodes";
-import {
-  VERSION_DISMISSED_KEY,
-  INSTRUCTIONS_BOX_COLLAPSED_KEY,
-  setUIDataKey,
-  isInFlight,
-} from "./uiData";
 import {
   livenessReducerObj,
   versionReducerObj,
@@ -47,9 +36,16 @@ import {
   healthReducerObj,
   settingsReducerObj,
 } from "./apiReducers";
-import Long from "long";
-import MembershipStatus = cockroach.kv.kvserver.liveness.livenesspb.MembershipStatus;
 import { loginSuccess } from "./login";
+import { AdminUIState, AppDispatch, createAdminUIStore } from "./state";
+import {
+  VERSION_DISMISSED_KEY,
+  INSTRUCTIONS_BOX_COLLAPSED_KEY,
+  setUIDataKey,
+  isInFlight,
+} from "./uiData";
+
+import MembershipStatus = cockroach.kv.kvserver.liveness.livenesspb.MembershipStatus;
 
 describe("alerts", function () {
   let store: Store<AdminUIState>;
@@ -455,9 +451,8 @@ describe("alerts", function () {
 
     describe("email signup for release notes alert", () => {
       it("initialized with default 'false' (hidden) state", () => {
-        const settingState = emailSubscriptionAlertLocalSetting.selector(
-          state(),
-        );
+        const settingState =
+          emailSubscriptionAlertLocalSetting.selector(state());
         expect(settingState).toBe(false);
       });
 

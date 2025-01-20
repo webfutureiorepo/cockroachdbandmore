@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
@@ -27,14 +22,15 @@ import (
 type TxnCoordSenderFactory struct {
 	log.AmbientContext
 
-	st                     *cluster.Settings
-	wrapped                kv.Sender
-	clock                  *hlc.Clock
-	heartbeatInterval      time.Duration
-	linearizable           bool // enables linearizable behavior
-	stopper                *stop.Stopper
-	metrics                TxnMetrics
-	condensedIntentsEveryN log.EveryN
+	st                       *cluster.Settings
+	wrapped                  kv.Sender
+	clock                    *hlc.Clock
+	heartbeatInterval        time.Duration
+	linearizable             bool // enables linearizable behavior
+	stopper                  *stop.Stopper
+	metrics                  TxnMetrics
+	condensedIntentsEveryN   log.EveryN
+	inflightOverBudgetEveryN log.EveryN
 
 	testingKnobs ClientTestingKnobs
 }
@@ -64,16 +60,17 @@ func NewTxnCoordSenderFactory(
 	cfg TxnCoordSenderFactoryConfig, wrapped kv.Sender,
 ) *TxnCoordSenderFactory {
 	tcf := &TxnCoordSenderFactory{
-		AmbientContext:         cfg.AmbientCtx,
-		st:                     cfg.Settings,
-		wrapped:                wrapped,
-		clock:                  cfg.Clock,
-		stopper:                cfg.Stopper,
-		linearizable:           cfg.Linearizable,
-		heartbeatInterval:      cfg.HeartbeatInterval,
-		metrics:                cfg.Metrics,
-		condensedIntentsEveryN: log.Every(time.Second),
-		testingKnobs:           cfg.TestingKnobs,
+		AmbientContext:           cfg.AmbientCtx,
+		st:                       cfg.Settings,
+		wrapped:                  wrapped,
+		clock:                    cfg.Clock,
+		stopper:                  cfg.Stopper,
+		linearizable:             cfg.Linearizable,
+		heartbeatInterval:        cfg.HeartbeatInterval,
+		metrics:                  cfg.Metrics,
+		condensedIntentsEveryN:   log.Every(time.Second),
+		inflightOverBudgetEveryN: log.Every(time.Second),
+		testingKnobs:             cfg.TestingKnobs,
 	}
 	if tcf.st == nil {
 		tcf.st = cluster.MakeTestingClusterSettings()

@@ -1,14 +1,10 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { unset } from "src/util";
+
 import {
   ExecutionDetails,
   getInsightFromCause,
@@ -290,14 +286,14 @@ export function getInsightsFromProblemsAndCauses(
 
         if (insights.length === 0) {
           insights.push(
-            getInsightFromCause(InsightNameEnum.slowExecution, execType),
+            getInsightFromCause(InsightNameEnum.SLOW_EXECUTION, execType),
           );
         }
         break;
 
       case "FailedExecution":
         insights.push(
-          getInsightFromCause(InsightNameEnum.failedExecution, execType),
+          getInsightFromCause(InsightNameEnum.FAILED_EXECUTION, execType),
         );
         break;
 
@@ -339,39 +335,39 @@ export function getRecommendationForExecInsight(
   execDetails: ExecutionDetails | null,
 ): InsightRecommendation {
   switch (insight.name) {
-    case InsightNameEnum.highContention:
+    case InsightNameEnum.HIGH_CONTENTION:
       return {
-        type: InsightNameEnum.highContention,
+        type: InsightNameEnum.HIGH_CONTENTION,
         execution: execDetails,
         details: {
           duration: execDetails.contentionTimeMs,
           description: insight.description,
         },
       };
-    case InsightNameEnum.failedExecution:
+    case InsightNameEnum.FAILED_EXECUTION:
       return {
-        type: InsightNameEnum.failedExecution,
+        type: InsightNameEnum.FAILED_EXECUTION,
         execution: execDetails,
       };
-    case InsightNameEnum.highRetryCount:
+    case InsightNameEnum.HIGH_RETRY_COUNT:
       return {
-        type: InsightNameEnum.highRetryCount,
-        execution: execDetails,
-        details: {
-          description: insight.description,
-        },
-      };
-    case InsightNameEnum.planRegression:
-      return {
-        type: InsightNameEnum.planRegression,
+        type: InsightNameEnum.HIGH_RETRY_COUNT,
         execution: execDetails,
         details: {
           description: insight.description,
         },
       };
-    case InsightNameEnum.suboptimalPlan:
+    case InsightNameEnum.PLAN_REGRESSION:
       return {
-        type: InsightNameEnum.suboptimalPlan,
+        type: InsightNameEnum.PLAN_REGRESSION,
+        execution: execDetails,
+        details: {
+          description: insight.description,
+        },
+      };
+    case InsightNameEnum.SUBOPTIMAL_PLAN:
+      return {
+        type: InsightNameEnum.SUBOPTIMAL_PLAN,
         database: execDetails.databaseName,
         execution: execDetails,
         details: {

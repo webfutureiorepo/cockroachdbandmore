@@ -1,16 +1,15 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package install
 
-import "github.com/cockroachdb/cockroach/pkg/roachprod/config"
+import (
+	"fmt"
+
+	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
+)
 
 // ClusterSettings contains various knobs that affect operations on a cluster.
 type ClusterSettings struct {
@@ -109,8 +108,8 @@ func MakeClusterSettings(opts ...ClusterSettingOption) ClusterSettings {
 	clusterSettings := ClusterSettings{
 		Binary:          config.Binary,
 		Tag:             "",
-		PGUrlCertsDir:   "./certs",
-		Secure:          false,
+		PGUrlCertsDir:   fmt.Sprintf("./%s", CockroachNodeCertsDir),
+		Secure:          true,
 		UseTreeDist:     true,
 		Env:             config.DefaultEnvVars(),
 		NumRacks:        0,

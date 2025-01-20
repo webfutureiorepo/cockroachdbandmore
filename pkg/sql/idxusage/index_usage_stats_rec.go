@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package idxusage
 
@@ -45,9 +40,10 @@ const defaultUnusedIndexDuration = 7 * 24 * time.Hour
 var DropUnusedIndexDuration = settings.RegisterDurationSetting(
 	settings.ApplicationLevel,
 	"sql.index_recommendation.drop_unused_duration",
-	"the index unuse duration at which we begin to recommend dropping the index",
+	"the index unused duration at which we begin to recommend dropping the index",
 	defaultUnusedIndexDuration,
 	settings.NonNegativeDuration,
+	settings.WithPublic,
 )
 
 const indexExceedUsageDurationReasonPlaceholder = "This index has not been used in over %sand can be removed for better write performance."

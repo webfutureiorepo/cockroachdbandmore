@@ -1,18 +1,14 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades_test
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -52,24 +48,22 @@ func TestLeasingClusterVersionStarvation(t *testing.T) {
 				},
 				Server: &server.TestingKnobs{
 					DisableAutomaticVersionUpgrade: make(chan struct{}),
-					BinaryVersionOverride:          clusterversion.V23_2.Version(),
+					ClusterVersionOverride:         clusterversion.MinSupported.Version(),
 				},
 			},
 		},
 	}
 
-	// Disable lease renewals intentionally, so that we validate
-	// no deadlock risk exists with the settings table.
 	st := clustersettings.MakeTestingClusterSettingsWithVersions(
 		clusterversion.Latest.Version(),
 		clusterversion.MinSupported.Version(),
 		false)
-
 	clusterArgs.ServerArgs.Settings = st
-
+	// Encourage continuous lease renewals intentionally, so that we validate
+	// no deadlock risk exists with the settings table. By setting a higher number
+	// the expiration will be less than the renewal interval.g
+	lease.LeaseRenewalDuration.Override(ctx, &st.SV, time.Hour)
 	tc := testcluster.StartTestCluster(t, 1, clusterArgs)
-	lease.LeaseDuration.Override(ctx, &st.SV, 0)
-	lease.LeaseRenewalDuration.Override(ctx, &st.SV, 0)
 
 	defer tc.Stopper().Stop(ctx)
 	db := tc.ServerConn(0)
@@ -105,7 +99,7 @@ func TestLeasingClusterVersionStarvation(t *testing.T) {
 	upgrades.Upgrade(
 		t,
 		db,
-		clusterversion.V24_1,
+		clusterversion.Latest,
 		nil,
 		false,
 	)

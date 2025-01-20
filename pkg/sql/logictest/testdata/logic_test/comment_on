@@ -52,12 +52,40 @@ SELECT COMMENT FROM system.comments WHERE type = 4;
 SC
 
 statement ok
-COMMENT ON SCHEMA sc IS 'SC AGAIN'
+COMMENT ON SCHEMA sc IS 'SC_AGAIN'
 
 query T
 SELECT COMMENT FROM system.comments WHERE type = 4;
 ----
-SC AGAIN
+SC_AGAIN
+
+query TTT colnames,rowsort
+SHOW SCHEMAS WITH COMMENT
+----
+schema_name         owner  comment
+crdb_internal       node   NULL
+information_schema  node   NULL
+pg_catalog          node   NULL
+pg_extension        node   NULL
+public              root   NULL
+sc                  root   SC_AGAIN
+
+statement ok
+CREATE SCHEMA db.schema1
+
+statement ok
+COMMENT ON SCHEMA db.schema1 IS 'Database_Schema'
+
+query TTT colnames,rowsort
+SHOW SCHEMAS FROM db WITH COMMENT
+----
+schema_name         owner  comment
+crdb_internal       node   NULL
+information_schema  node   NULL
+pg_catalog          node   NULL
+pg_extension        node   NULL
+public              root   NULL
+schema1             root   Database_Schema
 
 statement ok
 CREATE TABLE t(
@@ -133,6 +161,9 @@ COMMENT ON COLUMN public.t.b IS 'column b'
 
 statement ok
 COMMENT ON COLUMN t.b IS 'column b AGAIN';
+
+statement error column name must be qualified
+COMMENT ON COLUMN b IS 'unqualified column b';
 
 query T
 SELECT create_statement FROM [SHOW CREATE TABLE t];
@@ -270,3 +301,70 @@ SELECT * FROM pg_catalog.pg_description WHERE objoid = 't'::regclass::OID;
 
 statement ok
 DELETE FROM system.comments WHERE type = 4294967122
+
+statement ok
+COMMENT ON SCHEMA sc IS NULL
+
+statement ok
+CREATE TYPE roach_dwellings AS ENUM ('roach_motel','roach_kitchen','roach_bathroom','roach_house');
+CREATE TYPE roach_legs AS (legs INT);
+
+onlyif config local-legacy-schema-changer
+statement error COMMENT ON TYPE is only implemented in the declarative schema changer
+COMMENT ON TYPE roach_dwellings IS 'First-CRDB-comment-on-types';
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_dwellings IS 'First-CRDB-comment-on-types';
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_legs IS 'Second-CRDB-comment-on-types';
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_dwellings IS 'First-CRDB-comment-on-types-again';
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_legs IS 'Second-CRDB-comment-on-types-again';
+
+skipif config local-legacy-schema-changer
+query IIIT colnames,rowsort
+SELECT * FROM SYSTEM.COMMENTS;
+----
+type  object_id  sub_id  comment
+4     109        0       Database_Schema
+7     112        0       First-CRDB-comment-on-types-again
+7     114        0       Second-CRDB-comment-on-types-again
+
+skipif config local-legacy-schema-changer
+query TTTT colnames,rowsort
+SHOW TYPES WITH COMMENT
+----
+schema  name             owner  comment
+public  roach_dwellings  root   First-CRDB-comment-on-types-again
+public  roach_legs       root   Second-CRDB-comment-on-types-again
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_dwellings IS NULL;
+
+skipif config local-legacy-schema-changer
+statement ok
+COMMENT ON TYPE roach_legs IS NULL;
+
+skipif config local-legacy-schema-changer
+query TTTT colnames,rowsort
+SHOW TYPES WITH COMMENT
+----
+schema  name             owner  comment
+public  roach_dwellings  root   NULL
+public  roach_legs       root   NULL
+
+skipif config local-legacy-schema-changer
+query IIIT colnames
+SELECT * FROM SYSTEM.COMMENTS;
+----
+type  object_id  sub_id  comment
+4     109        0       Database_Schema

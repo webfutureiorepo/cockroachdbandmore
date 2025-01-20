@@ -1,15 +1,11 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { getLogger } from "../util";
 
 import { fetchDataJSON } from "./fetchData";
-import { getLogger } from "../util";
 
 export type SqlExecutionRequest = {
   statements: SqlStatement[];
@@ -178,6 +174,7 @@ const UPGRADE_RELATED_ERRORS = [
 ];
 
 export function isUpgradeError(message: string): boolean {
+  if (message == null) return false;
   return UPGRADE_RELATED_ERRORS.some(err => message.search(err) !== -1);
 }
 
@@ -196,6 +193,10 @@ export function isUpgradeError(message: string): boolean {
  * @param message
  */
 export function sqlApiErrorMessage(message: string): string {
+  if (!message) {
+    return "";
+  }
+
   if (isUpgradeError(message)) {
     return "This page may not be available during an upgrade.";
   }
@@ -211,7 +212,6 @@ export function sqlApiErrorMessage(message: string): string {
 export function createSqlExecutionRequest(
   dbName: string,
   statements: SqlStatement[],
-  useObsService?: boolean,
 ): SqlExecutionRequest {
   return {
     execute: true,
@@ -219,7 +219,6 @@ export function createSqlExecutionRequest(
     database: dbName,
     max_result_size: LARGE_RESULT_SIZE,
     timeout: LONG_TIMEOUT,
-    use_obs_service: useObsService || false,
   };
 }
 
@@ -286,15 +285,15 @@ export function combineQueryErrors(
   };
 }
 
-export function txnResultIsEmpty(txn_result: SqlTxnResult<unknown>): boolean {
-  return !txn_result || !txn_result.rows || txn_result.rows?.length === 0;
+export function txnResultIsEmpty(txnResults: SqlTxnResult<unknown>): boolean {
+  return !txnResults || !txnResults.rows || txnResults.rows?.length === 0;
 }
 
 export function txnResultSetIsEmpty(
-  txn_results: SqlTxnResult<unknown>[],
+  txnResults: SqlTxnResult<unknown>[],
 ): boolean {
-  if (!txn_results || txn_results.length === 0) {
+  if (!txnResults || txnResults.length === 0) {
     return true;
   }
-  return txn_results.every(x => txnResultIsEmpty(x));
+  return txnResults.every(x => txnResultIsEmpty(x));
 }

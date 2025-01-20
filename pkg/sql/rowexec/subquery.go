@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -33,4 +28,9 @@ const (
 	// columns, unless there is exactly 1 column in which case the result type is
 	// that column's type. If there are no rows, the result is NULL.
 	SubqueryExecModeOneRow
+	// SubqueryExecModeDiscardAllRows indicates that the subquery is being
+	// executed for its side effects. The subquery should be executed until it
+	// produces all rows, but the rows should not be saved, and the result will
+	// never be checked.
+	SubqueryExecModeDiscardAllRows
 )

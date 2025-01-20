@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo
 
@@ -255,13 +250,9 @@ func (c *internCache) Add(item interface{}) {
 // interner. To use, first call the init method, then a series of hash methods.
 // The final value is stored in the hash field.
 type hasher struct {
-	// bytes is a scratch byte array used to serialize certain types of values
-	// during hashing and equality testing.
-	bytes []byte
-
-	// bytes2 is a scratch byte array used to serialize certain types of values
-	// during equality testing.
-	bytes2 []byte
+	// bytes, bytes2, and bytes3 are scratch byte arrays used to serialize
+	// certain types of values during hashing and equality testing.
+	bytes, bytes2, bytes3 []byte
 
 	// hash stores the hash value as it is incrementally computed.
 	hash internHash
@@ -273,6 +264,7 @@ func (h *hasher) Init() {
 	*h = hasher{
 		bytes:  h.bytes,
 		bytes2: h.bytes2,
+		bytes3: h.bytes3,
 		hash:   offset64,
 	}
 }
@@ -366,8 +358,6 @@ func (h *hasher) HashDatum(val tree.Datum) {
 		h.HashUint64(uint64(t.PGEpochDays()))
 	case *tree.DTime:
 		h.HashUint64(uint64(*t))
-	case *tree.DJSON:
-		h.HashString(t.String())
 	case *tree.DTuple:
 		// If labels are present, then hash of tuple's static type is needed to
 		// disambiguate when everything is the same except labels.
@@ -382,7 +372,7 @@ func (h *hasher) HashDatum(val tree.Datum) {
 		h.HashString(t.Locale)
 		h.HashString(t.Contents)
 	default:
-		h.bytes = encodeDatum(h.bytes[:0], val)
+		h.bytes, h.bytes3 = encodeDatum(h.bytes[:0], val, h.bytes3[:0])
 		h.HashBytes(h.bytes)
 	}
 }
@@ -425,6 +415,10 @@ func (h *hasher) HashType(val *types.T) {
 		h.HashInt(int(geo.SRID))
 		h.HashInt(int(geo.ShapeType))
 	}
+}
+
+func (h *hasher) HashExpr(val tree.Expr) {
+	h.HashUint64(uint64(reflect.ValueOf(val).Pointer()))
 }
 
 func (h *hasher) HashTypedExpr(val tree.TypedExpr) {
@@ -515,7 +509,9 @@ func (h *hasher) HashScanFlags(val ScanFlags) {
 	h.HashBool(val.NoIndexJoin)
 	h.HashBool(val.NoZigzagJoin)
 	h.HashBool(val.NoFullScan)
+	h.HashBool(val.AvoidFullScan)
 	h.HashBool(val.ForceIndex)
+	h.HashBool(val.ForceInvertedIndex)
 	h.HashBool(val.ForceZigzag)
 	h.HashInt(int(val.Direction))
 	h.HashUint64(uint64(val.Index))
@@ -534,6 +530,12 @@ func (h *hasher) HashJoinFlags(val JoinFlags) {
 func (h *hasher) HashFKCascades(val FKCascades) {
 	for i := range val {
 		h.HashUint64(uint64(reflect.ValueOf(val[i].Builder).Pointer()))
+	}
+}
+
+func (h *hasher) HashAfterTriggers(val *AfterTriggers) {
+	if val != nil {
+		h.HashUint64(uint64(reflect.ValueOf(val.Builder).Pointer()))
 	}
 }
 
@@ -588,6 +590,15 @@ func (h *hasher) HashUniqueOrdinals(val cat.UniqueOrdinals) {
 		hash ^= internHash(ord)
 		hash *= prime64
 	}
+	h.hash = hash
+}
+
+func (h *hasher) HashSchemaFunctionDeps(val opt.SchemaFunctionDeps) {
+	hash := h.hash
+	val.ForEach(func(i int) {
+		hash ^= internHash(i)
+		hash *= prime64
+	})
 	h.hash = hash
 }
 
@@ -777,6 +788,20 @@ func (h *hasher) HashUDFDefinition(val *UDFDefinition) {
 	h.HashUint64(uint64(reflect.ValueOf(val).Pointer()))
 }
 
+func (h *hasher) HashStoredProcTxnOp(val tree.StoredProcTxnOp) {
+	h.HashUint64(uint64(val))
+}
+
+func (h *hasher) HashTransactionModes(val tree.TransactionModes) {
+	h.HashUint64(uint64(val.Isolation))
+	h.HashUint64(uint64(val.UserPriority))
+	h.HashUint64(uint64(val.ReadWriteMode))
+	if val.AsOf.Expr != nil {
+		h.HashExpr(val.AsOf.Expr)
+	}
+	h.HashUint64(uint64(val.Deferrable))
+}
+
 // ----------------------------------------------------------------------
 //
 // Equality functions
@@ -862,9 +887,6 @@ func (h *hasher) IsDatumEqual(l, r tree.Datum) bool {
 	case *tree.DTime:
 		rt := r.(*tree.DTime)
 		return uint64(*lt) == uint64(*rt)
-	case *tree.DJSON:
-		rt := r.(*tree.DJSON)
-		return h.IsStringEqual(lt.String(), rt.String())
 	case *tree.DTuple:
 		rt := r.(*tree.DTuple)
 		// Compare datums and then compare static types if nulls or labels
@@ -886,8 +908,8 @@ func (h *hasher) IsDatumEqual(l, r tree.Datum) bool {
 		}
 		return len(lt.Array) != 0 || h.IsTypeEqual(ltyp, rtyp)
 	default:
-		h.bytes = encodeDatum(h.bytes[:0], l)
-		h.bytes2 = encodeDatum(h.bytes2[:0], r)
+		h.bytes, h.bytes3 = encodeDatum(h.bytes[:0], l, h.bytes3[:0])
+		h.bytes2, h.bytes3 = encodeDatum(h.bytes2[:0], r, h.bytes3[:0])
 		return bytes.Equal(h.bytes, h.bytes2)
 	}
 }
@@ -911,6 +933,10 @@ func (h *hasher) areDatumsWithTypeEqual(ldatums, rdatums tree.Datums, ltyp, rtyp
 		return h.IsTypeEqual(ltyp, rtyp)
 	}
 	return true
+}
+
+func (h *hasher) IsExprEqual(l, r tree.Expr) bool {
+	return l == r
 }
 
 func (h *hasher) IsTypedExprEqual(l, r tree.TypedExpr) bool {
@@ -990,6 +1016,17 @@ func (h *hasher) IsFKCascadesEqual(l, r FKCascades) bool {
 	return true
 }
 
+func (h *hasher) IsAfterTriggersEqual(l, r *AfterTriggers) bool {
+	if l == r {
+		return true
+	}
+	if l == nil || r == nil {
+		return false
+	}
+	// It's sufficient to compare the TriggerBuilder instances.
+	return l.Builder == r.Builder
+}
+
 func (h *hasher) IsExplainOptionsEqual(l, r tree.ExplainOptions) bool {
 	return l == r
 }
@@ -1040,6 +1077,10 @@ func (h *hasher) IsUniqueOrdinalsEqual(l, r cat.UniqueOrdinals) bool {
 		}
 	}
 	return true
+}
+
+func (h *hasher) IsSchemaFunctionDepsEqual(l, r opt.SchemaFunctionDeps) bool {
+	return l.Equals(r)
 }
 
 func (h *hasher) IsSchemaDepsEqual(l, r opt.SchemaDeps) bool {
@@ -1311,12 +1352,22 @@ func (h *hasher) IsUDFDefinitionEqual(l, r *UDFDefinition) bool {
 	return h.IsColListEqual(l.Params, r.Params) && l.IsRecursive == r.IsRecursive
 }
 
+func (h *hasher) IsStoredProcTxnOpEqual(l, r tree.StoredProcTxnOp) bool {
+	return l == r
+}
+
+func (h *hasher) IsTransactionModesEqual(l, r tree.TransactionModes) bool {
+	return l.Isolation == r.Isolation && l.UserPriority == r.UserPriority &&
+		l.ReadWriteMode == r.ReadWriteMode && l.AsOf.Expr == r.AsOf.Expr &&
+		l.Deferrable == r.Deferrable
+}
+
 // encodeDatum turns the given datum into an encoded string of bytes. If two
 // datums are equivalent, then their encoded bytes will be identical.
 // Conversely, if two datums are not equivalent, then their encoded bytes will
 // differ. This will panic if the datum cannot be encoded.
 // Notice: DCollatedString does not encode its collation and won't work here.
-func encodeDatum(b []byte, val tree.Datum) []byte {
+func encodeDatum(b []byte, val tree.Datum, scratch []byte) (res []byte, newScratch []byte) {
 	var err error
 
 	// Fast path: encode the datum using table key encoding. This does not always
@@ -1326,13 +1377,13 @@ func encodeDatum(b []byte, val tree.Datum) []byte {
 	if !colinfo.CanHaveCompositeKeyEncoding(val.ResolvedType()) {
 		b, err = keyside.Encode(b, val, encoding.Ascending)
 		if err == nil {
-			return b
+			return b, newScratch
 		}
 	}
 
-	b, err = valueside.Encode(b, valueside.NoColumnID, val, nil /* scratch */)
+	b, scratch, err = valueside.EncodeWithScratch(b, valueside.NoColumnID, val, scratch)
 	if err != nil {
 		panic(err)
 	}
-	return b
+	return b, scratch
 }

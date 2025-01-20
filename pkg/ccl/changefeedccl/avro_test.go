@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -56,9 +53,7 @@ var testTypeResolver = tree.MakeTestingMapTypeResolver(testTypes)
 const primary = descpb.FamilyID(0)
 
 func makeTestSemaCtx() tree.SemaContext {
-	testSemaCtx := tree.MakeSemaContext()
-	testSemaCtx.TypeResolver = testTypeResolver
-	return testSemaCtx
+	return tree.MakeSemaContext(testTypeResolver)
 }
 
 func parseTableDesc(createTableStmt string) (catalog.TableDescriptor, error) {
@@ -322,6 +317,9 @@ func TestAvroSchema(t *testing.T) {
 		case types.AnyFamily, types.OidFamily, types.TupleFamily:
 			// These aren't expected to be needed for changefeeds.
 			return true
+		case types.PGVectorFamily:
+			// We don't support PGVector in Avro yet.
+			return true
 		case types.ArrayFamily:
 			if !randgen.IsAllowedForArray(typ.ArrayContents()) {
 				return true
@@ -384,6 +382,7 @@ func TestAvroSchema(t *testing.T) {
 		tests = append(tests, randTypeTest)
 	}
 
+	ctx := context.Background()
 	evalCtx := eval.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -413,15 +412,17 @@ func TestAvroSchema(t *testing.T) {
 				require.NoError(t, err)
 				roundtripped, err := roundtrippedSchema.rowFromTextual(serialized)
 				require.NoError(t, err)
-				require.Equal(t, 0, encDatums[1].Datum.Compare(evalCtx, roundtripped[1].Datum),
-					`%s != %s`, encDatums[1].Datum, roundtripped[1].Datum)
+				cmp, err := encDatums[1].Datum.Compare(ctx, evalCtx, roundtripped[1].Datum)
+				require.NoError(t, err)
+				require.Equal(t, 0, cmp, `%s != %s`, encDatums[1].Datum, roundtripped[1].Datum)
 
 				serialized, err = origSchema.BinaryFromRow(nil, row.ForEachColumn())
 				require.NoError(t, err)
 				roundtripped, err = roundtrippedSchema.RowFromBinary(serialized)
 				require.NoError(t, err)
-				require.Equal(t, 0, encDatums[1].Datum.Compare(evalCtx, roundtripped[1].Datum),
-					`%s != %s`, encDatums[1].Datum, roundtripped[1].Datum)
+				cmp, err = encDatums[1].Datum.Compare(ctx, evalCtx, roundtripped[1].Datum)
+				require.NoError(t, err)
+				require.Equal(t, 0, cmp, `%s != %s`, encDatums[1].Datum, roundtripped[1].Datum)
 			}
 		})
 	}

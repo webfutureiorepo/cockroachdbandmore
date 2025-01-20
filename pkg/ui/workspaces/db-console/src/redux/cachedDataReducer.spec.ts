@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
-import { Action } from "redux";
+import isError from "lodash/isError";
 import moment from "moment-timezone";
+import { Action } from "redux";
+
 import {
   CachedDataReducer,
   CachedDataReducerState,
@@ -178,7 +174,7 @@ describe("basic cachedDataReducer", function () {
           "duplicatenamespace",
         );
       } catch (e) {
-        expect(_.isError(e)).toBeTruthy();
+        expect(isError(e)).toBeTruthy();
         return;
       }
       // expected to throw an error after using a duplicate actionNamespace
@@ -347,15 +343,18 @@ describe("PaginatedCachedDataReducer", function () {
   }
 
   class Response implements WithPaginationResponse {
-    constructor(public response: string, public next_page_token: string) {}
+    constructor(
+      public response: string,
+      public next_page_token: string,
+    ) {}
   }
 
   const apiEndpointMockFactory: (
     totalPages: number,
     pageSize: number,
   ) => (req: Request) => Promise<Response> = (
-    totalPages: number = 5,
-    pageSize: number = 10,
+    totalPages = 5,
+    pageSize = 10,
   ) => {
     let requestCounter = 0;
     return (req = new Request(null, pageSize, requestCounter.toString())) => {

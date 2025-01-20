@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -67,8 +62,8 @@ INSERT INTO t VALUES (1, 2, 3, 4), (5, 6, 7, 8), (9, 10, 11, 12);
 			// Run the following statements in a node running the next
 			// version, if any; otherwise, pick a random node.
 			nodes := c.All()
-			if h.Context.MixedBinary() {
-				nodes = h.Context.NodesInNextVersion()
+			if h.Context().MixedBinary() {
+				nodes = h.Context().NodesInNextVersion()
 			}
 
 			if err := h.ExecWithGateway(r, nodes, `DELETE FROM t WHERE x = 13 OR x = 20`); err != nil {
@@ -147,7 +142,8 @@ func registerSecondaryIndexesMultiVersionCluster(r registry.Registry) {
 		Owner:            registry.OwnerSQLFoundations,
 		Cluster:          r.MakeClusterSpec(3),
 		CompatibleClouds: registry.AllExceptAWS,
-		Suites:           registry.Suites(registry.Nightly),
+		Suites:           registry.Suites(registry.MixedVersion, registry.Nightly),
+		Randomized:       true,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			runIndexUpgrade(ctx, t, c)
 		},

@@ -1,19 +1,14 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { createSelector } from "reselect";
 
 import { AdminUIState } from "src/redux/state";
 import { MetricMetadataResponseMessage } from "src/util/api";
 
-export type MetricsMetadata = MetricMetadataResponseMessage["metadata"];
+export type MetricsMetadata = MetricMetadataResponseMessage;
 
 // State selectors
 const metricsMetadataStateSelector = (state: AdminUIState) =>
@@ -21,6 +16,5 @@ const metricsMetadataStateSelector = (state: AdminUIState) =>
 
 export const metricsMetadataSelector = createSelector(
   metricsMetadataStateSelector,
-  (metricsMetadata): MetricsMetadata =>
-    metricsMetadata ? metricsMetadata.metadata : undefined,
+  (metricsMetadata): MetricsMetadata => metricsMetadata,
 );

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 /**
  * This module contains all the REST endpoints for communicating with the admin UI.
@@ -15,6 +10,7 @@
 import moment from "moment-timezone";
 
 import { VersionList, VersionCheckRequest } from "src/interfaces/cockroachlabs";
+
 import { withTimeout } from "./api";
 
 export const COCKROACHLABS_ADDR = "https://register.cockroachdb.com";

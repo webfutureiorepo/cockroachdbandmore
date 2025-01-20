@@ -48,10 +48,6 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":spanconfigkvsubscriber"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/base",
         "//pkg/keys",
@@ -80,6 +76,7 @@ go_test(
         "//pkg/util/protoutil",
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",
+        "//pkg/util/tracing",
         "@com_github_cockroachdb_datadriven//:datadriven",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_stretchr_testify//require",

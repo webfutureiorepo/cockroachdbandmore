@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package azure
 
@@ -129,7 +124,7 @@ func TestAzureFileCredential(t *testing.T) {
 		defaultCreds, err := azidentity.NewDefaultAzureCredential(nil)
 		require.NoError(t, err)
 
-		require.ErrorContains(t, verifyCredentialsAccess(defaultCreds), "DefaultAzureCredential: failed to acquire a token")
+		require.ErrorContains(t, verifyCredentialsAccess(defaultCreds), "DefaultAzureCredential authentication failed. failed to acquire a token")
 
 		require.NoError(t, writeAzureCredentialsFile(credFile, cfg.tenantID, cfg.clientID, cfg.clientSecret))
 
@@ -163,7 +158,6 @@ func TestAzureFileCredential(t *testing.T) {
 	// reload, there should be no error that bubbles up to the rest of the Azure
 	// SDK and storage.
 	t.Run("reload-on-error", func(t *testing.T) {
-		testSettings := cluster.MakeTestingClusterSettings()
 		ioConf := base.ExternalIODirConfig{}
 		storeURI := cfg.filePathImplicitAuth("backup-test")
 
@@ -188,7 +182,8 @@ func TestAzureFileCredential(t *testing.T) {
 			}
 
 			// Setup a sink for the given args.
-			clientFactory := blobs.TestBlobServiceClient(testSettings.ExternalIODir)
+			clientFactory := blobs.TestBlobServiceClient("")
+			testSettings := cluster.MakeTestingClusterSettings()
 			s, err := cloud.MakeExternalStorage(ctx, conf, ioConf, testSettings, clientFactory,
 				nil, nil, cloud.NilMetrics, cloud.WithAzureStorageTestingKnobs(&knobs))
 			if err != nil {

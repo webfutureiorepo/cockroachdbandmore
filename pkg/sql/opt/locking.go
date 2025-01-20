@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opt
 
@@ -42,6 +37,8 @@ type Locking struct {
 	//   SKIP LOCKED
 	//   NOWAIT
 	//
+	// Note that SKIP LOCKED can be requested without a locking strength, which
+	// signifies skipping over locks without taking any additional locks.
 	WaitPolicy tree.LockingWaitPolicy
 
 	// The third property is the form of locking, either record locking or
@@ -80,8 +77,19 @@ func (l Locking) Max(l2 Locking) Locking {
 	}
 }
 
-// IsLocking returns whether the receiver is configured to use a row-level
-// locking mode.
+// IsLocking returns whether the receiver is configured to use row-level
+// locking.
 func (l Locking) IsLocking() bool {
 	return l.Strength != tree.ForNone
+}
+
+// IsNoOp returns true if none of the locking properties are set. It differs
+// from IsLocking in that it considers all of the locking properties, instead of
+// only Strength. Currently, the only locking property that can be set when
+// Strength=ForNone is WaitPolicy=LockWaitSkipLocked or
+// WaitPolicy=LockWaitError. So we can say: IsNoOp returns false if IsLocking
+// returns true OR the SKIP LOCKED wait policy is in effect OR the NOWAIT wait
+// policy is in effect.
+func (l Locking) IsNoOp() bool {
+	return l == Locking{}
 }

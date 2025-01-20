@@ -1,26 +1,24 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { takeEvery, takeLatest } from "redux-saga/effects";
 import { expectSaga, testSaga } from "redux-saga-test-plan";
-import { actions } from "./localStorage.reducer";
+
 import { actions as stmtInsightActions } from "src/store/insights/statementInsights/statementInsights.reducer";
 import { actions as txnInsightActions } from "src/store/insights/transactionInsights/transactionInsights.reducer";
 import { actions as sqlStatsActions } from "src/store/sqlStats/sqlStats.reducer";
 import { actions as txnStatsActions } from "src/store/transactionStats";
+
+import { defaultTimeScaleSelected } from "../../timeScaleDropdown";
+
+import { actions } from "./localStorage.reducer";
 import {
   localStorageSaga,
   updateLocalStorageItemSaga,
   updateTimeScale,
 } from "./localStorage.saga";
-import { defaultTimeScaleSelected } from "../../timeScaleDropdown";
-import { takeEvery, takeLatest } from "redux-saga/effects";
 
 const ts = defaultTimeScaleSelected;
 

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package floatcmp provides functions for determining float values to be equal
 // if they are within a tolerance. It is designed to be used in tests.
@@ -97,6 +92,40 @@ func FloatsMatchApprox(expectedString, actualString string) (bool, error) {
 	return EqualApprox(expected, actual, CloseFraction, CloseMargin), nil
 }
 
+// splitFloatArray splits the textual representation of the float array of the
+// form {1.2,3.4,5.6,...} into its elements (in the textual form).
+func splitFloatArray(array string) []string {
+	return strings.Split(strings.Trim(array, "{}"), ",")
+}
+
+// floatArraysMatchImpl is the common logic for verifying whether two float
+// arrays match where per-element verification is done by the provided function.
+func floatArraysMatchImpl(
+	expected, actual string, matchFn func(string, string) (bool, error),
+) (bool, error) {
+	if expected == "NULL" || actual == "NULL" {
+		// Default to string matching for NULL arrays.
+		return expected == actual, nil
+	}
+	exp, act := splitFloatArray(expected), splitFloatArray(actual)
+	if len(exp) != len(act) {
+		return false, nil
+	}
+	for i := range exp {
+		match, err := matchFn(exp[i], act[i])
+		if !match || err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// FloatArraysMatchApprox returns whether two floating point arrays represented
+// as strings are equal within a tolerance.
+func FloatArraysMatchApprox(expectedString, actualString string) (bool, error) {
+	return floatArraysMatchImpl(expectedString, actualString, FloatsMatchApprox)
+}
+
 // FloatsCmp returns -1 if aString is less than bString, 0 if they are equal,
 // and 1 otherwise when aString and bString are parsed as SQL floats. NULL
 // sorts before NaN, which sorts before all other numbers.
@@ -130,6 +159,37 @@ func FloatsCmp(aString, bString string) (int, error) {
 	} else {
 		return 1, nil
 	}
+}
+
+// FloatArraysCmp returns -1 if aString is less than bString, 0 if they are
+// equal, and 1 otherwise when aString and bString are parsed as SQL float
+// arrays. NULL sorts before NaN, which sorts before all other numbers.
+func FloatArraysCmp(aString, bString string) (int, error) {
+	if aString == "NULL" {
+		if bString != "NULL" {
+			return -1, nil
+		}
+		return 0, nil
+	} else if bString == "NULL" {
+		return 1, nil
+	}
+	aFloats, bFloats := splitFloatArray(aString), splitFloatArray(bString)
+	// Comparison of arrays is such that we check the "shared" elements first,
+	// and only if all of them are equal, then we check the lengths of arrays
+	// (see tree.DArray.Compare).
+	toCheck := min(len(aFloats), len(bFloats))
+	for i := 0; i < toCheck; i++ {
+		cmp, err := FloatsCmp(aFloats[i], bFloats[i])
+		if cmp != 0 || err != nil {
+			return cmp, err
+		}
+	}
+	if len(aFloats) < len(bFloats) {
+		return -1, nil
+	} else if len(aFloats) > len(bFloats) {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // FloatsMatch returns whether two floating point numbers represented as
@@ -197,6 +257,13 @@ func FloatsMatch(expectedString, actualString string) (bool, error) {
 		actual -= (actual - float64(actDigit)) * 10
 	}
 	return true, nil
+}
+
+// FloatArraysMatch returns whether two floating point number arrays represented
+// as strings have matching 15 significant decimal digits (this is the precision
+// that Postgres supports for 'double precision' type) for each element.
+func FloatArraysMatch(expectedString, actualString string) (bool, error) {
+	return floatArraysMatchImpl(expectedString, actualString, FloatsMatch)
 }
 
 // RoundFloatsInString rounds floats in a given string to the given number of significant figures.

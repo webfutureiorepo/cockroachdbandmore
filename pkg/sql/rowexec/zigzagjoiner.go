@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rowexec
 
@@ -29,9 +24,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/optional"
 	"github.com/cockroachdb/errors"
 )
@@ -260,7 +255,7 @@ type zigzagJoiner struct {
 // be fetched at a time. Increasing this will improve performance for when
 // matched rows are grouped together, but increasing this too much will result
 // in fetching too many rows and therefore skipping less rows.
-var zigzagJoinerBatchSize = rowinfra.RowLimit(util.ConstantWithMetamorphicTestValue(
+var zigzagJoinerBatchSize = rowinfra.RowLimit(metamorphic.ConstantWithTestValue(
 	"zig-zag-joiner-batch-size",
 	5, /* defaultValue */
 	1, /* metamorphicValue */
@@ -305,7 +300,7 @@ func newZigzagJoiner(
 
 	leftColumnTypes := spec.Sides[0].FetchSpec.FetchedColumnTypes()
 	rightColumnTypes := spec.Sides[1].FetchSpec.FetchedColumnTypes()
-	err := z.joinerBase.init(
+	_, err := z.joinerBase.init(
 		ctx,
 		z, /* self */
 		flowCtx,
@@ -472,6 +467,7 @@ func (z *zigzagJoiner) setupInfo(
 			LockWaitPolicy:             spec.LockingWaitPolicy,
 			LockDurability:             spec.LockingDurability,
 			LockTimeout:                flowCtx.EvalCtx.SessionData().LockTimeout,
+			DeadlockTimeout:            flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 			Alloc:                      &info.alloc,
 			MemMonitor:                 flowCtx.Mon,
 			Spec:                       &spec.FetchSpec,
@@ -573,12 +569,12 @@ func (z *zigzagJoiner) matchBase(curRow rowenc.EncDatumRow, side int) (bool, err
 
 	prevEqDatums := z.extractEqDatums(z.baseRow, z.prevSide())
 	curEqDatums := z.extractEqDatums(curRow, side)
-
-	eqColTypes := z.infos[side].eqColTypes
+	prevEqColTypes := z.infos[z.prevSide()].eqColTypes
+	curEqColTypes := z.infos[side].eqColTypes
 	ordering := z.infos[side].eqColOrdering
 
 	// Compare the equality columns of the baseRow to that of the curRow.
-	cmp, err := prevEqDatums.Compare(eqColTypes, &z.infos[side].alloc, ordering, z.FlowCtx.EvalCtx, curEqDatums)
+	cmp, err := prevEqDatums.CompareEx(z.Ctx(), prevEqColTypes, &z.infos[side].alloc, ordering, z.FlowCtx.EvalCtx, curEqDatums, curEqColTypes)
 	if err != nil {
 		return false, err
 	}
@@ -660,7 +656,7 @@ func (z *zigzagJoiner) nextRow(ctx context.Context) (rowenc.EncDatumRow, error) 
 			ctx,
 			roachpb.Spans{roachpb.Span{Key: curInfo.key, EndKey: curInfo.endKey}},
 			nil, /* spanIDs */
-			rowinfra.GetDefaultBatchBytesLimit(z.EvalCtx.TestingKnobs.ForceProductionValues),
+			rowinfra.GetDefaultBatchBytesLimit(z.FlowCtx.EvalCtx.TestingKnobs.ForceProductionValues),
 			zigzagJoinerBatchSize,
 		)
 		if err != nil {
@@ -718,9 +714,10 @@ func (z *zigzagJoiner) nextRow(ctx context.Context) (rowenc.EncDatumRow, error) 
 
 			prevEqCols := z.extractEqDatums(prevNext, prevSide)
 			currentEqCols := z.extractEqDatums(curNext, z.side)
-			eqColTypes := curInfo.eqColTypes
+			prevEqColTypes := z.infos[prevSide].eqColTypes
+			curEqColTypes := z.infos[z.side].eqColTypes
 			ordering := curInfo.eqColOrdering
-			cmp, err := prevEqCols.Compare(eqColTypes, &z.infos[z.side].alloc, ordering, z.FlowCtx.EvalCtx, currentEqCols)
+			cmp, err := prevEqCols.CompareEx(ctx, prevEqColTypes, &z.infos[z.side].alloc, ordering, z.FlowCtx.EvalCtx, currentEqCols, curEqColTypes)
 			if err != nil {
 				return nil, err
 			}
@@ -799,7 +796,7 @@ func (z *zigzagJoiner) maybeFetchInitialRow() error {
 			z.Ctx(),
 			roachpb.Spans{roachpb.Span{Key: curInfo.key, EndKey: curInfo.endKey}},
 			nil, /* spanIDs */
-			rowinfra.GetDefaultBatchBytesLimit(z.EvalCtx.TestingKnobs.ForceProductionValues),
+			rowinfra.GetDefaultBatchBytesLimit(z.FlowCtx.EvalCtx.TestingKnobs.ForceProductionValues),
 			zigzagJoinerBatchSize,
 		)
 		if err != nil {
@@ -852,10 +849,11 @@ func (z *zigzagJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
 	kvStats := execinfrapb.KVStats{
 		BytesRead:           optional.MakeUint(uint64(z.getBytesRead())),
 		KVPairsRead:         optional.MakeUint(uint64(z.getKVPairsRead())),
-		ContentionTime:      optional.MakeTimeValue(z.contentionEventsListener.CumulativeContentionTime),
+		ContentionTime:      optional.MakeTimeValue(z.contentionEventsListener.GetContentionTime()),
 		BatchRequestsIssued: optional.MakeUint(uint64(z.getBatchRequestsIssued())),
 	}
-	execstats.PopulateKVMVCCStats(&kvStats, &z.scanStatsListener.ScanStats)
+	scanStats := z.scanStatsListener.GetScanStats()
+	execstats.PopulateKVMVCCStats(&kvStats, &scanStats)
 	for i := range z.infos {
 		fis, ok := getFetcherInputStats(z.infos[i].fetcher)
 		if !ok {
@@ -869,7 +867,7 @@ func (z *zigzagJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
 		KV:     kvStats,
 		Output: z.OutputHelper.Stats(),
 	}
-	ret.Exec.ConsumedRU = optional.MakeUint(z.tenantConsumptionListener.ConsumedRU)
+	ret.Exec.ConsumedRU = optional.MakeUint(z.tenantConsumptionListener.GetConsumedRU())
 	return ret
 }
 

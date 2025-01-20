@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -17,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -40,12 +36,17 @@ import (
 type UpdateFn func(txn isql.Txn, md JobMetadata, ju *JobUpdater) error
 
 type Updater struct {
-	j   *Job
-	txn isql.Txn
+	j            *Job
+	txn          isql.Txn
+	txnDebugName string
 }
 
 func (j *Job) NoTxn() Updater {
 	return Updater{j: j}
+}
+
+func (j *Job) DebugNameNoTxn(txnDebugName string) Updater {
+	return Updater{j: j, txnDebugName: txnDebugName}
 }
 
 func (j *Job) WithTxn(txn isql.Txn) Updater {
@@ -57,6 +58,9 @@ func (u Updater) update(ctx context.Context, updateFn UpdateFn) (retErr error) {
 		return u.j.registry.db.Txn(ctx, func(
 			ctx context.Context, txn isql.Txn,
 		) error {
+			if u.txnDebugName != "" {
+				txn.KV().SetDebugName(u.txnDebugName)
+			}
 			u.txn = txn
 			return u.update(ctx, updateFn)
 		})
@@ -67,10 +71,9 @@ func (u Updater) update(ctx context.Context, updateFn UpdateFn) (retErr error) {
 	var payload *jobspb.Payload
 	var progress *jobspb.Progress
 	var status Status
-	var runStats *RunStats
 	j := u.j
 	defer func() {
-		if retErr != nil {
+		if retErr != nil && !HasJobNotFoundError(retErr) {
 			retErr = errors.Wrapf(retErr, "job %d", j.id)
 			return
 		}
@@ -81,9 +84,6 @@ func (u Updater) update(ctx context.Context, updateFn UpdateFn) (retErr error) {
 		}
 		if progress != nil {
 			j.mu.progress = *progress
-		}
-		if runStats != nil {
-			j.mu.runStats = runStats
 		}
 		if status != "" {
 			j.mu.status = status
@@ -120,7 +120,7 @@ WHERE id = $1
 		return err
 	}
 	if row == nil {
-		return errors.Errorf("not found in system.jobs table")
+		return &JobNotFoundError{jobID: j.ID()}
 	}
 
 	if status, err = unmarshalStatus(row[0]); err != nil {
@@ -132,6 +132,8 @@ WHERE id = $1
 	if progress, err = UnmarshalProgress(row[2]); err != nil {
 		return err
 	}
+	beforeProgress := *progress
+	beforePayload := *payload
 	if j.session != nil {
 		if row[3] == tree.DNull {
 			return errors.Errorf(
@@ -162,15 +164,35 @@ WHERE id = $1
 		Status:   status,
 		Payload:  payload,
 		Progress: progress,
-		RunStats: &RunStats{
-			NumRuns: int(*numRuns),
-			LastRun: lastRun.Time,
-		},
 	}
 
 	var ju JobUpdater
 	if err := updateFn(u.txn, md, &ju); err != nil {
 		return err
+	}
+
+	// a job status is considered updated if:
+	//  1. the status of the updated metadata is not empty
+	//  2. the status of the updated metadata is not equal to old status
+	//  3. the status of the updated metadata and the old status is running
+	// #1 should be sufficient to determine whether a status change has happened
+	// as the status field of ju.md is not empty only when JobMetadata.UpdateStatus is
+	// called, and this is only called in places where a status change is happening.
+	// Since this may not be in the case in the future we add condition #2. #3 is
+	// required when a job starts because it may already have a "running" status.
+	//
+	if ju.md.Status != "" &&
+		(ju.md.Status != status || (ju.md.Status == StatusRunning && status == StatusRunning)) {
+		u.txn.KV().AddCommitTrigger(func(ctx context.Context) {
+			p := ju.md.Payload
+			// In some cases, ju.md.Payload may be nil, such as a cancel-requested status update.
+			// In this case, payload is used.
+			if p == nil {
+				p = payload
+			}
+			// If run stats has been updated, use the updated run stats.
+			LogStatusChangeStructured(ctx, md.ID, p.Type().String(), p, status, ju.md.Status)
+		})
 	}
 	if j.registry.knobs.BeforeUpdate != nil {
 		if err := j.registry.knobs.BeforeUpdate(md, ju.md); err != nil {
@@ -202,11 +224,6 @@ WHERE id = $1
 
 	if ju.md.Status != "" {
 		addSetter("status", ju.md.Status)
-	}
-	if ju.md.RunStats != nil {
-		runStats = ju.md.RunStats
-		addSetter("last_run", ju.md.RunStats.LastRun)
-		addSetter("num_runs", ju.md.RunStats.NumRuns)
 	}
 
 	var payloadBytes []byte
@@ -250,6 +267,99 @@ WHERE id = $1
 		}
 	}
 
+	v, err := u.txn.GetSystemSchemaVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if v.AtLeast(clusterversion.V25_1_AddJobsTables.Version()) {
+		if ju.md.Status != "" && ju.md.Status != status {
+			if err := j.Messages().Record(ctx, u.txn, "state", string(ju.md.Status)); err != nil {
+				return err
+			}
+			// If we are changing state, we should clear out "running status", unless
+			// we are about to set it to something instead.
+			if progress == nil || progress.RunningStatus == "" {
+				if err := j.StatusStorage().Clear(ctx, u.txn); err != nil {
+					return err
+				}
+			}
+		}
+
+		if progress != nil {
+			var ts hlc.Timestamp
+			if hwm := progress.GetHighWater(); hwm != nil {
+				ts = *hwm
+			}
+
+			if err := j.ProgressStorage().Set(ctx, u.txn, float64(progress.GetFractionCompleted()), ts); err != nil {
+				return err
+			}
+
+			if progress.RunningStatus != beforeProgress.RunningStatus {
+				if err := j.StatusStorage().Set(ctx, u.txn, progress.RunningStatus); err != nil {
+					return err
+				}
+			}
+
+			if progress.TraceID != beforeProgress.TraceID {
+				if err := j.Messages().Record(ctx, u.txn, "trace-id", fmt.Sprintf("%d", progress.TraceID)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if v.AtLeast(clusterversion.V25_1_AddJobsColumns.Version()) {
+
+		vals := []interface{}{j.ID()}
+
+		var update strings.Builder
+
+		if payloadBytes != nil {
+			if beforePayload.Description != payload.Description {
+				if update.Len() > 0 {
+					update.WriteString(", ")
+				}
+				vals = append(vals, payload.Description)
+				fmt.Fprintf(&update, "description = $%d", len(vals))
+			}
+
+			if beforePayload.UsernameProto.Decode() != payload.UsernameProto.Decode() {
+				if update.Len() > 0 {
+					update.WriteString(", ")
+				}
+				vals = append(vals, payload.UsernameProto.Decode().Normalized())
+				fmt.Fprintf(&update, "owner = $%d", len(vals))
+			}
+
+			if beforePayload.Error != payload.Error {
+				if update.Len() > 0 {
+					update.WriteString(", ")
+				}
+				vals = append(vals, payload.Error)
+				fmt.Fprintf(&update, "error_msg = $%d", len(vals))
+			}
+
+			if beforePayload.FinishedMicros != payload.FinishedMicros {
+				if update.Len() > 0 {
+					update.WriteString(", ")
+				}
+				vals = append(vals, time.UnixMicro(payload.FinishedMicros))
+				fmt.Fprintf(&update, "finished = $%d", len(vals))
+			}
+
+		}
+		if len(vals) > 1 {
+			stmt := fmt.Sprintf("UPDATE system.jobs SET %s WHERE id = $1", update.String())
+			if _, err := u.txn.ExecEx(
+				ctx, "job-update-row", u.txn.KV(),
+				sessiondata.NodeUserSessionDataOverride,
+				stmt, vals...,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Insert the job payload and progress into the system.jobs_info table.
 	infoStorage := j.InfoStorage(u.txn)
 	infoStorage.claimChecked = true
@@ -267,19 +377,12 @@ WHERE id = $1
 	return nil
 }
 
-// RunStats consists of job-run statistics: num of runs and last-run timestamp.
-type RunStats struct {
-	LastRun time.Time
-	NumRuns int
-}
-
 // JobMetadata groups the job metadata values passed to UpdateFn.
 type JobMetadata struct {
 	ID       jobspb.JobID
 	Status   Status
 	Payload  *jobspb.Payload
 	Progress *jobspb.Progress
-	RunStats *RunStats
 }
 
 // CheckRunningOrReverting returns an InvalidStatusError if md.Status is not
@@ -318,28 +421,79 @@ func (ju *JobUpdater) hasUpdates() bool {
 	return ju.md != JobMetadata{}
 }
 
-// UpdateRunStats is used to update the exponential-backoff parameters last_run and
-// num_runs in system.jobs table.
-func (ju *JobUpdater) UpdateRunStats(numRuns int, lastRun time.Time) {
-	ju.md.RunStats = &RunStats{
-		NumRuns: numRuns,
-		LastRun: lastRun,
-	}
+func (ju *JobUpdater) PauseRequested(
+	ctx context.Context, txn isql.Txn, md JobMetadata, reason string,
+) error {
+	return ju.PauseRequestedWithFunc(ctx, txn, md, nil /* fn */, reason)
 }
 
-// UpdateHighwaterProgressed updates job updater progress with the new high water mark.
-func (ju *JobUpdater) UpdateHighwaterProgressed(highWater hlc.Timestamp, md JobMetadata) error {
-	if err := md.CheckRunningOrReverting(); err != nil {
-		return err
+func (ju *JobUpdater) PauseRequestedWithFunc(
+	ctx context.Context, txn isql.Txn, md JobMetadata, fn onPauseRequestFunc, reason string,
+) error {
+	if md.Status == StatusPauseRequested || md.Status == StatusPaused {
+		return nil
 	}
+	if md.Status != StatusPending && md.Status != StatusRunning && md.Status != StatusReverting {
+		return fmt.Errorf("job with status %s cannot be requested to be paused", md.Status)
+	}
+	if fn != nil {
+		if err := fn(ctx, md, ju); err != nil {
+			return err
+		}
+	}
+	ju.UpdateStatus(StatusPauseRequested)
+	md.Payload.PauseReason = reason
+	ju.UpdatePayload(md.Payload)
+	log.Infof(ctx, "job %d: pause requested recorded with reason %s", md.ID, reason)
+	return nil
+}
 
-	if highWater.Less(hlc.Timestamp{}) {
-		return errors.Errorf("high-water %s is outside allowable range > 0.0", highWater)
+// Unpaused sets the status of the tracked job to running or reverting iff the
+// job is currently paused. It does not directly resume the job.
+func (ju *JobUpdater) Unpaused(_ context.Context, md JobMetadata) error {
+	if md.Status == StatusRunning || md.Status == StatusReverting {
+		// Already resumed - do nothing.
+		return nil
 	}
-	md.Progress.Progress = &jobspb.Progress_HighWater{
-		HighWater: &highWater,
+	if md.Status != StatusPaused {
+		return fmt.Errorf("job with status %s cannot be resumed", md.Status)
 	}
-	ju.UpdateProgress(md.Progress)
+	// We use the absence of error to determine what state we should
+	// resume into.
+	if md.Payload.FinalResumeError == nil {
+		ju.UpdateStatus(StatusRunning)
+	} else {
+		ju.UpdateStatus(StatusReverting)
+	}
+	return nil
+}
+
+func (ju *JobUpdater) CancelRequested(ctx context.Context, md JobMetadata) error {
+	return ju.CancelRequestedWithReason(ctx, md, errJobCanceled)
+}
+
+func (ju *JobUpdater) CancelRequestedWithReason(
+	ctx context.Context, md JobMetadata, reason error,
+) error {
+	if md.Payload.Noncancelable {
+		return errors.Newf("job %d: not cancelable", md.ID)
+	}
+	if md.Status == StatusCancelRequested || md.Status == StatusCanceled {
+		return nil
+	}
+	if md.Status != StatusPending && md.Status != StatusRunning && md.Status != StatusPaused {
+		return fmt.Errorf("job with status %s cannot be requested to be canceled", md.Status)
+	}
+	if md.Status == StatusPaused && md.Payload.FinalResumeError != nil {
+		decodedErr := errors.DecodeError(ctx, *md.Payload.FinalResumeError)
+		return errors.Wrapf(decodedErr, "job %d is paused and has non-nil FinalResumeError "+
+			"hence cannot be canceled and should be reverted", md.ID)
+	}
+	if !errors.Is(reason, errJobCanceled) {
+		md.Payload.Error = reason.Error()
+		ju.UpdatePayload(md.Payload)
+	}
+	ju.UpdateStatus(StatusCancelRequested)
 	return nil
 }
 

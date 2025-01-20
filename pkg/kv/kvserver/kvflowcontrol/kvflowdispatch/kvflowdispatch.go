@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvflowdispatch
 
@@ -35,7 +30,7 @@ type Dispatch struct {
 		// TODO(irfansharif,aaditya): On kv0/enc=false/nodes=3/cpu=96 this mutex
 		// is responsible for ~3.7% of the mutex contention. Look to address it
 		// as part of #104154. Perhaps shard this mutex by node ID? Or use a
-		// sync.Map instead?
+		// syncutil.Map instead?
 		syncutil.Mutex
 		// outbox maintains pending dispatches on a per-node basis.
 		outbox map[roachpb.NodeID]dispatches

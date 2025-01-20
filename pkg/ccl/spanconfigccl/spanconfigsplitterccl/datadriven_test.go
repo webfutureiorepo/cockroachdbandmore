@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigsplitterccl
 
@@ -81,12 +78,12 @@ func TestDataDriven(t *testing.T) {
 
 		tenantID := roachpb.MustMakeTenantID(10)
 		tenant := spanConfigTestCluster.InitializeTenant(ctx, tenantID)
-		spanConfigTestCluster.EnsureTenantCanSetZoneConfigurationsOrFatal(t, tenant)
 
 		// TODO(irfansharif): Expose this through the test harness once we integrate
 		// it into the schema changer.
 		splitter := spanconfigsplitter.New(tenant.ExecCfg().Codec, scKnobs)
 
+		var lastSeenID descpb.ID
 		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
 			switch d.Cmd {
 			case "exec-sql":
@@ -115,11 +112,14 @@ func TestDataDriven(t *testing.T) {
 					d.ScanArgs(t, "table", &tbName)
 					tbl := tenant.LookupTableByName(ctx, dbName, tbName)
 					objID = tbl.GetID()
+				case d.HasArg("last_seen_id"):
+					objID = lastSeenID
 				default:
 					d.Fatalf(t, "insufficient/improper args (%v) provided to split", d.CmdArgs)
 				}
 
 				steps.Reset()
+				lastSeenID = objID
 				splits, err := splitter.Splits(ctx, tenant.LookupTableDescriptorByID(ctx, objID))
 				require.NoError(t, err)
 				steps.WriteString(fmt.Sprintf("= %d", splits))

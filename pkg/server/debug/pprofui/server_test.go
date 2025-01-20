@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pprofui
 
@@ -261,7 +256,7 @@ Stacks for node 1:
 
 8 @ 0x4a13d6 0x46b3bb 0x46aef8 0x12fd53f 0xe9bc43 0x12fd478 0x4d3101
 # labels: {"foo":"baz", "bar":"biz"}
-#       0x12fd53e       github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1+0x9e github.com/cockroachdb/pebble/external/com_github_cockroachdb_pebble/table_cache.go:324
+#       0x12fd53e       github.com/cockroachdb/pebble.(*fileCacheShard).releaseLoop.func1+0x9e github.com/cockroachdb/pebble/external/com_github_cockroachdb_pebble/file_cache.go:324
 
 10 @ 0x4a13d6 0x4b131c 0x17969e6 0x4d3101
 #       0x17969e5       github.com/cockroachdb/cockroach/pkg/util/admission.initWorkQueue.func2+0x85    github.com/cockroachdb/cockroach/pkg/util/admission/work_queue.go:388
@@ -284,7 +279,7 @@ Stacks for node 1:
 
 8 @ 0x4a13d6 0x46b3bb 0x46aef8 0x12fd53f 0xe9bc43 0x12fd478 0x4d3101
 # labels: {"foo":"baz", "bar":"biz"}
-#       0x12fd53e       github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1+0x9e github.com/cockroachdb/pebble/external/com_github_cockroachdb_pebble/table_cache.go:324
+#       0x12fd53e       github.com/cockroachdb/pebble.(*fileCacheShard).releaseLoop.func1+0x9e github.com/cockroachdb/pebble/external/com_github_cockroachdb_pebble/file_cache.go:324
 
 10 @ 0x4a13d6 0x4b131c 0x17969e6 0x4d3101
 #       0x17969e5       github.com/cockroachdb/cockroach/pkg/util/admission.initWorkQueue.func2+0x85    github.com/cockroachdb/cockroach/pkg/util/admission/work_queue.go:388
@@ -309,7 +304,7 @@ Stacks for node 1:
 
 8 @ 0x4a13d6 0x46b3bb 0x46aef8 0x12fd53f 0xe9bc43 0x12fd478 0x4d3101
 # labels: {"foo":"baz", "bar":"biz"}
-#       0x12fd53e       github.com/cockroachdb/pebble.(*tableCacheShard).releaseLoop.func1+0x9e github.com/cockroachdb/pebble/external/com_github_cockroachdb_pebble/table_cache.go:324
+#       0x12fd53e       github.com/cockroachdb/pebble.(*fileCacheShard).releaseLoop.func1+0x9e github.com/cockroachdb/pebble/external/com_github_cockroachdb_pebble/file_cache.go:324
 
 8 @ 0x4a13d6 0x4b131c 0x1796e96 0x4d3101
 # labels: {"bar":"biz"}

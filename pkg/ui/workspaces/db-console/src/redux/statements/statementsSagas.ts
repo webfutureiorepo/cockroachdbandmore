@@ -1,13 +1,13 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import {
+  TimeScale,
+  api as clusterApi,
+  api as clusterUiApi,
+} from "@cockroachlabs/cluster-ui";
 import {
   all,
   call,
@@ -16,7 +16,19 @@ import {
   takeEvery,
   takeLatest,
 } from "redux-saga/effects";
+
 import { PayloadAction, WithRequest } from "src/interfaces/action";
+import {
+  createStatementDiagnosticsAlertLocalSetting,
+  cancelStatementDiagnosticsAlertLocalSetting,
+} from "src/redux/alerts";
+import {
+  invalidateStatementDiagnosticsRequests,
+  RECEIVE_STATEMENT_DIAGNOSTICS_REPORT,
+  refreshStatementDiagnosticsRequests,
+  statementDiagnosticInvalidationPeriod,
+} from "src/redux/apiReducers";
+import { setTimeScale } from "src/redux/timeScale";
 
 import {
   CREATE_STATEMENT_DIAGNOSTICS_REPORT,
@@ -27,19 +39,6 @@ import {
   cancelStatementDiagnosticsReportCompleteAction,
   cancelStatementDiagnosticsReportFailedAction,
 } from "./statementsActions";
-import {
-  invalidateStatementDiagnosticsRequests,
-  RECEIVE_STATEMENT_DIAGNOSTICS_REPORT,
-  refreshStatementDiagnosticsRequests,
-  statementDiagnosticInvalidationPeriod,
-} from "src/redux/apiReducers";
-import {
-  createStatementDiagnosticsAlertLocalSetting,
-  cancelStatementDiagnosticsAlertLocalSetting,
-} from "src/redux/alerts";
-import { TimeScale, api as clusterApi } from "@cockroachlabs/cluster-ui";
-import { setTimeScale } from "src/redux/timeScale";
-import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
 
 export function* createDiagnosticsReportSaga(
   action: PayloadAction<clusterUiApi.InsertStmtDiagnosticRequest>,
@@ -130,9 +129,7 @@ export function* cancelDiagnosticsReportSaga(
 // diagnostics has some diagnostics that is still not completed (with waiting status).
 // If there's not completed request, we poll data every 30 seconds (or as fallback with default invalidation period
 // that should be less than 30 seconds.
-export const receivedStatementDiagnosticsSaga = (
-  pollingDelay: number = 30000,
-) => {
+export const receivedStatementDiagnosticsSaga = (pollingDelay = 30000) => {
   const invalidationPeriodMs =
     statementDiagnosticInvalidationPeriod.asMilliseconds();
   const frequentPollingDelay = Math.min(invalidationPeriodMs, pollingDelay);

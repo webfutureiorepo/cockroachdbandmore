@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -27,7 +22,7 @@ var deleteNodePool = sync.Pool{
 }
 
 type deleteNode struct {
-	source planNode
+	singleInputPlanNode
 
 	// columns is set if this DELETE is returning any rows, to be
 	// consumed by a renderNode upstream. This occurs when there is a
@@ -73,7 +68,7 @@ func (d *deleteNode) startExec(params runParams) error {
 			params.p.Mon().MakeBoundAccount(),
 			colinfo.ColTypeInfoFromResCols(d.columns))
 	}
-	return d.run.td.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return d.run.td.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -102,7 +97,7 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 		}
 
 		// Advance one individual row.
-		if next, err := d.source.Next(params); !next {
+		if next, err := d.input.Next(params); !next {
 			lastBatch = true
 			if err != nil {
 				return false, err
@@ -110,9 +105,9 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 			break
 		}
 
-		// Process the deletion of the current source row,
+		// Process the deletion of the current input row,
 		// potentially accumulating the result row for later.
-		if err := d.processSourceRow(params, d.source.Values()); err != nil {
+		if err := d.processSourceRow(params, d.input.Values()); err != nil {
 			return false, err
 		}
 
@@ -156,18 +151,20 @@ func (d *deleteNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 	// satisfy the predicate and therefore do not exist in the partial index.
 	// This set is passed as a argument to tableDeleter.row below.
 	var pm row.PartialIndexUpdateHelper
+	deleteCols := len(d.run.td.rd.FetchCols) + d.run.numPassthrough
 	if n := len(d.run.td.tableDesc().PartialIndexes()); n > 0 {
-		offset := len(d.run.td.rd.FetchCols) + d.run.numPassthrough
-		partialIndexDelVals := sourceVals[offset : offset+n]
+		partialIndexDelVals := sourceVals[deleteCols : deleteCols+n]
 
 		err := pm.Init(nil /*partialIndexPutVals */, partialIndexDelVals, d.run.td.tableDesc())
 		if err != nil {
 			return err
 		}
+	}
 
-		// Truncate sourceVals so that it no longer includes partial index
-		// predicate values.
-		sourceVals = sourceVals[:offset]
+	if len(sourceVals) > deleteCols {
+		// Remove extra columns for partial index predicate values and AFTER
+		// triggers.
+		sourceVals = sourceVals[:deleteCols]
 	}
 
 	// Queue the deletion in the KV batch.
@@ -221,11 +218,11 @@ func (d *deleteNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 // BatchedCount implements the batchedPlanNode interface.
 func (d *deleteNode) BatchedCount() int { return d.run.td.lastBatchSize }
 
-// BatchedCount implements the batchedPlanNode interface.
+// BatchedValues implements the batchedPlanNode interface.
 func (d *deleteNode) BatchedValues(rowIdx int) tree.Datums { return d.run.td.rows.At(rowIdx) }
 
 func (d *deleteNode) Close(ctx context.Context) {
-	d.source.Close(ctx)
+	d.input.Close(ctx)
 	d.run.td.close(ctx)
 	*d = deleteNode{}
 	deleteNodePool.Put(d)

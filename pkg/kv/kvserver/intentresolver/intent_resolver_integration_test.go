@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 package intentresolver_test
 
 import (
@@ -14,6 +9,7 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -392,7 +388,7 @@ func TestIntentResolutionUnavailableRange(t *testing.T) {
 	const intentResolutionSendBatchTimeout = 1 * time.Second
 	serverArgs := make(map[int]base.TestServerArgs)
 	waitForIntentResolutionForT2 := make(chan struct{})
-	var t2RangeID roachpb.RangeID
+	var t2RangeID atomic.Int32
 	storeTestingKnobs := []kvserver.StoreTestingKnobs{
 		{
 			IntentResolverKnobs: kvserverbase.IntentResolverTestingKnobs{
@@ -407,7 +403,7 @@ func TestIntentResolutionUnavailableRange(t *testing.T) {
 				for _, req := range ba.Requests {
 					switch req.GetInner().(type) {
 					case *kvpb.ResolveIntentRequest:
-						if ba.RangeID == t2RangeID {
+						if ba.RangeID == roachpb.RangeID(t2RangeID.Load()) {
 							close(waitForIntentResolutionForT2)
 							// Block until the request is cancelled.
 							<-ctx.Done()
@@ -477,8 +473,10 @@ func TestIntentResolutionUnavailableRange(t *testing.T) {
 
 	{
 		// Get the range ID for t2.
-		err := db.QueryRow("select range_id from [show ranges from table t2] limit 1").Scan(&t2RangeID)
+		var tmpT2RangeID int32
+		err := db.QueryRow("select range_id from [show ranges from table t2] limit 1").Scan(&tmpT2RangeID)
 		require.NoError(t, err)
+		t2RangeID.Store(tmpT2RangeID)
 	}
 
 	{

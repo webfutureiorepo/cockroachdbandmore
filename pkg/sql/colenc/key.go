@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colenc
 
@@ -45,8 +40,10 @@ func partialIndexAndNullCheck[T []byte | roachpb.Key](
 
 // encodeKeys is the columnar version of keyside.Encode.
 // Cases taken from decodeTableKeyToCol.
+//
+// vec=nil indicates that all values are NULL.
 func encodeKeys[T []byte | roachpb.Key](
-	kys []T, typ *types.T, dir encoding.Direction, vec coldata.Vec, start, end int,
+	kys []T, dir encoding.Direction, vec *coldata.Vec, start, end int,
 ) error {
 	count := end - start
 	if vec == nil {
@@ -61,9 +58,10 @@ func encodeKeys[T []byte | roachpb.Key](
 				kys[r] = encoding.EncodeNullDescending(b)
 			}
 		}
+		return nil
 	}
 	nulls := vec.Nulls()
-	switch typ.Family() {
+	switch typ := vec.Type(); typ.Family() {
 	case types.BoolFamily:
 		bs := vec.Bool()
 		for r := 0; r < count; r++ {
@@ -231,13 +229,13 @@ func (b *BatchEncoder) encodeIndexKey(
 			return err
 		}
 		col, ok := b.colMap.Get(k.ColumnID)
-		var vec coldata.Vec
+		var vec *coldata.Vec
 		if ok {
 			vec = b.b.ColVec(col)
 		} else {
 			nulls.SetNulls()
 		}
-		if err := encodeKeys(kys, k.Type, dir, vec, b.start, b.end); err != nil {
+		if err := encodeKeys(kys, dir, vec, b.start, b.end); err != nil {
 			return err
 		}
 		if vec.Nulls().MaybeHasNulls() {

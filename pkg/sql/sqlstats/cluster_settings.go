@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstats
 
@@ -17,6 +12,7 @@ import (
 )
 
 // StmtStatsEnable determines whether to collect per-statement statistics.
+// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
 var StmtStatsEnable = settings.RegisterBoolSetting(
 	settings.ApplicationLevel,
 	"sql.metrics.statement_details.enabled", "collect per-statement query statistics", true,
@@ -35,6 +31,7 @@ var TxnStatsNumStmtFingerprintIDsToRecord = settings.RegisterIntSetting(
 
 // TxnStatsEnable determines whether to collect per-application transaction
 // statistics.
+// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
 var TxnStatsEnable = settings.RegisterBoolSetting(
 	settings.ApplicationLevel,
 	"sql.metrics.transaction_details.enabled", "collect per-application transaction statistics", true,
@@ -85,7 +82,7 @@ var MaxMemSQLStatsStmtFingerprints = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
 	"sql.metrics.max_mem_stmt_fingerprints",
 	"the maximum number of statement fingerprints stored in memory",
-	100000,
+	7500,
 	settings.WithPublic)
 
 // MaxMemSQLStatsTxnFingerprints specifies the maximum of unique transaction
@@ -94,7 +91,7 @@ var MaxMemSQLStatsTxnFingerprints = settings.RegisterIntSetting(
 	settings.ApplicationLevel,
 	"sql.metrics.max_mem_txn_fingerprints",
 	"the maximum number of transaction fingerprints stored in memory",
-	100000,
+	7500,
 	settings.WithPublic)
 
 // MaxMemReportedSQLStatsStmtFingerprints specifies the maximum of unique statement

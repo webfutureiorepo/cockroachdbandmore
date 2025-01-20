@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package pgwire
 
@@ -59,7 +54,9 @@ func parseClientProvidedSessionParameters(
 	hasTenantSelectOption := false
 	for {
 		// Read a key-value pair from the client.
-		key, err := buf.GetString()
+		// Note: GetSafeString is used since the key/value will live well past the
+		// life of the message.
+		key, err := buf.GetSafeString()
 		if err != nil {
 			return args, pgerror.Wrap(
 				err, pgcode.ProtocolViolation,
@@ -70,7 +67,7 @@ func parseClientProvidedSessionParameters(
 			// End of parameter list.
 			break
 		}
-		value, err := buf.GetString()
+		value, err := buf.GetSafeString()
 		if err != nil {
 			return args, pgerror.Wrapf(
 				err, pgcode.ProtocolViolation,
@@ -180,7 +177,7 @@ func parseClientProvidedSessionParameters(
 						return args, pgerror.Newf(pgcode.InvalidParameterValue,
 							"cannot specify system identity via options")
 					}
-					args.SystemIdentity, _ = username.MakeSQLUsernameFromUserInput(optvalue, username.PurposeValidation)
+					args.SystemIdentity = optvalue
 					continue
 
 				case "cluster":
@@ -193,6 +190,18 @@ func parseClientProvidedSessionParameters(
 					parts := strings.SplitN(optvalue, ".", 2)
 					args.tenantName = parts[0]
 					hasTenantSelectOption = true
+					continue
+				case "results_buffer_size":
+					if args.ConnResultsBufferSize, err = humanizeutil.ParseBytes(optvalue); err != nil {
+						return args, errors.WithSecondaryError(
+							pgerror.Newf(pgcode.ProtocolViolation,
+								"error parsing results_buffer_size option value '%s' as bytes", optvalue), err)
+					}
+					if args.ConnResultsBufferSize < 0 {
+						return args, pgerror.Newf(pgcode.ProtocolViolation,
+							"results_buffer_size option value '%s' cannot be negative", value)
+					}
+					args.foundBufferSize = true
 					continue
 				}
 				err = loadParameter(ctx, opt, optvalue, &args.SessionArgs)
@@ -241,7 +250,6 @@ func parseClientProvidedSessionParameters(
 			telemetry.Inc(sqltelemetry.CockroachShellCounter)
 		}
 	}
-
 	return args, nil
 }
 
@@ -282,14 +290,14 @@ var trustClientProvidedRemoteAddrOverride = envutil.EnvOrDefaultBool("COCKROACH_
 
 // TestingSetTrustClientProvidedRemoteAddr is used in tests.
 func (s *PreServeConnHandler) TestingSetTrustClientProvidedRemoteAddr(b bool) func() {
-	prev := s.trustClientProvidedRemoteAddr.Get()
-	s.trustClientProvidedRemoteAddr.Set(b)
-	return func() { s.trustClientProvidedRemoteAddr.Set(prev) }
+	prev := s.trustClientProvidedRemoteAddr.Load()
+	s.trustClientProvidedRemoteAddr.Store(b)
+	return func() { s.trustClientProvidedRemoteAddr.Store(prev) }
 }
 
 // TestingAcceptSystemIdentityOption is used in tests.
 func (s *PreServeConnHandler) TestingAcceptSystemIdentityOption(b bool) func() {
-	prev := s.acceptSystemIdentityOption.Get()
-	s.acceptSystemIdentityOption.Set(b)
-	return func() { s.acceptSystemIdentityOption.Set(prev) }
+	prev := s.acceptSystemIdentityOption.Load()
+	s.acceptSystemIdentityOption.Store(b)
+	return func() { s.acceptSystemIdentityOption.Store(prev) }
 }

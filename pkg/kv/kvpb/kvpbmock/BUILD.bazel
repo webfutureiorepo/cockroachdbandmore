@@ -1,12 +1,10 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@bazel_gomock//:gomock.bzl", "gomock")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "gomock")
 
 gomock(
     name = "mock_kvpb",
     out = "mocks_generated.go",
     interfaces = [
         "InternalClient",
-        "Internal_RangeFeedClient",
         "Internal_MuxRangeFeedClient",
     ],
     library = "//pkg/kv/kvpb",

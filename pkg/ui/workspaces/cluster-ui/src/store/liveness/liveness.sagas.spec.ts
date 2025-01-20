@@ -1,24 +1,21 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { expectSaga } from "redux-saga-test-plan";
-import { throwError } from "redux-saga-test-plan/providers";
 import * as matchers from "redux-saga-test-plan/matchers";
+import { throwError } from "redux-saga-test-plan/providers";
+
 import { getLiveness } from "src/api/livenessApi";
+
+import { getLivenessResponse } from "./liveness.fixtures";
+import { actions, reducer, LivenessState } from "./liveness.reducer";
 import {
   receivedLivenessSaga,
   refreshLivenessSaga,
   requestLivenessSaga,
 } from "./liveness.sagas";
-import { actions, reducer, LivenessState } from "./liveness.reducer";
-import { getLivenessResponse } from "./liveness.fixtures";
 
 describe("Liveness sagas", () => {
   const livenessResponse = getLivenessResponse();

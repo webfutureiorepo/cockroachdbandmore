@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tracing
 
@@ -107,6 +102,12 @@ func (opts *spanOptions) parentSpanID() tracingpb.SpanID {
 	return 0
 }
 
+// recordingType computes the resulting recording type of the span
+// based on various settings. Please note that some of this logic is
+// partially duplicates in `Tracer.startSpanFast` which is used for
+// spans without a parent and avoids calling this method for
+// performance reasons. If you modify this method, make sure to modify
+// `startSpanFast` as well.
 func (opts *spanOptions) recordingType() tracingpb.RecordingType {
 	if opts.recordingTypeExplicit {
 		return opts.recordingTypeOpt

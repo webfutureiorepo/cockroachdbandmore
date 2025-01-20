@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -62,7 +57,7 @@ func TestMysqldumpDataReader(t *testing.T) {
 	opts := roachpb.MysqldumpOptions{}
 
 	kvCh := make(chan row.KVBatch, 50)
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(nil /* resolver */)
 	// When creating a new dump reader, we need to pass in the walltime that will be used as
 	// a parameter used for generating unique rowid, random, and gen_random_uuid as default
 	// expressions. Here, the parameter doesn't matter so we pass in 0.
@@ -302,18 +297,20 @@ func compareTables(t *testing.T, expected, got *descpb.TableDescriptor) {
 	sd := &sessiondata.SessionData{}
 	for i := range expected.Indexes {
 		ctx := context.Background()
-		semaCtx := tree.MakeSemaContext()
+		semaCtx := tree.MakeSemaContext(nil /* resolver */)
 		tableName := &descpb.AnonymousTable
 		expectedDesc := tabledesc.NewBuilder(expected).BuildImmutableTable()
 		gotDesc := tabledesc.NewBuilder(got).BuildImmutableTable()
 		e, err := catformat.IndexForDisplay(
-			ctx, expectedDesc, tableName, expectedDesc.PublicNonPrimaryIndexes()[i], "" /* partition */, tree.FmtSimple, &semaCtx, sd, catformat.IndexDisplayDefOnly,
+			ctx, expectedDesc, tableName, expectedDesc.PublicNonPrimaryIndexes()[i], "", /* partition */
+			tree.FmtSimple, nil /* evalCtx */, &semaCtx, sd, catformat.IndexDisplayDefOnly,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
 		g, err := catformat.IndexForDisplay(
-			ctx, gotDesc, tableName, gotDesc.PublicNonPrimaryIndexes()[i], "" /* partition */, tree.FmtSimple, &semaCtx, sd, catformat.IndexDisplayDefOnly,
+			ctx, gotDesc, tableName, gotDesc.PublicNonPrimaryIndexes()[i], "", /* partition */
+			tree.FmtSimple, nil /* evalCtx */, &semaCtx, sd, catformat.IndexDisplayDefOnly,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)

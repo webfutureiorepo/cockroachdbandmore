@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package install
 
@@ -139,8 +134,8 @@ func (s *remoteSession) errWithDebug(err error) error {
 	err = rperrors.ClassifyCmdError(err)
 	// The verbose logs are noisy and not useful for most errors, so only
 	// retain them for potential flakes.
-	if errors.Is(err, rperrors.ErrSSH255) && s.logfile != "" {
-		err = errors.Wrap(err, "_potential_ SSH flake (`ssh -vvv` log retained under ssh/)")
+	if rperrors.IsSSHError(err) && s.logfile != "" {
+		err = errors.Wrapf(err, "_potential_ SSH flake (`ssh -vvv` log retained in %s)", s.logfile)
 		s.logfile = "" // prevent removal on close
 	}
 	return err
@@ -331,10 +326,9 @@ var sshAuthArgsOnce sync.Once
 
 func sshAuthArgs() []string {
 	sshAuthArgsOnce.Do(func() {
-		paths := []string{
-			filepath.Join(config.OSUser.HomeDir, ".ssh", "id_ed25519"),
-			filepath.Join(config.OSUser.HomeDir, ".ssh", "id_rsa"),
-			filepath.Join(config.OSUser.HomeDir, ".ssh", "google_compute_engine"),
+		paths := make([]string, len(config.DefaultPubKeyNames))
+		for idx, name := range config.DefaultPubKeyNames {
+			paths[idx] = filepath.Join(config.SSHDirectory, name)
 		}
 		for _, p := range paths {
 			if _, err := os.Stat(p); err == nil {

@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval_test
 
@@ -34,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -80,16 +76,16 @@ func TestExportCmd(t *testing.T) {
 
 	exportAndSlurpOne := func(
 		t *testing.T, start hlc.Timestamp, mvccFilter kvpb.MVCCFilter, maxResponseSSTBytes int64,
-	) ([]string, []storage.MVCCKeyValue, kvpb.ResponseHeader) {
+	) (int, []storage.MVCCKeyValue, kvpb.ResponseHeader) {
 		res, pErr := export(t, start, mvccFilter, maxResponseSSTBytes)
 		if pErr != nil {
 			t.Fatalf("%+v", pErr)
 		}
 
-		var paths []string
+		var files int
 		var kvs []storage.MVCCKeyValue
 		for _, file := range res.(*kvpb.ExportResponse).Files {
-			paths = append(paths, file.Path)
+			files++
 			iterOpts := storage.IterOptions{
 				KeyTypes:   storage.IterKeyTypePointsOnly,
 				LowerBound: keys.LocalMax,
@@ -120,13 +116,13 @@ func TestExportCmd(t *testing.T) {
 			}
 		}
 
-		return paths, kvs, res.(*kvpb.ExportResponse).Header()
+		return files, kvs, res.(*kvpb.ExportResponse).Header()
 	}
 	type ExportAndSlurpResult struct {
 		end                      hlc.Timestamp
-		mvccLatestFiles          []string
+		mvccLatestFiles          int
 		mvccLatestKVs            []storage.MVCCKeyValue
-		mvccAllFiles             []string
+		mvccAllFiles             int
 		mvccAllKVs               []storage.MVCCKeyValue
 		mvccLatestResponseHeader kvpb.ResponseHeader
 		mvccAllResponseHeader    kvpb.ResponseHeader
@@ -147,9 +143,9 @@ func TestExportCmd(t *testing.T) {
 		mvccLatestFilesLen int, mvccLatestKVsLen int, mvccAllFilesLen int, mvccAllKVsLen int,
 	) {
 		t.Helper()
-		require.Len(t, res.mvccLatestFiles, mvccLatestFilesLen, "unexpected files in latest export")
+		require.Equal(t, res.mvccLatestFiles, mvccLatestFilesLen, "unexpected files in latest export")
 		require.Len(t, res.mvccLatestKVs, mvccLatestKVsLen, "unexpected kvs in latest export")
-		require.Len(t, res.mvccAllFiles, mvccAllFilesLen, "unexpected files in all export")
+		require.Equal(t, res.mvccAllFiles, mvccAllFilesLen, "unexpected files in all export")
 		require.Len(t, res.mvccAllKVs, mvccAllKVsLen, "unexpected kvs in all export")
 	}
 
@@ -778,7 +774,7 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 	st := cluster.MakeTestingClusterSettings()
 	mkEngine := func(t *testing.T) (e storage.Engine, cleanup func()) {
 		dir, cleanupDir := testutils.TempDir(t)
-		e, err := storage.Open(ctx, storage.Filesystem(dir), st, storage.CacheSize(0))
+		e, err := storage.Open(ctx, fs.MustInitPhysicalTestingEnv(dir), st, storage.CacheSize(0))
 		if err != nil {
 			t.Fatal(err)
 		}

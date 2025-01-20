@@ -1,15 +1,11 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import moment from "moment-timezone";
 import React from "react";
+
 import { TimestampToMoment } from "src/util";
 
 import { JOB_STATUS_SUCCEEDED, isRunning } from "./jobOptions";
@@ -38,12 +34,20 @@ export class Duration extends React.PureComponent<{
       const fractionCompleted = job.fraction_completed;
       if (!startedAt || !modifiedAt || fractionCompleted === 0) {
         return null;
+      } else if (fractionCompleted < 0.05) {
+        return <span className={className}>Initializing...</span>;
       }
       const duration = modifiedAt.diff(startedAt);
-      const remaining = duration / fractionCompleted - duration;
+      const remaining = moment.duration(
+        duration / fractionCompleted - duration,
+      );
       return (
         <span className={className}>
-          {formatDuration(moment.duration(remaining)) + " remaining"}
+          {`${
+            remaining >= moment.duration(1, "minutes")
+              ? formatDuration(remaining)
+              : "Less than a minute"
+          } remaining`}
         </span>
       );
     } else if (

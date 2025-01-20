@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package descs
 
@@ -86,7 +81,6 @@ func getObjectPrefix(
 	ctx context.Context, g ByNameGetter, dbName, scName string,
 ) (prefix catalog.ResolvedObjectPrefix, err error) {
 	if g.flags.isMutable {
-		g.flags.isMutable = false
 		g.flags.layerFilters.withoutLeased = true
 	}
 	// If we're reading the object descriptor from the store,
@@ -105,7 +99,7 @@ func getObjectPrefix(
 
 // PrefixAndType looks up an immutable type descriptor by its full name.
 func PrefixAndType(
-	ctx context.Context, g ByNameGetter, name tree.ObjectName,
+	ctx context.Context, g ByNameGetter, name *tree.TypeName,
 ) (catalog.ResolvedObjectPrefix, catalog.TypeDescriptor, error) {
 	p, err := getObjectPrefix(ctx, g, name.Catalog(), name.Schema())
 	if err != nil || p.Schema == nil {
@@ -117,7 +111,7 @@ func PrefixAndType(
 
 // PrefixAndMutableType looks up a mutable type descriptor by its full name.
 func PrefixAndMutableType(
-	ctx context.Context, g MutableByNameGetter, name tree.ObjectName,
+	ctx context.Context, g MutableByNameGetter, name *tree.TypeName,
 ) (catalog.ResolvedObjectPrefix, *typedesc.Mutable, error) {
 	p, err := getObjectPrefix(ctx, ByNameGetter(g), name.Catalog(), name.Schema())
 	if err != nil || p.Schema == nil {
@@ -129,7 +123,7 @@ func PrefixAndMutableType(
 
 // PrefixAndTable looks up an immutable table descriptor by its full name.
 func PrefixAndTable(
-	ctx context.Context, g ByNameGetter, name tree.ObjectName,
+	ctx context.Context, g ByNameGetter, name *tree.TableName,
 ) (catalog.ResolvedObjectPrefix, catalog.TableDescriptor, error) {
 	p, err := getObjectPrefix(ctx, g, name.Catalog(), name.Schema())
 	if err != nil || p.Schema == nil {
@@ -141,7 +135,7 @@ func PrefixAndTable(
 
 // PrefixAndMutableTable looks up a mutable table descriptor by its full name.
 func PrefixAndMutableTable(
-	ctx context.Context, g MutableByNameGetter, name tree.ObjectName,
+	ctx context.Context, g MutableByNameGetter, name *tree.TableName,
 ) (catalog.ResolvedObjectPrefix, *tabledesc.Mutable, error) {
 	p, err := getObjectPrefix(ctx, ByNameGetter(g), name.Catalog(), name.Schema())
 	if err != nil || p.Schema == nil {

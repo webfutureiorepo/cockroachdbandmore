@@ -14,7 +14,10 @@ Aborted{WasUpgraded:false}
 	missing events:
 		TxnCommittedDueToDDL{}
 		TxnCommittedWithShowCommitTimestamp{}
+		TxnFinishAbortedPLpgSQL{}
+		TxnFinishCommittedPLpgSQL{}
 		TxnFinishCommitted{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnStart{ImplicitTxn:false}
 		TxnStart{ImplicitTxn:true}
@@ -33,7 +36,10 @@ Aborted{WasUpgraded:true}
 	missing events:
 		TxnCommittedDueToDDL{}
 		TxnCommittedWithShowCommitTimestamp{}
+		TxnFinishAbortedPLpgSQL{}
+		TxnFinishCommittedPLpgSQL{}
 		TxnFinishCommitted{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnStart{ImplicitTxn:false}
 		TxnStart{ImplicitTxn:true}
@@ -51,7 +57,10 @@ CommitWait{}
 		SavepointRollback{}
 		TxnCommittedDueToDDL{}
 		TxnCommittedWithShowCommitTimestamp{}
+		TxnFinishAbortedPLpgSQL{}
 		TxnFinishAborted{}
+		TxnFinishCommittedPLpgSQL{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnRestart{}
 		TxnStart{ImplicitTxn:false}
@@ -71,8 +80,11 @@ NoTxn{}
 		SavepointRollback{}
 		TxnCommittedDueToDDL{}
 		TxnCommittedWithShowCommitTimestamp{}
+		TxnFinishAbortedPLpgSQL{}
 		TxnFinishAborted{}
+		TxnFinishCommittedPLpgSQL{}
 		TxnFinishCommitted{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnRestart{}
 		TxnUpgradeToExplicit{}
@@ -88,10 +100,13 @@ Open{ImplicitTxn:false, WasUpgraded:false}
 		TxnCommittedWithShowCommitTimestamp{}
 		TxnFinishAborted{}
 		TxnFinishCommitted{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnRestart{}
 	missing events:
 		SavepointRollback{}
+		TxnFinishAbortedPLpgSQL{}
+		TxnFinishCommittedPLpgSQL{}
 		TxnStart{ImplicitTxn:false}
 		TxnStart{ImplicitTxn:true}
 		TxnUpgradeToExplicit{}
@@ -107,10 +122,13 @@ Open{ImplicitTxn:false, WasUpgraded:true}
 		TxnCommittedWithShowCommitTimestamp{}
 		TxnFinishAborted{}
 		TxnFinishCommitted{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnRestart{}
 	missing events:
 		SavepointRollback{}
+		TxnFinishAbortedPLpgSQL{}
+		TxnFinishCommittedPLpgSQL{}
 		TxnStart{ImplicitTxn:false}
 		TxnStart{ImplicitTxn:true}
 		TxnUpgradeToExplicit{}
@@ -122,13 +140,16 @@ Open{ImplicitTxn:true, WasUpgraded:false}
 		RetriableErr{CanAutoRetry:false, IsCommit:true}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
+		TxnCommittedDueToDDL{}
+		TxnFinishAbortedPLpgSQL{}
 		TxnFinishAborted{}
+		TxnFinishCommittedPLpgSQL{}
 		TxnFinishCommitted{}
 		TxnUpgradeToExplicit{}
 	missing events:
 		SavepointRollback{}
-		TxnCommittedDueToDDL{}
 		TxnCommittedWithShowCommitTimestamp{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnRestart{}
 		TxnStart{ImplicitTxn:false}
@@ -138,6 +159,7 @@ Open{ImplicitTxn:true, WasUpgraded:true}
 	handled events:
 		NonRetriableErr{IsCommit:true}
 		RetriableErr{CanAutoRetry:false, IsCommit:true}
+		TxnCommittedDueToDDL{}
 		TxnFinishAborted{}
 		TxnFinishCommitted{}
 	missing events:
@@ -146,8 +168,10 @@ Open{ImplicitTxn:true, WasUpgraded:true}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
 		SavepointRollback{}
-		TxnCommittedDueToDDL{}
 		TxnCommittedWithShowCommitTimestamp{}
+		TxnFinishAbortedPLpgSQL{}
+		TxnFinishCommittedPLpgSQL{}
+		TxnFinishPrepared{}
 		TxnReleased{}
 		TxnRestart{}
 		TxnStart{ImplicitTxn:false}

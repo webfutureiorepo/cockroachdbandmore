@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package keys
 
@@ -85,6 +80,8 @@ var (
 	// LocalRangeAppliedStateSuffix is the suffix for the range applied state
 	// key.
 	LocalRangeAppliedStateSuffix = []byte("rask")
+	// LocalRangeForceFlushSuffix is the suffix for the range force flush key.
+	LocalRangeForceFlushSuffix = []byte("rffk")
 	// This was previously used for the replicated RaftTruncatedState. It is no
 	// longer used and this key has been removed via a migration. See
 	// LocalRaftTruncatedStateSuffix for the corresponding unreplicated
@@ -219,6 +216,20 @@ var (
 	// is to allow a restarting node to discover approximately how long it has
 	// been down without needing to retrieve liveness records from the cluster.
 	localStoreLastUpSuffix = []byte("uptm")
+	// localStoreLivenessRequesterMeta stores the Store Liveness metadata
+	// corresponding to support requested by the local store. In particular,
+	// RequesterMeta stores the highest timestamp and highest epoch at which
+	// support has been requested.
+	localStoreLivenessRequesterMeta = []byte("slrm")
+	// localStoreLivenessSupporterMeta stores the Store Liveness metadata
+	// corresponding to support provided by the local store. In particular,
+	// SupporterMeta stores the highest timestamp at which support has been
+	// withdrawn.
+	localStoreLivenessSupporterMeta = []byte("slsm")
+	// localStoreLivenessSupportFor stores the Store Liveness support by the local
+	// store for a store in the cluster. It includes the epoch and expiration of
+	// support.
+	localStoreLivenessSupportFor = []byte("slsf")
 	// localRemovedLeakedRaftEntriesSuffix is DEPRECATED and remains to prevent
 	// reuse.
 	localRemovedLeakedRaftEntriesSuffix = []byte("dlre")
@@ -287,6 +298,12 @@ var (
 	// BootstrapVersionKey is the key at which clusters bootstrapped with a version
 	// > 1.0 persist the version at which they were bootstrapped.
 	BootstrapVersionKey = roachpb.Key(makeKey(SystemPrefix, roachpb.RKey("bootstrap-version")))
+	// ClusterInitGracePeriodTimestamp is used for license enforcement. It marks the timestamp
+	// set during cluster initialization, by which a license must be installed to avoid
+	// throttling. The value is stored as the number of seconds since the Unix epoch.
+	ClusterInitGracePeriodTimestamp = roachpb.Key(makeKey(SystemPrefix, roachpb.RKey("lic-gpi-ts")))
+	// TrialLicenseExpiry is used to track the expiry of any trial license (past or present)
+	TrialLicenseExpiry = roachpb.Key(makeKey(SystemPrefix, roachpb.RKey("lic-tle")))
 	//
 	// NodeIDGenerator is the global node ID generator sequence.
 	NodeIDGenerator = roachpb.Key(makeKey(SystemPrefix, roachpb.RKey("node-idgen")))

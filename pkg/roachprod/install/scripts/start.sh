@@ -2,13 +2,8 @@
 #
 # Copyright 2021 The Cockroach Authors.
 #
-# Use of this software is governed by the Business Source License
-# included in the file licenses/BSL.txt.
-#
-# As of the Change Date specified in that file, in accordance with
-# the Business Source License, use of this software will be governed
-# by the Apache License, Version 2.0, included in the file
-# licenses/APL.txt.
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
 set -euo pipefail
 
 # These values are substituted in the Go code that uses this. We use custom
@@ -77,7 +72,7 @@ sudo systemctl reset-failed "${VIRTUAL_CLUSTER_LABEL}" 2>/dev/null || true
 
 # The first time we run, install a small script that shows some helpful
 # information when we ssh in.
-if [ ! -e "${HOME}/.profile-cockroach" ]; then
+if [ ! -e "${HOME}/.profile-${VIRTUAL_CLUSTER_LABEL}" ]; then
   cat > "${HOME}/.profile-${VIRTUAL_CLUSTER_LABEL}" <<EOQ
 echo ""
 if systemctl is-active -q ${VIRTUAL_CLUSTER_LABEL}; then

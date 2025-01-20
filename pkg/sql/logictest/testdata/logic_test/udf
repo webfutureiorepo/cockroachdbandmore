@@ -49,10 +49,6 @@ CREATE FUNCTION err(b BOOL) RETURNS INT LANGUAGE SQL AS 'SELECT b'
 statement error pgcode 42P13 return type mismatch in function declared to return bool\nDETAIL: Actual return type is int
 CREATE FUNCTION err(i INT, j INT) RETURNS BOOL LANGUAGE SQL AS 'SELECT i - j'
 
-# TODO(#100962): Add support for default parameters.
-statement error pgcode 0A000 unimplemented: default value
-CREATE FUNCTION err(i INT, j INT DEFAULT 2) RETURNS INT LANGUAGE SQL AS 'SELECT i - j'
-
 # Make sure using table name as tuple type name works properly.
 # It should pass the return type validation and stored as a tuple type.
 statement ok
@@ -68,12 +64,13 @@ CREATE FUNCTION f_no_ref(a int) RETURNS INT IMMUTABLE AS 'SELECT 1' LANGUAGE SQL
 query T
 SELECT create_statement FROM [SHOW CREATE FUNCTION f_no_ref];
 ----
-CREATE FUNCTION public.f_no_ref(IN a INT8)
+CREATE FUNCTION public.f_no_ref(a INT8)
   RETURNS INT8
   IMMUTABLE
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE SQL
+  SECURITY INVOKER
   AS $$
   SELECT 1;
 $$
@@ -101,12 +98,13 @@ $$
 query T
 SELECT create_statement FROM [SHOW CREATE FUNCTION f];
 ----
-CREATE FUNCTION public.f(IN a test.public.notmyworkday)
+CREATE FUNCTION public.f(a public.notmyworkday)
   RETURNS INT8
   VOLATILE
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE SQL
+  SECURITY INVOKER
   AS $$
   SELECT a FROM test.public.t;
   SELECT b FROM test.public.t@t_idx_b;
@@ -138,9 +136,9 @@ SELECT oid, proname, pronamespace, proowner, prolang, proleakproof, proisstrict,
 FROM pg_catalog.pg_proc WHERE proname IN ('proc_f', 'proc_f_2')
 ORDER BY 1
 ----
-100118  proc_f    105  1546506610  14  false  false  false  v  1  20  20     {i}    NULL    f  SELECT 1;
-100119  proc_f    105  1546506610  14  true   true   false  i  2  25  25 20  {i,i}  {"",b}  f  SELECT 'hello';
-100121  proc_f_2  120  1546506610  14  false  false  false  v  1  25  25     {i}    NULL    f  SELECT 'hello';
+100118  proc_f    105  1546506610  14  false  false  false  v  1  20  20     NULL  NULL    f  SELECT 1;
+100119  proc_f    105  1546506610  14  true   true   false  i  2  25  25 20  NULL  {"",b}  f  SELECT 'hello';
+100121  proc_f_2  120  1546506610  14  false  false  false  v  1  25  25     NULL  NULL    f  SELECT 'hello';
 
 # Ensure that the pg_proc virtual index works properly.
 
@@ -224,16 +222,12 @@ subtest end
 
 subtest create_or_replace_function
 
-statement error pgcode 42P13 pq: parameter name "a" used more than once
-CREATE FUNCTION f_test_cor(a INT, a INT) RETURNS INT IMMUTABLE LANGUAGE SQL AS $$ SELECT 1 $$;
-
 statement ok
 CREATE FUNCTION f_test_cor(a INT, b INT) RETURNS INT IMMUTABLE LEAKPROOF STRICT LANGUAGE SQL AS $$ SELECT 1 $$;
 
 statement error pgcode 42723 pq: function "f_test_cor" already exists with same argument types
 CREATE FUNCTION f_test_cor(a INT, b INT) RETURNS INT IMMUTABLE LANGUAGE SQL AS $$ SELECT 1 $$;
 
-skipif config local-mixed-23.1
 statement error pgcode 42809 cannot change routine kind\nDETAIL: "f_test_cor" is a function
 CREATE OR REPLACE PROCEDURE f_test_cor(a INT, b INT) LANGUAGE SQL AS $$ SELECT 2 $$;
 
@@ -252,12 +246,13 @@ CREATE OR REPLACE FUNCTION f_test_cor(a INT, b INT) RETURNS INT LEAKPROOF LANGUA
 query T
 SELECT create_statement FROM [SHOW CREATE FUNCTION f_test_cor];
 ----
-CREATE FUNCTION public.f_test_cor(IN a INT8, IN b INT8)
+CREATE FUNCTION public.f_test_cor(a INT8, b INT8)
   RETURNS INT8
   IMMUTABLE
   LEAKPROOF
   STRICT
   LANGUAGE SQL
+  SECURITY INVOKER
   AS $$
   SELECT 1;
 $$
@@ -270,12 +265,13 @@ CREATE OR REPLACE FUNCTION f_test_cor(a INT, b INT) RETURNS INT LANGUAGE SQL AS 
 query T
 SELECT create_statement FROM [SHOW CREATE FUNCTION f_test_cor];
 ----
-CREATE FUNCTION public.f_test_cor(IN a INT8, IN b INT8)
+CREATE FUNCTION public.f_test_cor(a INT8, b INT8)
   RETURNS INT8
   VOLATILE
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE SQL
+  SECURITY INVOKER
   AS $$
   SELECT 2;
 $$
@@ -286,12 +282,13 @@ CREATE OR REPLACE FUNCTION f_test_cor(a INT, b INT) RETURNS INT IMMUTABLE LEAKPR
 query T
 SELECT create_statement FROM [SHOW CREATE FUNCTION f_test_cor];
 ----
-CREATE FUNCTION public.f_test_cor(IN a INT8, IN b INT8)
+CREATE FUNCTION public.f_test_cor(a INT8, b INT8)
   RETURNS INT8
   IMMUTABLE
   LEAKPROOF
   STRICT
   LANGUAGE SQL
+  SECURITY INVOKER
   AS $$
   SELECT 3;
 $$
@@ -672,12 +669,13 @@ $func$
 query T
 SELECT create_statement FROM [SHOW CREATE FUNCTION single_quote]
 ----
-CREATE FUNCTION public.single_quote(IN s STRING)
+CREATE FUNCTION public.single_quote(s STRING)
   RETURNS STRING
   VOLATILE
   NOT LEAKPROOF
   CALLED ON NULL INPUT
   LANGUAGE SQL
+  SECURITY INVOKER
   AS $$
   SELECT (e'\'' || s) || e'\'';
 $$
@@ -787,6 +785,172 @@ FROM purchase
 1.00   BHD
 10.00  GBP
 
+subtest regression_113186
+
+statement ok
+CREATE FUNCTION f113186() RETURNS RECORD AS $$ SELECT 1.99; $$ LANGUAGE SQL;
+
+query I
+SELECT * FROM f113186() AS foo(x INT);
+----
+2
+
+# Test type-coercion rules for composite return types.
+subtest return_tuple
+
+statement ok
+CREATE TYPE one_typ AS (x INT);
+CREATE TYPE two_typ AS (x INT, y INT);
+
+# Test a function returning a composite type with one element.
+statement ok
+DROP FUNCTION f;
+CREATE FUNCTION f() RETURNS one_typ LANGUAGE SQL AS $$ SELECT 1; $$;
+
+query T
+SELECT f();
+----
+(1)
+
+query I
+SELECT * FROM f();
+----
+1
+
+statement ok
+DROP FUNCTION f;
+CREATE FUNCTION f() RETURNS one_typ LANGUAGE SQL AS $$ SELECT ROW(1); $$;
+
+query T
+SELECT f();
+----
+(1)
+
+query I
+SELECT * FROM f();
+----
+1
+
+statement ok
+DROP FUNCTION f;
+
+statement error pgcode 42P13 pq: return type mismatch in function declared to return one_typ
+CREATE FUNCTION f() RETURNS one_typ LANGUAGE SQL AS $$ SELECT ROW(ROW(1)); $$;
+
+# Test a function returning a composite type with two elements.
+statement ok
+CREATE FUNCTION f() RETURNS two_typ LANGUAGE SQL AS $$ SELECT 1, 2; $$;
+
+query T
+SELECT f();
+----
+(1,2)
+
+query II
+SELECT * FROM f();
+----
+1  2
+
+statement ok
+DROP FUNCTION f;
+CREATE FUNCTION f() RETURNS two_typ LANGUAGE SQL AS $$ SELECT ROW(1, 2); $$;
+
+query T
+SELECT f();
+----
+(1,2)
+
+query II
+SELECT * FROM f();
+----
+1  2
+
+statement ok
+DROP FUNCTION f;
+
+statement error pgcode 42P13 pq: return type mismatch in function declared to return two_typ
+CREATE FUNCTION f() RETURNS two_typ LANGUAGE SQL AS $$ SELECT ROW(ROW(1, 2)); $$;
+
+# Test a function with two OUT-parameters.
+statement ok
+CREATE FUNCTION f(OUT x INT, OUT y INT) LANGUAGE SQL AS $$ SELECT 1, 2; $$;
+
+query T
+SELECT f();
+----
+(1,2)
+
+query II
+SELECT * FROM f();
+----
+1  2
+
+statement ok
+DROP FUNCTION f;
+CREATE FUNCTION f(OUT x INT, OUT y INT) LANGUAGE SQL AS $$ SELECT ROW(1, 2); $$;
+
+query T
+SELECT f();
+----
+(1,2)
+
+query II
+SELECT * FROM f();
+----
+1  2
+
+statement ok
+DROP FUNCTION f;
+
+statement error pgcode 42P13 pq: return type mismatch in function declared to return record
+CREATE FUNCTION f(OUT x INT, OUT y INT) LANGUAGE SQL AS $$ SELECT ROW(ROW(1, 2)); $$;
+
+statement ok
+CREATE FUNCTION f(x ANYELEMENT) RETURNS INT LANGUAGE SQL AS $$ SELECT 1; $$;
+
+statement ok
+SELECT f(0);
+
+statement ok
+SELECT f(0);
+
+statement ok
+DROP FUNCTION f;
+CREATE FUNCTION f(x INT) RETURNS INT LANGUAGE SQL AS $$ SELECT 1; $$;
+
+statement ok
+SELECT f('0');
+
+statement ok
+DROP FUNCTION f;
+CREATE FUNCTION f(x TEXT) RETURNS INT LANGUAGE SQL AS $$ SELECT 1; $$;
+
+statement ok
+SELECT f('0');
+
+statement ok
+DROP FUNCTION f;
+
+# Regression test for #117101 - update the resolved type of a VALUES row with a
+# UDF after the UDF is built.
+subtest regression_117101
+
+statement ok
+CREATE FUNCTION f117101() RETURNS RECORD CALLED ON NULL INPUT AS $funcbody$
+  SELECT ((42)::INT8, (43)::INT8)
+$funcbody$ LANGUAGE SQL;
+
+statement error pgcode 42804 pq: VALUES types tuple{int, int} and tuple{tuple{string, int}, unknown} cannot be matched
+SELECT
+  *
+FROM
+(
+  VALUES
+    (
+     (('aloha'::TEXT,
+     (44)::INT8), NULL)
+    ),
+    (COALESCE(f117101(), NULL))
+);
+
 subtest end
-
-

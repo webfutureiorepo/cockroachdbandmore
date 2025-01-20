@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package application_api_test
 
@@ -151,9 +146,8 @@ func TestAdminAPIJobs(t *testing.T) {
 	}
 	for _, job := range testJobs {
 		payload := jobspb.Payload{
-			UsernameProto:                job.username.EncodeProto(),
-			Details:                      jobspb.WrapPayloadDetails(job.details),
-			RetriableExecutionFailureLog: job.executionFailures,
+			UsernameProto: job.username.EncodeProto(),
+			Details:       jobspb.WrapPayloadDetails(job.details),
 		}
 		payloadBytes, err := protoutil.Marshal(&payload)
 		if err != nil {
@@ -178,8 +172,8 @@ func TestAdminAPIJobs(t *testing.T) {
 			t.Fatal(err)
 		}
 		sqlDB.Exec(t,
-			`INSERT INTO system.jobs (id, status, num_runs, last_run, job_type) VALUES ($1, $2, $3, $4, $5)`,
-			job.id, job.status, job.numRuns, job.lastRun, payload.Type().String(),
+			`INSERT INTO system.jobs (id, status, num_runs, last_run, job_type, owner) VALUES ($1, $2, $3, $4, $5, $6)`,
+			job.id, job.status, job.numRuns, job.lastRun, payload.Type().String(), payload.UsernameProto.Decode().Normalized(),
 		)
 		sqlDB.Exec(t,
 			`INSERT INTO system.job_info (job_id, info_key, value) VALUES ($1, $2, $3)`,
@@ -342,9 +336,8 @@ func TestAdminAPIJobsDetails(t *testing.T) {
 	}
 	for _, job := range testJobs {
 		payload := jobspb.Payload{
-			UsernameProto:                job.username.EncodeProto(),
-			Details:                      jobspb.WrapPayloadDetails(job.details),
-			RetriableExecutionFailureLog: job.executionLog,
+			UsernameProto: job.username.EncodeProto(),
+			Details:       jobspb.WrapPayloadDetails(job.details),
 		}
 		payloadBytes, err := protoutil.Marshal(&payload)
 		if err != nil {
@@ -369,8 +362,8 @@ func TestAdminAPIJobsDetails(t *testing.T) {
 			t.Fatal(err)
 		}
 		sqlDB.Exec(t,
-			`INSERT INTO system.jobs (id, status, num_runs, last_run) VALUES ($1, $2, $3, $4)`,
-			job.id, job.status, job.numRuns, job.lastRun,
+			`INSERT INTO system.jobs (id, status, num_runs, last_run, job_type) VALUES ($1, $2, $3, $4, $5)`,
+			job.id, job.status, job.numRuns, job.lastRun, payload.Type().String(),
 		)
 		sqlDB.Exec(t,
 			`INSERT INTO system.job_info (job_id, info_key, value) VALUES ($1, $2, $3)`,
@@ -396,20 +389,6 @@ func TestAdminAPIJobsDetails(t *testing.T) {
 
 	for i, job := range resJobs {
 		require.Equal(t, testJobs[i].id, job.ID)
-		require.Equal(t, len(testJobs[i].executionLog), len(job.ExecutionFailures))
-		for j, f := range job.ExecutionFailures {
-			tf := testJobs[i].executionLog[j]
-			require.Equal(t, tf.Status, f.Status)
-			require.Equal(t, tf.ExecutionStartMicros, f.Start.UnixMicro())
-			require.Equal(t, tf.ExecutionEndMicros, f.End.UnixMicro())
-			var expErr string
-			if tf.Error != nil {
-				expErr = errors.DecodeError(context.Background(), *tf.Error).Error()
-			} else {
-				expErr = tf.TruncatedError
-			}
-			require.Equal(t, expErr, f.Error)
-		}
 	}
 }
 

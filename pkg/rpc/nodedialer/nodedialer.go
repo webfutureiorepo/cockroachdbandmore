@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package nodedialer
 
@@ -15,20 +10,26 @@ import (
 	"net"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	circuit2 "github.com/cockroachdb/cockroach/pkg/util/circuit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"google.golang.org/grpc"
+	"storj.io/drpc/drpcpool"
 )
 
 // An AddressResolver translates NodeIDs into addresses.
-type AddressResolver func(roachpb.NodeID) (net.Addr, error)
+type AddressResolver func(roachpb.NodeID) (net.Addr, roachpb.Locality, error)
 
 // A Dialer wraps an *rpc.Context for dialing based on node IDs. For each node,
 // it maintains a circuit breaker that prevents rapid connection attempts and
@@ -95,12 +96,13 @@ func (n *Dialer) Dial(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, errors.Wrap(ctxErr, "dial")
 	}
-	addr, err := n.resolver(nodeID)
+	addr, locality, err := n.resolver(nodeID)
 	if err != nil {
 		err = errors.Wrapf(err, "failed to resolve n%d", nodeID)
 		return nil, err
 	}
-	return n.dial(ctx, nodeID, addr, true, class)
+	conn, _, _, _, err := n.dial(ctx, nodeID, addr, locality, true, class)
+	return conn, err
 }
 
 // DialNoBreaker is like Dial, but will not check the circuit breaker before
@@ -112,11 +114,12 @@ func (n *Dialer) DialNoBreaker(
 	if n == nil || n.resolver == nil {
 		return nil, errors.New("no node dialer configured")
 	}
-	addr, err := n.resolver(nodeID)
+	addr, locality, err := n.resolver(nodeID)
 	if err != nil {
 		return nil, err
 	}
-	return n.dial(ctx, nodeID, addr, false, class)
+	conn, _, _, _, err := n.dial(ctx, nodeID, addr, locality, false, class)
+	return conn, err
 }
 
 // DialInternalClient is a specialization of DialClass for callers that
@@ -140,16 +143,38 @@ func (n *Dialer) DialInternalClient(
 		}
 	}
 
-	addr, err := n.resolver(nodeID)
+	addr, locality, err := n.resolver(nodeID)
 	if err != nil {
 		return nil, errors.Wrap(err, "resolver error")
 	}
 	log.VEventf(ctx, 2, "sending request to %s", addr)
-	conn, err := n.dial(ctx, nodeID, addr, true, class)
+	conn, pool, dconn, drpcBatchStreamPool, err := n.dial(ctx, nodeID, addr, locality, true, class)
 	if err != nil {
 		return nil, err
 	}
-	return TracingInternalClient{InternalClient: kvpb.NewInternalClient(conn)}, nil
+
+	client := newBaseInternalClient(conn)
+	useStreamPoolClient := shouldUseBatchStreamPoolClient(ctx, n.rpcContext.Settings)
+	if useStreamPoolClient {
+		client = newBatchStreamPoolClient(pool)
+	}
+
+	if rpc.ExperimentalDRPCEnabled.Get(&n.rpcContext.Settings.SV) {
+		// TODO(server): gRPC version of batch stream pool implements
+		// rpc.RestrictedInternalClient and is allocation-optimized,
+		// whereas here we allocate a new throw-away
+		// unaryDRPCBatchServiceToInternalAdapter.
+		client = &unaryDRPCBatchServiceToInternalAdapter{
+			useStreamPoolClient:      useStreamPoolClient,
+			RestrictedInternalClient: client, // for RangeFeed only
+			drpcClient:               kvpb.NewDRPCBatchClient(dconn),
+			drpcStreamPool:           drpcBatchStreamPool,
+		}
+		return client, nil
+	}
+
+	client = maybeWrapInTracingClient(ctx, client)
+	return client, nil
 }
 
 // dial performs the dialing of the remote connection. If checkBreaker
@@ -159,30 +184,32 @@ func (n *Dialer) dial(
 	ctx context.Context,
 	nodeID roachpb.NodeID,
 	addr net.Addr,
+	locality roachpb.Locality,
 	checkBreaker bool,
 	class rpc.ConnectionClass,
-) (_ *grpc.ClientConn, err error) {
+) (*grpc.ClientConn, *rpc.BatchStreamPool, drpcpool.Conn, *rpc.DRPCBatchStreamPool, error) {
 	const ctxWrapMsg = "dial"
 	// Don't trip the breaker if we're already canceled.
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, errors.Wrap(ctxErr, ctxWrapMsg)
+		return nil, nil, nil, nil, errors.Wrap(ctxErr, ctxWrapMsg)
 	}
-	rpcConn := n.rpcContext.GRPCDialNode(addr.String(), nodeID, class)
-	connect := rpcConn.Connect
+	rpcConn := n.rpcContext.GRPCDialNode(addr.String(), nodeID, locality, class)
+	connect := rpcConn.ConnectEx
 	if !checkBreaker {
 		connect = rpcConn.ConnectNoBreaker
 	}
-	conn, err := connect(ctx)
+	conn, dconn, err := connect(ctx)
 	if err != nil {
 		// If we were canceled during the dial, don't trip the breaker.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, errors.Wrap(ctxErr, ctxWrapMsg)
+			return nil, nil, nil, nil, errors.Wrap(ctxErr, ctxWrapMsg)
 		}
 		err = errors.Wrapf(err, "failed to connect to n%d at %v", nodeID, addr)
-		return nil, err
+		return nil, nil, nil, nil, err
 	}
-
-	return conn, nil
+	pool := rpcConn.BatchStreamPool()
+	drpcStreamPool := rpcConn.DRPCBatchStreamPool()
+	return conn, pool, dconn, drpcStreamPool, nil
 }
 
 // ConnHealth returns nil if we have an open connection of the request
@@ -193,7 +220,7 @@ func (n *Dialer) ConnHealth(nodeID roachpb.NodeID, class rpc.ConnectionClass) er
 	if n == nil || n.resolver == nil {
 		return errors.New("no node dialer configured")
 	}
-	addr, err := n.resolver(nodeID)
+	addr, _, err := n.resolver(nodeID)
 	if err != nil {
 		return err
 	}
@@ -222,13 +249,28 @@ func (n *Dialer) ConnHealthTryDial(nodeID roachpb.NodeID, class rpc.ConnectionCl
 	if err == nil {
 		return err
 	}
-	addr, err := n.resolver(nodeID)
+	addr, locality, err := n.resolver(nodeID)
 	if err != nil {
 		return err
 	}
 	// NB: This will always return `ErrNotHeartbeated` since the heartbeat will
 	// not be done by the time `Health` is called since GRPCDialNode is async.
-	return n.rpcContext.GRPCDialNode(addr.String(), nodeID, class).Health()
+	return n.rpcContext.GRPCDialNode(addr.String(), nodeID, locality, class).Health()
+}
+
+// ConnHealthTryDialInstance returns nil if we have an open connection of the
+// rpc.DefaultClass to the given sqlinstance that succeeded on its most recent
+// heartbeat. If no healthy connection is found, it will attempt to dial the
+// instance.
+func (n *Dialer) ConnHealthTryDialInstance(id base.SQLInstanceID, addr string) error {
+	if n == nil {
+		return errors.New("no node dialer configured")
+	}
+	if err := n.rpcContext.ConnHealth(
+		addr, roachpb.NodeID(id), rpc.DefaultClass); err == nil {
+		return nil
+	}
+	return n.rpcContext.GRPCDialPod(addr, id, roachpb.Locality{}, rpc.DefaultClass).Health()
 }
 
 // GetCircuitBreaker retrieves the circuit breaker for connections to the
@@ -237,7 +279,7 @@ func (n *Dialer) ConnHealthTryDial(nodeID roachpb.NodeID, class rpc.ConnectionCl
 func (n *Dialer) GetCircuitBreaker(
 	nodeID roachpb.NodeID, class rpc.ConnectionClass,
 ) (*circuit2.Breaker, bool) {
-	addr, err := n.resolver(nodeID)
+	addr, _, err := n.resolver(nodeID)
 	if err != nil {
 		return nil, false
 	}
@@ -261,17 +303,108 @@ func (n *Dialer) Latency(nodeID roachpb.NodeID) (time.Duration, error) {
 	return latency, nil
 }
 
-// TracingInternalClient wraps an InternalClient and fills in trace information
-// on Batch RPCs.
+// baseInternalClient is a wrapper around a grpc.ClientConn that implements the
+// RestrictedInternalClient interface. By calling kvpb.NewInternalClient on each
+// RPC invocation, that function can be inlined and the returned internalClient
+// object (which itself is just a wrapper) never needs to be allocated on the
+// heap.
+type baseInternalClient grpc.ClientConn
+
+func newBaseInternalClient(conn *grpc.ClientConn) rpc.RestrictedInternalClient {
+	return (*baseInternalClient)(conn)
+}
+
+func (c *baseInternalClient) asConn() *grpc.ClientConn {
+	return (*grpc.ClientConn)(c)
+}
+
+// Batch implements the RestrictedInternalClient interface.
+func (c *baseInternalClient) Batch(
+	ctx context.Context, ba *kvpb.BatchRequest, opts ...grpc.CallOption,
+) (*kvpb.BatchResponse, error) {
+	return kvpb.NewInternalClient(c.asConn()).Batch(ctx, ba, opts...)
+}
+
+// MuxRangeFeed implements the RestrictedInternalClient interface.
+func (c *baseInternalClient) MuxRangeFeed(
+	ctx context.Context, opts ...grpc.CallOption,
+) (kvpb.Internal_MuxRangeFeedClient, error) {
+	return kvpb.NewInternalClient(c.asConn()).MuxRangeFeed(ctx, opts...)
+}
+
+var batchStreamPoolingEnabled = settings.RegisterBoolSetting(
+	settings.ApplicationLevel,
+	"rpc.batch_stream_pool.enabled",
+	"if true, use pooled gRPC streams to execute Batch RPCs",
+	metamorphic.ConstantWithTestBool("rpc.batch_stream_pool.enabled", true),
+)
+
+func shouldUseBatchStreamPoolClient(ctx context.Context, st *cluster.Settings) bool {
+	// NOTE: we use ActiveVersionOrEmpty(ctx).IsActive(...) instead of the more
+	// common IsActive(ctx, ...) to avoid a fatal error if an RPC is made before
+	// the cluster version is initialized.
+	if !st.Version.ActiveVersionOrEmpty(ctx).IsActive(clusterversion.V25_1_BatchStreamRPC) {
+		return false
+	}
+	if !batchStreamPoolingEnabled.Get(&st.SV) {
+		return false
+	}
+	return true
+}
+
+// batchStreamPoolClient is a client that sends Batch RPCs using a pooled
+// BatchStream RPC stream. Pooling these streams allows for reuse of gRPC
+// resources, as opposed to native unary RPCs, which create a new stream and
+// throw it away for each unary request (see grpc.invoke).
+type batchStreamPoolClient rpc.BatchStreamPool
+
+func newBatchStreamPoolClient(pool *rpc.BatchStreamPool) rpc.RestrictedInternalClient {
+	return (*batchStreamPoolClient)(pool)
+}
+
+func (c *batchStreamPoolClient) asPool() *rpc.BatchStreamPool {
+	return (*rpc.BatchStreamPool)(c)
+}
+
+// Batch implements the RestrictedInternalClient interface, using the pooled
+// streams in the BatchStreamPool to issue the Batch RPC.
+func (c *batchStreamPoolClient) Batch(
+	ctx context.Context, ba *kvpb.BatchRequest, opts ...grpc.CallOption,
+) (*kvpb.BatchResponse, error) {
+	if len(opts) > 0 {
+		return nil, errors.AssertionFailedf("batchStreamPoolClient.Batch does not support CallOptions")
+	}
+	return c.asPool().Send(ctx, ba)
+}
+
+// MuxRangeFeed implements the RestrictedInternalClient interface.
+func (c *batchStreamPoolClient) MuxRangeFeed(
+	ctx context.Context, opts ...grpc.CallOption,
+) (kvpb.Internal_MuxRangeFeedClient, error) {
+	return kvpb.NewInternalClient(c.asPool().Conn()).MuxRangeFeed(ctx, opts...)
+}
+
+// tracingInternalClient wraps a RestrictedInternalClient and fills in trace
+// information on Batch RPCs.
 //
-// Note that TracingInternalClient is not used to wrap the internalClientAdapter
+// Note that tracingInternalClient is not used to wrap the internalClientAdapter
 // - local RPCs don't need this tracing functionality.
-type TracingInternalClient struct {
-	kvpb.InternalClient
+type tracingInternalClient struct {
+	rpc.RestrictedInternalClient
+}
+
+func maybeWrapInTracingClient(
+	ctx context.Context, client rpc.RestrictedInternalClient,
+) rpc.RestrictedInternalClient {
+	sp := tracing.SpanFromContext(ctx)
+	if sp != nil && !sp.IsNoop() {
+		return &tracingInternalClient{RestrictedInternalClient: client}
+	}
+	return client
 }
 
 // Batch overrides the Batch RPC client method and fills in tracing information.
-func (tic TracingInternalClient) Batch(
+func (c *tracingInternalClient) Batch(
 	ctx context.Context, ba *kvpb.BatchRequest, opts ...grpc.CallOption,
 ) (*kvpb.BatchResponse, error) {
 	sp := tracing.SpanFromContext(ctx)
@@ -279,5 +412,5 @@ func (tic TracingInternalClient) Batch(
 		ba = ba.ShallowCopy()
 		ba.TraceInfo = sp.Meta().ToProto()
 	}
-	return tic.InternalClient.Batch(ctx, ba, opts...)
+	return c.RestrictedInternalClient.Batch(ctx, ba, opts...)
 }

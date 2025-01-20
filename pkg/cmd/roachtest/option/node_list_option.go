@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package option
 
@@ -76,6 +71,16 @@ func (n NodeListOption) RandNode() NodeListOption {
 // SeededRandNode returns a random node from the NodeListOption using a seeded rand object.
 func (n NodeListOption) SeededRandNode(rand *rand.Rand) NodeListOption {
 	return NodeListOption{n[rand.Intn(len(n))]}
+}
+
+func (n NodeListOption) SeededRandList(rand *rand.Rand, size int) (NodeListOption, error) {
+	if size > len(n) {
+		return NodeListOption{}, fmt.Errorf("cannot select list - size: %d > len: %d", size, len(n))
+	}
+
+	nodes := append([]int{}, n...)
+	rand.Shuffle(len(nodes), func(i, j int) { nodes[i], nodes[j] = nodes[j], nodes[i] })
+	return nodes[:size], nil
 }
 
 // NodeIDsString returns the nodes in the NodeListOption, separated by spaces.

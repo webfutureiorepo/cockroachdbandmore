@@ -1,15 +1,13 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package baseccl
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -21,6 +19,11 @@ import (
 // into StoreEncryptionSpecs.
 func TestNewStoreEncryptionSpec(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
+	absDataPath, err := filepath.Abs("data")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	testCases := []struct {
 		value       string
@@ -45,11 +48,18 @@ func TestNewStoreEncryptionSpec(t *testing.T) {
 		{"path=data,key=new.key,old-key=old.key,rotation-period=1", `could not parse rotation-duration value: 1: time: missing unit in duration "1"`, StoreEncryptionSpec{}},
 		{"path=data,key=new.key,old-key=old.key,rotation-period=1d", `could not parse rotation-duration value: 1d: time: unknown unit "d" in duration "1d"`, StoreEncryptionSpec{}},
 
-		// Good values.
+		// Good values. Note that paths get absolutized so we start most of them
+		// with / so we can used fixed expected values.
 		{"path=/data,key=/new.key,old-key=/old.key", "", StoreEncryptionSpec{Path: "/data", KeyPath: "/new.key", OldKeyPath: "/old.key", RotationPeriod: DefaultRotationPeriod}},
 		{"path=/data,key=/new.key,old-key=/old.key,rotation-period=1h", "", StoreEncryptionSpec{Path: "/data", KeyPath: "/new.key", OldKeyPath: "/old.key", RotationPeriod: time.Hour}},
 		{"path=/data,key=plain,old-key=/old.key,rotation-period=1h", "", StoreEncryptionSpec{Path: "/data", KeyPath: "plain", OldKeyPath: "/old.key", RotationPeriod: time.Hour}},
 		{"path=/data,key=/new.key,old-key=plain,rotation-period=1h", "", StoreEncryptionSpec{Path: "/data", KeyPath: "/new.key", OldKeyPath: "plain", RotationPeriod: time.Hour}},
+
+		// One relative path to test absolutization.
+		{"path=data,key=/new.key,old-key=/old.key", "", StoreEncryptionSpec{Path: absDataPath, KeyPath: "/new.key", OldKeyPath: "/old.key", RotationPeriod: DefaultRotationPeriod}},
+
+		// Special path * is not absolutized.
+		{"path=*,key=/new.key,old-key=/old.key", "", StoreEncryptionSpec{Path: "*", KeyPath: "/new.key", OldKeyPath: "/old.key", RotationPeriod: DefaultRotationPeriod}},
 	}
 
 	for i, testCase := range testCases {

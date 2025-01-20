@@ -15,7 +15,6 @@ go_library(
         "server_config.go",
         "testutils.go",
         "utils.go",
-        "version.go",
         ":gen-consumerstatus-stringer",  # keep
         ":gen-procstate-stringer",  # keep
     ],
@@ -30,6 +29,7 @@ go_library(
         "//pkg/keys",
         "//pkg/kv",
         "//pkg/kv/kvclient/kvcoord",
+        "//pkg/kv/kvclient/kvstreamer",
         "//pkg/kv/kvclient/rangecache",
         "//pkg/kv/kvpb",
         "//pkg/kv/kvserver/diskmap",
@@ -79,7 +79,7 @@ go_library(
         "@com_github_cockroachdb_redact//:redact",
         "@com_github_marusama_semaphore//:semaphore",
         "@io_opentelemetry_go_otel//attribute",
-        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//:grpc",
     ],
 )
 
@@ -91,10 +91,6 @@ go_test(
         "main_test.go",
     ],
     embed = [":execinfra"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/security/securityassets",
         "//pkg/security/securitytest",

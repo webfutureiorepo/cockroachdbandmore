@@ -1,15 +1,11 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
 
 import * as eventTypes from "src/util/eventTypes";
-import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
 
 /**
  * getEventDescription returns a short summary of an event.
@@ -178,7 +174,17 @@ export function getEventDescription(e: clusterUiApi.EventColumns): string {
     case eventTypes.DROP_ROLE:
       return `Role Dropped: User ${info.User} dropped role ${info.RoleName}`;
     case eventTypes.ALTER_ROLE:
-      return `Role Altered: User ${info.User} altered role ${info.RoleName} with options ${info.Options}`;
+      if (info.Options && info.Options.length > 0) {
+        return `Role Altered: User ${info.User} altered role ${info.RoleName} with options ${info.Options}`;
+      } else if (
+        info.SetInfo &&
+        info.SetInfo.length === 1 &&
+        info.SetInfo[0] === "DEFAULTSETTINGS"
+      ) {
+        return `Role Altered: User ${info.User} altered default settings for role ${info.RoleName}`;
+      } else {
+        return `Role Altered: User ${info.User} altered role ${info.RoleName}`;
+      }
     case eventTypes.IMPORT:
       return `Import Job: User ${info.User} has a job ${info.JobID} running with status ${info.Status}`;
     case eventTypes.RESTORE:
@@ -200,6 +206,12 @@ export function getEventDescription(e: clusterUiApi.EventColumns): string {
       return `Unsafe: User ${info.User} executed crdb_internal.${
         e.eventType
       }, Info: ${JSON.stringify(info, null, 2)}`;
+    case eventTypes.DISK_SLOWNESS_DETECTED:
+      return `Disk Slowness Detected: Node ${info.NodeID} Store ${info.StoreID} is experiencing a slow disk`;
+    case eventTypes.DISK_SLOWNESS_CLEARED:
+      return `Disk Slowness Cleared: Node ${info.NodeID} Store ${info.StoreID} is no longer experiencing a slow disk`;
+    case eventTypes.LOW_DISK_SPACE:
+      return `Available disk space below ${info.PercentThreshold}%: Node ${info.NodeID} Store ${info.StoreID}`;
     default:
       return `Event: ${e.eventType}, content: ${JSON.stringify(info, null, 2)}`;
   }
@@ -231,6 +243,7 @@ export interface EventInfo {
   RoleName?: string;
   SchemaName?: string;
   SequenceName?: string;
+  SetInfo?: string[];
   SettingName?: string;
   Statement?: string;
   TableName?: string;
@@ -261,6 +274,10 @@ export interface EventInfo {
   ForceNotice?: string;
   PreviousDescriptor?: string;
   NewDescriptor?: string;
+  StoreID?: string;
+  PercentThreshold?: string;
+  AvailableBytes?: string;
+  TotalBytes?: string;
 }
 
 export function getDroppedObjectsText(eventInfo: EventInfo): string {

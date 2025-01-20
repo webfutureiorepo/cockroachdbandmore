@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scheduledjobs
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/redact"
 )
 
 // JobSchedulerEnv is an environment for running scheduled jobs.
@@ -53,7 +49,7 @@ type JobExecutionConfig struct {
 	// be cast to that type in the sql package when it is used. Returns a cleanup
 	// function that must be called once the caller is done with the planner.
 	// This is the same mechanism used in jobs.Registry.
-	PlanHookMaker func(ctx context.Context, opName string, tnx *kv.Txn, user username.SQLUsername) (interface{}, func())
+	PlanHookMaker func(ctx context.Context, opName redact.SafeString, tnx *kv.Txn, user username.SQLUsername) (interface{}, func())
 	// ShouldRunScheduler, if set, returns true if the job scheduler should run
 	// schedules.  This callback should be re-checked periodically.
 	ShouldRunScheduler func(ctx context.Context, ts hlc.ClockTimestamp) (bool, error)

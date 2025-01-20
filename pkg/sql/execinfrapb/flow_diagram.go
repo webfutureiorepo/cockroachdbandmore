@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package execinfrapb
 
@@ -21,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
@@ -177,6 +173,12 @@ func (tr *TableReaderSpec) summary() (string, []string) {
 		}
 
 		details = append(details, spanStr.String())
+	}
+
+	if tr.MaxTimestampAgeNanos != 0 {
+		details = append(details, fmt.Sprintf(
+			"Inconsistent scan (max ts age %s)", time.Duration(tr.MaxTimestampAgeNanos),
+		))
 	}
 
 	return "TableReader", details
@@ -555,6 +557,56 @@ func (s *StreamIngestionDataSpec) summary() (string, []string) {
 	}
 
 	return "StreamIngestionData", annotations
+}
+
+func (s *LogicalReplicationWriterSpec) summary() (string, []string) {
+	const spanLimit = 9
+
+	tableNames := []string{}
+	for _, table := range s.TableMetadataByDestID {
+		tableNames = append(tableNames, table.SourceDescriptor.Name)
+	}
+
+	annotations := []string{
+		fmt.Sprintf("Tables: %s", strings.Join(tableNames, ",")),
+		fmt.Sprintf("Source node %s", s.PartitionSpec.SrcInstanceID),
+		"Spans:",
+	}
+
+	for i, span := range s.PartitionSpec.Spans {
+		if i == spanLimit {
+			annotations = append(annotations, fmt.Sprintf("and %d more spans", len(s.PartitionSpec.Spans)-spanLimit))
+			break
+		}
+		annotations = append(annotations, fmt.Sprintf("%v", span))
+	}
+
+	return "LogicalReplicationWriter", annotations
+}
+
+func (s *LogicalReplicationOfflineScanSpec) summary() (string, []string) {
+	const spanLimit = 9
+
+	srcTableIDs := []string{}
+	for _, pair := range s.Rekey {
+		srcTableIDs = append(srcTableIDs, fmt.Sprintf("%d", pair.OldID))
+	}
+
+	annotations := []string{
+		fmt.Sprintf("Src Table IDs: %s", strings.Join(srcTableIDs, ",")),
+		fmt.Sprintf("Source node %s", s.PartitionSpec.SrcInstanceID),
+		"Spans:",
+	}
+
+	for i, span := range s.PartitionSpec.Spans {
+		if i == spanLimit {
+			annotations = append(annotations, fmt.Sprintf("and %d more spans", len(s.PartitionSpec.Spans)-spanLimit))
+			break
+		}
+		annotations = append(annotations, fmt.Sprintf("%v", span))
+	}
+
+	return "LogicalReplicationOfflineScanWriter", annotations
 }
 
 // summary implements the diagramCellType interface.

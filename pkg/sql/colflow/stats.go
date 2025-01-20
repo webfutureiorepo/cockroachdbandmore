@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colflow
 
@@ -15,12 +10,14 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colflow/colrpc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -60,6 +57,10 @@ type batchInfoCollector struct {
 	// batch is the last batch returned by the wrapped operator.
 	batch coldata.Batch
 
+	// rowCountFastPath is set to indicate that the input is expected to produce
+	// a single batch with a single column with the row count value.
+	rowCountFastPath bool
+
 	// stopwatch keeps track of the amount of time the wrapped operator spent
 	// doing work. Note that this will include all of the time that the operator's
 	// inputs spent doing work - this will be corrected when stats are reported
@@ -85,6 +86,7 @@ func makeBatchInfoCollector(
 	return batchInfoCollector{
 		OneInputNode:         colexecop.NewOneInputNode(op),
 		componentID:          id,
+		rowCountFastPath:     colexec.IsColumnarizerAroundFastPathNode(op),
 		stopwatch:            inputWatch,
 		childStatsCollectors: childStatsCollectors,
 	}
@@ -130,9 +132,31 @@ func (bic *batchInfoCollector) Next() coldata.Batch {
 	}
 	if bic.batch.Length() > 0 {
 		bic.mu.Lock()
+		defer bic.mu.Unlock()
 		bic.mu.numBatches++
-		bic.mu.numTuples += uint64(bic.batch.Length())
-		bic.mu.Unlock()
+		if bic.rowCountFastPath {
+			// We have a special case where the batch has exactly one column
+			// with exactly one row in which we have the row count.
+			if buildutil.CrdbTestBuild {
+				if bic.mu.numBatches != 1 {
+					colexecerror.InternalError(errors.AssertionFailedf("saw second batch in fast path:\n%s", bic.batch))
+				}
+				if bic.batch.Width() != 1 {
+					colexecerror.InternalError(errors.AssertionFailedf("batch width is not 1:\n%s", bic.batch))
+				}
+				if bic.batch.Length() != 1 {
+					colexecerror.InternalError(errors.AssertionFailedf("batch length is not 1:\n%s", bic.batch))
+				}
+				if !bic.batch.ColVec(0).Type().Equal(types.Int) {
+					colexecerror.InternalError(errors.AssertionFailedf("single vector is not int:\n%s", bic.batch))
+				}
+			}
+			if ints, ok := bic.batch.ColVec(0).Col().(coldata.Int64s); ok {
+				bic.mu.numTuples = uint64(ints[0])
+			}
+		} else {
+			bic.mu.numTuples += uint64(bic.batch.Length())
+		}
 	}
 	return bic.batch
 }
@@ -388,7 +412,7 @@ func (i *statsInvariantChecker) GetStats() *execinfrapb.ComponentStats {
 
 func (i *statsInvariantChecker) DrainMeta() []execinfrapb.ProducerMetadata {
 	if !i.statsRetrieved {
-		return []execinfrapb.ProducerMetadata{{Err: errors.New("GetStats wasn't called before DrainMeta")}}
+		return []execinfrapb.ProducerMetadata{{Err: errors.AssertionFailedf("GetStats wasn't called before DrainMeta")}}
 	}
 	return nil
 }

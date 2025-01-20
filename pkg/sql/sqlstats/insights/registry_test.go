@@ -1,33 +1,23 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package insights
 
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"sort"
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/obs"
-	"github.com/cockroachdb/cockroach/pkg/obsservice/obspb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/uint128"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/datadriven"
-	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,7 +41,7 @@ func TestRegistry(t *testing.T) {
 	session := Session{ID: clusterunique.IDFromBytes([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))}
 
 	t.Run("slow detection", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		statement := &Statement{
 			Status:           Statement_Completed,
 			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
@@ -62,10 +52,10 @@ func TestRegistry(t *testing.T) {
 			newStmtWithProblemAndCauses(statement, Problem_SlowExecution, nil)
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statement)
-		registry.ObserveTransaction(ctx, session.ID, transaction)
+		registry.ObserveTransaction(session.ID, transaction)
 
 		expected := []*Insight{{
 			Session:     session,
@@ -88,7 +78,7 @@ func TestRegistry(t *testing.T) {
 	t.Run("failure detection", func(t *testing.T) {
 		// Verify that statement error info gets bubbled up to the transaction
 		// when the transaction does not have this information.
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		statement := &Statement{
 			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
 			FingerprintID:    appstatspb.StmtFingerprintID(100),
@@ -100,15 +90,15 @@ func TestRegistry(t *testing.T) {
 
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statement)
 		// Transaction status is set during transaction stats recorded based on
 		// if the transaction committed. We'll inject the failure here to align
 		// it with the test. The insights integration tests will verify that this
 		// field is set properly.
 		transaction.Status = Transaction_Failed
-		registry.ObserveTransaction(ctx, session.ID, transaction)
+		registry.ObserveTransaction(session.ID, transaction)
 
 		expected := []*Insight{{
 			Session:     session,
@@ -133,7 +123,7 @@ func TestRegistry(t *testing.T) {
 	})
 
 	t.Run("disabled", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		statement := &Statement{
 			Status:           Statement_Completed,
 			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
@@ -142,10 +132,10 @@ func TestRegistry(t *testing.T) {
 		}
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 0)
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statement)
-		registry.ObserveTransaction(ctx, session.ID, transaction)
+		registry.ObserveTransaction(session.ID, transaction)
 
 		var actual []*Insight
 		store.IterateInsights(
@@ -158,7 +148,7 @@ func TestRegistry(t *testing.T) {
 	})
 
 	t.Run("too fast", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
 		statement2 := &Statement{
@@ -166,10 +156,10 @@ func TestRegistry(t *testing.T) {
 			FingerprintID:    appstatspb.StmtFingerprintID(100),
 			LatencyInSeconds: 0.5,
 		}
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statement2)
-		registry.ObserveTransaction(ctx, session.ID, transaction)
+		registry.ObserveTransaction(session.ID, transaction)
 
 		var actual []*Insight
 		store.IterateInsights(
@@ -182,7 +172,7 @@ func TestRegistry(t *testing.T) {
 	})
 
 	t.Run("buffering statements per session", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		statement := &Statement{
 			Status:           Statement_Completed,
 			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
@@ -190,7 +180,7 @@ func TestRegistry(t *testing.T) {
 			LatencyInSeconds: 2,
 		}
 		otherSession := Session{ID: clusterunique.IDFromBytes([]byte("cccccccccccccccccccccccccccccccc"))}
-		otherTransaction := &Transaction{ID: uuid.FastMakeV4()}
+		otherTransaction := &Transaction{ID: uuid.MakeV4()}
 		otherStatement := &Statement{
 			ID:               clusterunique.IDFromBytes([]byte("dddddddddddddddddddddddddddddddd")),
 			FingerprintID:    appstatspb.StmtFingerprintID(101),
@@ -199,12 +189,12 @@ func TestRegistry(t *testing.T) {
 
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statement)
 		registry.ObserveStatement(otherSession.ID, otherStatement)
-		registry.ObserveTransaction(ctx, session.ID, transaction)
-		registry.ObserveTransaction(ctx, otherSession.ID, otherTransaction)
+		registry.ObserveTransaction(session.ID, transaction)
+		registry.ObserveTransaction(otherSession.ID, otherTransaction)
 
 		expected := []*Insight{{
 			Session:     session,
@@ -236,7 +226,7 @@ func TestRegistry(t *testing.T) {
 	})
 
 	t.Run("sibling statements without problems", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		statement := &Statement{
 			Status:           Statement_Completed,
 			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
@@ -250,11 +240,11 @@ func TestRegistry(t *testing.T) {
 
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statement)
 		registry.ObserveStatement(session.ID, siblingStatement)
-		registry.ObserveTransaction(ctx, session.ID, transaction)
+		registry.ObserveTransaction(session.ID, transaction)
 
 		expected := []*Insight{
 			{
@@ -279,17 +269,17 @@ func TestRegistry(t *testing.T) {
 	})
 
 	t.Run("txn with no stmts", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		st := cluster.MakeTestingClusterSettings()
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, newStore(st, obs.NoopEventsExporter{}))
-		require.NotPanics(t, func() { registry.ObserveTransaction(ctx, session.ID, transaction) })
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, newStore(st), nil)
+		require.NotPanics(t, func() { registry.ObserveTransaction(session.ID, transaction) })
 	})
 
 	t.Run("txn with high accumulated contention without high single stmt contention", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		st := cluster.MakeTestingClusterSettings()
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		contentionDuration := 10 * time.Second
 		statement := &Statement{
 			Status:           Statement_Completed,
@@ -297,10 +287,10 @@ func TestRegistry(t *testing.T) {
 			FingerprintID:    appstatspb.StmtFingerprintID(100),
 			LatencyInSeconds: 0.00001,
 		}
-		txnHighContention := &Transaction{ID: uuid.FastMakeV4(), Contention: &contentionDuration}
+		txnHighContention := &Transaction{ID: uuid.MakeV4(), Contention: &contentionDuration}
 
 		registry.ObserveStatement(session.ID, statement)
-		registry.ObserveTransaction(ctx, session.ID, txnHighContention)
+		registry.ObserveTransaction(session.ID, txnHighContention)
 
 		expected := []*Insight{
 			{
@@ -330,7 +320,7 @@ func TestRegistry(t *testing.T) {
 	})
 
 	t.Run("statement that is slow but should be ignored", func(t *testing.T) {
-		transaction := &Transaction{ID: uuid.FastMakeV4()}
+		transaction := &Transaction{ID: uuid.MakeV4()}
 		statementNotIgnored := &Statement{
 			Status:           Statement_Completed,
 			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
@@ -353,12 +343,12 @@ func TestRegistry(t *testing.T) {
 
 		st := cluster.MakeTestingClusterSettings()
 		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
-		store := newStore(st, obs.NoopEventsExporter{})
-		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
 		registry.ObserveStatement(session.ID, statementNotIgnored)
 		registry.ObserveStatement(session.ID, statementIgnoredSet)
 		registry.ObserveStatement(session.ID, statementIgnoredExplain)
-		registry.ObserveTransaction(ctx, session.ID, transaction)
+		registry.ObserveTransaction(session.ID, transaction)
 
 		expected := []*Insight{
 			{
@@ -384,54 +374,70 @@ func TestRegistry(t *testing.T) {
 	})
 }
 
-func TestInsightsConversion(t *testing.T) {
+func TestInsightsRegistry_Clear(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	session := Session{ID: clusterunique.IDFromBytes([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaa"))}
-	contentionDuration := 10 * time.Second
 
-	// Construct by hand an Insight struct. The values don't matter, but the same values
-	// being included in the transformation result do. This will fail whenever someone makes a change to
-	// obspb.StatementInsightsStatistics, forcing folks to update the transformation logic accordingly.
-	stmt := Statement{
-		AutoRetryReason:      "myRetryReason",
-		Causes:               []Cause{Cause_HighContention, Cause_SuboptimalPlan},
-		Contention:           &contentionDuration,
-		CPUSQLNanos:          500,
-		Database:             "myDB",
-		EndTime:              time.Date(2023, time.October, 31, 18, 33, 39, 0, time.UTC),
-		ErrorCode:            "myErrorCode",
-		ErrorMsg:             "myErrorMessage",
-		FingerprintID:        12345,
-		FullScan:             true,
-		ID:                   clusterunique.ID{Uint128: uint128.Uint128{Lo: 12, Hi: 987}},
-		IndexRecommendations: []string{"rec1", "rec2"},
-		Nodes:                []int64{2, 4, 8},
-		PlanGist:             "myPlanGist",
-		Problem:              Problem_SlowExecution,
-		Query:                "myQuery",
-		Retries:              2,
-		RowsRead:             100,
-		RowsWritten:          2,
-		LatencyInSeconds:     2,
-		StartTime:            time.Date(2023, time.October, 31, 18, 31, 39, 0, time.UTC),
-		Status:               Statement_Completed,
-	}
-	txn := Transaction{
-		ApplicationName: "myApp",
-		FingerprintID:   appstatspb.TransactionFingerprintID(123),
-		ID:              uuid.UUID{2},
-		ImplicitTxn:     true,
-		User:            "myUser",
-		UserPriority:    "1",
-	}
-
-	datadriven.RunTest(t, "testdata/collectedstmtinsightsstats_transform", func(t *testing.T, d *datadriven.TestData) string {
-		res := new(obspb.StatementInsightsStatistics)
-		stmt.CopyTo(ctx, &txn, &session, res)
-		var buf bytes.Buffer
-		_, err := fmt.Fprintf(&buf, "%# v\n", pretty.Formatter(res))
-		require.NoError(t, err)
-		return buf.String()
+	t.Run("clears cache", func(t *testing.T) {
+		// Initialize the registry.
+		st := cluster.MakeTestingClusterSettings()
+		LatencyThreshold.Override(ctx, &st.SV, 1*time.Second)
+		store := newStore(st)
+		registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
+		// Create some test data.
+		sessionA := Session{ID: clusterunique.IDFromBytes([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))}
+		sessionB := Session{ID: clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))}
+		statement := &Statement{
+			Status:           Statement_Completed,
+			ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+			FingerprintID:    appstatspb.StmtFingerprintID(100),
+			LatencyInSeconds: 2,
+		}
+		// Record the test data, assert it's cached.
+		registry.ObserveStatement(sessionA.ID, statement)
+		registry.ObserveStatement(sessionB.ID, statement)
+		expLenStmts := 2
+		// No need to acquire the lock here, as the registry is not attached to anything.
+		require.Len(t, registry.statements, expLenStmts)
+		// Now clear the cache, assert it's cleared.
+		registry.Clear()
+		require.Empty(t, registry.statements)
 	})
+}
+
+func TestInsightsRegistry_ClearSession(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Initialize the registry.
+	st := cluster.MakeTestingClusterSettings()
+	store := newStore(st)
+	registry := newRegistry(st, &latencyThresholdDetector{st: st}, store, nil)
+
+	// Create some test data.
+	sessionA := Session{ID: clusterunique.IDFromBytes([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))}
+	sessionB := Session{ID: clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))}
+	statement := &Statement{
+		Status:           Statement_Completed,
+		ID:               clusterunique.IDFromBytes([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+		FingerprintID:    appstatspb.StmtFingerprintID(100),
+		LatencyInSeconds: 2,
+	}
+
+	// Record the test data, assert it's cached.
+	registry.ObserveStatement(sessionA.ID, statement)
+	registry.ObserveStatement(sessionB.ID, statement)
+	// No need to acquire the lock here, as the registry is not attached to anything.
+	require.Len(t, registry.statements, 2)
+
+	// Clear the cache, assert it's cleared.
+	registry.clearSession(sessionA.ID)
+
+	// sessionA should be removed, sessionB should still be present.
+	b, ok := registry.statements[sessionA.ID]
+	require.False(t, ok)
+	require.Nil(t, b)
+	require.Len(t, registry.statements, 1)
+	require.NotEmpty(t, registry.statements[sessionB.ID])
 }

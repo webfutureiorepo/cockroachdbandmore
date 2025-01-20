@@ -1,24 +1,17 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
 import (
 	"context"
 	"strings"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -36,10 +29,8 @@ func MakeStoresIterator(stores *Stores) *StoresIterator {
 // ForEachStore is part of kvserverbase.StoresIterator.
 func (s *StoresIterator) ForEachStore(f func(kvserverbase.Store) error) error {
 	var err error
-	s.storeMap.Range(func(k int64, v unsafe.Pointer) bool {
-		store := (*Store)(v)
-
-		err = f((*baseStore)(store))
+	s.storeMap.Range(func(_ roachpb.StoreID, s *Store) bool {
+		err = f((*baseStore)(s))
 		return err == nil
 	})
 	return err
@@ -59,21 +50,21 @@ func (s *baseStore) StoreID() roachpb.StoreID {
 // Enqueue is part of kvserverbase.Store.
 func (s *baseStore) Enqueue(
 	ctx context.Context, queue string, rangeID roachpb.RangeID, skipShouldQueue bool,
-) (tracingpb.Recording, error) {
+) error {
 	store := (*Store)(s)
 	repl, err := store.GetReplica(rangeID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	trace, processErr, enqueueErr := store.Enqueue(ctx, queue, repl, skipShouldQueue, false /* async */)
+	processErr, enqueueErr := store.Enqueue(ctx, queue, repl, skipShouldQueue, false /* async */)
 	if processErr != nil {
-		return nil, processErr
+		return processErr
 	}
 	if enqueueErr != nil {
-		return nil, enqueueErr
+		return enqueueErr
 	}
-	return trace, nil
+	return nil
 }
 
 // SetQueueActive is part of kvserverbase.Store.
@@ -99,7 +90,7 @@ func (s *baseStore) SetQueueActive(active bool, queue string) error {
 func (s *baseStore) GetReplicaMutexForTesting(rangeID roachpb.RangeID) *syncutil.RWMutex {
 	store := (*Store)(s)
 	if repl := store.GetReplicaIfExists(rangeID); repl != nil {
-		return (*syncutil.RWMutex)(&repl.mu.ReplicaMutex)
+		return (*syncutil.RWMutex)(repl.GetMutexForTesting())
 	}
 	return nil
 }

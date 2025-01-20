@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package valueside
 
@@ -17,25 +12,25 @@ import (
 )
 
 // encodeTuple produces the value encoding for a tuple.
-func encodeTuple(t *tree.DTuple, appendTo []byte, colID uint32, scratch []byte) ([]byte, error) {
+func encodeTuple(
+	t *tree.DTuple, appendTo []byte, colID uint32, scratch []byte,
+) (_, newScratch []byte, err error) {
 	appendTo = encoding.EncodeValueTag(appendTo, colID, encoding.Tuple)
-	return encodeUntaggedTuple(t, appendTo, colID, scratch)
+	return encodeUntaggedTuple(t, appendTo, scratch)
 }
 
 // encodeUntaggedTuple produces the value encoding for a tuple without a value tag.
 func encodeUntaggedTuple(
-	t *tree.DTuple, appendTo []byte, colID uint32, scratch []byte,
-) ([]byte, error) {
+	t *tree.DTuple, appendTo []byte, scratch []byte,
+) (_, newScratch []byte, err error) {
 	appendTo = encoding.EncodeNonsortingUvarint(appendTo, uint64(len(t.D)))
-
-	var err error
 	for _, dd := range t.D {
-		appendTo, err = Encode(appendTo, NoColumnID, dd, scratch)
+		appendTo, scratch, err = EncodeWithScratch(appendTo, NoColumnID, dd, scratch[:0])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return appendTo, nil
+	return appendTo, scratch, nil
 }
 
 // decodeTuple decodes a tuple from its value encoding. It is the

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package current
 
@@ -38,9 +33,25 @@ func init() {
 		"dependent", "relation",
 		func(from, to NodeVars) rel.Clauses {
 			return rel.Clauses{
-				from.TypeFilter(rulesVersionKey, Not(isDescriptor)),
+				from.TypeFilter(rulesVersionKey, Not(isDescriptor), Not(isData)),
 				to.TypeFilter(rulesVersionKey, isDescriptor),
 				JoinOnDescID(from, to, "relation-id"),
+				StatusesToPublicOrTransient(from, scpb.Status_PUBLIC, to, scpb.Status_PUBLIC),
+			}
+		},
+	)
+}
+
+func init() {
+	registerDepRule(
+		"namespace exist before schema parent",
+		scgraph.Precedence,
+		"dependent", "relation",
+		func(from, to NodeVars) rel.Clauses {
+			return rel.Clauses{
+				from.Type((*scpb.Namespace)(nil)),
+				to.Type((*scpb.SchemaParent)(nil)),
+				JoinOnDescID(from, to, "schema-id"),
 				StatusesToPublicOrTransient(from, scpb.Status_PUBLIC, to, scpb.Status_PUBLIC),
 			}
 		},

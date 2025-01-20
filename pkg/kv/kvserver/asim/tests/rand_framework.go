@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -124,21 +119,22 @@ func (f randTestingFramework) runRandTest() testResult {
 	staticEvents := f.getStaticEvents(cluster, staticSettings)
 	seed := f.s.randSource.Int63()
 	simulator := gen.GenerateSimulation(f.s.duration, cluster, ranges, load, staticSettings, staticEvents, seed)
-	initialState, initialTime := simulator.State(), simulator.Curr()
+	initialStateStr, initialTime := simulator.State().PrettyPrint(), simulator.Curr()
 	simulator.RunSim(ctx)
 	history := simulator.History()
 	failed, reason := checkAssertions(ctx, history, f.s.assertions)
 	return testResult{
-		seed:          seed,
-		failed:        failed,
-		reason:        reason,
-		clusterGen:    cluster,
-		rangeGen:      ranges,
-		loadGen:       load,
-		eventGen:      staticEvents,
-		initialState:  initialState,
-		initialTime:   initialTime,
-		eventExecutor: simulator.EventExecutor(),
+		seed:            seed,
+		failed:          failed,
+		reason:          reason,
+		clusterGen:      cluster,
+		rangeGen:        ranges,
+		loadGen:         load,
+		eventGen:        staticEvents,
+		initialStateStr: initialStateStr,
+		initialTime:     initialTime,
+		history:         history,
+		eventExecutor:   simulator.EventExecutor(),
 	}
 }
 

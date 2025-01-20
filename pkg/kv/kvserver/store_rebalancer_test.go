@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -24,6 +19,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/load"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	rload "github.com/cockroachdb/cockroach/pkg/kv/kvserver/load"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/gossiputil"
@@ -34,8 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/tracker"
 )
 
 var (
@@ -61,8 +57,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 3000,
 				CPUPerSecond:     3000 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold - 10),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold - 10),
 			},
 		},
 		{
@@ -81,8 +76,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 2800,
 				CPUPerSecond:     2800 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold - 5),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold - 5),
 			},
 		},
 		{
@@ -101,8 +95,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 2600,
 				CPUPerSecond:     2600 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold + 2),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold + 2),
 			},
 		},
 		{
@@ -121,8 +114,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 2400,
 				CPUPerSecond:     2400 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold - 10),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold - 10),
 			},
 		},
 		{
@@ -141,8 +133,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 2200,
 				CPUPerSecond:     2200 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold - 3),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold - 3),
 			},
 		},
 		{
@@ -161,8 +152,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 2000,
 				CPUPerSecond:     2000 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold + 2),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold + 2),
 			},
 		},
 		{
@@ -181,8 +171,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 1800,
 				CPUPerSecond:     1800 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold - 10),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold - 10),
 			},
 		},
 		{
@@ -201,8 +190,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 1600,
 				CPUPerSecond:     1600 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold - 5),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold - 5),
 			},
 		},
 		{
@@ -221,8 +209,7 @@ var (
 			Capacity: roachpb.StoreCapacity{
 				QueriesPerSecond: 1400,
 				CPUPerSecond:     1400 * float64(time.Millisecond),
-				IOThreshold: allocatorimpl.TestingIOThresholdWithScore(
-					allocatorimpl.DefaultReplicaIOOverloadThreshold + 3),
+				IOThresholdMax:   allocatorimpl.TestingIOThresholdWithScore(allocatorimpl.DefaultReplicaIOOverloadThreshold + 3),
 			},
 		},
 	}
@@ -509,32 +496,32 @@ func loadRanges(rr *ReplicaRankings, s *Store, ranges []testRange) {
 	for i, r := range ranges {
 		rangeID := roachpb.RangeID(i + 1)
 		repl := &Replica{store: s, RangeID: rangeID}
-		repl.mu.state.Desc = &roachpb.RangeDescriptor{RangeID: rangeID}
+		repl.shMu.state.Desc = &roachpb.RangeDescriptor{RangeID: rangeID}
 		repl.mu.conf = s.cfg.DefaultSpanConfig
 		for _, storeID := range r.voters {
-			repl.mu.state.Desc.InternalReplicas = append(repl.mu.state.Desc.InternalReplicas, roachpb.ReplicaDescriptor{
+			repl.shMu.state.Desc.InternalReplicas = append(repl.shMu.state.Desc.InternalReplicas, roachpb.ReplicaDescriptor{
 				NodeID:    roachpb.NodeID(storeID),
 				StoreID:   storeID,
 				ReplicaID: roachpb.ReplicaID(storeID),
 				Type:      roachpb.VOTER_FULL,
 			})
 		}
-		repl.mu.state.Lease = &roachpb.Lease{
+		repl.shMu.state.Lease = &roachpb.Lease{
 			Expiration: &hlc.MaxTimestamp,
-			Replica:    repl.mu.state.Desc.InternalReplicas[0],
+			Replica:    repl.shMu.state.Desc.InternalReplicas[0],
 		}
 		// NB: We set the index to 2 corresponding to the match in
 		// TestingRaftStatusFn. Matches that are 0 are considered behind.
-		repl.mu.state.TruncatedState = &kvserverpb.RaftTruncatedState{Index: 2}
+		repl.shMu.raftTruncState = kvserverpb.RaftTruncatedState{Index: 2}
 		for _, storeID := range r.nonVoters {
-			repl.mu.state.Desc.InternalReplicas = append(repl.mu.state.Desc.InternalReplicas, roachpb.ReplicaDescriptor{
+			repl.shMu.state.Desc.InternalReplicas = append(repl.shMu.state.Desc.InternalReplicas, roachpb.ReplicaDescriptor{
 				NodeID:    roachpb.NodeID(storeID),
 				StoreID:   storeID,
 				ReplicaID: roachpb.ReplicaID(storeID),
 				Type:      roachpb.NON_VOTER,
 			})
 		}
-		repl.mu.state.Stats = &enginepb.MVCCStats{}
+		repl.shMu.state.Stats = &enginepb.MVCCStats{}
 		repl.loadStats = rload.NewReplicaLoad(s.Clock(), nil)
 		repl.loadStats.TestingSetStat(rload.Queries, r.qps)
 		repl.loadStats.TestingSetStat(rload.ReqCPUNanos, r.reqCPU)
@@ -1284,6 +1271,7 @@ func TestChooseRangeToRebalanceAcrossHeterogeneousZones(t *testing.T) {
 			rctx := sr.NewRebalanceContext(ctx, options, hottestRanges, LBRebalancingLeasesAndReplicas)
 			rctx.options.IOOverloadOptions = allocatorimpl.IOOverloadOptions{
 				ReplicaEnforcementLevel: allocatorimpl.IOOverloadThresholdBlockTransfers,
+				UseIOThresholdMax:       true,
 			}
 			rctx.options.LoadThreshold = allocatorimpl.WithAllDims(0.05)
 
@@ -1568,20 +1556,20 @@ func TestNoLeaseTransferToBehindReplicas(t *testing.T) {
 		storeID roachpb.StoreID,
 	) *raft.Status {
 		status := &raft.Status{
-			Progress: make(map[uint64]tracker.Progress),
+			Progress: make(map[raftpb.PeerID]tracker.Progress),
 		}
 		replDesc, ok := desc.GetReplicaDescriptor(storeID)
 		require.True(t, ok, "Could not find replica descriptor for replica on store with id %d", storeID)
 
-		status.Lead = uint64(replDesc.ReplicaID)
-		status.RaftState = raft.StateLeader
+		status.Lead = raftpb.PeerID(replDesc.ReplicaID)
+		status.RaftState = raftpb.StateLeader
 		status.Commit = 2
 		for _, replica := range desc.InternalReplicas {
 			match := uint64(2)
 			if replica.StoreID == roachpb.StoreID(5) {
 				match = 0
 			}
-			status.Progress[uint64(replica.ReplicaID)] = tracker.Progress{
+			status.Progress[raftpb.PeerID(replica.ReplicaID)] = tracker.Progress{
 				Match: match,
 				State: tracker.StateReplicate,
 			}
@@ -1854,18 +1842,18 @@ func TestStoreRebalancerHotRangesLogging(t *testing.T) {
 // testing.
 func TestingRaftStatusFn(desc *roachpb.RangeDescriptor, storeID roachpb.StoreID) *raft.Status {
 	status := &raft.Status{
-		Progress: make(map[uint64]tracker.Progress),
+		Progress: make(map[raftpb.PeerID]tracker.Progress),
 	}
 	replDesc, ok := desc.GetReplicaDescriptor(storeID)
 	if !ok {
 		return status
 	}
 
-	status.Lead = uint64(replDesc.ReplicaID)
-	status.RaftState = raft.StateLeader
+	status.Lead = raftpb.PeerID(replDesc.ReplicaID)
+	status.RaftState = raftpb.StateLeader
 	status.Commit = 2
 	for _, replica := range desc.InternalReplicas {
-		status.Progress[uint64(replica.ReplicaID)] = tracker.Progress{
+		status.Progress[raftpb.PeerID(replica.ReplicaID)] = tracker.Progress{
 			Match: 2,
 			State: tracker.StateReplicate,
 		}

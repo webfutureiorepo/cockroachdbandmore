@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package build
 
@@ -107,13 +102,22 @@ func BinaryVersion() string {
 	return binaryVersion
 }
 
-// BinaryVersionPrefix returns the version prefix of the current build.
-func BinaryVersionPrefix() string {
-	v, err := version.Parse(BinaryVersion())
-	if err != nil {
-		return "dev"
+// VersionForURLs is used to determine the version to use in public-facing doc URLs.
+// It returns "vX.Y" for all release versions, and all prerelease versions >= "alpha.1".
+// X and Y are the major and minor, respectively, of the version specified in version.txt.
+// For all other prerelease versions, it returns "dev".
+// N.B. new public-facing doc URLs are expected to be up beginning with the "alpha.1" prerelease. Otherwise, "dev" will
+// cause the url mapper to redirect to the latest stable release.
+func VersionForURLs() string {
+	// Prerelease versions >= "alpha.1"
+	if parsedVersionTxt.PreRelease() >= "alpha.1" {
+		return fmt.Sprintf("v%d.%d", parsedVersionTxt.Major(), parsedVersionTxt.Minor())
 	}
-	return fmt.Sprintf("v%d.%d", v.Major(), v.Minor())
+	// Production release versions
+	if parsedVersionTxt.PreRelease() == "" {
+		return fmt.Sprintf("v%d.%d", parsedVersionTxt.Major(), parsedVersionTxt.Minor())
+	}
+	return "dev"
 }
 
 // BranchReleaseSeries returns tha major and minor in version.txt, without
@@ -211,5 +215,5 @@ func TestingOverrideVersion(v string) func() {
 
 // MakeIssueURL produces a URL to a CockroachDB issue.
 func MakeIssueURL(issue int) string {
-	return fmt.Sprintf("https://go.crdb.dev/issue-v/%d/%s", issue, BinaryVersionPrefix())
+	return fmt.Sprintf("https://go.crdb.dev/issue-v/%d/%s", issue, VersionForURLs())
 }

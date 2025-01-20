@@ -1,18 +1,15 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import { Route, Switch, useHistory, useRouteMatch } from "react-router-dom";
-import React, { useEffect } from "react";
-import SnapshotPage from "src/views/tracez_v2/snapshotPage";
 import { join } from "path";
+
+import React, { useEffect } from "react";
+import { Route, Switch, useHistory, useRouteMatch } from "react-router-dom";
+
 import { getDataFromServer } from "src/util/dataFromServer";
+import SnapshotPage from "src/views/tracez_v2/snapshotPage";
 
 const NodePicker: React.FC = () => {
   // If no node was provided, navigate explicitly to the local node.

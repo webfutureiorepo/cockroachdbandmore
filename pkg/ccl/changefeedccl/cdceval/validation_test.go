@@ -1,10 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cdceval
 
@@ -97,8 +94,8 @@ func TestNormalizeAndValidate(t *testing.T) {
 			name: "UDTs fully qualified",
 			desc: fooDesc,
 			stmt: "SELECT *, 'inactive':::status FROM foo AS bar WHERE status = 'open':::status",
-			expectStmt: "SELECT *, 'inactive':::defaultdb.public.status " +
-				"FROM foo AS bar WHERE status = 'open':::defaultdb.public.status",
+			expectStmt: "SELECT *, 'inactive':::public.status " +
+				"FROM foo AS bar WHERE status = 'open':::public.status",
 			splitColFams: false,
 		},
 		{

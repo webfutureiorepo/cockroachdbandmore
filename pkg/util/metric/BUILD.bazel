@@ -22,13 +22,14 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/util/metric",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/util",
         "//pkg/util/buildutil",
         "//pkg/util/envutil",
         "//pkg/util/log",
+        "//pkg/util/metamorphic",
         "//pkg/util/metric/tick",
         "//pkg/util/syncutil",
         "//pkg/util/timeutil",
+        "@com_github_axiomhq_hyperloglog//:hyperloglog",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_codahale_hdrhistogram//:hdrhistogram",
         "@com_github_gogo_protobuf//proto",
@@ -37,7 +38,6 @@ go_library(
         "@com_github_prometheus_client_model//go",
         "@com_github_prometheus_common//expfmt",
         "@com_github_prometheus_prometheus//promql/parser",
-        "@com_github_rcrowley_go_metrics//:go-metrics",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -56,10 +56,6 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":metric"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/testutils/datapathutils",
         "//pkg/testutils/echotest",
@@ -69,6 +65,7 @@ go_test(
         "@com_github_prometheus_client_golang//prometheus",
         "@com_github_prometheus_client_model//go",
         "@com_github_prometheus_common//expfmt",
+        "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
 )

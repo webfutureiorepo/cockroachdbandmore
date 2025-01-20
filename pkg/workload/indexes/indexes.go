@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package indexes
 
@@ -89,6 +84,9 @@ func (*indexes) Meta() workload.Meta { return indexesMeta }
 // Flags implements the Flagser interface.
 func (w *indexes) Flags() workload.Flags { return w.flags }
 
+// ConnFlags implements the ConnFlagser interface.
+func (w *indexes) ConnFlags() *workload.ConnFlags { return w.connFlags }
+
 // Hooks implements the Hookser interface.
 func (w *indexes) Hooks() workload.Hooks {
 	return workload.Hooks{
@@ -159,10 +157,6 @@ func (w *indexes) Tables() []workload.Table {
 func (w *indexes) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
-	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
-	if err != nil {
-		return workload.QueryLoad{}, err
-	}
 	cfg := workload.NewMultiConnPoolCfgFromFlags(w.connFlags)
 	cfg.MaxTotalConnections = w.connFlags.Concurrency + 1
 	mcp, err := workload.NewMultiConnPool(ctx, cfg, urls...)
@@ -185,7 +179,7 @@ func (w *indexes) Ops(
 		return workload.QueryLoad{}, errors.Errorf("unknown workload: %q", w.workload)
 	}
 
-	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{}
 	for i := 0; i < w.connFlags.Concurrency; i++ {
 		op := &indexesOp{
 			config: w,

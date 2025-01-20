@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import { assert } from "chai";
 
@@ -189,7 +184,6 @@ describe("flattenStatementStats", () => {
       assert.equal(flattened[i].distSQL, stats[i].key.key_data.distSQL);
       assert.equal(flattened[i].vec, stats[i].key.key_data.vec);
       assert.equal(flattened[i].full_scan, stats[i].key.key_data.full_scan);
-      assert.equal(flattened[i].failed, stats[i].key.key_data.failed);
       assert.equal(flattened[i].node_id, stats[i].key.node_id);
 
       assert.equal(flattened[i].stats, stats[i].stats);

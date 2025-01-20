@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -22,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
+	"github.com/lib/pq"
 )
 
 const (
@@ -73,7 +71,10 @@ func (s *sqlSink) getConcreteType() sinkType {
 const sqlSinkTableName = `sqlsink`
 
 func makeSQLSink(
-	u sinkURL, tableName string, targets changefeedbase.Targets, mb metricsRecorderBuilder,
+	u *changefeedbase.SinkURL,
+	tableName string,
+	targets changefeedbase.Targets,
+	mb metricsRecorderBuilder,
 ) (Sink, error) {
 	// Swap the changefeed prefix for the sql connection one that sqlSink
 	// expects.
@@ -89,12 +90,12 @@ func makeSQLSink(
 	}
 
 	uri := u.String()
-	u.consumeParam(`sslcert`)
-	u.consumeParam(`sslkey`)
-	u.consumeParam(`sslmode`)
-	u.consumeParam(`sslrootcert`)
+	u.ConsumeParam(`sslcert`)
+	u.ConsumeParam(`sslkey`)
+	u.ConsumeParam(`sslmode`)
+	u.ConsumeParam(`sslrootcert`)
 
-	if unknownParams := u.remainingQueryParams(); len(unknownParams) > 0 {
+	if unknownParams := u.RemainingQueryParams(); len(unknownParams) > 0 {
 		return nil, errors.Errorf(
 			`unknown SQL sink query parameters: %s`, strings.Join(unknownParams, ", "))
 	}
@@ -109,10 +110,13 @@ func makeSQLSink(
 }
 
 func (s *sqlSink) Dial() error {
-	db, err := gosql.Open(`postgres`, s.uri)
+	connector, err := pq.NewConnector(s.uri)
 	if err != nil {
 		return err
 	}
+
+	s.metrics.netMetrics().WrapPqDialer(connector, "sql")
+	db := gosql.OpenDB(connector)
 	if _, err := db.Exec(fmt.Sprintf(sqlSinkCreateTableStmt, s.tableName)); err != nil {
 		db.Close()
 		return err

@@ -1,14 +1,11 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import _ from "lodash";
+import join from "lodash/join";
+import random from "lodash/random";
+import sample from "lodash/sample";
 
 export function randomName(): string {
   // Add more! Have fun.
@@ -51,5 +48,5 @@ export function randomName(): string {
     "turkey",
   ];
 
-  return _.join([_.sample(adjectives), _.sample(nouns), _.random(1, 42)], "_");
+  return join([sample(adjectives), sample(nouns), random(1, 42)], "_");
 }

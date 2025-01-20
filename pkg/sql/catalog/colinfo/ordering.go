@@ -1,17 +1,13 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colinfo
 
 import (
 	"bytes"
+	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -72,13 +68,17 @@ var NoOrdering ColumnOrdering
 //   - 0 if lhs and rhs are equal on the ordering columns;
 //   - less than 0 if lhs comes first;
 //   - greater than 0 if rhs comes first.
-func CompareDatums(ordering ColumnOrdering, evalCtx *eval.Context, lhs, rhs tree.Datums) int {
+func CompareDatums(
+	ctx context.Context, ordering ColumnOrdering, evalCtx *eval.Context, lhs, rhs tree.Datums,
+) int {
 	for _, c := range ordering {
 		// TODO(pmattis): This is assuming that the datum types are compatible. I'm
 		// not sure this always holds as `CASE` expressions can return different
 		// types for a column for different rows. Investigate how other RDBMs
 		// handle this.
-		if cmp := lhs[c.ColIdx].Compare(evalCtx, rhs[c.ColIdx]); cmp != 0 {
+		if cmp, err := lhs[c.ColIdx].Compare(ctx, evalCtx, rhs[c.ColIdx]); err != nil {
+			panic(err)
+		} else if cmp != 0 {
 			if c.Direction == encoding.Descending {
 				cmp = -cmp
 			}

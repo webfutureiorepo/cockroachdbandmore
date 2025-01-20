@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvflowhandle_test
 
@@ -89,7 +84,7 @@ func TestHandleAdmit(t *testing.T) {
 			clock := hlc.NewClockForTesting(nil)
 			st := cluster.MakeTestingClusterSettings()
 			kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
-			kvflowcontrol.Mode.Override(ctx, &st.SV, int64(kvflowcontrol.ApplyToAll))
+			kvflowcontrol.Mode.Override(ctx, &st.SV, kvflowcontrol.ApplyToAll)
 
 			controller := kvflowcontroller.New(registry, st, clock)
 			handle := kvflowhandle.New(
@@ -173,7 +168,7 @@ func TestFlowControlMode(t *testing.T) {
 			clock := hlc.NewClockForTesting(nil)
 			st := cluster.MakeTestingClusterSettings()
 			kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
-			kvflowcontrol.Mode.Override(ctx, &st.SV, int64(tc.mode))
+			kvflowcontrol.Mode.Override(ctx, &st.SV, tc.mode)
 
 			controller := kvflowcontroller.New(registry, st, clock)
 			handle := kvflowhandle.New(
@@ -253,7 +248,7 @@ func TestInspectHandle(t *testing.T) {
 	clock := hlc.NewClockForTesting(nil)
 	st := cluster.MakeTestingClusterSettings()
 	kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
-	kvflowcontrol.Mode.Override(ctx, &st.SV, int64(kvflowcontrol.ApplyToAll))
+	kvflowcontrol.Mode.Override(ctx, &st.SV, kvflowcontrol.ApplyToAll)
 
 	pos := func(d uint64) kvflowcontrolpb.RaftLogPosition {
 		return kvflowcontrolpb.RaftLogPosition{Term: 1, Index: d}

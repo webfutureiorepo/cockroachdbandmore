@@ -1,12 +1,18 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+import moment from "moment-timezone";
+
+import {
+  getInsightsFromProblemsAndCauses,
+  InsightExecEnum,
+  TransactionStatus,
+  TxnInsightEvent,
+} from "src/insights";
+
+import { INTERNAL_APP_NAME_PREFIX } from "../util";
 
 import {
   executeInternalSql,
@@ -14,14 +20,6 @@ import {
   SqlApiResponse,
   sqlResultsAreEmpty,
 } from "./sqlApi";
-import {
-  getInsightsFromProblemsAndCauses,
-  InsightExecEnum,
-  TransactionStatus,
-  TxnInsightEvent,
-} from "src/insights";
-import moment from "moment-timezone";
-import { INTERNAL_APP_NAME_PREFIX } from "../util";
 import { makeInsightsSqlRequest } from "./txnInsightsUtils";
 
 // Txn query string limit for previews in the overview page.

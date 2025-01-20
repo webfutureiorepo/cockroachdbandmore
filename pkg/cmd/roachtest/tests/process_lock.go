@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -20,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -33,7 +29,7 @@ func registerProcessLock(r registry.Registry) {
 	r.Add(registry.TestSpec{
 		Name:             "process-lock",
 		Owner:            registry.OwnerStorage,
-		Cluster:          r.MakeClusterSpec(4, spec.ReuseNone()),
+		Cluster:          r.MakeClusterSpec(4, spec.WorkloadNode(), spec.ReuseNone()),
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly),
 		// Encryption is implemented within the virtual filesystem layer,
@@ -49,23 +45,23 @@ func registerProcessLock(r registry.Registry) {
 			startSettings.Env = append(startSettings.Env, "COCKROACH_AUTO_BALLAST=false")
 
 			t.Status("starting cluster")
-			c.Start(ctx, t.L(), startOpts, startSettings, c.Range(1, 3))
+			c.Start(ctx, t.L(), startOpts, startSettings, c.CRDBNodes())
 
 			// Wait for upreplication.
 			conn := c.Conn(ctx, t.L(), 2)
 			defer conn.Close()
 			require.NoError(t, conn.PingContext(ctx))
-			require.NoError(t, WaitFor3XReplication(ctx, t, conn))
+			require.NoError(t, roachtestutil.WaitFor3XReplication(ctx, t.L(), conn))
 
-			c.Run(ctx, option.WithNodes(c.Node(4)), `./cockroach workload init kv --splits 1000 {pgurl:1}`)
+			c.Run(ctx, option.WithNodes(c.WorkloadNode()), `./cockroach workload init kv --splits 1000 {pgurl:1}`)
 
 			seed := int64(1666467482296309000)
 			rng := randutil.NewTestRandWithSeed(seed)
 
 			t.Status("starting workload")
-			m := c.NewMonitor(ctx, c.Range(1, 3))
+			m := c.NewMonitor(ctx, c.CRDBNodes())
 			m.Go(func(ctx context.Context) error {
-				c.Run(ctx, option.WithNodes(c.Node(4)), fmt.Sprintf(`./cockroach workload run kv --read-percent 0 `+
+				c.Run(ctx, option.WithNodes(c.WorkloadNode()), fmt.Sprintf(`./cockroach workload run kv --read-percent 0 `+
 					`--duration %s --concurrency 512 --max-rate 4096 --tolerate-errors `+
 					` --min-block-bytes=1024 --max-block-bytes=1024 `+
 					`{pgurl:1-3}`, runDuration.String()))

@@ -1,10 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package changefeedccl
 
@@ -75,8 +72,8 @@ const (
 type avroLogicalType struct {
 	SchemaType  avroSchemaType `json:"type"`
 	LogicalType string         `json:"logicalType"`
-	Precision   int            `json:"precision,omitempty"`
-	Scale       int            `json:"scale,omitempty"`
+	Precision   *int           `json:"precision,omitempty"`
+	Scale       *int           `json:"scale,omitempty"`
 }
 
 type avroArrayType struct {
@@ -169,6 +166,7 @@ type avroMetadata map[string]interface{}
 type avroEnvelopeOpts struct {
 	beforeField, afterField, recordField bool
 	updatedField, resolvedField          bool
+	mvccTimestampField                   bool
 }
 
 // avroEnvelopeRecord is an `avroRecord` that wraps a changed SQL row and some
@@ -528,8 +526,8 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 		decimalType := avroLogicalType{
 			SchemaType:  avroSchemaBytes,
 			LogicalType: `decimal`,
-			Precision:   prec,
-			Scale:       width,
+			Precision:   &prec,
+			Scale:       &width,
 		}
 		setNullableWithStringFallback(
 			decimalType,
@@ -623,6 +621,12 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 				return tree.ParseDTSVector(x.(string))
 			},
 		)
+	// case types.PGVectorFamily:
+	//
+	// We could have easily supported PGVector type via stringification, but it
+	// would probably be quite inefficient; thus, in order to not back ourselves
+	// into a corner with compatibility, we choose to return an error instead
+	// for now.
 	case types.EnumFamily:
 		setNullable(
 			avroSchemaString,
@@ -948,6 +952,14 @@ func envelopeToAvroSchema(
 		}
 		schema.Fields = append(schema.Fields, updatedField)
 	}
+	if opts.mvccTimestampField {
+		mvccTimestampField := &avroSchemaField{
+			SchemaType: []avroSchemaType{avroSchemaNull, avroSchemaString},
+			Name:       `mvcc_timestamp`,
+			Default:    nil,
+		}
+		schema.Fields = append(schema.Fields, mvccTimestampField)
+	}
 	if opts.resolvedField {
 		resolvedField := &avroSchemaField{
 			SchemaType: []avroSchemaType{avroSchemaNull, avroSchemaString},
@@ -1031,6 +1043,20 @@ func (r *avroEnvelopeRecord) BinaryFromRow(
 			native[`updated`] = goavro.Union(avroUnionKey(avroSchemaString), ts.AsOfSystemTime())
 		}
 	}
+
+	if r.opts.mvccTimestampField {
+		native[`mvcc_timestamp`] = nil
+		if u, ok := meta[`mvcc_timestamp`]; ok {
+			delete(meta, `mvcc_timestamp`)
+			ts, ok := u.(hlc.Timestamp)
+			if !ok {
+				return nil, changefeedbase.WithTerminalError(
+					errors.Errorf(`unknown metadata timestamp type: %T`, u))
+			}
+			native[`mvcc_timestamp`] = goavro.Union(avroUnionKey(avroSchemaString), ts.AsOfSystemTime())
+		}
+	}
+
 	if r.opts.resolvedField {
 		native[`resolved`] = nil
 		if u, ok := meta[`resolved`]; ok {

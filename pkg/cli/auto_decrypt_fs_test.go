@@ -1,17 +1,13 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/pebble/vfs"
@@ -39,22 +36,27 @@ func TestAutoDecryptFS(t *testing.T) {
 	path2 := filepath.Join(dir, "foo", "path2")
 
 	var buf bytes.Buffer
-	resolveFn := func(dir string) (vfs.FS, error) {
+	resolveFn := func(dir string) (*fs.Env, error) {
 		if dir != path1 && dir != path2 {
 			t.Fatalf("unexpected dir %s", dir)
 		}
-		fs := vfs.NewMem()
-		require.NoError(t, fs.MkdirAll(dir, 0755))
-		return vfs.WithLogging(fs, func(format string, args ...interface{}) {
+		memFS := vfs.WithLogging(vfs.NewMem(), func(format string, args ...interface{}) {
 			fmt.Fprintf(&buf, dir+": "+format+"\n", args...)
-		}), nil
+		})
+		env, err := fs.InitEnv(context.Background(), memFS, "" /* dir */, fs.EnvConfig{}, nil /* statsCollector */)
+		require.NoError(t, err)
+		require.NoError(t, env.MkdirAll(dir, 0755))
+		return env, nil
 	}
 
-	var fs autoDecryptFS
-	fs.Init([]string{path1, path2}, resolveFn)
+	var decryptFS autoDecryptFS
+	decryptFS.Init([]string{path1, path2}, resolveFn)
+	defer func() {
+		require.NoError(t, decryptFS.Close())
+	}()
 
 	create := func(pathElems ...string) {
-		file, err := fs.Create(filepath.Join(pathElems...))
+		file, err := decryptFS.Create(filepath.Join(pathElems...), fs.UnspecifiedWriteCategory)
 		require.NoError(t, err)
 		file.Close()
 	}
@@ -62,19 +64,25 @@ func TestAutoDecryptFS(t *testing.T) {
 	create(dir, "foo")
 	create(path1, "bar")
 	create(path2, "baz")
-	require.NoError(t, fs.MkdirAll(filepath.Join(path2, "a", "b"), 0755))
+	require.NoError(t, decryptFS.MkdirAll(filepath.Join(path2, "a", "b"), 0755))
 	create(path2, "a", "b", "xx")
 
 	// Check that operations inside the two paths happen using the resolved FSes.
-	output := strings.ReplaceAll(buf.String(), dir, "$TMPDIR")
-	expected :=
-		`$TMPDIR/path1: create: $TMPDIR/path1/bar
+	output := strings.TrimSpace(strings.ReplaceAll(buf.String(), dir, "$TMPDIR"))
+	expected := `
+$TMPDIR/path1: mkdir-all:  0777
+$TMPDIR/path1: lock: LOCK
+$TMPDIR/path1: mkdir-all: $TMPDIR/path1 0755
+$TMPDIR/path1: create: $TMPDIR/path1/bar
 $TMPDIR/path1: close: $TMPDIR/path1/bar
+$TMPDIR/foo/path2: mkdir-all:  0777
+$TMPDIR/foo/path2: lock: LOCK
+$TMPDIR/foo/path2: mkdir-all: $TMPDIR/foo/path2 0755
 $TMPDIR/foo/path2: create: $TMPDIR/foo/path2/baz
 $TMPDIR/foo/path2: close: $TMPDIR/foo/path2/baz
 $TMPDIR/foo/path2: mkdir-all: $TMPDIR/foo/path2/a/b 0755
 $TMPDIR/foo/path2: create: $TMPDIR/foo/path2/a/b/xx
 $TMPDIR/foo/path2: close: $TMPDIR/foo/path2/a/b/xx
 `
-	require.Equal(t, expected, output)
+	require.Equal(t, strings.TrimSpace(expected), output)
 }

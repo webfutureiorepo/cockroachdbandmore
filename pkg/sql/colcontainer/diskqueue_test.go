@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 package colcontainer_test
 
 import (
@@ -28,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/stretchr/testify/require"
 )
@@ -178,25 +174,46 @@ func TestDiskQueueCloseOnErr(t *testing.T) {
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
 
-	serverCfg := &execinfra.ServerConfig{}
-	serverCfg.TestingKnobs.ForceDiskSpill = true
-	diskMon := execinfra.NewLimitedMonitorNoFlowCtx(ctx, testDiskMonitor, serverCfg, nil /* sd */, "test-disk")
-	defer diskMon.Stop(ctx)
-	diskAcc := diskMon.MakeBoundAccount()
-	defer diskAcc.Close(ctx)
+	// Some hard-coded limits assume default batch size.
+	require.NoError(t, coldata.SetBatchSizeForTests(coldata.DefaultColdataBatchSize))
 
-	typs := []*types.T{types.Int}
-	q, err := colcontainer.NewDiskQueue(ctx, typs, queueCfg, &diskAcc, testMemAcc)
-	require.NoError(t, err)
+	rng, _ := randutil.NewTestRand()
+	args := coldatatestutils.RandomVecArgs{Rand: rng}
+	batch := coldatatestutils.RandomBatch(testAllocator, args, types.OneIntCol, coldata.BatchSize(), coldata.BatchSize())
 
-	b := coldata.NewMemBatch(typs, coldata.StandardColumnFactory)
+	// Ensure that each batch is written to a separate file.
+	queueCfg.MaxFileSizeBytes = 1
 
-	err = q.Enqueue(ctx, b)
-	require.Error(t, err, "expected Enqueue to produce an error given a disk limit of one byte")
-	require.Equal(t, pgerror.GetPGCode(err), pgcode.DiskFull, "unexpected pg code")
+	for _, diskLimit := range []int64{
+		2,                             // Disk budget will be exceeded after the first batch.
+		mon.DefaultPoolAllocationSize, // Disk budget will be exceeded after the second batch.
+	} {
+		t.Run(fmt.Sprintf("diskLimit=%s", humanizeutil.IBytes(diskLimit)), func(t *testing.T) {
+			serverCfg := &execinfra.ServerConfig{}
+			serverCfg.TestingKnobs.MemoryLimitBytes = diskLimit
+			diskMon := execinfra.NewLimitedMonitorNoFlowCtx(ctx, testDiskMonitor, serverCfg, nil /* sd */, "test-disk")
+			defer diskMon.Stop(ctx)
+			diskAcc := diskMon.MakeBoundAccount()
+			defer diskAcc.Close(ctx)
 
-	// Now Close the queue, this should be successful.
-	require.NoError(t, q.Close(ctx))
+			typs := []*types.T{types.Int}
+			q, err := colcontainer.NewDiskQueue(ctx, typs, queueCfg, &diskAcc, testMemAcc)
+			require.NoError(t, err)
+
+			err = q.Enqueue(ctx, batch)
+			if diskLimit > 2 {
+				// If we have large disk limit, then enqueuing the first batch
+				// should succeed, but we should get an error on the second one.
+				require.NoError(t, err)
+				err = q.Enqueue(ctx, batch)
+			}
+			require.Error(t, err, "expected Enqueue to produce an error")
+			require.Equal(t, pgerror.GetPGCode(err), pgcode.DiskFull, "unexpected pg code")
+
+			// Now Close the queue, this should be successful.
+			require.NoError(t, q.Close(ctx))
+		})
+	}
 }
 
 // Flags for BenchmarkQueue.

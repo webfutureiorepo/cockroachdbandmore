@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -31,9 +26,9 @@ import (
 func (p *planner) DropTenantByID(
 	ctx context.Context, tenID uint64, synchronousImmediateDrop, ignoreServiceMode bool,
 ) error {
-	if p.SessionData().DisableDropVirtualCluster || p.SessionData().SafeUpdates {
+	if p.SessionData().SafeUpdates {
 		err := errors.Newf("DROP VIRTUAL CLUSTER causes irreversible data loss")
-		err = errors.WithMessage(err, "rejected (via sql_safe_updates or disable_drop_virtual_cluster)")
+		err = errors.WithMessage(err, "rejected (via sql_safe_updates)")
 		err = pgerror.WithCandidateCode(err, pgcode.Warning)
 		return err
 	}

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -175,7 +170,6 @@ func periodicallyPersistHLCUpperBound(
 	// persistInterval is the interval used for persisting the
 	// an upper bound of the HLC
 	var persistInterval time.Duration
-	var ok bool
 
 	persistHLCUpperBound := func() {
 		if err := clock.RefreshHLCUpperBound(
@@ -192,16 +186,19 @@ func periodicallyPersistHLCUpperBound(
 
 	for {
 		select {
-		case persistInterval, ok = <-persistHLCUpperBoundIntervalCh:
-			ticker.Stop()
-			if !ok {
-				return
+		case updatedPersistInterval := <-persistHLCUpperBoundIntervalCh:
+			if updatedPersistInterval == persistInterval {
+				// No change.
+				continue
 			}
+			persistInterval = updatedPersistInterval
 
+			ticker.Stop()
 			if persistInterval > 0 {
 				ticker = tickerFn(persistInterval)
 				persistHLCUpperBound()
-				log.Ops.Info(context.Background(), "persisting HLC upper bound is enabled")
+				log.Ops.Infof(context.Background(), "persisting HLC upper bound is enabled [every %.2fs]",
+					persistInterval.Seconds())
 			} else {
 				if err := clock.ResetHLCUpperBound(persistHLCUpperBoundFn); err != nil {
 					log.Ops.Fatalf(
@@ -247,6 +244,10 @@ func (s *topLevelServer) startPersistingHLCUpperBound(
 		return s.node.SetHLCUpperBound(context.Background(), t)
 	}
 	persistHLCUpperBoundIntervalCh := make(chan time.Duration, 1)
+	// Seed channel with initial update, then install a callback to update it
+	// on future changes. SetOnChange does not automatically trigger the callback
+	// if the setting is initially set.
+	persistHLCUpperBoundIntervalCh <- persistHLCUpperBoundInterval.Get(&s.st.SV)
 	persistHLCUpperBoundInterval.SetOnChange(&s.st.SV, func(context.Context) {
 		persistHLCUpperBoundIntervalCh <- persistHLCUpperBoundInterval.Get(&s.st.SV)
 	})

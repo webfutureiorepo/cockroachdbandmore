@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -22,7 +17,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/cloud/cloudprivilege"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -254,7 +248,9 @@ func importJobDescription(
 	}
 	sort.Slice(stmt.Options, func(i, j int) bool { return stmt.Options[i].Key < stmt.Options[j].Key })
 	ann := p.ExtendedEvalContext().Annotations
-	return tree.AsStringWithFQNames(&stmt, ann), nil
+	return tree.AsStringWithFlags(
+		&stmt, tree.FmtAlwaysQualifyNames|tree.FmtShowFullURIs, tree.FmtAnnotations(ann),
+	), nil
 }
 
 func logSanitizedImportDestination(ctx context.Context, destination string) {
@@ -299,13 +295,13 @@ func resolveUDTsUsedByImportInto(
 	err := sql.DescsTxn(ctx, p.ExecCfg(), func(
 		ctx context.Context, txn isql.Txn, descriptors *descs.Collection,
 	) (err error) {
-		dbDesc, err = descriptors.ByID(txn.KV()).WithoutNonPublic().Get().Database(ctx, table.GetParentID())
+		dbDesc, err = descriptors.ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Database(ctx, table.GetParentID())
 		if err != nil {
 			return err
 		}
 		typeIDs, _, err := table.GetAllReferencedTypeIDs(dbDesc,
 			func(id descpb.ID) (catalog.TypeDescriptor, error) {
-				immutDesc, err := descriptors.ByID(txn.KV()).WithoutNonPublic().Get().Type(ctx, id)
+				immutDesc, err := descriptors.ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Type(ctx, id)
 				if err != nil {
 					return nil, err
 				}
@@ -316,7 +312,7 @@ func resolveUDTsUsedByImportInto(
 		}
 
 		for _, typeID := range typeIDs {
-			immutDesc, err := descriptors.ByID(txn.KV()).WithoutNonPublic().Get().Type(ctx, typeID)
+			immutDesc, err := descriptors.ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Type(ctx, typeID)
 			if err != nil {
 				return err
 			}
@@ -355,10 +351,10 @@ func importTypeCheck(
 // importPlanHook implements sql.PlanHookFn.
 func importPlanHook(
 	ctx context.Context, stmt tree.Statement, p sql.PlanHookState,
-) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
+) (sql.PlanHookRowFn, colinfo.ResultColumns, bool, error) {
 	importStmt, ok := stmt.(*tree.Import)
 	if !ok {
-		return nil, nil, nil, false, nil
+		return nil, nil, false, nil
 	}
 
 	if !importStmt.Bundle && !importStmt.Into {
@@ -382,7 +378,7 @@ func importPlanHook(
 		featureImportEnabled,
 		"IMPORT",
 	); err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, false, err
 	}
 
 	exprEval := p.ExprEvaluator("IMPORT")
@@ -390,7 +386,7 @@ func importPlanHook(
 		ctx, importStmt.Options, importOptionExpectValues,
 	)
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, false, err
 	}
 
 	var isDetached bool
@@ -400,7 +396,7 @@ func importPlanHook(
 
 	filenamePatterns, err := exprEval.StringArray(ctx, importStmt.Files)
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, false, err
 	}
 
 	// Certain ExternalStorage URIs require super-user access. Check all the
@@ -413,14 +409,14 @@ func importPlanHook(
 			if _, workloadErr := parseWorkloadConfig(file); workloadErr == nil {
 				continue
 			}
-			return nil, nil, nil, false, err
+			return nil, nil, false, err
 		}
-		if err := cloudprivilege.CheckDestinationPrivileges(ctx, p, []string{file}); err != nil {
-			return nil, nil, nil, false, err
+		if err := sql.CheckDestinationPrivileges(ctx, p, []string{file}); err != nil {
+			return nil, nil, false, err
 		}
 	}
 
-	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
+	fn := func(ctx context.Context, resultsCh chan<- tree.Datums) error {
 		// TODO(dan): Move this span into sql.
 		ctx, span := tracing.ChildSpan(ctx, importStmt.StatementTag())
 		defer span.Finish()
@@ -817,6 +813,10 @@ func importPlanHook(
 				return err
 			}
 
+			if len(found.LDRJobIDs) > 0 {
+				return errors.Newf("cannot run an import on table %s which is apart of a Logical Data Replication stream", table)
+			}
+
 			// Validate target columns.
 			var intoCols []string
 			isTargetCol := make(map[string]bool)
@@ -1029,9 +1029,9 @@ func importPlanHook(
 	}
 
 	if isDetached {
-		return fn, jobs.DetachedJobExecutionResultHeader, nil, false, nil
+		return fn, jobs.DetachedJobExecutionResultHeader, false, nil
 	}
-	return fn, jobs.BulkJobExecutionResultHeader, nil, false, nil
+	return fn, jobs.BulkJobExecutionResultHeader, false, nil
 }
 
 func parseAvroOptions(

@@ -1,14 +1,8 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-export const MULTITENANT_SESSION_COOKIE_NAME = "session";
 export const SYSTEM_TENANT_NAME = "system";
 
 export const getAllCookies = (): Map<string, string> => {
@@ -27,28 +21,8 @@ export const getCookieValue = (cookieName: string): string => {
   return cookies.get(cookieName) || null;
 };
 
-// selectTenantsFromMultitenantSessionCookie formats the session
-// cookie value and returns only the tenant names.
-export const selectTenantsFromMultitenantSessionCookie = (): string[] => {
-  const cookies = getAllCookies();
-  const sessionsStr = cookies.get(MULTITENANT_SESSION_COOKIE_NAME);
-  return sessionsStr
-    ? sessionsStr
-        .replace(/["]/g, "")
-        .split(/[,]/g)
-        .filter((_, idx) => idx % 2 === 1)
-    : [];
-};
-
-// maybeClearTenantCookie clears the tenant cookie if there are multiple tenants
-// found in the multitenant-session cookie.
-export const maybeClearTenantCookie = () => {
-  const tenants = selectTenantsFromMultitenantSessionCookie();
-  // If in multi-tenant environment, we need to clear the tenant cookie so that
-  // we can do a multi-tenant logout.
-  if (tenants.length > 1) {
-    setCookie("tenant", "");
-  }
+export const clearTenantCookie = () => {
+  setCookie("tenant", "");
 };
 
 export const setCookie = (

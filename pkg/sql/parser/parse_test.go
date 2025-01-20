@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package parser_test
 
@@ -36,17 +31,50 @@ import (
 
 // TestParseDataDriven verifies that we can parse the supplied SQL and regenerate the SQL
 // string from the syntax tree.
-func TestParseDatadriven(t *testing.T) {
+//
+// The follow commands are allowed:
+//
+//   - parse
+//
+//     Parses a statement and verifies that it round-trips. Various forms of the
+//     formatted AST are printed as test output.
+//
+//   - parse-no-verify
+//
+//     Parses a statement without verifying that it round-trips. It will fail if
+//     parsing errors. It does not print any test output.
+//
+//   - error
+//
+//     Parses a statement and expects an error. The error is printed as test
+//     output.
+func TestParseDataDriven(t *testing.T) {
 	datadriven.Walk(t, datapathutils.TestDataPath(t), func(t *testing.T, path string) {
 		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
 			switch d.Cmd {
 			case "parse":
-				return sqlutils.VerifyParseFormat(t, d.Input, false /* plpgsql */)
+				const plpgsql = false
+				reparseWithoutLiterals := true
+				for _, arg := range d.CmdArgs {
+					if arg.Key == "no-parse-without-literals" {
+						reparseWithoutLiterals = false
+					}
+				}
+				return sqlutils.VerifyParseFormat(t, d.Input, d.Pos, plpgsql, reparseWithoutLiterals)
+			case "parse-no-verify":
+				_, err := parser.Parse(d.Input)
+				if err != nil {
+					d.Fatalf(t, "%s\nunexpected error: %s", d.Pos, err)
+				}
+				return ""
 			case "error":
 				_, err := parser.Parse(d.Input)
+				if err == nil {
+					d.Fatalf(t, "%s\nexpected error, found none", d.Pos)
+				}
 				return sqlutils.VerifyParseError(err)
 			}
-			d.Fatalf(t, "unsupported command: %s", d.Cmd)
+			d.Fatalf(t, "%s\nunsupported command: %s", d.Pos, d.Cmd)
 			return ""
 		})
 	})
@@ -377,7 +405,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`CREATE SUBSCRIPTION a`, 0, `create subscription`, ``},
 		{`CREATE TABLESPACE a`, 54113, `create tablespace`, ``},
 		{`CREATE TEXT SEARCH a`, 7821, `create text`, ``},
-		{`CREATE TRIGGER a`, 28296, `create`, ``},
 
 		{`DROP ACCESS METHOD a`, 0, `drop access method`, ``},
 		{`DROP AGGREGATE a`, 74775, `drop aggregate`, ``},
@@ -396,7 +423,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`DROP SERVER a`, 0, `drop server`, ``},
 		{`DROP SUBSCRIPTION a`, 0, `drop subscription`, ``},
 		{`DROP TEXT SEARCH a`, 7821, `drop text`, ``},
-		{`DROP TRIGGER a`, 28296, `drop`, ``},
 
 		{`DISCARD PLANS`, 0, `discard plans`, ``},
 

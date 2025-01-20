@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gossip
 
@@ -75,10 +70,6 @@ const (
 	// a version which drops the key entirely, and then, in a subsequent
 	// release, delete this key.
 	KeyDeprecatedSystemConfig = "system-db"
-
-	// KeyDistSQLNodeVersionKeyPrefix is key prefix for each node's DistSQL
-	// version.
-	KeyDistSQLNodeVersionKeyPrefix = "distsql-version"
 
 	// KeyDistSQLDrainingPrefix is the key prefix for each node's DistSQL
 	// draining state.
@@ -154,11 +145,6 @@ func DecodeStoreDescKey(storeKey string) (roachpb.StoreID, error) {
 		return 0, errors.Wrapf(err, "failed parsing StoreID from key %q", storeKey)
 	}
 	return roachpb.StoreID(storeID), nil
-}
-
-// MakeDistSQLNodeVersionKey returns the gossip key for the given store.
-func MakeDistSQLNodeVersionKey(instanceID base.SQLInstanceID) string {
-	return MakeKey(KeyDistSQLNodeVersionKeyPrefix, instanceID.String())
 }
 
 // MakeDistSQLDrainingKey returns the gossip key for the given node's distsql

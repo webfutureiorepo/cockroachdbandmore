@@ -1,22 +1,19 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { util } from "@cockroachlabs/cluster-ui";
+import clone from "lodash/clone";
 import React from "react";
-import _ from "lodash";
 import { Link } from "react-router-dom";
 
-import { generateLocalityRoute } from "src/util/localities";
 import { LocalityTier } from "src/redux/localities";
-import { util } from "@cockroachlabs/cluster-ui";
-import { getLocalityLabel } from "src/util/localities";
-import mapPinIcon from "!!raw-loader!assets/mapPin.svg";
-import { trustIcon } from "src/util/trust";
 import { CLUSTERVIZ_ROOT } from "src/routes/visualization";
+import { generateLocalityRoute, getLocalityLabel } from "src/util/localities";
+import { trustIcon } from "src/util/trust";
+
+import mapPinIcon from "!!raw-loader!assets/mapPin.svg";
 
 import "./breadcrumbs.styl";
 
@@ -63,7 +60,7 @@ function breadcrumbPaths(path: LocalityTier[]): LocalityTier[][] {
   const output: LocalityTier[][] = [[]];
   path.forEach(tier => {
     pathSoFar.push(tier);
-    output.push(_.clone(pathSoFar));
+    output.push(clone(pathSoFar));
   });
   return output;
 }

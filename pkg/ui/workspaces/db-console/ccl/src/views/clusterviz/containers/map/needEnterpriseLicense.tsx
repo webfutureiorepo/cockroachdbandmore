@@ -1,19 +1,15 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 
 import step1Img from "assets/nodeMapSteps/1-getLicense.png";
 import step2Img from "assets/nodeMapSteps/2-setKey.svg";
 import step3Img from "assets/nodeMapSteps/3-seeMap.png";
-
-import { NodeCanvasContainerOwnProps } from "src/views/clusterviz/containers/map/nodeCanvasContainer";
 import * as docsURL from "src/util/docs";
+import { NodeCanvasContainerOwnProps } from "src/views/clusterviz/containers/map/nodeCanvasContainer";
 import "./needEnterpriseLicense.styl";
 
 // This takes the same props as the NodeCanvasContainer which it is swapped out with.

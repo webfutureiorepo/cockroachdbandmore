@@ -1,35 +1,31 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { PayloadAction } from "@reduxjs/toolkit";
-import { expectSaga } from "redux-saga-test-plan";
 import Long from "long";
+import moment from "moment-timezone";
+import { expectSaga } from "redux-saga-test-plan";
+import * as matchers from "redux-saga-test-plan/matchers";
 import {
   EffectProviders,
   StaticProvider,
   throwError,
 } from "redux-saga-test-plan/providers";
-import * as matchers from "redux-saga-test-plan/matchers";
-import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+
 import { getStatementDetails } from "src/api/statementsApi";
-import {
-  refreshSQLDetailsStatsSaga,
-  requestSQLDetailsStatsSaga,
-} from "./statementDetails.sagas";
+
 import {
   actions,
   reducer,
   SQLDetailsStatsReducerState,
 } from "./statementDetails.reducer";
-
-import moment from "moment-timezone";
+import {
+  refreshSQLDetailsStatsSaga,
+  requestSQLDetailsStatsSaga,
+} from "./statementDetails.sagas";
 
 const lastUpdated = moment();
 
@@ -64,7 +60,6 @@ describe("SQLDetailsStats sagas", () => {
           query: "SELECT * FROM crdb_internal.node_build_info",
           app_names: ["$ cockroach sql", "newname"],
           dist_sql_count: new Long(2),
-          failed_count: new Long(2),
           implicit_txn: true,
           vec_count: new Long(2),
           full_scan_count: new Long(2),
@@ -162,7 +157,9 @@ describe("SQLDetailsStats sagas", () => {
             nanos: 111613000,
           },
           nodes: [new Long(1)],
+          kv_node_ids: [2],
           plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
+          failure_count: new Long(2),
         },
       },
       statement_statistics_per_aggregated_ts: [
@@ -255,6 +252,7 @@ describe("SQLDetailsStats sagas", () => {
               nanos: 111613000,
             },
             nodes: [new Long(1)],
+            kv_node_ids: [2],
             plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
           },
           aggregated_ts: {
@@ -351,6 +349,7 @@ describe("SQLDetailsStats sagas", () => {
               nanos: 111613000,
             },
             nodes: [new Long(1)],
+            kv_node_ids: [2],
             plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
           },
           aggregated_ts: {
@@ -447,6 +446,7 @@ describe("SQLDetailsStats sagas", () => {
               nanos: 111613000,
             },
             nodes: [new Long(1)],
+            kv_node_ids: [2],
             plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
           },
           aggregated_ts: {
@@ -543,6 +543,7 @@ describe("SQLDetailsStats sagas", () => {
               nanos: 111613000,
             },
             nodes: [new Long(1)],
+            kv_node_ids: [2],
             plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
           },
           aggregated_ts: {
@@ -641,10 +642,11 @@ describe("SQLDetailsStats sagas", () => {
               nanos: 111613000,
             },
             nodes: [new Long(1)],
+            kv_node_ids: [2],
             plan_gists: ["AgH6////nxkAAA4AAAAGBg=="],
           },
           explain_plan: "• virtual table\n  table: @primary",
-          plan_hash: new Long(14192395335876201826),
+          plan_hash: Long.fromString("14192395335876201826"),
         },
       ],
       internal_app_name_prefix: "$ internal",

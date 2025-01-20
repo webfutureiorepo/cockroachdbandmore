@@ -1,17 +1,14 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sessiondata
 
 import (
 	"net"
+	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/security/username"
@@ -20,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // SessionData contains session parameters. They are all user-configurable.
@@ -172,6 +170,9 @@ type LocalUnmigratableSessionData struct {
 	// IsSSL indicates whether the session is using SSL/TLS.
 	IsSSL bool
 
+	// AuthenticationMethod is the method used to authenticate this session.
+	AuthenticationMethod redact.SafeString
+
 	// ////////////////////////////////////////////////////////////////////////
 	// WARNING: consider whether a session parameter you're adding needs to  //
 	// be propagated to the remote nodes or needs to persist amongst session //
@@ -307,4 +308,83 @@ func (s *Stack) PopAll() {
 // Elems returns all elements in the Stack.
 func (s *Stack) Elems() []*SessionData {
 	return s.stack
+}
+
+// Update performs a best-effort update of the field specified in 'variable' to
+// the value specified in 'value'. Boolean indicating whether an update was
+// performed is returned.
+//
+// The method only looks through the fields of embedded
+// sessiondatapb.SessionData and sessiondatapb.LocalOnlySessionData structs and
+// performs string-matching on the field name. Most custom types aren't
+// supported.
+func (s *SessionData) Update(variable, value string) bool {
+	elem := reflect.ValueOf(&s.SessionData).Elem()
+	if updateField(elem, variable, value) {
+		return true
+	}
+	elem = reflect.ValueOf(&s.LocalOnlySessionData).Elem()
+	return updateField(elem, variable, value)
+}
+
+// getValueToSet converts the provided value to reflect.Value based on the
+// specified type. ok=false is returned if conversion isn't successful.
+func getValueToSet(value, typeName string) (_ reflect.Value, ok bool) {
+	switch typeName {
+	case "bool":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		return reflect.ValueOf(b), true
+	case "float64":
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		return reflect.ValueOf(f), true
+	case "int32":
+		i, err := strconv.ParseInt(value, 10, 32)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		return reflect.ValueOf(int32(i)), true
+	case "int64":
+		i, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		return reflect.ValueOf(i), true
+	case "Duration":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return reflect.Value{}, false
+		}
+		return reflect.ValueOf(d), true
+	case "string":
+		return reflect.ValueOf(value), true
+	case "VectorizeExecMode":
+		v, ok := sessiondatapb.VectorizeExecModeFromString(value)
+		return reflect.ValueOf(v), ok
+	}
+	return reflect.Value{}, false
+}
+
+// updateField updates a single field in elem (which must be of Struct kind)
+// that has the name specified in 'variable' to the value specified in 'value'.
+// Boolean value indicates whether the update was successful.
+func updateField(elem reflect.Value, variable, value string) bool {
+	typ := elem.Type()
+	for i := 0; i < elem.NumField(); i++ {
+		if typ.Field(i).Name == variable {
+			f := elem.Field(i)
+			v, ok := getValueToSet(value, f.Type().Name())
+			if !ok {
+				return false
+			}
+			f.Set(v)
+			return true
+		}
+	}
+	return false
 }

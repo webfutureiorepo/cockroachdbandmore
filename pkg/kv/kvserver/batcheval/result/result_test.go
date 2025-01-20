@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package result
 
@@ -15,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEvalResultIsZero(t *testing.T) {
@@ -83,4 +80,16 @@ func TestMergeAndDestroy(t *testing.T) {
 	if f, exp := *r1.Local.Metrics, (Metrics{LeaseRequestSuccess: 9, ResolveAbort: 13}); f != exp {
 		t.Fatalf("expected %d, got %d", exp, f)
 	}
+
+	var r3 Result
+	r3.Replicated.State = &kvserverpb.ReplicaState{
+		ForceFlushIndex: roachpb.ForceFlushIndex{Index: 3},
+	}
+	require.ErrorContains(t, r0.MergeAndDestroy(r3), "must not specify ForceFlushIndex")
+
+	var r4 Result
+	r4.Replicated.DoTimelyApplicationToAllReplicas = true
+	require.False(t, r0.Replicated.DoTimelyApplicationToAllReplicas)
+	require.NoError(t, r0.MergeAndDestroy(r4))
+	require.True(t, r0.Replicated.DoTimelyApplicationToAllReplicas)
 }

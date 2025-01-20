@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package optbuilder
 
@@ -221,11 +216,11 @@ func (b *Builder) buildScalar(
 		// arguments with a CastExpr that preserves the static type.
 
 		left := t.TypedLeft()
-		if left.ResolvedType() == types.Unknown {
+		if left.ResolvedType().Family() == types.UnknownFamily {
 			left = reType(left, t.ResolvedBinOp().LeftType)
 		}
 		right := t.TypedRight()
-		if right.ResolvedType() == types.Unknown {
+		if right.ResolvedType().Family() == types.UnknownFamily {
 			right = reType(right, t.ResolvedBinOp().RightType)
 		}
 		out = b.constructBinary(
@@ -249,7 +244,9 @@ func (b *Builder) buildScalar(
 		for i := range t.Whens {
 			condExpr := t.Whens[i].Cond.(tree.TypedExpr)
 			cond := b.buildScalar(condExpr, inScope, nil, nil, colRefs)
-			valExpr, ok := eval.ReType(t.Whens[i].Val.(tree.TypedExpr), valType)
+			// TODO(mgartner): Rather than use WithoutTypeModifiers here,
+			// consider typing the CaseExpr without a type modifier.
+			valExpr, ok := eval.ReType(t.Whens[i].Val.(tree.TypedExpr), valType.WithoutTypeModifiers())
 			if !ok {
 				panic(pgerror.Newf(
 					pgcode.DatatypeMismatch,
@@ -263,7 +260,7 @@ func (b *Builder) buildScalar(
 		// Add the ELSE expression to the end of whens as a raw scalar expression.
 		var orElse opt.ScalarExpr
 		if t.Else != nil {
-			elseExpr, ok := eval.ReType(t.Else.(tree.TypedExpr), valType)
+			elseExpr, ok := eval.ReType(t.Else.(tree.TypedExpr), valType.WithoutTypeModifiers())
 			if !ok {
 				panic(pgerror.Newf(
 					pgcode.DatatypeMismatch,
@@ -289,7 +286,7 @@ func (b *Builder) buildScalar(
 			// The type of the CoalesceExpr might be different than the inputs (e.g.
 			// when they are NULL). Force all inputs to be the same type, so that we
 			// build coalesce operator with the correct type.
-			expr, ok := eval.ReType(t.TypedExprAt(i), typ)
+			expr, ok := eval.ReType(t.TypedExprAt(i), typ.WithoutTypeModifiers())
 			if !ok {
 				panic(pgerror.Newf(
 					pgcode.DatatypeMismatch,
@@ -339,7 +336,7 @@ func (b *Builder) buildScalar(
 		ifTrueExpr := reType(t.True.(tree.TypedExpr), valType)
 		ifTrue := b.buildScalar(ifTrueExpr, inScope, nil, nil, colRefs)
 		whens := memo.ScalarListExpr{b.factory.ConstructWhen(memo.TrueSingleton, ifTrue)}
-		orElseExpr, ok := eval.ReType(t.Else.(tree.TypedExpr), valType)
+		orElseExpr, ok := eval.ReType(t.Else.(tree.TypedExpr), valType.WithoutTypeModifiers())
 		if !ok {
 			panic(pgerror.Newf(
 				pgcode.DatatypeMismatch,
@@ -494,7 +491,7 @@ func (b *Builder) buildScalar(
 		panic(unimplemented.Newf(fmt.Sprintf("optbuilder.%T", scalar), "not yet implemented: scalar expression: %T", scalar))
 	}
 
-	return b.finishBuildScalar(scalar, out, inScope, outScope, outCol)
+	return b.finishBuildScalar(scalar, out, outScope, outCol)
 }
 
 func (b *Builder) hasSubOperator(t *tree.ComparisonExpr) bool {
@@ -574,7 +571,14 @@ func (b *Builder) buildFunction(
 	})
 
 	if overload.Class == tree.GeneratorClass {
-		return b.finishBuildGeneratorFunction(f, overload, out, inScope, outScope, outCol)
+		if overload.ReturnsRecordType {
+			if colDefListTypes := b.getColumnDefinitionListTypes(inScope); colDefListTypes != nil {
+				// Use the types from the column definition list to determine the
+				// function return type.
+				f.SetTypeAnnotation(colDefListTypes)
+			}
+		}
+		return b.finishBuildGeneratorFunction(f, out, inScope, outScope, outCol)
 	}
 
 	// Add a dependency on sequences that are used as a string argument.
@@ -587,7 +591,7 @@ func (b *Builder) buildFunction(
 			var ds cat.DataSource
 			if seqIdentifier.IsByID() {
 				flags := cat.Flags{
-					AvoidDescriptorCaches: b.insideViewDef || b.insideFuncDef,
+					AvoidDescriptorCaches: b.insideViewDef || b.insideFuncDef || b.insideTriggerDef,
 				}
 				ds, _, err = b.catalog.ResolveDataSourceByID(b.ctx, flags, cat.StableID(seqIdentifier.SeqID))
 				if err != nil {
@@ -606,7 +610,28 @@ func (b *Builder) buildFunction(
 		}
 	}
 
-	return b.finishBuildScalar(f, out, inScope, outScope, outCol)
+	return b.finishBuildScalar(f, out, outScope, outCol)
+}
+
+// getColumnDefinitionListTypes returns a composite type representing the column
+// definition list for the current scope, if any. If one doesn't exist,
+// getColumnDefinitionListTypes returns nil.
+func (b *Builder) getColumnDefinitionListTypes(inScope *scope) *types.T {
+	alias := inScope.alias
+	if alias == nil || len(alias.Cols) == 0 || alias.Cols[0].Type == nil {
+		return nil
+	}
+	contents := make([]*types.T, len(alias.Cols))
+	labels := make([]string, len(alias.Cols))
+	for i, c := range alias.Cols {
+		defTyp, err := tree.ResolveType(b.ctx, c.Type, b.semaCtx.TypeResolver)
+		if err != nil {
+			panic(err)
+		}
+		contents[i] = defTyp
+		labels[i] = string(c.Name)
+	}
+	return types.MakeLabeledTuple(contents, labels)
 }
 
 // buildRangeCond builds a RANGE clause as a simpler expression. Examples:
@@ -825,6 +850,12 @@ func (b *Builder) constructBinary(
 		return b.factory.ConstructFetchValPath(left, right)
 	case treebin.JSONFetchTextPath:
 		return b.factory.ConstructFetchTextPath(left, right)
+	case treebin.Distance:
+		return b.factory.ConstructVectorDistance(left, right)
+	case treebin.CosDistance:
+		return b.factory.ConstructVectorCosDistance(left, right)
+	case treebin.NegInnerProduct:
+		return b.factory.ConstructVectorNegInnerProduct(left, right)
 	}
 	panic(errors.AssertionFailedf("unhandled binary operator: %s", redact.Safe(bin)))
 }

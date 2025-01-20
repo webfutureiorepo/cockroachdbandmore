@@ -1,12 +1,7 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -46,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -280,10 +276,10 @@ func (sc *SchemaChanger) runBackfill(ctx context.Context) error {
 				// that don't, so preserve the flag if its already been flipped.
 				needColumnBackfill = needColumnBackfill || catalog.ColumnNeedsBackfill(col)
 			} else if idx := m.AsIndex(); idx != nil {
+				addedIndexSpans = append(addedIndexSpans, tableDesc.IndexSpan(sc.execCfg.Codec, idx.GetID()))
 				if idx.IsTemporaryIndexForBackfill() {
 					temporaryIndexes = append(temporaryIndexes, idx.GetID())
 				} else {
-					addedIndexSpans = append(addedIndexSpans, tableDesc.IndexSpan(sc.execCfg.Codec, idx.GetID()))
 					addedIndexes = append(addedIndexes, idx.GetID())
 				}
 			} else if c := m.AsConstraintWithoutIndex(); c != nil {
@@ -756,7 +752,7 @@ func (sc *SchemaChanger) validateConstraints(
 	if err := sc.fixedTimestampTxn(ctx, readAsOf, func(
 		ctx context.Context, txn descs.Txn,
 	) error {
-		tableDesc, err = txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
+		tableDesc, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
 		return err
 	}); err != nil {
 		return err
@@ -791,8 +787,7 @@ func (sc *SchemaChanger) validateConstraints(
 				// Use the DistSQLTypeResolver because we need to resolve types by ID.
 				collection := evalCtx.Descs
 				resolver := descs.NewDistSQLTypeResolver(collection, txn.KV())
-				semaCtx := tree.MakeSemaContext()
-				semaCtx.TypeResolver = &resolver
+				semaCtx := tree.MakeSemaContext(&resolver)
 				semaCtx.NameResolver = NewSkippingCacheSchemaResolver(
 					txn.Descriptors(),
 					sessiondata.NewStack(NewInternalSessionData(ctx, sc.settings, "validate constraint")),
@@ -805,7 +800,7 @@ func (sc *SchemaChanger) validateConstraints(
 				defer func() { collection.ReleaseAll(ctx) }()
 				if ck := c.AsCheck(); ck != nil {
 					if err := validateCheckInTxn(
-						ctx, txn, &semaCtx, evalCtx.SessionData(), desc, ck,
+						ctx, txn, &evalCtx.Context, &semaCtx, evalCtx.SessionData(), desc, ck,
 					); err != nil {
 						return err
 					}
@@ -1044,8 +1039,9 @@ func (sc *SchemaChanger) distIndexBackfill(
 		}
 		sd := NewInternalSessionData(ctx, sc.execCfg.Settings, "dist-index-backfill")
 		evalCtx = createSchemaChangeEvalCtx(ctx, sc.execCfg, sd, txn.KV().ReadTimestamp(), txn.Descriptors())
-		planCtx = sc.distSQLPlanner.NewPlanningCtx(ctx, &evalCtx, nil, /* planner */
-			txn.KV(), DistributionTypeSystemTenantOnly)
+		planCtx = sc.distSQLPlanner.NewPlanningCtx(
+			ctx, &evalCtx, nil /* planner */, txn.KV(), FullDistribution,
+		)
 		indexBatchSize := indexBackfillBatchSize.Get(&sc.execCfg.Settings.SV)
 		chunkSize := sc.getChunkSize(indexBatchSize)
 		spec, err := initIndexBackfillerSpec(*tableDesc.TableDesc(), writeAsOf, readAsOf, writeAtRequestTimestamp, chunkSize, addedIndexes)
@@ -1351,8 +1347,9 @@ func (sc *SchemaChanger) distColumnBackfill(
 			)
 			defer recv.Release()
 
-			planCtx := sc.distSQLPlanner.NewPlanningCtx(ctx, &evalCtx, nil /* planner */, txn.KV(),
-				DistributionTypeSystemTenantOnly)
+			planCtx := sc.distSQLPlanner.NewPlanningCtx(
+				ctx, &evalCtx, nil /* planner */, txn.KV(), FullDistribution,
+			)
 			spec, err := initColumnBackfillerSpec(tableDesc, duration, chunkSize, backfillUpdateChunkSizeThresholdBytes, readAsOf)
 			if err != nil {
 				return err
@@ -1396,7 +1393,7 @@ func (sc *SchemaChanger) updateJobRunningStatus(
 ) (tableDesc catalog.TableDescriptor, err error) {
 	err = DescsTxn(ctx, sc.execCfg, func(ctx context.Context, txn isql.Txn, col *descs.Collection) (err error) {
 		// Read table descriptor without holding a lease.
-		tableDesc, err = col.ByID(txn.KV()).Get().Table(ctx, sc.descID)
+		tableDesc, err = col.ByIDWithoutLeased(txn.KV()).Get().Table(ctx, sc.descID)
 		if err != nil {
 			return err
 		}
@@ -1451,7 +1448,7 @@ func (sc *SchemaChanger) validateIndexes(ctx context.Context) error {
 	if err := sc.fixedTimestampTxn(ctx, readAsOf, func(
 		ctx context.Context, txn descs.Txn,
 	) (err error) {
-		tableDesc, err = txn.Descriptors().ByID(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
+		tableDesc, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).WithoutNonPublic().Get().Table(ctx, sc.descID)
 		return err
 	}); err != nil {
 		return err
@@ -1551,11 +1548,10 @@ func ValidateConstraint(
 	) error {
 		// Use a schema resolver because we need to resolve types by ID and table by name.
 		resolver := NewSkippingCacheSchemaResolver(txn.Descriptors(), sessiondata.NewStack(sessionData), txn.KV(), nil /* authAccessor */)
-		semaCtx := tree.MakeSemaContext()
-		semaCtx.TypeResolver = resolver
-		semaCtx.NameResolver = resolver
+		semaCtx := tree.MakeSemaContext(resolver)
 		semaCtx.FunctionResolver = descs.NewDistSQLFunctionResolver(txn.Descriptors(), txn.KV())
 		defer func() { txn.Descriptors().ReleaseAll(ctx) }()
+		evalCtx := &eval.Context{}
 
 		switch catalog.GetConstraintType(constraint) {
 		case catconstants.ConstraintTypeCheck:
@@ -1566,8 +1562,10 @@ func ValidateConstraint(
 					if skip, err := canSkipCheckValidation(tableDesc, ck); err != nil || skip {
 						return err
 					}
-					violatingRow, formattedCkExpr, err := validateCheckExpr(ctx, &semaCtx, txn, sessionData, ck.GetExpr(),
-						tableDesc.(*tabledesc.Mutable), indexIDForValidation)
+					violatingRow, formattedCkExpr, err := validateCheckExpr(
+						ctx, evalCtx, &semaCtx, txn, sessionData, ck.GetExpr(),
+						tableDesc.(*tabledesc.Mutable), indexIDForValidation,
+					)
 					if err != nil {
 						return err
 					}
@@ -1586,7 +1584,7 @@ func ValidateConstraint(
 			)
 		case catconstants.ConstraintTypeFK:
 			fk := constraint.AsForeignKey()
-			targetTable, err := txn.Descriptors().ByID(txn.KV()).Get().Table(ctx, fk.GetReferencedTableID())
+			targetTable, err := txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Table(ctx, fk.GetReferencedTableID())
 			if err != nil {
 				return err
 			}
@@ -1680,9 +1678,6 @@ func ValidateInvertedIndexes(
 	}()
 
 	for i, idx := range indexes {
-		// Shadow i and idx to prevent the values from changing within each
-		// gorountine.
-		i, idx := i, idx
 		countReady[i] = make(chan struct{})
 
 		grp.GoCtx(func(ctx context.Context) error {
@@ -1797,9 +1792,10 @@ func countExpectedRowsForInvertedIndex(
 	if col.IsExpressionIndexColumn() {
 		colNameOrExpr = col.GetComputeExpr()
 	} else {
-		// Wrap the column name in double-quotes because it might
-		// contain special characters, like "-".
-		colNameOrExpr = fmt.Sprintf("%q", col.ColName())
+		// Format the column name so that it can be parsed if it has special
+		// characters, like "-" or a newline.
+		name := col.ColName()
+		colNameOrExpr = tree.AsStringWithFlags(&name, tree.FmtParsable)
 	}
 
 	var expectedCount int64
@@ -2236,15 +2232,11 @@ func (sc *SchemaChanger) backfillIndexes(
 	writeAtRequestTimestamp := len(temporaryIndexes) != 0
 	log.Infof(ctx, "backfilling %d indexes: %v (writeAtRequestTimestamp: %v)", len(addingSpans), addingSpans, writeAtRequestTimestamp)
 
-	// Split off a new range for each new index span. But only do so for the
-	// system tenant. Secondary tenants do not have mandatory split points
-	// between tables or indexes.
-	if sc.execCfg.Codec.ForSystemTenant() {
-		expirationTime := sc.db.KV().Clock().Now().Add(time.Hour.Nanoseconds(), 0)
-		for _, span := range addingSpans {
-			if err := sc.db.KV().AdminSplit(ctx, span.Key, expirationTime); err != nil {
-				return err
-			}
+	// Split off a new range for each new index span.
+	expirationTime := sc.db.KV().Clock().Now().Add(time.Hour.Nanoseconds(), 0)
+	for _, span := range addingSpans {
+		if err := sc.db.KV().AdminSplit(ctx, span.Key, expirationTime); err != nil {
+			return err
 		}
 	}
 
@@ -2395,6 +2387,9 @@ func (sc *SchemaChanger) truncateAndBackfillColumns(
 		uint64(columnBackfillUpdateChunkSizeThresholdBytes.Get(&sc.settings.SV)),
 		backfill.ColumnMutationFilter,
 	); err != nil {
+		if errors.HasType(err, &kvpb.InsufficientSpaceError{}) {
+			return jobs.MarkPauseRequestError(errors.UnwrapAll(err))
+		}
 		return err
 	}
 	log.Info(ctx, "finished clearing and backfilling columns")
@@ -2461,7 +2456,7 @@ func runSchemaChangesInTxn(
 				// Don't need to do anything here, as the call to MakeMutationComplete
 				// will perform the steps for this operation.
 			} else if m.AsComputedColumnSwap() != nil {
-				return AlterColTypeInTxnNotSupportedErr
+				return sqlerrors.NewAlterColTypeInTxnNotSupportedErr()
 			} else if col := m.AsColumn(); col != nil {
 				if !doneColumnBackfill && catalog.ColumnNeedsBackfill(col) {
 					if err := columnBackfillInTxn(
@@ -2583,7 +2578,8 @@ func runSchemaChangesInTxn(
 		if check := c.AsCheck(); check != nil {
 			if check.GetConstraintValidity() == descpb.ConstraintValidity_Validating {
 				if err := validateCheckInTxn(
-					ctx, planner.InternalSQLTxn(), &planner.semaCtx, planner.SessionData(), tableDesc, check,
+					ctx, planner.InternalSQLTxn(), planner.EvalContext(), &planner.semaCtx,
+					planner.SessionData(), tableDesc, check,
 				); err != nil {
 					return err
 				}
@@ -2627,6 +2623,18 @@ func runSchemaChangesInTxn(
 	// update the table descriptor directly.
 	for _, c := range constraintAdditionMutations {
 		if ck := c.AsCheck(); ck != nil {
+			if ck.IsNotNullColumnConstraint() {
+				// Remove the  check constraint we added.
+				for i := range tableDesc.Checks {
+					if tableDesc.Checks[i].ConstraintID == ck.GetConstraintID() {
+						tableDesc.Checks = append(tableDesc.Checks[:i], tableDesc.Checks[i+1:]...)
+					}
+					colID := ck.GetReferencedColumnID(0)
+					col := catalog.FindColumnByID(tableDesc, colID)
+					col.ColumnDesc().Nullable = false
+					continue
+				}
+			}
 			tableDesc.Checks = append(tableDesc.Checks, ck.CheckDesc())
 		} else if fk := c.AsForeignKey(); fk != nil {
 			var referencedTableDesc *tabledesc.Mutable
@@ -2680,6 +2688,7 @@ func runSchemaChangesInTxn(
 func validateCheckInTxn(
 	ctx context.Context,
 	txn isql.Txn,
+	evalCtx *eval.Context,
 	semaCtx *tree.SemaContext,
 	sessionData *sessiondata.SessionData,
 	tableDesc *tabledesc.Mutable,
@@ -2693,8 +2702,10 @@ func validateCheckInTxn(
 	return txn.WithSyntheticDescriptors(
 		syntheticDescs,
 		func() error {
-			violatingRow, formattedCkExpr, err := validateCheckExpr(ctx, semaCtx, txn, sessionData,
-				checkToValidate.GetExpr(), tableDesc, 0 /* indexIDForValidation */)
+			violatingRow, formattedCkExpr, err := validateCheckExpr(
+				ctx, evalCtx, semaCtx, txn, sessionData, checkToValidate.GetExpr(),
+				tableDesc, 0, /* indexIDForValidation */
+			)
 			if err != nil {
 				return err
 			}
@@ -2734,7 +2745,7 @@ func getTargetTablesAndFk(
 	if fk == nil {
 		return nil, nil, nil, errors.AssertionFailedf("foreign key %s does not exist", fkName)
 	}
-	targetTable, err = txn.Descriptors().ByID(txn.KV()).Get().Table(ctx, fk.ReferencedTableID)
+	targetTable, err = txn.Descriptors().ByIDWithoutLeased(txn.KV()).Get().Table(ctx, fk.ReferencedTableID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2934,7 +2945,7 @@ func indexTruncateInTxn(
 			execCfg.GetRowMetrics(internal),
 		)
 		td := tableDeleter{rd: rd, alloc: alloc}
-		if err := td.init(ctx, txn.KV(), evalCtx, &evalCtx.Settings.SV); err != nil {
+		if err := td.init(ctx, txn.KV(), evalCtx); err != nil {
 			return err
 		}
 		var err error

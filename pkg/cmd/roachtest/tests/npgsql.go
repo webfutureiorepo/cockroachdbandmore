@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -18,10 +13,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
 )
 
 var npgsqlReleaseTagRegex = regexp.MustCompile(`^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
@@ -42,7 +38,7 @@ func registerNpgsql(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(install.SecureOption(true)), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -141,9 +137,9 @@ echo '%s' | git apply --ignore-whitespace -`, fmt.Sprintf(npgsqlPatch, result.St
 		rawResults := "stdout:\n" + result.Stdout + "\n\nstderr:\n" + result.Stderr
 		t.L().Printf("Test results for npgsql: %s", rawResults)
 
-		// Fatal for a roachprod or SSH error. A roachprod error is when result.Err==nil.
+		// Fatal for a roachprod or transient error. A roachprod error is when result.Err==nil.
 		// Proceed for any other (command) errors
-		if err != nil && (result.Err == nil || errors.Is(err, rperrors.ErrSSH255)) {
+		if err != nil && (result.Err == nil || rperrors.IsTransient(err)) {
 			t.Fatal(err)
 		}
 
@@ -173,9 +169,10 @@ echo '%s' | git apply --ignore-whitespace -`, fmt.Sprintf(npgsqlPatch, result.St
 	}
 
 	r.Add(registry.TestSpec{
-		Name:             "npgsql",
-		Owner:            registry.OwnerSQLFoundations,
-		Cluster:          r.MakeClusterSpec(1),
+		Name:  "npgsql",
+		Owner: registry.OwnerSQLFoundations,
+		// .NET only supports AMD64 arch for 7.0.
+		Cluster:          r.MakeClusterSpec(1, spec.Arch(vm.ArchAMD64)),
 		Leases:           registry.MetamorphicLeases,
 		CompatibleClouds: registry.AllExceptAWS,
 		Suites:           registry.Suites(registry.Nightly, registry.Driver),
@@ -198,11 +195,11 @@ index ecfdd85f..17527129 100644
      public const string DefaultConnectionString =
 -        "Server=localhost;Username=npgsql_tests;Password=npgsql_tests;Database=npgsql_tests;Timeout=0;Command Timeout=0;SSL Mode=Disable";
 +        "Server=127.0.0.1;Username=npgsql_tests;Password=npgsql_tests;Database=npgsql_tests;Port=%s;Timeout=0;Command Timeout=0;SSL Mode=Prefer;Include Error Detail=true";
- 
+
      /// <summary>
      /// The connection string that will be used when opening the connection to the tests database.
 @@ -186,7 +186,6 @@ internal static async Task<string> CreateTempTable(NpgsqlConnection conn, string
- 
+
          await conn.ExecuteNonQueryAsync(@$"
  START TRANSACTION;
 -SELECT pg_advisory_xact_lock(0);

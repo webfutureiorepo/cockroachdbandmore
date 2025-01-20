@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanset
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/pebble"
@@ -449,11 +445,12 @@ func (s spanSetReader) ScanInternal(
 	ctx context.Context,
 	lower, upper roachpb.Key,
 	visitPointKey func(key *pebble.InternalKey, value pebble.LazyValue, info pebble.IteratorLevel) error,
-	visitRangeDel func(start []byte, end []byte, seqNum uint64) error,
+	visitRangeDel func(start []byte, end []byte, seqNum pebble.SeqNum) error,
 	visitRangeKey func(start []byte, end []byte, keys []rangekey.Key) error,
 	visitSharedFile func(sst *pebble.SharedSSTMeta) error,
+	visitExternalFile func(sst *pebble.ExternalFile) error,
 ) error {
-	return s.r.ScanInternal(ctx, lower, upper, visitPointKey, visitRangeDel, visitRangeKey, visitSharedFile)
+	return s.r.ScanInternal(ctx, lower, upper, visitPointKey, visitRangeDel, visitRangeKey, visitSharedFile, visitExternalFile)
 }
 
 func (s spanSetReader) Close() {
@@ -469,7 +466,7 @@ func (s spanSetReader) MVCCIterate(
 	start, end roachpb.Key,
 	iterKind storage.MVCCIterKind,
 	keyTypes storage.IterKeyType,
-	readCategory storage.ReadCategory,
+	readCategory fs.ReadCategory,
 	f func(storage.MVCCKeyValue, storage.MVCCRangeKeyStack) error,
 ) error {
 	if s.spansOnly {
@@ -518,7 +515,7 @@ func (s spanSetReader) ConsistentIterators() bool {
 }
 
 // PinEngineStateForIterators implements the storage.Reader interface.
-func (s spanSetReader) PinEngineStateForIterators(readCategory storage.ReadCategory) error {
+func (s spanSetReader) PinEngineStateForIterators(readCategory fs.ReadCategory) error {
 	return s.r.PinEngineStateForIterators(readCategory)
 }
 
@@ -749,6 +746,14 @@ func makeSpanSetReadWriterAt(rw storage.ReadWriter, spans *SpanSet, ts hlc.Times
 	}
 }
 
+// NewReader returns a storage.Reader that asserts access of the underlying
+// Reader against the given SpanSet at a given timestamp. If zero timestamp is
+// provided, accesses are considered non-MVCC.
+func NewReader(r storage.Reader, spans *SpanSet, ts hlc.Timestamp) storage.Reader {
+	spans = addLockTableSpans(spans)
+	return spanSetReader{r: r, spans: spans, ts: ts}
+}
+
 // NewReadWriterAt returns a storage.ReadWriter that asserts access of the
 // underlying ReadWriter against the given SpanSet at a given timestamp.
 // If zero timestamp is provided, accesses are considered non-MVCC.
@@ -777,9 +782,10 @@ func (s spanSetBatch) ScanInternal(
 	ctx context.Context,
 	lower, upper roachpb.Key,
 	visitPointKey func(key *pebble.InternalKey, value pebble.LazyValue, info pebble.IteratorLevel) error,
-	visitRangeDel func(start []byte, end []byte, seqNum uint64) error,
+	visitRangeDel func(start []byte, end []byte, seqNum pebble.SeqNum) error,
 	visitRangeKey func(start []byte, end []byte, keys []rangekey.Key) error,
 	visitSharedFile func(sst *pebble.SharedSSTMeta) error,
+	visitExternalFile func(sst *pebble.ExternalFile) error,
 ) error {
 	// Only used on Engine.
 	panic("unimplemented")

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver
 
@@ -95,7 +90,7 @@ func TestReadSummaryCollectForR1(t *testing.T) {
 
 	// Assert that r1's summary was not influenced by the r2 range-local key we
 	// set above.
-	summary := collectReadSummaryFromTimestampCache(ctx, tc, &r1desc)
+	summary := collectReadSummaryFromTimestampCache(ctx, tc, &r1desc, 0, 0)
 	require.Equal(t, baseTS, summary.Global.LowWater)
 	require.Equal(t, baseTS, summary.Local.LowWater)
 }

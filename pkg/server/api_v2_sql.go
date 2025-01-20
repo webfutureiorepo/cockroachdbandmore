@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package server
 
@@ -17,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/server/authserver"
@@ -28,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/ui"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -39,8 +36,6 @@ import (
 // the serverccl package.
 var SQLAPIClock timeutil.TimeSource = timeutil.DefaultTimeSource{}
 
-// swagger:operation POST /sql/ execSQL
-//
 // # Execute one or more SQL statements
 //
 // Executes one or more SQL statements.
@@ -324,9 +319,31 @@ func (a *apiV2Server) execSQL(w http.ResponseWriter, r *http.Request) {
 		requestPayload.ApplicationName = "$ api-v2-sql"
 	}
 
+	localityMetadataEnabled := ui.DatabaseLocalityMetadataEnabled.Get(a.sqlServer.execCfg.SV())
+
 	// Parse the input SQL.
 	for i := range requestPayload.Statements {
 		s := &requestPayload.Statements[i]
+
+		if !localityMetadataEnabled {
+			// Note(davidh): This is a hack. The reason I'm putting the code
+			// for it here is twofold: 1. The code to make this change happen
+			// on the frontend is too complex because of the use of this SQL
+			// API. We end up having to do a lot of client-side wrangling to
+			// read the cluster settings, then make the DB request but filter
+			// out the offending queries. Making the change here reduces the
+			// amount of code necessary. 2. Reducing the diff size is
+			// necessary because we want to backport this change to 23.2,
+			// 24.1, and 24.2. This hack can be removed after 24.3 is
+			// released because the new DB page will be in place.
+			if localityMetadataQueryRegexp.Match([]byte(s.SQL)) {
+				// Replace with a no-op to allow the rest of the execution to
+				// continue and return a matchin list of responses. Client-side
+				// code is resilient to empty results.
+				s.SQL = "SELECT 1"
+			}
+		}
+
 		stmts, err := parser.Parse(s.SQL)
 		if err != nil {
 			topLevelError(errors.WithDetail(
@@ -454,6 +471,15 @@ func (a *apiV2Server) execSQL(w http.ResponseWriter, r *http.Request) {
 						}
 					}()
 
+					if returnType == tree.Ack || stmt.stmt.AST.StatementType() == tree.TypeTCL {
+						// We want to disallow statements that modify txn state (like
+						// BEGIN and COMMIT) because the internal executor does not
+						// expect such statements. We'll lean on the safe side and
+						// prohibit all statements with an ACK return type, similar
+						// to the builtin `crdb_internal.execute_internally(...)`.
+						return errors.New("disallowed statement type")
+					}
+
 					// If the max size has been exceeded by previous statements/transactions
 					// avoid executing, return immediately.
 					err := checkSize(curSize)
@@ -484,7 +510,18 @@ func (a *apiV2Server) execSQL(w http.ResponseWriter, r *http.Request) {
 						return err
 					}
 
+					// Make sure column names are not duplicated.
 					txnRes.Columns = columnsDefinition(it.Types())
+					seenColumnNames := make(map[string]int, len(txnRes.Columns))
+					for i, col := range txnRes.Columns {
+						origName := col.Name
+						count := seenColumnNames[origName]
+						if count > 0 {
+							txnRes.Columns[i].Name = fmt.Sprintf("%s_%d", origName, count)
+						}
+						seenColumnNames[origName] = count + 1
+					}
+
 					for ; ok; ok, err = it.Next(ctx) {
 						if err := a.shouldStop(ctx); err != nil {
 							return err
@@ -584,3 +621,10 @@ func (j jsonError) MarshalJSON() ([]byte, error) {
 	pqErr := pgerror.Flatten(j.error)
 	return gojson.MarshalIndent(pqErr, "", "")
 }
+
+// This regexp is constructed to match client-side queries written in
+// `databaseDetailsApi.ts` and `tableDetailsApi.ts`. It's meant to
+// filter out queries that use `SHOW RANGES` which are expensive to
+// execute and can be disabled by the operator. See the Note above for
+// an explanation of this hack.
+var localityMetadataQueryRegexp = regexp.MustCompile(`SHOW RANGES FROM (DATABASE|TABLE)`)

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sqlstatsutil
 
@@ -95,12 +90,19 @@ func BuildStmtMetadataJSON(statistics *appstatspb.CollectedStatementStatistics) 
 //		        "type": "int",
 //		      },
 //		    },
+//		    "kv_node_ids": {
+//		      "type": "array",
+//		      "items": {
+//		        "type": "int32",
+//		      },
+//		    },
 //		    "regions": {
 //		      "type": "array",
 //		      "items": {
 //		        "type": "string",
 //		      },
 //		    },
+//		    "usedFollowerRead": { "type": "boolean" },
 //		    "mvcc_iterator_stats": {
 //		      "type": "object",
 //		      "properties": {
@@ -177,7 +179,9 @@ func BuildStmtMetadataJSON(statistics *appstatspb.CollectedStatementStatistics) 
 //		        "firstExecAt":       { "type": "string" },
 //		        "lastExecAt":        { "type": "string" },
 //		        "nodes":             { "type": "node_ids" },
+//		        "kvNodeIds":         { "type": "kv_node_ids" },
 //		        "regions":           { "type": "regions" },
+//		        "usedFollowerRead":  { "type": "boolean" },
 //		        "indexes":           { "type": "indexes" },
 //		        "lastErrorCode":     { "type": "string" },
 //		      },
@@ -194,6 +198,7 @@ func BuildStmtMetadataJSON(statistics *appstatspb.CollectedStatementStatistics) 
 //		        "bytesRead",
 //		        "rowsRead",
 //		        "nodes",
+//		        "kvNodeIds",
 //		        "regions",
 //		        "indexes
 //		      ]

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package spanconfigstore
 
@@ -14,7 +9,6 @@ import (
 	"context"
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -159,8 +153,7 @@ func (s *spanConfigStore) computeSplitKey(
 			// ranges.
 			systemTableUpperBound := keys.SystemSQLCodec.TablePrefix(keys.MaxReservedDescID + 1)
 			if roachpb.Key(rem).Compare(systemTableUpperBound) < 0 ||
-				!(StorageCoalesceAdjacentSetting.Get(&s.settings.SV) &&
-					s.settings.Version.IsActive(ctx, clusterversion.V23_2_EnableRangeCoalescingForSystemTenant)) {
+				!StorageCoalesceAdjacentSetting.Get(&s.settings.SV) {
 				return roachpb.RKey(match.span.Key), nil
 			}
 		} else {
@@ -228,24 +221,27 @@ func (s *spanConfigStore) computeSplitKey(
 // key.
 func (s *spanConfigStore) getSpanConfigForKey(
 	ctx context.Context, key roachpb.RKey,
-) (conf roachpb.SpanConfig, found bool) {
+) (conf roachpb.SpanConfig, confSpan roachpb.Span, found bool) {
 	sp := roachpb.Span{Key: key.AsRawKey(), EndKey: key.Next().AsRawKey()}
 	iter, query := s.btree.MakeIter(), makeQueryEntry(sp)
 	for iter.FirstOverlap(query); iter.Valid(); {
-		conf, found = iter.Cur().conf(), true
+		cur := iter.Cur()
+		conf = cur.conf()
+		confSpan = cur.span
+		found = true
 		break
 	}
 	if !found && log.ExpensiveLogEnabled(ctx, 1) {
 		log.Warningf(ctx, "span config not found for %s", key.String())
 	}
-	return conf, found
+	return conf, confSpan, found
 }
 
-// apply takes an incremental set of updates and returns the spans/span<->config
-// entries deleted/added as a result of applying them. It also updates its state
-// by applying them if dryrun is false.
+// apply takes an incremental set of updates, updates the state of the store by
+// applying them, and returns the spans/span<->config entries deleted/added as a
+// result of applying them.
 func (s *spanConfigStore) apply(
-	ctx context.Context, dryrun bool, updates ...spanconfig.Update,
+	ctx context.Context, updates ...spanconfig.Update,
 ) (deleted []roachpb.Span, added []entry, err error) {
 	if err := validateApplyArgs(updates...); err != nil {
 		return nil, nil, err
@@ -258,7 +254,7 @@ func (s *spanConfigStore) apply(
 	})
 	updates = sorted // re-use the same variable
 
-	entriesToDelete, entriesToAdd, err := s.accumulateOpsFor(ctx, dryrun, updates)
+	entriesToDelete, entriesToAdd, err := s.accumulateOpsFor(ctx, updates)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -266,19 +262,15 @@ func (s *spanConfigStore) apply(
 	deleted = make([]roachpb.Span, len(entriesToDelete))
 	for i := range entriesToDelete {
 		entry := &entriesToDelete[i]
-		if !dryrun {
-			s.btree.Delete(entry)
-			s.interner.remove(ctx, entry.canonical)
-		}
+		s.btree.Delete(entry)
+		s.interner.remove(ctx, entry.canonical)
 		deleted[i] = entry.span
 	}
 
 	added = make([]entry, len(entriesToAdd))
 	for i := range entriesToAdd {
 		entry := &entriesToAdd[i]
-		if !dryrun {
-			s.btree.Set(entry)
-		}
+		s.btree.Set(entry)
 		added[i] = *entry
 	}
 
@@ -379,7 +371,7 @@ func (s *spanConfigStore) apply(
 //
 //	add {span=carry-over.span, conf=carry-over.conf} if non-empty
 func (s *spanConfigStore) accumulateOpsFor(
-	ctx context.Context, dryrun bool, updates []spanconfig.Update,
+	ctx context.Context, updates []spanconfig.Update,
 ) (toDelete, toAdd []entry, _ error) {
 	var carryOver spanConfigPair
 	for _, update := range updates {
@@ -390,7 +382,7 @@ func (s *spanConfigStore) accumulateOpsFor(
 				Key:    carriedOver.span.Key,
 				EndKey: update.GetTarget().GetSpan().Key}
 			if gapBetweenUpdates.Valid() {
-				toAdd = append(toAdd, s.makeEntry(ctx, dryrun, gapBetweenUpdates, carriedOver.config))
+				toAdd = append(toAdd, s.makeEntry(ctx, gapBetweenUpdates, carriedOver.config))
 			}
 
 			carryOverSpanAfterUpdate := roachpb.Span{
@@ -403,7 +395,7 @@ func (s *spanConfigStore) accumulateOpsFor(
 				}
 			}
 		} else if !carriedOver.isEmpty() {
-			toAdd = append(toAdd, s.makeEntry(ctx, dryrun, carriedOver.span, carriedOver.config))
+			toAdd = append(toAdd, s.makeEntry(ctx, carriedOver.span, carriedOver.config))
 		}
 
 		skipAddingSelf := false
@@ -446,7 +438,7 @@ func (s *spanConfigStore) accumulateOpsFor(
 
 				// Re-add the non-intersecting span, if any.
 				if pre.Valid() {
-					toAdd = append(toAdd, s.makeEntry(ctx, dryrun, pre, existingConf))
+					toAdd = append(toAdd, s.makeEntry(ctx, pre, existingConf))
 				}
 			}
 
@@ -467,7 +459,7 @@ func (s *spanConfigStore) accumulateOpsFor(
 
 		if update.Addition() && !skipAddingSelf {
 			// Add the update itself.
-			toAdd = append(toAdd, s.makeEntry(ctx, dryrun, update.GetTarget().GetSpan(), update.GetConfig()))
+			toAdd = append(toAdd, s.makeEntry(ctx, update.GetTarget().GetSpan(), update.GetConfig()))
 
 			// TODO(irfansharif): If we're adding an entry, we could inspect the
 			// entries before and after and check whether either of them have
@@ -485,7 +477,7 @@ func (s *spanConfigStore) accumulateOpsFor(
 	}
 
 	if !carryOver.isEmpty() {
-		toAdd = append(toAdd, s.makeEntry(ctx, dryrun, carryOver.span, carryOver.config))
+		toAdd = append(toAdd, s.makeEntry(ctx, carryOver.span, carryOver.config))
 	}
 	return toDelete, toAdd, nil
 }
@@ -561,15 +553,10 @@ type entry struct {
 }
 
 func (s *spanConfigStore) makeEntry(
-	ctx context.Context, dryrun bool, sp roachpb.Span, conf roachpb.SpanConfig,
+	ctx context.Context, sp roachpb.Span, conf roachpb.SpanConfig,
 ) entry {
-	if !dryrun {
-		s.treeIDAlloc++
-	}
-	var canonical *roachpb.SpanConfig
-	if !dryrun || s.knobs.StoreInternConfigsInDryRuns {
-		canonical = s.interner.add(ctx, conf)
-	}
+	s.treeIDAlloc++
+	canonical := s.interner.add(ctx, conf)
 	return entry{
 		spanConfigPairInterned: spanConfigPairInterned{
 			span:      sp,

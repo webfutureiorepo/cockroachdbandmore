@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -45,9 +40,8 @@ func registerElasticIO(r registry.Registry) {
 		Suites: registry.Suites(registry.Nightly),
 		// Tags:      registry.Tags(`weekly`),
 		// Second node is solely for Prometheus.
-		Cluster:         r.MakeClusterSpec(2, spec.CPU(8)),
-		RequiresLicense: true,
-		Leases:          registry.MetamorphicLeases,
+		Cluster: r.MakeClusterSpec(2, spec.CPU(8), spec.WorkloadNode()),
+		Leases:  registry.MetamorphicLeases,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			if c.IsLocal() {
 				t.Skip("IO overload test is not meant to run locally")
@@ -55,38 +49,39 @@ func registerElasticIO(r registry.Registry) {
 			if c.Spec().NodeCount != 2 {
 				t.Fatalf("expected 2 nodes, found %d", c.Spec().NodeCount)
 			}
-			crdbNodes := c.Spec().NodeCount - 1
-			workAndPromNode := crdbNodes + 1
 
 			promCfg := &prometheus.Config{}
-			promCfg.WithPrometheusNode(c.Node(workAndPromNode).InstallNodes()[0]).
-				WithNodeExporter(c.Range(1, c.Spec().NodeCount-1).InstallNodes()).
-				WithCluster(c.Range(1, c.Spec().NodeCount-1).InstallNodes()).
+			promCfg.WithPrometheusNode(c.WorkloadNode().InstallNodes()[0]).
+				WithNodeExporter(c.CRDBNodes().InstallNodes()).
+				WithCluster(c.CRDBNodes().InstallNodes()).
 				WithGrafanaDashboardJSON(grafana.ChangefeedAdmissionControlGrafana)
 			err := c.StartGrafana(ctx, t.L(), promCfg)
 			require.NoError(t, err)
-			promClient, err := clusterstats.SetupCollectorPromClient(ctx, c, t.L(), promCfg)
-			require.NoError(t, err)
-			statCollector := clusterstats.NewStatsCollector(ctx, promClient)
-
-			c.Put(ctx, t.DeprecatedWorkload(), "./workload", c.Node(workAndPromNode))
-			startOpts := option.DefaultStartOptsNoBackups()
+			startOpts := option.NewStartOpts(option.NoBackupSchedule)
 			roachtestutil.SetDefaultAdminUIPort(c, &startOpts.RoachprodOpts)
 			startOpts.RoachprodOpts.ExtraArgs = append(startOpts.RoachprodOpts.ExtraArgs,
 				"--vmodule=io_load_listener=2")
 			settings := install.MakeClusterSettings()
-			c.Start(ctx, t.L(), startOpts, settings, c.Range(1, crdbNodes))
-			setAdmissionControl(ctx, t, c, true)
+			c.Start(ctx, t.L(), startOpts, settings, c.CRDBNodes())
+			promClient, err := clusterstats.SetupCollectorPromClient(ctx, c, t.L(), promCfg)
+			require.NoError(t, err)
+			statCollector := clusterstats.NewStatsCollector(ctx, promClient)
+			roachtestutil.SetAdmissionControl(ctx, t, c, true)
 			duration := 30 * time.Minute
 			t.Status("running workload")
-			m := c.NewMonitor(ctx, c.Range(1, crdbNodes))
+			m := c.NewMonitor(ctx, c.CRDBNodes())
+			labels := map[string]string{
+				"duration":    fmt.Sprintf("%d", duration.Milliseconds()),
+				"concurrency": "512",
+			}
 			m.Go(func(ctx context.Context) error {
 				dur := " --duration=" + duration.String()
-				url := fmt.Sprintf(" {pgurl:1-%d}", crdbNodes)
-				cmd := "./workload run kv --init --histograms=perf/stats.json --concurrency=512 " +
-					"--splits=1000 --read-percent=0 --min-block-bytes=65536 --max-block-bytes=65536 " +
-					"--txn-qos=background --tolerate-errors" + dur + url
-				c.Run(ctx, option.WithNodes(c.Node(workAndPromNode)), cmd)
+				url := fmt.Sprintf(" {pgurl%s}", c.CRDBNodes())
+				cmd := fmt.Sprintf("./cockroach workload run kv --init %s --concurrency=512 "+
+					"--splits=1000 --read-percent=0 --min-block-bytes=65536 --max-block-bytes=65536 "+
+					"--txn-qos=background --tolerate-errors --secure %s %s",
+					roachtestutil.GetWorkloadHistogramArgs(t, c, labels), dur, url)
+				c.Run(ctx, option.WithNodes(c.WorkloadNode()), cmd)
 				return nil
 			})
 			m.Go(func(ctx context.Context) error {
@@ -123,16 +118,29 @@ func registerElasticIO(r registry.Registry) {
 				// not working, the threshold of 7 will be easily breached, since
 				// regular tokens allow sub-levels to exceed 10.
 				const subLevelThreshold = 7
+				const sampleCountForL0Sublevel = 12
+				var l0SublevelCount []float64
 				// Sleep initially for stability to be achieved, before measuring.
 				time.Sleep(5 * time.Minute)
 				for {
-					time.Sleep(30 * time.Second)
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					default:
+					}
+					time.Sleep(10 * time.Second)
 					val, err := getMetricVal(subLevelMetric)
 					if err != nil {
 						continue
 					}
-					if val > subLevelThreshold {
-						t.Fatalf("sub-level count %f exceeded threshold", val)
+					l0SublevelCount = append(l0SublevelCount, val)
+					// We want to use the mean of the last 2m of data to avoid short-lived
+					// spikes causing failures.
+					if len(l0SublevelCount) >= sampleCountForL0Sublevel {
+						latestSampleMeanL0Sublevels := roachtestutil.GetMeanOverLastN(sampleCountForL0Sublevel, l0SublevelCount)
+						if latestSampleMeanL0Sublevels > subLevelThreshold {
+							t.Fatalf("sub-level mean %f over last %d iterations exceeded threshold", latestSampleMeanL0Sublevels, sampleCountForL0Sublevel)
+						}
 					}
 					if timeutil.Now().After(endTime) {
 						return nil

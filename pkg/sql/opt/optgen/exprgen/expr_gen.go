@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package exprgen
 
@@ -308,6 +303,9 @@ func (eg *exprGen) castToDesiredType(arg interface{}, desiredType reflect.Type) 
 		if desiredType == reflect.TypeOf(memo.ScanLimit(0)) {
 			return memo.MakeScanLimit(int64(*i), false)
 		}
+		if desiredType == reflect.TypeOf(int64(0)) {
+			return int64(*i)
+		}
 	}
 
 	if str, ok := arg.(string); ok {
@@ -404,7 +402,7 @@ func (eg *exprGen) populateBestProps(
 		} else {
 			childProps = xform.BuildChildPhysicalPropsScalar(eg.mem, expr, i)
 		}
-		cost += eg.populateBestProps(ctx, expr.Child(i), childProps)
+		cost.Add(eg.populateBestProps(ctx, expr.Child(i), childProps))
 	}
 
 	if rel != nil {
@@ -414,7 +412,7 @@ func (eg *exprGen) populateBestProps(
 		provided.Ordering = ordering.BuildProvided(eg.f.EvalContext(), rel, &required.Ordering)
 		provided.Distribution = distribution.BuildProvided(ctx, eg.f.EvalContext(), rel, &required.Distribution)
 
-		cost += eg.coster.ComputeCost(rel, required)
+		cost.Add(eg.coster.ComputeCost(rel, required))
 		eg.mem.SetBestProps(rel, required, provided, cost)
 	}
 	return cost

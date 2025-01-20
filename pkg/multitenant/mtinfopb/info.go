@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package mtinfopb
 
@@ -36,8 +31,13 @@ const (
 	// This mode causes KV nodes to spontaneously start the SQL service
 	// for the tenant.
 	ServiceModeShared TenantServiceMode = 2
+
+	// ServiceModeStopping says that the service was previusly in
+	// ServiceModeShared but is in the process of stopping.
+	ServiceModeStopping TenantServiceMode = 3
+
 	// MaxServiceMode is a sentinel value.
-	MaxServiceMode TenantServiceMode = ServiceModeShared
+	MaxServiceMode TenantServiceMode = ServiceModeStopping
 )
 
 // String implements fmt.Stringer.
@@ -49,6 +49,8 @@ func (s TenantServiceMode) String() string {
 		return "external"
 	case ServiceModeShared:
 		return "shared"
+	case ServiceModeStopping:
+		return "stopping"
 	default:
 		return fmt.Sprintf("unimplemented-%d", int(s))
 	}

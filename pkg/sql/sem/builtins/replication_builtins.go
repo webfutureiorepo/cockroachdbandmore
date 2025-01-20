@@ -1,26 +1,25 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package builtins
 
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/repstream/streampb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
+	"github.com/cockroachdb/cockroach/pkg/sql/syntheticprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -43,7 +42,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 	// Stream ingestion functions starts here.
 	"crdb_internal.complete_stream_ingestion_job": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -64,7 +63,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 
 	"crdb_internal.stream_ingestion_stats_json": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -85,7 +84,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 
 	"crdb_internal.stream_ingestion_stats_pb": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -107,7 +106,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 	// Stream production functions starts here.
 	"crdb_internal.start_replication_stream": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -178,7 +177,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 
 	"crdb_internal.replication_stream_progress": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -219,7 +218,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 	),
 	"crdb_internal.stream_partition": makeBuiltin(
 		tree.FunctionProperties{
-			Category:           builtinconstants.CategoryStreamIngestion,
+			Category:           builtinconstants.CategoryClusterReplication,
 			Undocumented:       true,
 			DistsqlBlocklist:   false,
 			VectorizeStreaming: true,
@@ -239,6 +238,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 					return nil, err
 				}
 				return mgr.StreamPartition(
+					ctx,
 					streampb.StreamID(tree.MustBeDInt(args[0])),
 					[]byte(tree.MustBeDBytes(args[1])),
 				)
@@ -250,7 +250,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 
 	"crdb_internal.replication_stream_spec": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -266,7 +266,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 				}
 
 				streamID := int64(tree.MustBeDInt(args[0]))
-				spec, err := mgr.GetReplicationStreamSpec(ctx, streampb.StreamID(streamID))
+				spec, err := mgr.GetPhysicalReplicationStreamSpec(ctx, streampb.StreamID(streamID))
 				if err != nil {
 					return nil, err
 				}
@@ -285,7 +285,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 
 	"crdb_internal.complete_replication_stream": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -317,7 +317,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 	),
 	"crdb_internal.setup_span_configs_stream": makeBuiltin(
 		tree.FunctionProperties{
-			Category:           builtinconstants.CategoryStreamIngestion,
+			Category:           builtinconstants.CategoryClusterReplication,
 			Undocumented:       true,
 			DistsqlBlocklist:   false,
 			VectorizeStreaming: true,
@@ -343,7 +343,7 @@ var replicationBuiltins = map[string]builtinDefinition{
 	),
 	"crdb_internal.unsafe_revert_tenant_to_timestamp": makeBuiltin(
 		tree.FunctionProperties{
-			Category:         builtinconstants.CategoryStreamIngestion,
+			Category:         builtinconstants.CategoryClusterReplication,
 			Undocumented:     true,
 			DistsqlBlocklist: true,
 		},
@@ -382,6 +382,207 @@ var replicationBuiltins = map[string]builtinDefinition{
 				return &tsDec, err
 			},
 			Info:       "This function reverts the given tenant to a particular timestamp.",
+			Volatility: volatility.Volatile,
+		},
+	),
+	"crdb_internal.split_at": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         builtinconstants.CategorySystemRepair,
+			Undocumented:     true,
+			DistsqlBlocklist: true,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "key", Typ: types.Bytes},
+				{Name: "ttl", Typ: types.Interval},
+			},
+			ReturnType: tree.FixedReturnType(types.Void),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				if err := evalCtx.SessionAccessor.CheckPrivilege(
+					ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.REPAIRCLUSTER,
+				); err != nil {
+					return nil, err
+				}
+				key := roachpb.Key(tree.MustBeDBytes(args[0]))
+				ttl := tree.MustBeDInterval(args[1])
+				expiration := evalCtx.Txn.DB().Clock().Now().Add(ttl.Nanos(), 0)
+				return tree.DVoidDatum, evalCtx.Txn.DB().AdminSplit(ctx, key, expiration)
+			},
+			Info:       "Splits at an *arbitrary* byte key.",
+			Volatility: volatility.Volatile,
+		},
+	),
+	"crdb_internal.scatter": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         builtinconstants.CategorySystemRepair,
+			Undocumented:     true,
+			DistsqlBlocklist: true,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "key", Typ: types.Bytes},
+			},
+			ReturnType: tree.FixedReturnType(types.Void),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				if err := evalCtx.SessionAccessor.CheckPrivilege(
+					ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.REPAIRCLUSTER,
+				); err != nil {
+					return nil, err
+				}
+				key := roachpb.Key(tree.MustBeDBytes(args[0]))
+				_, err := evalCtx.Txn.DB().AdminScatter(ctx, key, 0)
+				return tree.DVoidDatum, err
+			},
+			Info:       "Scatters the passed arbitrary key",
+			Volatility: volatility.Volatile,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "key", Typ: types.Bytes},
+				{Name: "end_key", Typ: types.Bytes},
+			},
+			ReturnType: tree.FixedReturnType(types.Void),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				if err := evalCtx.SessionAccessor.CheckPrivilege(
+					ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.REPAIRCLUSTER,
+				); err != nil {
+					return nil, err
+				}
+				key := roachpb.Key(tree.MustBeDBytes(args[0]))
+				endKey := roachpb.Key(tree.MustBeDBytes(args[1]))
+
+				scatterReq := &kvpb.AdminScatterRequest{
+					RequestHeader:   kvpb.RequestHeaderFromSpan(roachpb.Span{Key: key, EndKey: endKey}),
+					RandomizeLeases: true,
+				}
+				_, pErr := kv.SendWrapped(ctx, evalCtx.Txn.DB().NonTransactionalSender(), scatterReq)
+				if pErr != nil {
+					return nil, pErr.GoError()
+				}
+				return tree.DVoidDatum, nil
+			},
+			Info:       "Scatters the passed arbitrary key",
+			Volatility: volatility.Volatile,
+		},
+	),
+	// TODO(ssd): These functions likely aren't the final API we
+	// want.  Namely, boths should perhaps just be overloads of
+	// existing functions.
+	"crdb_internal.plan_logical_replication": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         builtinconstants.CategoryClusterReplication,
+			Undocumented:     true,
+			DistsqlBlocklist: true,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "req", Typ: types.Bytes},
+			},
+			ReturnType: tree.FixedReturnType(types.Bytes),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				mgr, err := evalCtx.StreamManagerFactory.GetReplicationStreamManager(ctx)
+				if err != nil {
+					return nil, err
+				}
+				reqBytes := []byte(tree.MustBeDBytes(args[0]))
+				req := streampb.LogicalReplicationPlanRequest{}
+				if err := protoutil.Unmarshal(reqBytes, &req); err != nil {
+					return nil, err
+				}
+
+				spec, err := mgr.PlanLogicalReplication(ctx, req)
+				if err != nil {
+					return nil, err
+				}
+				rawSpec, err := protoutil.Marshal(spec)
+				if err != nil {
+					return nil, err
+				}
+				return tree.NewDBytes(tree.DBytes(rawSpec)), err
+			},
+			Info:       "Returns a replication stream spec for the given logical replication plan request",
+			Volatility: volatility.Volatile,
+		},
+	),
+
+	"crdb_internal.start_replication_stream_for_tables": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         builtinconstants.CategoryClusterReplication,
+			Undocumented:     true,
+			DistsqlBlocklist: true,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "req", Typ: types.Bytes},
+			},
+			ReturnType: tree.FixedReturnType(types.Bytes),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				mgr, err := evalCtx.StreamManagerFactory.GetReplicationStreamManager(ctx)
+				if err != nil {
+					return nil, err
+				}
+				reqBytes := []byte(tree.MustBeDBytes(args[0]))
+				req := streampb.ReplicationProducerRequest{}
+				if err := protoutil.Unmarshal(reqBytes, &req); err != nil {
+					return nil, err
+				}
+
+				spec, err := mgr.StartReplicationStreamForTables(ctx, req)
+				if err != nil {
+					return nil, err
+				}
+
+				rawSpec, err := protoutil.Marshal(&spec)
+				if err != nil {
+					return nil, err
+				}
+				return tree.NewDBytes(tree.DBytes(rawSpec)), err
+			},
+			Info:       "TODO(ssd)",
+			Volatility: volatility.Volatile,
+		},
+	),
+	"crdb_internal.logical_replication_inject_failures": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         builtinconstants.CategoryClusterReplication,
+			Undocumented:     true,
+			DistsqlBlocklist: true,
+		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "stream", Typ: types.Int},
+				{Name: "proc", Typ: types.Int},
+				{Name: "percent", Typ: types.Int},
+			},
+			ReturnType: tree.FixedReturnType(types.Void),
+			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
+				mgr, err := evalCtx.StreamManagerFactory.GetReplicationStreamManager(ctx)
+				if err != nil {
+					return nil, err
+				}
+				stream := streampb.StreamID(int(tree.MustBeDInt(args[0])))
+				proc := int32(int(tree.MustBeDInt(args[1])))
+				percent := streampb.StreamID(int(tree.MustBeDInt(args[2])))
+
+				if percent > 100 {
+					return nil, errors.New("invalid percent")
+				}
+
+				found := false
+				for _, i := range mgr.DebugGetLogicalConsumerStatuses(ctx) {
+					if stream == 0 || stream == i.StreamID {
+						if proc == 0 || proc == i.ProcessorID {
+							found = true
+							i.SetInjectedFailurePercent(uint32(percent))
+						}
+					}
+				}
+				if !found {
+					return nil, errors.New("no matching processors found")
+				}
+				return tree.DVoidDatum, nil
+			},
+			Info:       "Debugging tool to force failures during application of LDR events",
 			Volatility: volatility.Volatile,
 		},
 	),

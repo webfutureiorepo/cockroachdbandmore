@@ -1,26 +1,23 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 import React from "react";
 import { Link } from "react-router-dom";
+
+import { Loading } from "src/loading";
 import { ColumnDescriptor, SortedTable } from "src/sortedtable";
-import { StmtInsightEvent } from "../types";
-import { InsightCell } from "../workloadInsights/util/insightCell";
 import {
   DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT,
   Duration,
   limitText,
 } from "src/util";
-import { Loading } from "src/loading";
-import { InsightsError } from "../insightsErrorComponent";
+
 import { Timestamp, Timezone } from "../../timestamp";
+import { InsightsError } from "../insightsErrorComponent";
+import { StmtInsightEvent } from "../types";
+import { InsightCell } from "../workloadInsights/util/insightCell";
 
 const stmtColumns: ColumnDescriptor<StmtInsightEvent>[] = [
   {

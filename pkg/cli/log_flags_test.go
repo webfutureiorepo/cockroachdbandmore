@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -66,7 +61,7 @@ func TestSetupLogging(t *testing.T) {
 		`file-defaults: \{` +
 			`dir: (?P<path>[^,]+), ` +
 			`max-file-size: 10MiB, ` +
-			`file-permissions: "0644", ` +
+			`file-permissions: "0640", ` +
 			`buffered-writes: true, ` +
 			`filter: INFO, ` +
 			`format: crdb-v2, ` +
@@ -75,14 +70,14 @@ func TestSetupLogging(t *testing.T) {
 	fileDefaultsNoMaxSizeRe := regexp.MustCompile(
 		`file-defaults: \{` +
 			`dir: (?P<path>[^,]+), ` +
-			`file-permissions: "0644", ` +
+			`file-permissions: "0640", ` +
 			`buffered-writes: true, ` +
 			`filter: INFO, ` +
 			`format: crdb-v2, ` +
 			`redactable: true, ` +
 			`buffering: NONE\}`)
 	const fileDefaultsNoDir = `file-defaults: {` +
-		`file-permissions: "0644", ` +
+		`file-permissions: "0640", ` +
 		`buffered-writes: true, ` +
 		`filter: INFO, ` +
 		`format: crdb-v2, ` +
@@ -97,7 +92,7 @@ func TestSetupLogging(t *testing.T) {
 		`\{channels: \{(?P<chans>[^}]*)\}, ` +
 			`dir: (?P<path>[^,]+), ` +
 			`max-file-size: 10MiB, ` +
-			`file-permissions: "0644", ` +
+			`file-permissions: "0640", ` +
 			`buffered-writes: (?P<buf>[^,]+), ` +
 			`filter: INFO, ` +
 			`format: (?P<format>[^,]+), ` +
@@ -108,7 +103,7 @@ func TestSetupLogging(t *testing.T) {
 			`dir: (?P<path>[^,]+), ` +
 			`max-file-size: 100KiB, ` +
 			`max-group-size: 1.0MiB, ` +
-			`file-permissions: "0644", ` +
+			`file-permissions: "0640", ` +
 			`buffered-writes: true, ` +
 			`filter: INFO, ` +
 			`format: crdb-v2, ` +

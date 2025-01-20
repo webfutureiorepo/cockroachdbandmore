@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -25,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessioninit"
@@ -32,11 +28,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // CreateRoleNode creates entries in the system.users table.
 // This is called from CREATE USER and CREATE ROLE.
 type CreateRoleNode struct {
+	zeroInputPlanNode
 	ifNotExists bool
 	isRole      bool
 	roleOptions roleoption.List
@@ -122,7 +120,7 @@ func (p *planner) CreateRoleNode(
 }
 
 func (n *CreateRoleNode) startExec(params runParams) error {
-	var opName string
+	var opName redact.RedactableString
 	if n.isRole {
 		sqltelemetry.IncIAMCreateCounter(sqltelemetry.Role)
 		opName = "create-role"
@@ -141,8 +139,8 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 		params.ctx,
 		opName,
 		params.p.txn,
-		sessiondata.RootUserSessionDataOverride,
-		fmt.Sprintf(`select "isRole" from %s where username = $1`, sessioninit.UsersTableName),
+		sessiondata.NodeUserSessionDataOverride,
+		fmt.Sprintf(`select "isRole" from system.public.%s where username = $1`, catconstants.UsersTableName),
 		n.roleName,
 	)
 	if err != nil {
@@ -157,14 +155,14 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 	}
 
 	// TODO(richardjcai): move hashedPassword column to system.role_options.
-	stmt := fmt.Sprintf("INSERT INTO %s VALUES ($1, $2, $3, $4)", sessioninit.UsersTableName)
+	stmt := fmt.Sprintf("INSERT INTO system.public.%s VALUES ($1, $2, $3, $4)", catconstants.UsersTableName)
 	roleID, err := descidgen.GenerateUniqueRoleID(params.ctx, params.ExecCfg().DB, params.ExecCfg().Codec)
 	if err != nil {
 		return err
 	}
 	rowsAffected, err := params.p.InternalSQLTxn().ExecEx(
 		params.ctx, opName, params.p.txn,
-		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		sessiondata.NodeUserSessionDataOverride,
 		stmt, n.roleName, hashedPassword, n.isRole, roleID,
 	)
 	if err != nil {
@@ -202,7 +200,7 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 
 func updateRoleOptions(
 	params runParams,
-	opName string,
+	opName redact.RedactableString,
 	roleOptions roleoption.List,
 	roleName username.SQLUsername,
 	telemetryOp string,
@@ -230,6 +228,11 @@ func updateRoleOptions(
 				// will not be interpreted as NULL by the Executor.
 				qargs = append(qargs, nil)
 			} else {
+				if v.Validate != nil {
+					if err := v.Validate(params.ExecCfg().Settings, roleName, val); err != nil {
+						return 0, err
+					}
+				}
 				qargs = append(qargs, val)
 			}
 		}
@@ -247,7 +250,7 @@ func updateRoleOptions(
 			params.ctx,
 			opName,
 			params.p.txn,
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			stmt,
 			qargs...,
 		)

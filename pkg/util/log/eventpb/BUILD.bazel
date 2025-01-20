@@ -37,10 +37,6 @@ go_test(
     size = "small",
     srcs = ["event_test.go"],
     embed = [":eventpb"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = [
         "//pkg/util/log/logpb",
         "@com_github_cockroachdb_redact//:redact",
@@ -51,6 +47,7 @@ go_test(
 proto_library(
     name = "eventpb_proto",
     srcs = [
+        "changefeed_events.proto",
         "cluster_events.proto",
         "ddl_events.proto",
         "debug_events.proto",
@@ -97,8 +94,8 @@ genrule(
         {} \
         >$(location eventlog_channels_generated.go)
     """.format(_EVENTPB_PROTO_LOCATIONS),
-    exec_tools = [
-        "//pkg/util/log/eventpb/eventpbgen:eventpbgen",
+    tools = [
+        "//pkg/util/log/eventpb/eventpbgen",
     ],
     visibility = [
         ":__pkg__",
@@ -117,8 +114,8 @@ genrule(
         {} \
         >$(location json_encode_generated.go)
     """.format(_EVENTPB_PROTO_LOCATIONS),
-    exec_tools = [
-        "//pkg/util/log/eventpb/eventpbgen:eventpbgen",
+    tools = [
+        "//pkg/util/log/eventpb/eventpbgen",
     ],
     visibility = [
         ":__pkg__",

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package norm implements normalization for queries.
 package norm
@@ -136,6 +131,9 @@ func (f *Factory) Init(ctx context.Context, evalCtx *eval.Context, catalog cat.C
 		mem = &memo.Memo{}
 	}
 	mem.Init(ctx, evalCtx)
+	mem.SetReplacer(func(e opt.Expr, replace memo.ReplaceFunc) opt.Expr {
+		return f.Replace(e, ReplaceFunc(replace))
+	})
 
 	// This initialization pattern ensures that fields are not unwittingly
 	// reused. Field reuse must be explicit.
@@ -301,6 +299,20 @@ func (f *Factory) CopyAndReplace(
 ) {
 	opt.MaybeInjectOptimizerTestingPanic(f.ctx, f.evalCtx)
 
+	f.CopyMetadataFrom(from.Memo())
+
+	// Perform copy and replacement, and store result as the root of this
+	// factory's memo.
+	to := f.invokeReplace(from, replace).(memo.RelExpr)
+	f.Memo().SetRoot(to, fromProps)
+}
+
+// CopyMetadataFrom copies the metadata from the given memo to this factory's
+// memo. This allows expressions copied from the original memo to reference the
+// same tables and columns that they did before.
+func (f *Factory) CopyMetadataFrom(from *memo.Memo) {
+	opt.MaybeInjectOptimizerTestingPanic(f.ctx, f.evalCtx)
+
 	if !f.mem.IsEmpty() {
 		panic(errors.AssertionFailedf("destination memo must be empty"))
 	}
@@ -308,18 +320,17 @@ func (f *Factory) CopyAndReplace(
 	// Copy the next scalar rank to the target memo so that new scalar
 	// expressions built with the new memo will not share scalar ranks with
 	// existing expressions.
-	f.mem.CopyNextRankFrom(from.Memo())
+	f.mem.CopyNextRankFrom(from)
+
+	// Copy the next With ID to the target memo so that new CTE expressions built
+	// with the new memo will not share With IDs with existing expressions.
+	f.mem.CopyNextWithIDFrom(from)
 
 	// Copy all metadata to the target memo so that referenced tables and
 	// columns can keep the same ids they had in the "from" memo. Scalar
 	// expressions in the metadata cannot have placeholders, so we simply copy
 	// the expressions without replacement.
-	f.mem.Metadata().CopyFrom(from.Memo().Metadata(), f.CopyWithoutAssigningPlaceholders)
-
-	// Perform copy and replacement, and store result as the root of this
-	// factory's memo.
-	to := f.invokeReplace(from, replace).(memo.RelExpr)
-	f.Memo().SetRoot(to, fromProps)
+	f.mem.Metadata().CopyFrom(from.Metadata(), f.CopyWithoutAssigningPlaceholders)
 }
 
 // CopyWithoutAssigningPlaceholders returns a copy of the given scalar expression.

@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tabledesc_test
 
@@ -386,7 +381,7 @@ func TestIndexStrictColumnIDs(t *testing.T) {
 	require.NoError(t, err)
 
 	// Retrieve KV trace and check for redundant values.
-	rows, err := conn.Query(`SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE message LIKE 'InitPut%'`)
+	rows, err := conn.Query(`SELECT message FROM [SHOW KV TRACE FOR SESSION] WHERE message LIKE 'CPut%/Table/%/2% ->%'`)
 	require.NoError(t, err)
 	defer rows.Close()
 	require.True(t, rows.Next())
@@ -397,7 +392,7 @@ func TestIndexStrictColumnIDs(t *testing.T) {
 	if srv.TenantController().StartedDefaultTestTenant() {
 		tenantPrefix = codec.TenantPrefix().String()
 	}
-	expected := fmt.Sprintf(`InitPut %s/Table/%d/2/0/0/0/0/0/0 -> /BYTES/0x2300030003000300`, tenantPrefix, mut.GetID())
+	expected := fmt.Sprintf(`CPut %s/Table/%d/2/0/0/0/0/0/0 -> /BYTES/0x2300030003000300`, tenantPrefix, mut.GetID())
 	require.Equal(t, expected, msg)
 
 	// Test that with the strict guarantees, this table descriptor would have been

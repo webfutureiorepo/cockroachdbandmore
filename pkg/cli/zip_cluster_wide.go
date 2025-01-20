@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cli
 
@@ -19,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -26,7 +22,6 @@ import (
 const (
 	debugBase         = "debug"
 	eventsName        = "/events"
-	livenessName      = "/liveness"
 	nodesPrefix       = "/nodes"
 	rangelogName      = "/rangelog"
 	reportsPrefix     = "/reports"
@@ -34,53 +29,85 @@ const (
 	settingsName      = "/settings"
 	problemRangesName = reportsPrefix + "/problemranges"
 	tenantRangesName  = "/tenant_ranges"
+	nodesFile         = "nodes.json"
+	livenessFile      = "liveness.json"
+	eventsFile        = "events.json"
+	rangeLogFile      = "rangelog.json"
+	settingsFile      = "settings.json"
+	problemRangesFile = "problemranges.json"
 )
 
 // makeClusterWideZipRequests defines the zipRequests that are to be
 // performed just once for the entire cluster.
 func makeClusterWideZipRequests(
-	admin serverpb.AdminClient, status serverpb.StatusClient, prefix string,
+	zr *zipReporter, admin serverpb.AdminClient, status serverpb.StatusClient, prefix string,
 ) []zipRequest {
-	return []zipRequest{
-		// NB: we intentionally omit liveness since it's already pulled manually (we
-		// act on the output to special case decommissioned nodes).
-		{
+	var zipRequests []zipRequest
+
+	if zipCtx.files.shouldIncludeFile(eventsFile) {
+		zipRequests = append(zipRequests, zipRequest{
 			fn: func(ctx context.Context) (interface{}, error) {
 				return admin.Events(ctx, &serverpb.EventsRequest{})
 			},
 			pathName: prefix + eventsName,
-		},
-		{
+		})
+	} else {
+		zr.info("skipping %s due to file filters", eventsFile)
+	}
+
+	if zipCtx.files.shouldIncludeFile(rangeLogFile) {
+		zipRequests = append(zipRequests, zipRequest{
 			fn: func(ctx context.Context) (interface{}, error) {
 				return admin.RangeLog(ctx, &serverpb.RangeLogRequest{})
 			},
 			pathName: prefix + rangelogName,
-		},
-		{
+		})
+	} else {
+		zr.info("skipping %s due to file filters", rangeLogFile)
+	}
+
+	if zipCtx.files.shouldIncludeFile(settingsFile) {
+		zipRequests = append(zipRequests, zipRequest{
 			fn: func(ctx context.Context) (interface{}, error) {
 				return admin.Settings(ctx, &serverpb.SettingsRequest{})
 			},
 			pathName: prefix + settingsName,
-		},
-		{
-			fn: func(ctx context.Context) (interface{}, error) {
-				return status.ProblemRanges(ctx, &serverpb.ProblemRangesRequest{})
-			},
-			pathName: prefix + problemRangesName,
-		},
+		})
+	} else {
+		zr.info("skipping %s due to file filters", settingsFile)
 	}
+
+	if zipCtx.includeRangeInfo {
+		if zipCtx.files.shouldIncludeFile(problemRangesFile) {
+			zipRequests = append(zipRequests, zipRequest{
+				fn: func(ctx context.Context) (interface{}, error) {
+					return status.ProblemRanges(ctx, &serverpb.ProblemRangesRequest{})
+				},
+				pathName: prefix + problemRangesName,
+			})
+		} else {
+			zr.info("skipping %s due to file filters", problemRangesFile)
+		}
+
+	}
+	return zipRequests
 }
 
 // collectClusterData runs the data collection that only needs to
 // occur once for the entire cluster.
 func (zc *debugZipContext) collectClusterData(
 	ctx context.Context,
-) (nodesList *serverpb.NodesListResponse, livenessByNodeID nodeLivenesses, err error) {
-	clusterWideZipRequests := makeClusterWideZipRequests(zc.admin, zc.status, zc.prefix)
+) (
+	nodesList *serverpb.NodesListResponse,
+	nodesListRedacted *serverpb.NodesListResponse,
+	livenessByNodeID nodeLivenesses,
+	err error,
+) {
+	clusterWideZipRequests := makeClusterWideZipRequests(zc.clusterPrinter, zc.admin, zc.status, zc.prefix)
 
 	for _, r := range clusterWideZipRequests {
 		if err := zc.runZipRequest(ctx, zc.clusterPrinter, r); err != nil {
-			return &serverpb.NodesListResponse{}, nil, err
+			return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, err
 		}
 	}
 
@@ -97,39 +124,51 @@ func (zc *debugZipContext) collectClusterData(
 		return nil
 	}
 	if err := queryAndDumpTables(zipInternalTablesPerCluster); err != nil {
-		return &serverpb.NodesListResponse{}, nil, err
+		return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, err
 	}
 	if err := queryAndDumpTables(zipSystemTables); err != nil {
-		return &serverpb.NodesListResponse{}, nil, err
+		return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, err
 	}
 
 	{
 		s := zc.clusterPrinter.start("requesting nodes")
+
 		var nodesStatus *serverpb.NodesResponse
-		err := zc.runZipFn(ctx, s, func(ctx context.Context) error {
+		err = zc.runZipFn(ctx, s, func(ctx context.Context) error {
 			nodesList, err = zc.status.NodesList(ctx, &serverpb.NodesListRequest{})
-			nodesStatus, err = zc.status.Nodes(ctx, &serverpb.NodesRequest{})
+			if err != nil {
+				return err
+			}
+			nodesStatus, err = zc.status.Nodes(ctx, &serverpb.NodesRequest{Redact: zipCtx.redact})
+			if err != nil {
+				return err
+			}
+			nodesListRedacted, err = zc.status.NodesList(ctx, &serverpb.NodesListRequest{Redact: zipCtx.redact})
 			return err
 		})
 
-		if code := status.Code(errors.Cause(err)); code == codes.Unimplemented {
-			// running on non system tenant, use data from NodesList()
-			if cErr := zc.z.createJSONOrError(s, debugBase+"/nodes.json", nodesList, err); cErr != nil {
-				return &serverpb.NodesListResponse{}, nil, cErr
+		if zipCtx.files.shouldIncludeFile(nodesFile) {
+			if code := status.Code(errors.Cause(err)); code == codes.Unimplemented {
+				// running on non system tenant, use data from redacted NodesList()
+				if cErr := zc.z.createJSONOrError(s, debugBase+"/"+nodesFile, nodesListRedacted, err); cErr != nil {
+					return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, cErr
+				}
+			} else {
+				if cErr := zc.z.createJSONOrError(s, debugBase+"/"+nodesFile, nodesStatus, err); cErr != nil {
+					return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, cErr
+				}
 			}
 		} else {
-			if cErr := zc.z.createJSONOrError(s, debugBase+"/nodes.json", nodesStatus, err); cErr != nil {
-				return &serverpb.NodesListResponse{}, nil, cErr
-			}
+			s.info("skipping %s due to file filters", nodesFile)
 		}
 
 		if nodesList == nil {
 			// In case the NodesList() RPC failed), we still want to inspect the
 			// per-node endpoints on the head node.
 			s = zc.clusterPrinter.start("retrieving the node status")
-			firstNodeDetails, err := zc.status.Details(ctx, &serverpb.DetailsRequest{NodeId: "local"})
+			firstNodeDetails, err := zc.status.Details(ctx, &serverpb.DetailsRequest{NodeId: "local", Redact: zipCtx.redact})
 			if err != nil {
-				return &serverpb.NodesListResponse{}, nil, err
+				return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, err
 			}
 			s.done()
 			nodesList = &serverpb.NodesListResponse{
@@ -148,15 +187,34 @@ func (zc *debugZipContext) collectClusterData(
 			lresponse, err = zc.admin.Liveness(ctx, &serverpb.LivenessRequest{})
 			return err
 		})
-		if cErr := zc.z.createJSONOrError(s, zc.prefix+livenessName+".json", nodes, err); cErr != nil {
-			return &serverpb.NodesListResponse{}, nil, cErr
+		if zipCtx.files.shouldIncludeFile(livenessFile) {
+			if cErr := zc.z.createJSONOrError(s, zc.prefix+"/"+livenessFile, nodes, err); cErr != nil {
+				return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, cErr
+			}
+		} else {
+			s.info("skipping %s due to file filters", livenessFile)
 		}
+
 		livenessByNodeID = map[roachpb.NodeID]livenesspb.NodeLivenessStatus{}
 		if lresponse != nil {
 			livenessByNodeID = lresponse.Statuses
 		}
 	}
 
+	err = zc.getTenantRange(ctx)
+	if err != nil {
+		return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, err
+	}
+
+	err = zc.getJobTraces(ctx)
+	if err != nil {
+		return &serverpb.NodesListResponse{}, &serverpb.NodesListResponse{}, nil, err
+	}
+
+	return nodesList, nodesListRedacted, livenessByNodeID, nil
+}
+
+func (zc *debugZipContext) getTenantRange(ctx context.Context) error {
 	if zipCtx.includeRangeInfo {
 		var tenantRanges *serverpb.TenantRangesResponse
 		s := zc.clusterPrinter.start("requesting tenant ranges")
@@ -166,7 +224,7 @@ func (zc *debugZipContext) collectClusterData(
 			return err
 		}); requestErr != nil {
 			if err := zc.z.createError(s, zc.prefix+tenantRangesName, requestErr); err != nil {
-				return &serverpb.NodesListResponse{}, nil, s.fail(err)
+				return s.fail(err)
 			}
 		} else {
 			s.done()
@@ -176,30 +234,36 @@ func (zc *debugZipContext) collectClusterData(
 				sort.Slice(rangeList.Ranges, func(i, j int) bool {
 					return rangeList.Ranges[i].RangeID > rangeList.Ranges[j].RangeID
 				})
-				sLocality := zc.clusterPrinter.start("writing tenant ranges for locality: %s", locality)
+				sLocality := zc.clusterPrinter.start(redact.Sprintf("writing tenant ranges for locality: %s", locality))
 				name := fmt.Sprintf("%s/%s/%s", zc.prefix, tenantRangesName, locality)
-				s := zc.clusterPrinter.start("writing tenant ranges for locality %s", locality)
+				if !zipCtx.files.shouldIncludeFile(locality + ".json") {
+					s.info("skipping tenant ranges for locality %s due to file filters", locality)
+					continue
+				}
+				s := zc.clusterPrinter.start(redact.Sprintf("writing tenant ranges for locality %s", locality))
 				if err := zc.z.createJSON(s, name+".json", rangeList.Ranges); err != nil {
-					return &serverpb.NodesListResponse{}, nil, s.fail(err)
+					return s.fail(err)
 				}
 				sLocality.done()
 			}
 			zc.clusterPrinter.info("%d tenant ranges found", rangesFound)
 		}
 	}
+	return nil
+}
 
+func (zc *debugZipContext) getJobTraces(ctx context.Context) error {
 	if zipCtx.includeRunningJobTraces {
 		s := zc.clusterPrinter.start("collecting the inflight traces for jobs")
 		if requestErr := zc.runZipFn(ctx, s, func(ctx context.Context) error {
 			return zc.dumpTraceableJobTraces(ctx)
 		}); requestErr != nil {
 			if err := zc.z.createError(s, zc.prefix+"/jobs", requestErr); err != nil {
-				return &serverpb.NodesListResponse{}, nil, s.fail(err)
+				return s.fail(err)
 			}
 		} else {
 			s.done()
 		}
 	}
-
-	return nodesList, livenessByNodeID, nil
+	return nil
 }

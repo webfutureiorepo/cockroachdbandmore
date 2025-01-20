@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -309,7 +304,7 @@ func (d *dev) generateJs(cmd *cobra.Command) error {
 
 	args := []string{
 		"build",
-		"//pkg/ui/workspaces/eslint-plugin-crdb:eslint-plugin-crdb-lib",
+		"//pkg/ui/workspaces/eslint-plugin-crdb:ts_project",
 		"//pkg/ui/workspaces/db-console/src/js:crdb-protobuf-client",
 		"//pkg/ui/workspaces/cluster-ui:ts_project",
 	}
@@ -336,8 +331,14 @@ func (d *dev) generateJs(cmd *cobra.Command) error {
 
 	// Copy the eslint-plugin output tree back out of the sandbox, since eslint
 	// plugins in editors default to only searching in ./node_modules for plugins.
-	return d.os.CopyAll(
+	err = d.os.CopyAll(
 		filepath.Join(bazelBin, eslintPluginDist),
 		filepath.Join(workspace, eslintPluginDist),
 	)
+	if err != nil {
+		return err
+	}
+
+	// Generate crdb-api-client package.
+	return makeUICrdbApiClientCmd(d).RunE(cmd, []string{})
 }

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // This file lives here instead of sql/flowinfra to avoid an import cycle.
 
@@ -42,13 +37,10 @@ type FlowCtx struct {
 	// ID is a unique identifier for a flow.
 	ID execinfrapb.FlowID
 
-	// EvalCtx is used by all the processors in the flow to evaluate expressions.
-	// Processors that intend to evaluate expressions with this EvalCtx should
-	// get a copy with NewEvalCtx instead of storing a pointer to this one
-	// directly (since some processor mutate the EvalContext they use).
-	//
-	// TODO(andrei): Get rid of this field and pass a non-shared EvalContext to
-	// cores of the processors that need it.
+	// EvalCtx is used by all the processors in the flow to access immutable
+	// state of the execution context. Processors that intend to evaluate
+	// expressions with this EvalCtx should get a copy with NewEvalCtx instead
+	// of using this field.
 	EvalCtx *eval.Context
 
 	Mon *mon.BytesMonitor
@@ -60,7 +52,7 @@ type FlowCtx struct {
 	Txn *kv.Txn
 
 	// MakeLeafTxn returns a new LeafTxn, different from Txn.
-	MakeLeafTxn func() (*kv.Txn, error)
+	MakeLeafTxn func(context.Context) (*kv.Txn, error)
 
 	// Descriptors is used to look up leased table descriptors and to construct
 	// transaction bound TypeResolvers to resolve type references during flow
@@ -107,19 +99,11 @@ type FlowCtx struct {
 	TenantCPUMonitor multitenantcpu.CPUUsageHelper
 }
 
-// NewEvalCtx returns a modifiable copy of the FlowCtx's EvalContext.
-// Processors should use this method any time they need to store a pointer to
-// the EvalContext, since processors may mutate the EvalContext. Specifically,
-// every processor that runs ProcOutputHelper.Init must pass in a modifiable
-// EvalContext, since it stores that EvalContext in its exprHelpers and mutates
-// them at runtime to ensure expressions are evaluated with the correct indexed
-// var context.
-// TODO(yuzefovich): once we remove eval.Context.deprecatedContext, re-evaluate
-// this since many processors don't modify the eval context except for that
-// field.
+// NewEvalCtx returns a modifiable copy of the FlowCtx's eval.Context.
+// Processors should use this method whenever they explicitly modify the
+// eval.Context.
 func (flowCtx *FlowCtx) NewEvalCtx() *eval.Context {
-	evalCopy := flowCtx.EvalCtx.Copy()
-	return evalCopy
+	return flowCtx.EvalCtx.Copy()
 }
 
 // TestingKnobs returns the distsql testing knobs for this flow context.
@@ -168,8 +152,7 @@ func (flowCtx *FlowCtx) NewTypeResolver(txn *kv.Txn) descs.DistSQLTypeResolver {
 // input transaction.
 func (flowCtx *FlowCtx) NewSemaContext(txn *kv.Txn) *tree.SemaContext {
 	resolver := flowCtx.NewTypeResolver(txn)
-	semaCtx := tree.MakeSemaContext()
-	semaCtx.TypeResolver = &resolver
+	semaCtx := tree.MakeSemaContext(&resolver)
 	return &semaCtx
 }
 

@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -33,6 +28,7 @@ import (
 )
 
 type dropFunctionNode struct {
+	zeroInputPlanNode
 	toDrop       []*funcdesc.Mutable
 	dropBehavior tree.DropBehavior
 }
@@ -61,7 +57,7 @@ func (p *planner) DropFunction(ctx context.Context, n *tree.DropRoutine) (ret pl
 	}
 	fnResolved := intsets.MakeFast()
 	for _, fn := range n.Routines {
-		ol, err := p.matchRoutine(ctx, &fn, !n.IfExists, routineType)
+		ol, err := p.matchRoutine(ctx, &fn, !n.IfExists, routineType, true /* inDropContext */)
 		if err != nil {
 			return nil, err
 		}
@@ -123,7 +119,11 @@ func (n *dropFunctionNode) Close(ctx context.Context)           {}
 // returned if the function is not found. An error is also returning if a
 // builtin function is matched.
 func (p *planner) matchRoutine(
-	ctx context.Context, routineObj *tree.RoutineObj, required bool, routineType tree.RoutineType,
+	ctx context.Context,
+	routineObj *tree.RoutineObj,
+	required bool,
+	routineType tree.RoutineType,
+	inDropContext bool,
 ) (*tree.QualifiedOverload, error) {
 	path := p.CurrentSearchPath()
 	unresolvedName := routineObj.FuncName.ToUnresolvedObjectName().ToUnresolvedName()
@@ -141,11 +141,9 @@ func (p *planner) matchRoutine(
 		return nil, err
 	}
 
-	paramTypes, err := routineObj.ParamTypes(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	ol, err := fnDef.MatchOverload(paramTypes, routineObj.FuncName.Schema(), &path, routineType)
+	ol, err := fnDef.MatchOverload(
+		ctx, p, routineObj, &path, routineType, inDropContext, false, /* tryDefaultExprs */
+	)
 	if err != nil {
 		if !required && errors.Is(err, tree.ErrRoutineUndefined) {
 			return nil, nil
@@ -189,7 +187,7 @@ func (p *planner) canDropFunction(ctx context.Context, fnDesc catalog.FunctionDe
 		return err
 	}
 	if !hasOwernship {
-		return errors.Errorf("must be owner of function %s", fnDesc.GetName())
+		return pgerror.Newf(pgcode.InsufficientPrivilege, "must be owner of function %s", fnDesc.GetName())
 	}
 	return nil
 }
@@ -222,6 +220,20 @@ func (p *planner) dropFunctionImpl(ctx context.Context, fnMutable *funcdesc.Muta
 				fnMutable.Name, fnMutable.ID, refMutable.Name, refMutable.ID,
 			),
 		); err != nil {
+			return err
+		}
+	}
+
+	// Remove this function from the dependencies
+	for _, id := range fnMutable.DependsOnFunctions {
+		refMutable, err := p.Descriptors().MutableByID(p.txn).Function(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := refMutable.RemoveFunctionReference(fnMutable.ID); err != nil {
+			return err
+		}
+		if err := p.writeFuncDesc(ctx, refMutable); err != nil {
 			return err
 		}
 	}

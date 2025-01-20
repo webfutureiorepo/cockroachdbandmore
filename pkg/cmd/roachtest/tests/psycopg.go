@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -21,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
-	"github.com/cockroachdb/errors"
 )
 
 var psycopgReleaseTagRegex = regexp.MustCompile(`^(?P<major>\d+)(?:_(?P<minor>\d+)(?:_(?P<point>\d+)(?:_(?P<subpoint>\d+))?)?)?$`)
@@ -39,7 +33,7 @@ func registerPsycopg(r registry.Registry) {
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
-		c.Start(ctx, t.L(), option.DefaultStartOptsInMemory(), install.MakeClusterSettings(), c.All())
+		c.Start(ctx, t.L(), option.NewStartOpts(sqlClientsInMemoryDB), install.MakeClusterSettings(), c.All())
 
 		version, err := fetchCockroachVersion(ctx, t.L(), c, node[0])
 		if err != nil {
@@ -108,18 +102,19 @@ func registerPsycopg(r registry.Registry) {
 
 		t.Status("running psycopg test suite")
 
-		result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(node),
+		result, err := c.RunWithDetailsSingleNode(ctx, t.L(), option.WithNodes(node), fmt.Sprintf(
 			`cd /mnt/data1/psycopg/ &&
 			export PSYCOPG2_TESTDB=defaultdb &&
-			export PSYCOPG2_TESTDB_USER=test_admin &&
+			export PSYCOPG2_TESTDB_USER=%s &&
+			export PSYCOPG2_TESTDB_PASSWORD=%s &&
 			export PSYCOPG2_TESTDB_PORT={pgport:1} &&
 			export PSYCOPG2_TESTDB_HOST=localhost &&
 			make check PYTHON_VERSION=3`,
-		)
+			install.DefaultUser, install.DefaultPassword))
 
-		// Fatal for a roachprod or SSH error. A roachprod error is when result.Err==nil.
+		// Fatal for a roachprod or transient error. A roachprod error is when result.Err==nil.
 		// Proceed for any other (command) errors
-		if err != nil && (result.Err == nil || errors.Is(err, rperrors.ErrSSH255)) {
+		if err != nil && (result.Err == nil || rperrors.IsTransient(err)) {
 			t.Fatal(err)
 		}
 

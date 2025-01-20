@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package jobs
 
@@ -61,7 +56,7 @@ func TestScheduleControl(t *testing.T) {
 	makeSchedule := func(name string, cron string) jobspb.ScheduleID {
 		schedule := th.newScheduledJob(t, name, "sql")
 		if cron != "" {
-			require.NoError(t, schedule.SetSchedule(cron))
+			require.NoError(t, schedule.SetScheduleAndNextRun(cron))
 		}
 
 		require.NoError(t, schedules.Create(ctx, schedule))
@@ -82,7 +77,7 @@ func TestScheduleControl(t *testing.T) {
 
 	t.Run("pause-active-schedule", func(t *testing.T) {
 		schedule := th.newScheduledJob(t, "test schedule", "select 42")
-		require.NoError(t, schedule.SetSchedule("@weekly"))
+		require.NoError(t, schedule.SetScheduleAndNextRun("@weekly"))
 		// Datums only store up until microseconds.
 		ms := time.Microsecond
 		firstRunTime := timeutil.Now().Add(10 * time.Second).Truncate(ms)
@@ -158,14 +153,14 @@ func TestJobsControlForSchedules(t *testing.T) {
 	// Our resume never completes any jobs, until this test completes.
 	// As such, the job does not undergo usual job state transitions
 	// (e.g. pause-request -> paused).
-	RegisterConstructor(jobspb.TypeImport, func(job *Job, _ *cluster.Settings) Resumer {
+	defer TestingRegisterConstructor(jobspb.TypeImport, func(job *Job, _ *cluster.Settings) Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(_ context.Context) error {
 				<-blockResume
 				return nil
 			},
 		}
-	}, UsesTenantCostControl)
+	}, UsesTenantCostControl)()
 
 	record := Record{
 		Description: "fake job",
@@ -241,7 +236,7 @@ func TestJobsControlForSchedules(t *testing.T) {
 				context.Background(),
 				"test-num-effected",
 				nil,
-				sessiondata.RootUserSessionDataOverride,
+				sessiondata.NodeUserSessionDataOverride,
 				jobControl,
 			)
 			require.NoError(t, err)
@@ -272,14 +267,14 @@ func TestFilterJobsControlForSchedules(t *testing.T) {
 	defer close(blockResume)
 
 	// Our resume never completes any jobs, until this test completes.
-	RegisterConstructor(jobspb.TypeImport, func(job *Job, _ *cluster.Settings) Resumer {
+	defer TestingRegisterConstructor(jobspb.TypeImport, func(job *Job, _ *cluster.Settings) Resumer {
 		return jobstest.FakeResumer{
 			OnResume: func(_ context.Context) error {
 				<-blockResume
 				return nil
 			},
 		}
-	}, UsesTenantCostControl)
+	}, UsesTenantCostControl)()
 
 	record := Record{
 		Description: "fake job",
@@ -323,7 +318,7 @@ func TestFilterJobsControlForSchedules(t *testing.T) {
 				context.Background(),
 				"test-num-effected",
 				nil,
-				sessiondata.RootUserSessionDataOverride,
+				sessiondata.NodeUserSessionDataOverride,
 				jobControl,
 			)
 			require.NoError(t, err)
@@ -385,7 +380,7 @@ func TestJobControlByType(t *testing.T) {
 			context.Background(),
 			"test-invalid-type",
 			nil,
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			invalidTypeQuery,
 		)
 		require.Error(t, err, "unsupported job type")
@@ -405,14 +400,14 @@ func TestJobControlByType(t *testing.T) {
 
 	// Make the jobs of each type controllable.
 	for _, jobType := range allJobTypes {
-		RegisterConstructor(jobType, func(job *Job, _ *cluster.Settings) Resumer {
+		defer TestingRegisterConstructor(jobType, func(job *Job, _ *cluster.Settings) Resumer {
 			return jobstest.FakeResumer{
 				OnResume: func(ctx context.Context) error {
 					<-ctx.Done()
 					return nil
 				},
 			}
-		}, UsesTenantCostControl)
+		}, UsesTenantCostControl)()
 	}
 
 	for _, jobType := range allJobTypes {
@@ -472,7 +467,7 @@ func TestJobControlByType(t *testing.T) {
 					context.Background(),
 					"test-num-effected",
 					nil,
-					sessiondata.RootUserSessionDataOverride,
+					sessiondata.NodeUserSessionDataOverride,
 					commandQuery,
 				)
 				require.NoError(t, err, "%s", delayedShowJobs(t, subJobs))

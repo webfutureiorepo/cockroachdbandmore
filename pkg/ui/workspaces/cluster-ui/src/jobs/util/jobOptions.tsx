@@ -1,13 +1,9 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
+
 import { BadgeStatus } from "src/badge";
 
 const JobType = cockroach.sql.jobs.jobspb.Type;
@@ -29,7 +25,10 @@ export function jobToVisual(job: Job): JobStatusVisual {
   if (job.type === "REPLICATION STREAM PRODUCER") {
     return JobStatusVisual.BadgeOnly;
   }
-  if (job.type === "REPLICATION STREAM INGESTION") {
+  if (
+    job.type === "REPLICATION STREAM INGESTION" ||
+    job.type === "LOGICAL REPLICATION"
+  ) {
     return jobToVisualForReplicationIngestion(job);
   }
   switch (job.status) {
@@ -58,7 +57,7 @@ function jobToVisualForReplicationIngestion(job: Job): JobStatusVisual {
   if (job.fraction_completed > 0 && job.status === JOB_STATUS_RUNNING) {
     return JobStatusVisual.ProgressBarWithDuration;
   }
-  return JobStatusVisual.BadgeOnly;
+  return JobStatusVisual.BadgeWithMessage;
 }
 
 export const JOB_STATUS_SUCCEEDED = "succeeded";
@@ -201,8 +200,13 @@ export const typeOptions = [
   },
   {
     value: JobType.REPLICATION_STREAM_PRODUCER.toString(),
-    name: "Physical Replication Producer",
+    name: "Replication Producer",
     key: jobTypeKeys[JobType.REPLICATION_STREAM_PRODUCER],
+  },
+  {
+    value: JobType.LOGICAL_REPLICATION.toString(),
+    name: "Logical Replication Ingestion",
+    key: jobTypeKeys[JobType.LOGICAL_REPLICATION],
   },
   {
     value: JobType.AUTO_SPAN_CONFIG_RECONCILIATION.toString(),

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexec
 
@@ -74,7 +69,7 @@ type spooler interface {
 	// spool performs the actual spooling.
 	spool()
 	// getValues returns ith Vec of the already spooled data.
-	getValues(i int) coldata.Vec
+	getValues(i int) *coldata.Vec
 	// getNumTuples returns the number of spooled tuples.
 	getNumTuples() int
 	// getPartitionsCol returns a partitions column vector in which every true
@@ -112,6 +107,8 @@ type allSpooler struct {
 var _ spooler = &allSpooler{}
 var _ colexecop.Resetter = &allSpooler{}
 
+// allocator will be used for the append-only buffered batch for the buffered
+// tuples and the windowed batch (the latter is allocated lazily).
 func newAllSpooler(
 	allocator *colmem.Allocator, input colexecop.Operator, inputTypes []*types.T,
 ) spooler {
@@ -125,7 +122,6 @@ func newAllSpooler(
 func (p *allSpooler) init(ctx context.Context) {
 	p.Input.Init(ctx)
 	p.bufferedTuples = colexecutils.NewAppendOnlyBufferedBatch(p.allocator, p.inputTypes, nil /* colsToStore */)
-	p.windowedBatch = p.allocator.NewMemBatchWithFixedCapacity(p.inputTypes, 0 /* size */)
 }
 
 func (p *allSpooler) spool() {
@@ -138,7 +134,7 @@ func (p *allSpooler) spool() {
 	}
 }
 
-func (p *allSpooler) getValues(i int) coldata.Vec {
+func (p *allSpooler) getValues(i int) *coldata.Vec {
 	if !p.spooled {
 		colexecerror.InternalError(errors.AssertionFailedf("getValues() is called before spool()"))
 	}
@@ -157,6 +153,9 @@ func (p *allSpooler) getPartitionsCol() []bool {
 }
 
 func (p *allSpooler) getWindowedBatch(startIdx, endIdx int) coldata.Batch {
+	if p.windowedBatch == nil {
+		p.windowedBatch = p.allocator.NewMemBatchWithFixedCapacity(p.inputTypes, 0 /* size */)
+	}
 	// We don't need to worry about selection vectors here because if these were
 	// present on the original input batches, they have been removed when we were
 	// buffering up tuples.
@@ -180,6 +179,11 @@ func (p *allSpooler) Reset(ctx context.Context) {
 type sortOp struct {
 	colexecop.InitHelper
 
+	// allocator will be used for the following:
+	// - output batch via the AccountingHelper
+	// - order slice
+	// - partitions and partitionsCol scratch slices
+	// - abbreviatedSortCol in some colSorters.
 	allocator *colmem.Allocator
 	helper    colmem.AccountingHelper
 	input     spooler
@@ -226,7 +230,8 @@ type sortOp struct {
 
 	output coldata.Batch
 
-	exported int
+	exported       int
+	exportComplete bool
 }
 
 var _ colexecop.BufferingInMemoryOperator = &sortOp{}
@@ -237,7 +242,7 @@ type colSorter interface {
 	// init prepares this sorter, given a particular Vec and an order vector,
 	// which must be the same size as the input Vec and will be permuted with
 	// the same swaps as the column.
-	init(ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int)
+	init(ctx context.Context, allocator *colmem.Allocator, col *coldata.Vec, order []int)
 	// reset releases memory allocated by the colSorter. It should be called
 	// when the colSorter is no longer needed.
 	reset()
@@ -455,6 +460,7 @@ func (p *sortOp) Reset(ctx context.Context) {
 	}
 	p.emitted = 0
 	p.exported = 0
+	p.exportComplete = false
 	p.state = sortSpooling
 }
 
@@ -472,14 +478,33 @@ func (p *sortOp) Child(nth int, verbose bool) execopnode.OpNode {
 }
 
 func (p *sortOp) ExportBuffered(colexecop.Operator) coldata.Batch {
-	if p.exported == p.input.getNumTuples() {
+	if p.exportComplete {
 		return coldata.ZeroBatch
 	}
-	newExported := p.exported + coldata.BatchSize()
-	if newExported > p.input.getNumTuples() {
-		newExported = p.input.getNumTuples()
+	if p.exported < p.input.getNumTuples() {
+		newExported := p.exported + coldata.BatchSize()
+		if newExported > p.input.getNumTuples() {
+			newExported = p.input.getNumTuples()
+		}
+		b := p.input.getWindowedBatch(p.exported, newExported)
+		p.exported = newExported
+		return b
 	}
-	b := p.input.getWindowedBatch(p.exported, newExported)
-	p.exported = newExported
-	return b
+	p.exportComplete = true
+	return coldata.ZeroBatch
+}
+
+// ReleaseBeforeExport implements the colexecop.BufferingInMemoryOperator
+// interface.
+func (p *sortOp) ReleaseBeforeExport() {}
+
+// ReleaseAfterExport implements the colexecop.BufferingInMemoryOperator
+// interface.
+func (p *sortOp) ReleaseAfterExport(colexecop.Operator) {
+	if p.allocator == nil {
+		// Resources have already been released.
+		return
+	}
+	defer p.allocator.ReleaseAll()
+	*p = sortOp{exportComplete: true}
 }

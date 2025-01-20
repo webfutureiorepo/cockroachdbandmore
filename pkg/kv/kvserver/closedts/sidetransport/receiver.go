@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sidetransport
 
@@ -165,6 +160,7 @@ func (s *Receiver) onRecvErr(ctx context.Context, nodeID roachpb.NodeID, err err
 // timestamp information. It maintains the latest closed timestamps communicated
 // by the sender node.
 type incomingStream struct {
+	log.AmbientContext
 	// The server that created this stream.
 	server       *Receiver
 	stores       Stores
@@ -324,6 +320,8 @@ func (r *incomingStream) Run(
 				if !msg.Snapshot {
 					log.Fatal(ctx, "expected the first message to be a snapshot")
 				}
+				r.AddLogTag("remote", r.nodeID)
+				ctx = r.AnnotateCtx(ctx)
 			}
 
 			r.processUpdate(ctx, msg)

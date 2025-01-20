@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+# Copyright 2022 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
+set -exuo pipefail
 
 download_and_extract() {
   cockroach_version=$1
@@ -17,8 +23,6 @@ download_and_extract() {
   else
     curl -sSfL "${binary_url}" > cockroach.zip
     7z e -omnt cockroach.zip
-    mkdir -p mnt/lib
-    mv mnt/*.dll mnt/lib/
   fi
 
   echo "Downloaded ${binary_url}"

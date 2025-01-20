@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package coldata
 
@@ -157,7 +152,7 @@ func TestSetAndUnsetNulls(t *testing.T) {
 func TestNullsSet(t *testing.T) {
 	args := SliceArgs{
 		// Neither type nor the length here matter.
-		Src: NewMemColumn(types.Bool, 0, StandardColumnFactory),
+		Src: NewVec(types.Bool, 0, StandardColumnFactory),
 	}
 	for _, withSel := range []bool{false, true} {
 		t.Run(fmt.Sprintf("WithSel=%t", withSel), func(t *testing.T) {

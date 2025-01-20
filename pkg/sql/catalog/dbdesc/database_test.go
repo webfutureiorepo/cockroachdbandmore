@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package dbdesc
 
@@ -389,13 +384,22 @@ func TestMaybeConvertIncompatibleDBPrivilegesToDefaultPrivileges(t *testing.T) {
 	}
 }
 
-func TestStripDanglingBackReferences(t *testing.T) {
+func TestStripDanglingBackReferencesAndRoles(t *testing.T) {
 	type testCase struct {
-		name                  string
-		input, expectedOutput descpb.DatabaseDescriptor
-		validIDs              catalog.DescriptorIDSet
+		name                           string
+		input, expectedOutput          descpb.DatabaseDescriptor
+		validIDs                       catalog.DescriptorIDSet
+		strippedDanglingBackReferences bool
+		strippedNonExistentRoles       bool
 	}
 
+	badOwnerPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.MakeSQLUsernameFromPreNormalizedString("dropped_user"))
+	goodOwnerPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.AdminRoleName())
+	badPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.RootUserName())
+	goodPrivilege := catpb.NewBaseDatabasePrivilegeDescriptor(username.RootUserName())
+	badPrivilege.Users = append(badPrivilege.Users, catpb.UserPrivileges{
+		UserProto: username.TestUserName().EncodeProto(),
+	})
 	testData := []testCase{
 		{
 			name: "schema",
@@ -406,6 +410,7 @@ func TestStripDanglingBackReferences(t *testing.T) {
 					"bar": {ID: 101},
 					"baz": {ID: 12345},
 				},
+				Privileges: badPrivilege,
 			},
 			expectedOutput: descpb.DatabaseDescriptor{
 				Name: "foo",
@@ -413,8 +418,32 @@ func TestStripDanglingBackReferences(t *testing.T) {
 				Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
 					"bar": {ID: 101},
 				},
+				Privileges: goodPrivilege,
 			},
-			validIDs: catalog.MakeDescriptorIDSet(100, 101),
+			validIDs:                       catalog.MakeDescriptorIDSet(100, 101),
+			strippedDanglingBackReferences: true,
+			strippedNonExistentRoles:       true,
+		},
+		{
+			name: "missing owner",
+			input: descpb.DatabaseDescriptor{
+				Name: "foo",
+				ID:   100,
+				Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
+					"bar": {ID: 101},
+				},
+				Privileges: badOwnerPrivilege,
+			},
+			expectedOutput: descpb.DatabaseDescriptor{
+				Name: "foo",
+				ID:   100,
+				Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
+					"bar": {ID: 101},
+				},
+				Privileges: goodOwnerPrivilege,
+			},
+			validIDs:                 catalog.MakeDescriptorIDSet(100, 101),
+			strippedNonExistentRoles: true,
 		},
 	}
 
@@ -427,8 +456,12 @@ func TestStripDanglingBackReferences(t *testing.T) {
 			require.NoError(t, b.StripDanglingBackReferences(test.validIDs.Contains, func(id jobspb.JobID) bool {
 				return false
 			}))
+			require.NoError(t, b.StripNonExistentRoles(func(role username.SQLUsername) bool {
+				return role.IsAdminRole() || role.IsPublicRole() || role.IsRootUser() || role.IsNodeUser()
+			}))
 			desc := b.BuildCreatedMutableDatabase()
-			require.True(t, desc.GetPostDeserializationChanges().Contains(catalog.StrippedDanglingBackReferences))
+			require.Equal(t, test.strippedDanglingBackReferences, desc.GetPostDeserializationChanges().Contains(catalog.StrippedDanglingBackReferences))
+			require.Equal(t, test.strippedNonExistentRoles, desc.GetPostDeserializationChanges().Contains(catalog.StrippedNonExistentRoles))
 			require.Equal(t, out.BuildCreatedMutableDatabase().DatabaseDesc(), desc.DatabaseDesc())
 		})
 	}

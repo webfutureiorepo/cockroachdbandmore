@@ -1,17 +1,13 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package rangefeedbuffer
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -19,13 +15,12 @@ import (
 
 // RangeFeedValueEventToKV is a function to type assert an Event into a
 // *kvpb.RangeFeedValue and then convert it to a roachpb.KeyValue.
-func RangeFeedValueEventToKV(event Event) roachpb.KeyValue {
-	rfv := event.(*kvpb.RangeFeedValue)
+func RangeFeedValueEventToKV(rfv *kvpb.RangeFeedValue) roachpb.KeyValue {
 	return roachpb.KeyValue{Key: rfv.Key, Value: rfv.Value}
 }
 
 // EventsToKVs converts a slice of Events to a slice of KeyValue pairs.
-func EventsToKVs(events []Event, f func(ev Event) roachpb.KeyValue) []roachpb.KeyValue {
+func EventsToKVs[E Event](events []E, f func(ev E) roachpb.KeyValue) []roachpb.KeyValue {
 	kvs := make([]roachpb.KeyValue, 0, len(events))
 	for _, ev := range events {
 		kvs = append(kvs, f(ev))
@@ -46,12 +41,11 @@ func MergeKVs(base, updates []roachpb.KeyValue) []roachpb.KeyValue {
 	}
 	combined := make([]roachpb.KeyValue, 0, len(base)+len(updates))
 	combined = append(append(combined, base...), updates...)
-	sort.Slice(combined, func(i, j int) bool {
-		cmp := combined[i].Key.Compare(combined[j].Key)
-		if cmp == 0 {
-			return combined[i].Value.Timestamp.Less(combined[j].Value.Timestamp)
-		}
-		return cmp < 0
+	slices.SortFunc(combined, func(a, b roachpb.KeyValue) int {
+		return cmp.Or(
+			a.Key.Compare(b.Key),
+			a.Value.Timestamp.Compare(b.Value.Timestamp),
+		)
 	})
 	r := combined[:0]
 	for _, kv := range combined {

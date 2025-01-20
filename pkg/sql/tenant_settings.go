@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -14,6 +9,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -29,6 +25,7 @@ import (
 // alterTenantSetClusterSettingNode represents an
 // ALTER VIRTUAL CLUSTER ... SET CLUSTER SETTING statement.
 type alterTenantSetClusterSettingNode struct {
+	zeroInputPlanNode
 	name       settings.SettingName
 	tenantSpec tenantSpec
 	st         *cluster.Settings
@@ -56,13 +53,18 @@ func (p *planner) AlterTenantSetClusterSetting(
 	}
 
 	name := settings.SettingName(strings.ToLower(n.Name))
+	// Disallow setting the 'version' setting for any tenant.
+	if name == clusterversion.KeyVersionSetting {
+		return nil, errors.Errorf("cannot set '%s' for tenants", name)
+	}
+
 	st := p.EvalContext().Settings
 	setting, ok, nameStatus := settings.LookupForLocalAccess(name, true /* forSystemTenant - checked above already */)
 	if !ok {
 		return nil, errors.Errorf("unknown cluster setting '%s'", name)
 	}
 	if nameStatus != settings.NameActive {
-		p.BufferClientNotice(ctx, settingNameDeprecationNotice(name, setting.Name()))
+		p.BufferClientNotice(ctx, settingAlternateNameNotice(name, setting.Name()))
 		name = setting.Name()
 	}
 	// Error out if we're trying to set a system-only variable.
@@ -120,7 +122,7 @@ func (n *alterTenantSetClusterSettingNode) startExec(params runParams) error {
 		reportedValue = "DEFAULT"
 		if _, err := params.p.InternalSQLTxn().ExecEx(
 			params.ctx, "reset-tenant-setting", params.p.Txn(),
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			"DELETE FROM system.tenant_settings WHERE tenant_id = $1 AND name = $2", tenantID, n.setting.InternalKey(),
 		); err != nil {
 			return err
@@ -137,7 +139,7 @@ func (n *alterTenantSetClusterSettingNode) startExec(params runParams) error {
 		}
 		if _, err := params.p.InternalSQLTxn().ExecEx(
 			params.ctx, "update-tenant-setting", params.p.Txn(),
-			sessiondata.RootUserSessionDataOverride,
+			sessiondata.NodeUserSessionDataOverride,
 			`UPSERT INTO system.tenant_settings (tenant_id, name, value, last_updated, value_type) VALUES ($1, $2, $3, now(), $4)`,
 			tenantID, n.setting.InternalKey(), encoded, n.setting.Typ(),
 		); err != nil {
@@ -183,7 +185,7 @@ func (p *planner) ShowTenantClusterSetting(
 		return nil, errors.Errorf("unknown setting: %q", name)
 	}
 	if nameStatus != settings.NameActive {
-		p.BufferClientNotice(ctx, settingNameDeprecationNotice(name, setting.Name()))
+		p.BufferClientNotice(ctx, settingAlternateNameNotice(name, setting.Name()))
 		name = setting.Name()
 	}
 
@@ -245,7 +247,7 @@ FROM
 				ctx, "get-tenant-setting-value", p.txn,
 				sessiondata.NoSessionDataOverride,
 				lookupEncodedTenantSetting,
-				setting.Name(), rec.ID)
+				setting.InternalKey(), rec.ID)
 			if err != nil {
 				return false, "", err
 			}

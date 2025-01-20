@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package scbuildstmt
 
@@ -107,10 +102,10 @@ func addCreateDatabaseElements(
 	})
 	b.Add(&scpb.Owner{
 		DescriptorID: publicSchemaID,
-		Owner:        username.AdminRoleName().Normalized(),
+		Owner:        dbOwner.Normalized(),
 	})
 	includeCreatePriv := sqlclustersettings.PublicSchemaCreatePrivilegeEnabled.Get(&b.ClusterSettings().SV)
-	for _, up := range catpb.NewPublicSchemaPrivilegeDescriptor(includeCreatePriv).Users {
+	for _, up := range catpb.NewPublicSchemaPrivilegeDescriptor(dbOwner, includeCreatePriv).Users {
 		b.Add(&scpb.UserPrivileges{
 			DescriptorID:    publicSchemaID,
 			UserName:        up.User().Normalized(),

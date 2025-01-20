@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package importer
 
@@ -159,7 +154,7 @@ COPY done;
 	}
 }
 
-func TestImportArrayData(t *testing.T) {
+func TestImportPGDump(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
@@ -184,6 +179,7 @@ func TestImportArrayData(t *testing.T) {
 		data        string
 		verifyQuery string
 		expected    [][]string
+		errorRE     string
 	}{
 		{
 			name: "text arrays",
@@ -211,7 +207,7 @@ COPY t (array_column) FROM STDIN;
 		},
 
 		{
-			name: "multiple columns",
+			name: "multiple array columns",
 			data: `
 CREATE TABLE t (
 	array_column int[],
@@ -226,6 +222,24 @@ COPY t (array_column, array_column2) FROM STDIN;
 				{"{1,2,3}", "{cat,dog}"},
 			},
 		},
+
+		{
+			name: "function",
+			data: `
+CREATE TABLE t (x INT);
+
+SELECT addgeometrycolumn('t', 'foo', 4326, 'POINT', 2)`,
+			expected: [][]string{},
+		},
+
+		{
+			name: "function with subquery",
+			data: `
+CREATE TABLE t (x INT);
+
+SELECT addgeometrycolumn('t', 'foo', 4326, (SELECT 'POINT'), 2)`,
+			errorRE: ".*subqueries are not allowed in pg_dump function arguments.*",
+		},
 	}
 
 	for _, test := range tests {
@@ -237,8 +251,12 @@ COPY t (array_column, array_column2) FROM STDIN;
 			data = test.data
 
 			// Import PGDump and verify expected behavior.
-			sqlDB.Exec(t, importDumpQuery, srv.URL)
-			sqlDB.CheckQueryResults(t, test.verifyQuery, test.expected)
+			if test.errorRE != "" {
+				sqlDB.ExpectErr(t, test.errorRE, importDumpQuery, srv.URL)
+			} else {
+				sqlDB.Exec(t, importDumpQuery, srv.URL)
+				sqlDB.CheckQueryResults(t, test.verifyQuery, test.expected)
+			}
 		})
 	}
 }

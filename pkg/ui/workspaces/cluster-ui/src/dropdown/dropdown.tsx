@@ -1,20 +1,17 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
+import { CaretDown } from "@cockroachlabs/icons";
 import classnames from "classnames/bind";
+import React from "react";
+
+import { Button, ButtonProps } from "src/button";
 
 import { OutsideEventHandler } from "../outsideEventHandler";
+
 import styles from "./dropdown.module.scss";
-import { Button, ButtonProps } from "src/button";
-import { CaretDown } from "@cockroachlabs/icons";
 
 const cx = classnames.bind(styles);
 

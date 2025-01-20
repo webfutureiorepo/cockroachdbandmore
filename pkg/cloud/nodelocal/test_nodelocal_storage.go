@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package nodelocal
 
@@ -18,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/cloud/cloudpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 )
 
@@ -25,26 +21,11 @@ import (
 // nodelocal with one reads and writes directly from the given
 // directory.
 //
-// The returned func restores the prooduction implemenation.
+// The returned func restores the prooduction implementation.
 func ReplaceNodeLocalForTesting(root string) func() {
 	makeFn := func(ctx context.Context, conf cloud.EarlyBootExternalStorageContext, es cloudpb.ExternalStorage) (cloud.ExternalStorage, error) {
-		if !buildutil.CrdbTestBuild {
-			panic("nodelocal test implementation in non-test build")
-		}
-		c, err := blobs.NewLocalClient(root)
-		if err != nil {
-			return nil, err
-		}
-		lfs := &localFileStorage{
-			cfg:        es.LocalFileConfig,
-			ioConf:     base.ExternalIODirConfig{},
-			base:       es.LocalFileConfig.Path,
-			blobClient: c,
-			settings:   conf.Settings,
-		}
-		return lfs, nil
+		return TestingMakeNodelocalStorage(root, conf.Settings, es), nil
 	}
-
 	parserFn := func(uri *url.URL) (cloudpb.ExternalStorage, error) {
 		if !buildutil.CrdbTestBuild {
 			panic("nodelocal test implementation in non-test build")
@@ -62,4 +43,24 @@ func ReplaceNodeLocalForTesting(root string) func() {
 		EarlyBootParseFn:     parserFn,
 		Schemes:              []string{scheme},
 	})
+}
+
+// TestingMakeNodelocalStorage constructs a nodelocal storage for use in tests.
+func TestingMakeNodelocalStorage(
+	root string, settings *cluster.Settings, es cloudpb.ExternalStorage,
+) cloud.ExternalStorage {
+	if !buildutil.CrdbTestBuild {
+		panic("nodelocal test implementation in non-test build")
+	}
+	c, err := blobs.NewLocalClient(root)
+	if err != nil {
+		panic(err)
+	}
+	return &localFileStorage{
+		cfg:        es.LocalFileConfig,
+		ioConf:     base.ExternalIODirConfig{},
+		base:       es.LocalFileConfig.Path,
+		blobClient: c,
+		settings:   settings,
+	}
 }

@@ -1,31 +1,27 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { AxisUnits } from "@cockroachlabs/cluster-ui";
 import React from "react";
 
+import { cockroach } from "src/js/protos";
 import LineGraph from "src/views/cluster/components/linegraph";
-import { Axis, Metric } from "src/views/shared/components/metricQuery";
-import { AxisUnits } from "@cockroachlabs/cluster-ui";
-
-import {
-  GraphDashboardProps,
-  nodeDisplayName,
-  storeIDsForNode,
-} from "./dashboardUtils";
 import {
   CircuitBreakerTrippedReplicasTooltip,
   LogicalBytesGraphTooltip,
   PausedFollowersTooltip,
   ReceiverSnapshotsQueuedTooltip,
 } from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
-import { cockroach } from "src/js/protos";
+import { Axis, Metric } from "src/views/shared/components/metricQuery";
+
+import {
+  GraphDashboardProps,
+  nodeDisplayName,
+  storeIDsForNode,
+} from "./dashboardUtils";
+
 import TimeSeriesQueryAggregator = cockroach.ts.tspb.TimeSeriesQueryAggregator;
 
 export default function (props: GraphDashboardProps) {
@@ -103,6 +99,24 @@ export default function (props: GraphDashboardProps) {
             sources={storeIDsForNode(storeIDsByNodeID, nid)}
           />
         ))}
+      </Axis>
+    </LineGraph>,
+
+    <LineGraph
+      title="Lease Types"
+      sources={storeSources}
+      tenantSource={tenantSource}
+      tooltip={`Details about the types of leases in use by ranges in the
+                system. A cluster is expected to have a mix of lease types.
+                In the node view, shows details about leases the node is
+                responsible for. In the cluster view, shows details about
+                leases all across the cluster.`}
+      showMetricsInTooltip={true}
+    >
+      <Axis label="leases">
+        <Metric name="cr.store.leases.expiration" title="Expiration Leases" />
+        <Metric name="cr.store.leases.epoch" title="Epoch Leases" />
+        <Metric name="cr.store.leases.leader" title="Leader Leases" />
       </Axis>
     </LineGraph>,
 
@@ -285,6 +299,15 @@ export default function (props: GraphDashboardProps) {
               sources={storeIDsForNode(storeIDsByNodeID, nid)}
               nonNegativeRate
             />
+            <Metric
+              key={nid}
+              name="cr.store.range.snapshots.upreplication.rcvd-bytes"
+              title={
+                nodeDisplayName(nodeDisplayNameByID, nid) + "-upreplication"
+              }
+              sources={storeIDsForNode(storeIDsByNodeID, nid)}
+              nonNegativeRate
+            />
           </>
         ))}
       </Axis>
@@ -429,15 +452,12 @@ export default function (props: GraphDashboardProps) {
       tenantSource={tenantSource}
       showMetricsInTooltip={true}
     >
-      <Axis label="replicas" units={AxisUnits.Count}>
+      <Axis label="Replaced Errors / Sec" units={AxisUnits.Count}>
         {nodeIDs.map(nid => (
           <Metric
             key={nid}
             name="cr.store.queue.replicate.replacedecommissioningreplica.error"
-            title={
-              nodeDisplayName(nodeDisplayNameByID, nid) +
-              " - Replaced Errors / Sec"
-            }
+            title={nodeDisplayName(nodeDisplayNameByID, nid)}
             sources={storeIDsForNode(storeIDsByNodeID, nid)}
             nonNegativeRate
           />

@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvserver_test
 
@@ -29,10 +24,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/uncertainty"
+	"github.com/cockroachdb/cockroach/pkg/raft"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -40,8 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 // TestCreateManyUnappliedProbes is a (by default skipped) test that writes
@@ -111,7 +107,7 @@ LIMIT
 	}
 
 	st := cluster.MakeTestingClusterSettings()
-	eng, err := storage.Open(ctx, storage.Filesystem(p), st)
+	eng, err := storage.Open(ctx, fs.MustInitPhysicalTestingEnv(p), st)
 	require.NoError(t, err)
 	defer eng.Close()
 
@@ -194,7 +190,7 @@ LIMIT
 			}
 
 			idKey := raftlog.MakeCmdIDKey()
-			payload, err := raftlog.EncodeCommand(ctx, &raftCmd, idKey, nil)
+			payload, err := raftlog.EncodeCommand(ctx, &raftCmd, idKey, raftlog.EncodeOptions{})
 			require.NoError(t, err)
 			ents = append(ents, raftpb.Entry{
 				Term:  lastTerm,
@@ -260,7 +256,7 @@ LIMIT
 type wgSyncCallback sync.WaitGroup
 
 func (w *wgSyncCallback) OnLogSync(
-	ctx context.Context, messages []raftpb.Message, stats storage.BatchCommitStats,
+	context.Context, logstore.MsgStorageAppendDone, storage.BatchCommitStats,
 ) {
 	(*sync.WaitGroup)(w).Done()
 }

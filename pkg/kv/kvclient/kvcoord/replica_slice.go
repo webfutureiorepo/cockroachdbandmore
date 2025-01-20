@@ -1,25 +1,24 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package kvcoord
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/shuffle"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 // ReplicaInfo extends the Replica structure with the associated node
@@ -38,6 +37,25 @@ type ReplicaInfo struct {
 
 // A ReplicaSlice is a slice of ReplicaInfo.
 type ReplicaSlice []ReplicaInfo
+
+func (rs ReplicaSlice) String() string {
+	return redact.StringWithoutMarkers(rs)
+}
+
+// SafeFormat implements the redact.SafeFormatter interface.
+func (rs ReplicaSlice) SafeFormat(w redact.SafePrinter, _ rune) {
+	var buf redact.StringBuilder
+	buf.Print("[")
+	for i, r := range rs {
+		if i > 0 {
+			buf.Print(",")
+		}
+		buf.Printf("%v(health=%v match=%d latency=%v)",
+			r, r.healthy, r.tierMatchLength, humanizeutil.Duration(r.latency))
+	}
+	buf.Print("]")
+	w.Print(buf)
+}
 
 // ReplicaSliceFilter controls which kinds of replicas are to be included in
 // the slice for routing BatchRequests to.
@@ -70,7 +88,7 @@ const (
 // sendError is returned.
 func NewReplicaSlice(
 	ctx context.Context,
-	nodeDescs NodeDescStore,
+	nodeDescs kvclient.NodeDescStore,
 	desc *roachpb.RangeDescriptor,
 	leaseholder *roachpb.ReplicaDescriptor,
 	filter ReplicaSliceFilter,
@@ -197,6 +215,7 @@ type HealthFunc func(roachpb.NodeID) bool
 // leaseholder is known by the caller, the caller will move it to the
 // front if appropriate.
 func (rs ReplicaSlice) OptimizeReplicaOrder(
+	ctx context.Context,
 	st *cluster.Settings,
 	nodeID roachpb.NodeID,
 	healthFn HealthFunc,
@@ -206,6 +225,7 @@ func (rs ReplicaSlice) OptimizeReplicaOrder(
 	// If we don't know which node we're on or its locality, and we don't have
 	// latency information to other nodes, send the RPCs randomly.
 	if nodeID == 0 && latencyFn == nil && len(locality.Tiers) == 0 {
+		log.VEvent(ctx, 2, "randomly shuffling replicas to route to")
 		shuffle.Shuffle(rs)
 		return
 	}
@@ -232,37 +252,40 @@ func (rs ReplicaSlice) OptimizeReplicaOrder(
 	}
 
 	// Sort replicas by latency and then attribute affinity.
-	sort.Slice(rs, func(i, j int) bool {
+	slices.SortFunc(rs, func(a, b ReplicaInfo) int {
 		// Always sort healthy nodes before unhealthy nodes.
-		if rs[i].healthy != rs[j].healthy {
-			return rs[i].healthy
+		if a.healthy != b.healthy {
+			if a.healthy {
+				return -1
+			}
+			return +1
 		}
 
 		// If the region is different choose the closer one.
 		// If the setting is true(default) consider locality before latency.
 		if sortByLocalityFirst {
 			// If the region is different choose the closer one.
-			if rs[i].tierMatchLength != rs[j].tierMatchLength {
-				return rs[i].tierMatchLength > rs[j].tierMatchLength
+			if a.tierMatchLength != b.tierMatchLength {
+				return -cmp.Compare(a.tierMatchLength, b.tierMatchLength)
 			}
 		}
 
 		// Use latency if they are different. The local node has a latency of -1
 		// so will sort before any other node.
-		if rs[i].latency != rs[j].latency {
-			return rs[i].latency < rs[j].latency
+		if a.latency != b.latency {
+			return cmp.Compare(a.latency, b.latency)
 		}
 
 		// If the setting is false, sort locality after latency.
 		if !sortByLocalityFirst {
 			// If the region is different choose the closer one.
-			if rs[i].tierMatchLength != rs[j].tierMatchLength {
-				return rs[i].tierMatchLength > rs[j].tierMatchLength
+			if a.tierMatchLength != b.tierMatchLength {
+				return -cmp.Compare(a.tierMatchLength, b.tierMatchLength)
 			}
 		}
 
 		// If everything else is equal sort by node id.
-		return rs[i].NodeID < rs[j].NodeID
+		return cmp.Compare(a.NodeID, b.NodeID)
 	})
 }
 

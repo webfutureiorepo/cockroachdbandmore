@@ -1,18 +1,12 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package cluster
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -20,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -37,8 +32,6 @@ type Settings struct {
 	// overwriting the default of a single setting.
 	Manual atomic.Value // bool
 
-	ExternalIODir string
-
 	// Tracks whether a CPU profile is going on and if so, which kind. See
 	// CPUProfileType().
 	// This is used so that we can enable "non-cheap" instrumentation only when it
@@ -53,7 +46,7 @@ type Settings struct {
 
 	// Cache can be used for arbitrary caching, e.g. to cache decoded
 	// enterprises licenses for utilccl.CheckEnterpriseEnabled().
-	Cache sync.Map
+	Cache syncutil.Map[any, any]
 
 	// OverridesInformer can be nil.
 	OverridesInformer OverridesInformer
@@ -123,15 +116,20 @@ func (s *Settings) MakeUpdater() settings.Updater {
 	return settings.NewUpdater(&s.SV)
 }
 
-// MakeClusterSettings returns a Settings object that has its binary and
-// minimum supported versions set to this binary's build and it's minimum
-// supported versions respectively. The cluster version setting is not
-// initialized.
+// MakeClusterSettings returns a Settings object. The cluster version setting is
+// not initialized.
 func MakeClusterSettings() *Settings {
+	return MakeClusterSettingsWithVersions(clusterversion.Latest.Version(), clusterversion.MinSupported.Version())
+}
+
+// MakeClusterSettingsWithVersions returns a Settings object that has the given
+// latest and minimum supported versions. The cluster version setting is not
+// initialized.
+func MakeClusterSettingsWithVersions(latest, minSupported roachpb.Version) *Settings {
 	s := &Settings{}
 
 	sv := &s.SV
-	s.Version = clusterversion.MakeVersionHandle(&s.SV)
+	s.Version = clusterversion.MakeVersionHandle(&s.SV, latest, minSupported)
 	sv.Init(context.TODO(), s.Version)
 	return s
 }
@@ -159,12 +157,7 @@ func MakeTestingClusterSettings() *Settings {
 func MakeTestingClusterSettingsWithVersions(
 	latestVersion, minSupportedVersion roachpb.Version, initializeVersion bool,
 ) *Settings {
-	s := &Settings{}
-
-	sv := &s.SV
-	s.Version = clusterversion.MakeVersionHandleWithOverride(
-		&s.SV, latestVersion, minSupportedVersion)
-	sv.Init(context.TODO(), s.Version)
+	s := MakeClusterSettingsWithVersions(latestVersion, minSupportedVersion)
 
 	if initializeVersion {
 		// Initialize cluster version to specified latestVersion.
@@ -179,10 +172,8 @@ func MakeTestingClusterSettingsWithVersions(
 // be used for settings objects that are passed as initial parameters for test
 // clusters; the given Settings object should not be in use by any server.
 func TestingCloneClusterSettings(st *Settings) *Settings {
-	result := &Settings{
-		ExternalIODir: st.ExternalIODir,
-	}
-	result.Version = clusterversion.MakeVersionHandleWithOverride(
+	result := &Settings{}
+	result.Version = clusterversion.MakeVersionHandle(
 		&result.SV, st.Version.LatestVersion(), st.Version.MinSupportedVersion(),
 	)
 	result.SV.TestingCopyForServer(&st.SV, result.Version)

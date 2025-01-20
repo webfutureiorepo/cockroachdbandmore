@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 //
 
 package raftlog
@@ -14,8 +9,8 @@ package raftlog
 import (
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/raft/v3/raftpb"
 )
 
 func TestNewEntry(t *testing.T) {
@@ -29,11 +24,13 @@ func TestNewEntry(t *testing.T) {
 		"empty entry": {data: nil, expectEmpty: true},
 		// Proposed by CRDB on unquiescence.
 		"empty payload": {
-			data:        EncodeCommandBytes(EntryEncodingStandardWithoutAC, "00000000", nil),
+			data: EncodeCommandBytes(
+				EntryEncodingStandardWithoutAC, "00000000", nil, 0 /* pri */),
 			expectEmpty: true,
 		},
 		"invalid": {
-			data:      EncodeCommandBytes(EntryEncodingStandardWithAC, "00000000", []byte("not a protobuf")),
+			data: EncodeCommandBytes(
+				EntryEncodingStandardWithAC, "00000000", []byte("not a protobuf"), 0 /* pri */),
 			expectErr: true,
 		},
 	}

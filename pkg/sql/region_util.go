@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -29,15 +24,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/zone"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/regions"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/rangedesc"
@@ -913,7 +911,7 @@ func generateAndValidateZoneConfigForMultiRegionDatabase(
 		return zonepb.ZoneConfig{}, pgerror.Wrap(err, pgcode.CheckViolation, "could not validate zone config")
 	}
 
-	if err := validateNoRepeatKeysInZone(&dbZoneConfig); err != nil {
+	if err := zonepb.ValidateNoRepeatKeysInZone(&dbZoneConfig); err != nil {
 		return zonepb.ZoneConfig{}, err
 	}
 
@@ -1051,18 +1049,34 @@ func (p *planner) refreshZoneConfigsForTables(
 	if err != nil {
 		return err
 	}
+	// System databases will have regional by row tables configured
+	// as survive zone.
+	var surviveZoneCfg *multiregion.RegionConfig
+	if desc.GetID() == keys.SystemDatabaseID {
+		tempCfg, err := SynthesizeRegionConfig(ctx, p.txn, desc.GetID(), p.Descriptors(), multiregion.SynthesizeRegionConfigOptionForceSurvivalZone)
+		if err != nil {
+			return err
+		}
+		surviveZoneCfg = &tempCfg
+	}
 
 	return p.forEachMutableTableInDatabase(
 		ctx,
 		desc,
 		func(ctx context.Context, scName string, tbDesc *tabledesc.Mutable) error {
 			if opts.filterFunc(tbDesc) {
+				targetRegionCfg := &regionConfig
+				// On system databases we will force a survive zone config
+				// for regional by row tables.
+				if surviveZoneCfg != nil && tbDesc.IsLocalityRegionalByRow() {
+					targetRegionCfg = surviveZoneCfg
+				}
 				return ApplyZoneConfigForMultiRegionTable(
 					ctx,
 					p.InternalSQLTxn(),
 					p.ExecCfg(),
 					p.extendedEvalCtx.Tracing.KVTracingEnabled(),
-					regionConfig,
+					*targetRegionCfg,
 					tbDesc,
 					ApplyZoneConfigForMultiRegionTableOptionTableAndIndexes,
 				)
@@ -1172,7 +1186,8 @@ func (p *planner) maybeInitializeMultiRegionDatabase(
 	}
 
 	if err := p.createEnumWithID(
-		p.RunParams(ctx),
+		ctx,
+		p.EvalContext(),
 		regionConfig.RegionEnumID(),
 		regionLabels,
 		desc,
@@ -1217,7 +1232,7 @@ func (p *planner) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionForValidation,
+		multiregion.SynthesizeRegionConfigOptionForValidation,
 	)
 	if err != nil {
 		return err
@@ -1236,7 +1251,9 @@ func (p *planner) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context
 // ResetMultiRegionZoneConfigsForTable takes a table ID and resets that table's
 // zone configurations to match what would have originally been set by the
 // multi-region syntax.
-func (p *planner) ResetMultiRegionZoneConfigsForTable(ctx context.Context, id int64) error {
+func (p *planner) ResetMultiRegionZoneConfigsForTable(
+	ctx context.Context, id int64, forceZoneSurvival bool,
+) error {
 	desc, err := p.Descriptors().MutableByID(p.txn).Table(ctx, descpb.ID(id))
 	if err != nil {
 		return errors.Wrapf(err, "error resolving referenced table ID %d", id)
@@ -1251,7 +1268,15 @@ func (p *planner) ResetMultiRegionZoneConfigsForTable(ctx context.Context, id in
 	if desc.LocalityConfig == nil {
 		return nil
 	}
-	regionConfig, err := SynthesizeRegionConfig(ctx, p.txn, desc.GetParentID(), p.Descriptors())
+	var opts []multiregion.SynthesizeRegionConfigOption
+	// System databases will have regional by row tables configured
+	// as survive zone.
+	if forceZoneSurvival {
+		opts = []multiregion.SynthesizeRegionConfigOption{
+			multiregion.SynthesizeRegionConfigOptionForceSurvivalZone,
+		}
+	}
+	regionConfig, err := SynthesizeRegionConfig(ctx, p.txn, desc.GetParentID(), p.Descriptors(), opts...)
 	if err != nil {
 		return err
 	}
@@ -1271,7 +1296,7 @@ func (p *planner) ResetMultiRegionZoneConfigsForTable(ctx context.Context, id in
 // database's zone configuration to match what would have originally been set by
 // the multi-region syntax.
 func (p *planner) ResetMultiRegionZoneConfigsForDatabase(ctx context.Context, id int64) error {
-	dbDesc, err := p.Descriptors().ByID(p.txn).WithoutNonPublic().Get().Database(ctx, descpb.ID(id))
+	dbDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).WithoutNonPublic().Get().Database(ctx, descpb.ID(id))
 	if err != nil {
 		return err
 	}
@@ -1379,110 +1404,22 @@ func (p *planner) CurrentDatabaseRegionConfig(
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionUseCache,
+		multiregion.SynthesizeRegionConfigOptionUseCache,
 	)
 }
-
-type synthesizeRegionConfigOptions struct {
-	includeOffline bool
-	forValidation  bool
-	useCache       bool
-}
-
-// SynthesizeRegionConfigOption is an option to pass into SynthesizeRegionConfig.
-type SynthesizeRegionConfigOption func(o *synthesizeRegionConfigOptions)
-
-// SynthesizeRegionConfigOptionIncludeOffline includes offline descriptors for use
-// in RESTORE.
-var SynthesizeRegionConfigOptionIncludeOffline SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	o.includeOffline = true
-}
-
-// SynthesizeRegionConfigOptionForValidation includes descriptors which are being dropped
-// as part of the regions field, allowing validation to account for regions in the
-// process of being dropped.
-var SynthesizeRegionConfigOptionForValidation SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	o.forValidation = true
-}
-
-// SynthesizeRegionConfigOptionUseCache uses a cache for synthesizing the region
-// config.
-var SynthesizeRegionConfigOptionUseCache SynthesizeRegionConfigOption = func(o *synthesizeRegionConfigOptions) {
-	o.useCache = true
-}
-
-// ErrNotMultiRegionDatabase is returned from SynthesizeRegionConfig when the
-// requested database is not a multi-region database.
-var ErrNotMultiRegionDatabase = errors.New(
-	"database is not a multi-region database",
-)
 
 // SynthesizeRegionConfig returns a RegionConfig representing the user
 // configured state of a multi-region database by coalescing state from both
 // the database descriptor and multi-region type descriptor. By default, it
 // avoids the cache and is intended for use by DDL statements.
-//
-// TODO(ajwerner): Refactor this to take the database descriptor rather than
-// the database ID.
 func SynthesizeRegionConfig(
 	ctx context.Context,
 	txn *kv.Txn,
 	dbID descpb.ID,
 	descsCol *descs.Collection,
-	opts ...SynthesizeRegionConfigOption,
+	opts ...multiregion.SynthesizeRegionConfigOption,
 ) (multiregion.RegionConfig, error) {
-	var o synthesizeRegionConfigOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-
-	dbDesc, regionEnumDesc, err := getDBAndRegionEnumDescs(
-		ctx, txn, dbID, descsCol, o.useCache, o.includeOffline,
-	)
-	if err != nil {
-		return multiregion.RegionConfig{}, err
-	}
-
-	var regionNames, transitioningRegionNames, addingRegionNames catpb.RegionNames
-	_ = regionEnumDesc.ForEachRegion(func(name catpb.RegionName, transition descpb.TypeDescriptor_EnumMember_Direction) error {
-		switch transition {
-		case descpb.TypeDescriptor_EnumMember_NONE:
-			regionNames = append(regionNames, name)
-		case descpb.TypeDescriptor_EnumMember_ADD:
-			transitioningRegionNames = append(transitioningRegionNames, name)
-			addingRegionNames = append(addingRegionNames, name)
-		case descpb.TypeDescriptor_EnumMember_REMOVE:
-			transitioningRegionNames = append(transitioningRegionNames, name)
-			if o.forValidation {
-				// Since the partitions and zone configs are only updated when a transaction
-				// commits, this must ignore all regions being added (since they will not be
-				// reflected in the zone configuration yet), but it must include all region
-				// being dropped (since they will not be dropped from the zone configuration
-				// until they are fully removed from the type descriptor, again, at the end
-				// of the transaction).
-				regionNames = append(regionNames, name)
-			}
-		}
-		return nil
-	})
-	regionConfig := multiregion.MakeRegionConfig(
-		regionNames,
-		dbDesc.GetRegionConfig().PrimaryRegion,
-		dbDesc.GetRegionConfig().SurvivalGoal,
-		regionEnumDesc.GetID(),
-		dbDesc.GetRegionConfig().Placement,
-		regionEnumDesc.TypeDesc().RegionConfig.SuperRegions,
-		regionEnumDesc.TypeDesc().RegionConfig.ZoneConfigExtensions,
-		multiregion.WithTransitioningRegions(transitioningRegionNames),
-		multiregion.WithAddingRegions(addingRegionNames),
-		multiregion.WithSecondaryRegion(dbDesc.GetRegionConfig().SecondaryRegion),
-	)
-
-	if err := multiregion.ValidateRegionConfig(regionConfig); err != nil {
-		return multiregion.RegionConfig{}, err
-	}
-
-	return regionConfig, nil
+	return regions.SynthesizeRegionConfigInTxn(ctx, txn, dbID, descsCol, opts...)
 }
 
 // GetLocalityRegionEnumPhysicalRepresentation returns the physical
@@ -1563,7 +1500,7 @@ func getDBAndRegionEnumDescs(
 	if useCache {
 		b = descsCol.ByIDWithLeased(txn)
 	} else {
-		b = descsCol.ByID(txn)
+		b = descsCol.ByIDWithoutLeased(txn)
 	}
 	if !includeOffline {
 		b = b.WithoutOffline()
@@ -1574,7 +1511,7 @@ func getDBAndRegionEnumDescs(
 		return nil, nil, err
 	}
 	if !dbDesc.IsMultiRegion() {
-		return nil, nil, ErrNotMultiRegionDatabase
+		return nil, nil, regions.ErrNotMultiRegionDatabase
 	}
 	regionEnumID, err := dbDesc.MultiRegionEnumID()
 	if err != nil {
@@ -2005,7 +1942,7 @@ func (p *planner) validateZoneConfigForMultiRegionDatabaseWasNotModifiedByUser(
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionForValidation,
+		multiregion.SynthesizeRegionConfigOptionForValidation,
 	)
 	if err != nil {
 		return err
@@ -2088,7 +2025,7 @@ func (p *planner) validateZoneConfigForMultiRegionTableWasNotModifiedByUser(
 		p.txn,
 		dbDesc.GetID(),
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionForValidation,
+		multiregion.SynthesizeRegionConfigOptionForValidation,
 	)
 	if err != nil {
 		return err
@@ -2416,7 +2353,7 @@ func (p *planner) GetMultiregionConfig(
 		p.txn,
 		databaseID,
 		p.Descriptors(),
-		SynthesizeRegionConfigOptionUseCache,
+		multiregion.SynthesizeRegionConfigOptionUseCache,
 	)
 
 	if err != nil {
@@ -2465,35 +2402,75 @@ func (p *planner) GetRangeDescByID(
 	return rangeDesc, nil
 }
 
+func (p *planner) setSystemDatabaseSurvival(ctx context.Context) error {
+	// Retrieve the system database descriptor and ensure it supports
+	// multi-region
+	systemDB, err := p.Descriptors().MutableByID(p.txn).Database(ctx, keys.SystemDatabaseID)
+	if err != nil {
+		return err
+	}
+
+	// Alter the survivability goal on the system database, if we are on
+	// a new enough version.
+	if err := p.alterDatabaseSurvivalGoal(ctx,
+		systemDB, tree.SurvivalGoalRegionFailure, "alter system database to survive region failure only"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// systemTableLocalityChangeJobName is the job name used when the locality is converted
+// to regional by row.
+const systemTableLocalityChangeJobName = "convert system.%s to %s locality"
+
 // optimizeSystemDatabase configures some tables in the system data as
 // global and regional by row. The locality changes reduce how long it
 // takes a server to start up in a multi-region deployment.
 func (p *planner) optimizeSystemDatabase(ctx context.Context) error {
-	globalTables := []string{
-		"users",
-		"zones",
-		"privileges",
-		"comments",
-		"role_options",
-		"role_members",
-		"database_role_settings",
-		"settings",
-		"descriptor",
-		"namespace",
-		"table_statistics",
-		"web_sessions",
-		"region_liveness",
+	systemTables := systemschema.MakeSystemTables()
+	globalTables := map[string]struct{}{
+		"users":                  {},
+		"zones":                  {},
+		"privileges":             {},
+		"comments":               {},
+		"role_options":           {},
+		"role_members":           {},
+		"database_role_settings": {},
+		"settings":               {},
+		"descriptor":             {},
+		"namespace":              {},
+		"table_statistics":       {},
+		"web_sessions":           {},
+		"region_liveness":        {},
 	}
 
-	rbrTables := []string{
-		"sqlliveness",
-		"sql_instances",
-		"lease",
+	rbrTables := map[string]struct{}{
+		"sqlliveness":   {},
+		"sql_instances": {},
+		"lease":         {},
+	}
+
+	// Configure all ohter tables are region tables, with the system database
+	// primary region as the region.
+	regionTables := make([]string, 0, len(systemTables))
+	for _, table := range systemTables {
+		if !table.IsTable() {
+			continue
+		}
+		name := table.GetName()
+		if _, ok := rbrTables[name]; ok {
+			continue
+		}
+		if _, ok := globalTables[name]; ok {
+			continue
+		}
+		regionTables = append(regionTables, name)
 	}
 
 	// Retrieve the system database descriptor and ensure it supports
 	// multi-region
-	systemDB, err := p.Descriptors().ByID(p.txn).WithoutNonPublic().Get().Database(ctx, keys.SystemDatabaseID)
+	systemDB, err := p.Descriptors().MutableByID(p.txn).Database(ctx, keys.SystemDatabaseID)
 	if err != nil {
 		return err
 	}
@@ -2526,11 +2503,11 @@ func (p *planner) optimizeSystemDatabase(ctx context.Context) error {
 	}
 
 	applyLocalityChange := func(desc *tabledesc.Mutable, locality string) error {
-		if err := p.ResetMultiRegionZoneConfigsForTable(ctx, int64(desc.GetID())); err != nil {
+		if err := p.ResetMultiRegionZoneConfigsForTable(ctx, int64(desc.GetID()), locality == "regional by row"); err != nil {
 			return err
 		}
 
-		jobName := fmt.Sprintf("convert system.%s to %s locality", desc.GetName(), locality)
+		jobName := fmt.Sprintf(systemTableLocalityChangeJobName, desc.GetName(), locality)
 		return p.writeSchemaChange(ctx, desc, descpb.InvalidMutationID, jobName)
 	}
 
@@ -2544,8 +2521,10 @@ func (p *planner) optimizeSystemDatabase(ctx context.Context) error {
 	}
 
 	partitionByRegion := func(table *tabledesc.Mutable) error {
+		// System databases will have regional by row tables configured
+		// as survive zone.
 		regionConfig, err := SynthesizeRegionConfig(
-			ctx, p.txn, table.GetParentID(), p.Descriptors(),
+			ctx, p.txn, table.GetParentID(), p.Descriptors(), multiregion.SynthesizeRegionConfigOptionForceSurvivalZone,
 		)
 		if err != nil {
 			return err
@@ -2593,8 +2572,13 @@ func (p *planner) optimizeSystemDatabase(ctx context.Context) error {
 	}
 
 	// Configure global system tables
-	for _, tableName := range globalTables {
+	for tableName := range globalTables {
 		descriptor, err := getDescriptor(tableName)
+		// Some system tables only come into effect once the
+		// version changes, so skip over those.
+		if sqlerrors.IsUndefinedRelationError(err) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -2614,8 +2598,29 @@ func (p *planner) optimizeSystemDatabase(ctx context.Context) error {
 		}
 	}
 
+	// Configure by region tables next.
+	primaryRegionName, err := systemDB.PrimaryRegionName()
+	if err != nil {
+		return err
+	}
+	for _, tableName := range regionTables {
+		descriptor, err := getDescriptor(tableName)
+		// Some system tables only come into effect once the
+		// version changes, so skip over those.
+		if sqlerrors.IsUndefinedRelationError(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		descriptor.SetTableLocalityRegionalByTable(tree.Name(primaryRegionName))
+		if err := applyLocalityChange(descriptor, "global"); err != nil {
+			return err
+		}
+	}
+
 	// Configure regional by row system tables
-	for _, tableName := range rbrTables {
+	for tableName := range rbrTables {
 		descriptor, err := getDescriptor(tableName)
 		if err != nil {
 			return err

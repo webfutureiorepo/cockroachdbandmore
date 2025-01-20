@@ -1,15 +1,11 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
-import React from "react";
 import { Modal as AntModal } from "antd";
+import React from "react";
+
 import "antd/lib/modal/style";
 import { Button, Text, TextTypes } from "src/components";
 import "./modal.styl";
@@ -30,7 +26,7 @@ export const Modal: React.FC<ModalProps> = props => {
     <AntModal
       title={title && <Text textType={TextTypes.Heading3}>{title}</Text>}
       className="crl-modal"
-      visible={visible}
+      open={visible}
       closeIcon={
         <div className="crl-modal__close-icon" onClick={onCancel}>
           &times;

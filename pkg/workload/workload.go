@@ -1,12 +1,7 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 // Package workload provides an abstraction for generators of sql query loads
 // (and requisite initial data) as well as tools for working with these
@@ -26,6 +21,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
@@ -81,6 +77,12 @@ type Flags struct {
 type Flagser interface {
 	Generator
 	Flags() Flags
+}
+
+// ConnFlagser returns the connection flags this Generator is configured with.
+type ConnFlagser interface {
+	Generator
+	ConnFlags() *ConnFlags
 }
 
 // Opser returns the work functions for this generator. The tables are required
@@ -168,6 +170,8 @@ type Meta struct {
 type Table struct {
 	// Name is the unqualified table name, pre-escaped for use directly in SQL.
 	Name string
+	// ObjectPrefix is an optional database and schema prefix.
+	ObjectPrefix *tree.ObjectNamePrefix
 	// Schema is the SQL formatted schema for this table, with the `CREATE TABLE
 	// <name>` prefix omitted.
 	Schema string
@@ -182,6 +186,16 @@ type Table struct {
 	// Stats is the pre-calculated set of statistics on this table. They can be
 	// injected using `ALTER TABLE <name> INJECT STATISTICS ...`.
 	Stats []JSONStatistic
+}
+
+// GetResolvedName gets a resolved name with the prefix applied, if one
+// exists.
+func (t Table) GetResolvedName() tree.TableName {
+	if t.ObjectPrefix == nil {
+		return tree.MakeUnqualifiedTableName(tree.Name(t.Name))
+	}
+	return tree.MakeTableNameFromPrefix(*t.ObjectPrefix,
+		tree.Name(t.Name))
 }
 
 // BatchedTuples is a generic generator of tuples (SQL rows, PKs to split at,
@@ -347,6 +361,12 @@ func ColBatchToRows(cb coldata.Batch) [][]interface{} {
 					datums[rowIdx*numCols+colIdx] = colBytes.Get(rowIdx)
 				}
 			}
+		case types.TimestampTZFamily:
+			for rowIdx, datum := range col.Timestamp()[:numRows] {
+				if !nulls.NullAt(rowIdx) {
+					datums[rowIdx*numCols+colIdx] = datum
+				}
+			}
 		default:
 			panic(fmt.Sprintf(`unhandled type %s`, col.Type()))
 		}
@@ -371,6 +391,10 @@ type InitialDataLoader interface {
 // IMPORT-based InitialDataLoader implementation.
 var ImportDataLoader InitialDataLoader = requiresCCLBinaryDataLoader(`IMPORT`)
 
+// ImportDataLoaderConcurrencyFlag that can be used to control import concurrency.
+const ImportDataLoaderConcurrencyFlag = "import-concurrency-limit"
+const ImportDataLoaderConcurrencyFlagDescription = "limit for concurrency of import operations"
+
 type requiresCCLBinaryDataLoader string
 
 func (l requiresCCLBinaryDataLoader) InitialDataLoad(
@@ -382,8 +406,6 @@ func (l requiresCCLBinaryDataLoader) InitialDataLoad(
 // QueryLoad represents some SQL query workload performable on a database
 // initialized with the requisite tables.
 type QueryLoad struct {
-	SQLDatabase string
-
 	// WorkerFns is one function per worker. It is to be called once per unit of
 	// work to be done.
 	WorkerFns []func(context.Context) error

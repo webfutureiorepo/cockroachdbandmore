@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package status
 
@@ -17,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/redact"
 	humanize "github.com/dustin/go-humanize"
 )
@@ -35,7 +31,7 @@ var statsTemplate = template.Must(template.New("runtime stats").Funcs(template.F
 
 func logStats(ctx context.Context, stats *eventpb.RuntimeStats) {
 	// In any case, log the structured event to its native channel (HEALTH).
-	log.StructuredEvent(ctx, stats)
+	log.StructuredEvent(ctx, severity.INFO, stats)
 
 	// Also, log a formatted version of the structured event on the HEALTH channel,
 	// for use by humans while troubleshooting from log files.

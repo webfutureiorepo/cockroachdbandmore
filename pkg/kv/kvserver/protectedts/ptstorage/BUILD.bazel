@@ -29,17 +29,13 @@ go_library(
 
 go_test(
     name = "ptstorage_test",
-    size = "medium",
+    size = "large",
     srcs = [
         "main_test.go",
         "storage_test.go",
         "validate_test.go",
     ],
     embed = [":ptstorage"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     shard_count = 16,
     deps = [
         "//pkg/base",
@@ -58,10 +54,12 @@ go_test(
         "//pkg/sql/catalog/colinfo",
         "//pkg/sql/catalog/descpb",
         "//pkg/sql/isql",
+        "//pkg/sql/parser/statements",
         "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",
         "//pkg/testutils",
         "//pkg/testutils/serverutils",
+        "//pkg/testutils/skip",
         "//pkg/testutils/testcluster",
         "//pkg/util/hlc",
         "//pkg/util/leaktest",
@@ -71,6 +69,7 @@ go_test(
         "//pkg/util/randutil",
         "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_cockroachdb_redact//:redact",
         "@com_github_stretchr_testify//require",
     ],
 )

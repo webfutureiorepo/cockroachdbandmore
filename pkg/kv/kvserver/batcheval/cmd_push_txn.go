@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package batcheval
 
@@ -16,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
@@ -25,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -148,7 +143,7 @@ func PushTxn(
 	// Fetch existing transaction; if missing, we're allowed to abort.
 	var existTxn roachpb.Transaction
 	ok, err := storage.MVCCGetProto(ctx, readWriter, key, hlc.Timestamp{}, &existTxn,
-		storage.MVCCGetOptions{ReadCategory: storage.BatchEvalReadCategory})
+		storage.MVCCGetOptions{ReadCategory: fs.BatchEvalReadCategory})
 	if err != nil {
 		return result.Result{}, err
 	} else if !ok {
@@ -310,6 +305,10 @@ func PushTxn(
 	// Determine what to do with the pushee, based on the push type.
 	switch pushType {
 	case kvpb.PUSH_ABORT:
+		if existTxn.Status == roachpb.PREPARED {
+			return result.Result{}, errors.AssertionFailedf(
+				"PUSH_ABORT succeeded against a PREPARED txn: %+v", existTxn)
+		}
 		// If aborting the transaction, set the new status.
 		reply.PusheeTxn.Status = roachpb.ABORTED
 		// Forward the timestamp to accommodate AbortSpan GC. See method comment for
@@ -327,7 +326,7 @@ func PushTxn(
 		if ok {
 			txnRecord := reply.PusheeTxn.AsRecord()
 			if err := storage.MVCCPutProto(ctx, readWriter, key, hlc.Timestamp{}, &txnRecord,
-				storage.MVCCWriteOptions{Stats: cArgs.Stats, Category: storage.BatchEvalReadCategory}); err != nil {
+				storage.MVCCWriteOptions{Stats: cArgs.Stats, Category: fs.BatchEvalReadCategory}); err != nil {
 				return result.Result{}, err
 			}
 		}
@@ -341,18 +340,6 @@ func PushTxn(
 		// cache. We rely on the timestamp cache to prevent the record from ever
 		// being committed with a timestamp beneath this timestamp.
 		reply.PusheeTxn.WriteTimestamp.Forward(args.PushTo)
-		// If the transaction record was already present, continue to update the
-		// transaction record until all nodes are running v23.1. v22.2 nodes won't
-		// know to check the timestamp cache again on commit to learn about any
-		// successful timestamp pushes.
-		// TODO(nvanbenschoten): remove this logic in v23.2.
-		if ok && !cArgs.EvalCtx.ClusterSettings().Version.IsActive(ctx, clusterversion.V23_1) {
-			txnRecord := reply.PusheeTxn.AsRecord()
-			if err := storage.MVCCPutProto(ctx, readWriter, key, hlc.Timestamp{}, &txnRecord,
-				storage.MVCCWriteOptions{Stats: cArgs.Stats, Category: storage.BatchEvalReadCategory}); err != nil {
-				return result.Result{}, err
-			}
-		}
 	default:
 		return result.Result{}, errors.AssertionFailedf("unexpected push type: %v", pushType)
 	}

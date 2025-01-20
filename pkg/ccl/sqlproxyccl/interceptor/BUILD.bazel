@@ -30,12 +30,8 @@ go_test(
         "pg_conn_test.go",
     ],
     embed = [":interceptor"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
-    tags = ["ccl_test"],
     deps = [
+        "//pkg/ccl/testutilsccl",
         "//pkg/sql/pgwire/pgwirebase",
         "//pkg/util/leaktest",
         "@com_github_cockroachdb_errors//:errors",

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# Copyright 2020 The Cockroach Authors.
+#
+# Use of this software is governed by the CockroachDB Software License
+# included in the /LICENSE file.
+
+
 source "$(dirname "${0}")/teamcity-support.sh"
 
 # mark_build marks a build with a given label specified as a parameter on
@@ -34,11 +40,11 @@ mark_build() {
 
 # Publish potential release metadata to a stable location.
 publish_qualify_metadata() {
-  gcs_bucket="release-automation-dev"
-  google_credentials=$GOOGLE_RELEASE_AUTOMATION_CREDENTIALS_DEV
+  gcs_bucket="cockroach-release-qualification-test"
+  google_credentials=$GCS_CREDENTIALS_DEV
   if [[ -z "${DRY_RUN}" ]] ; then
-    gcs_bucket="release-automation-prod"
-    google_credentials=$GOOGLE_RELEASE_AUTOMATION_CREDENTIALS_PROD
+    gcs_bucket="cockroach-release-qualification-prod"
+    google_credentials=$GCS_CREDENTIALS_PROD
   fi
 
   tc_start_block "Metadata"

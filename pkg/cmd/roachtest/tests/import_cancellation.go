@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package tests
 
@@ -22,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -32,25 +28,23 @@ import (
 
 func registerImportCancellation(r registry.Registry) {
 	r.Add(registry.TestSpec{
-		Name:             `import-cancellation`,
-		Owner:            registry.OwnerSQLQueries,
-		Timeout:          6 * time.Hour,
-		Cluster:          r.MakeClusterSpec(6, spec.CPU(32)),
-		CompatibleClouds: registry.AllExceptAWS,
+		Name:    `import-cancellation`,
+		Owner:   registry.OwnerSQLQueries,
+		Timeout: 6 * time.Hour,
+		Cluster: r.MakeClusterSpec(6, spec.CPU(32)),
+		// Uses gs://cockroach-fixtures-us-east1. See:
+		// https://github.com/cockroachdb/cockroach/issues/105968
+		CompatibleClouds: registry.Clouds(spec.GCE, spec.Local),
 		Suites:           registry.Suites(registry.Nightly),
 		Leases:           registry.MetamorphicLeases,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if c.Cloud() != spec.GCE && !c.IsLocal() {
-				t.Skip("uses gs://cockroach-fixtures-us-east1; see https://github.com/cockroachdb/cockroach/issues/105968")
-			}
 			runImportCancellation(ctx, t, c)
 		},
 	})
 }
 
 func runImportCancellation(ctx context.Context, t test.Test, c cluster.Cluster) {
-	c.Put(ctx, t.DeprecatedWorkload(), "./workload") // required for tpch
-	startOpts := maybeUseMemoryBudget(t, 50)
+	startOpts := roachtestutil.MaybeUseMemoryBudget(t, 50)
 	startOpts.RoachprodOpts.ScheduleBackups = true
 	c.Start(ctx, t.L(), startOpts, install.MakeClusterSettings())
 	t.Status("starting csv servers")
@@ -114,7 +108,6 @@ func runImportCancellation(ctx context.Context, t test.Test, c cluster.Cluster) 
 	var wg sync.WaitGroup
 	wg.Add(len(tablesToNumFiles))
 	for tableName, numFiles := range tablesToNumFiles {
-		tableName, numFiles := tableName, numFiles // bind to iteration scope
 		rng := rand.New(rand.NewSource(test.rootRng.Int63()))
 		m.Go(func(ctx context.Context) error {
 			defer wg.Done()
@@ -164,7 +157,7 @@ func runImportCancellation(ctx context.Context, t test.Test, c cluster.Cluster) 
 		// were run 2 times.
 		maxOps := 2 * numQueries
 		cmd := fmt.Sprintf(
-			"./workload run tpch --db=csv --concurrency=1 --queries=%s --max-ops=%d {pgurl%s} "+
+			"./cockroach workload run tpch --db=csv --concurrency=1 --queries=%s --max-ops=%d {pgurl%s} "+
 				"--enable-checks=true", queries, maxOps, c.All())
 		if err := c.RunE(ctx, option.WithNodes(c.Node(1)), cmd); err != nil {
 			t.Fatal(err)

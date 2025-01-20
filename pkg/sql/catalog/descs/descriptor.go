@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package descs
 
@@ -562,8 +557,8 @@ func (tc *Collection) getNonVirtualDescriptorID(
 		if tc.isShadowedName(ni) {
 			return continueLookups, descpb.InvalidID, nil
 		}
-		if tc.cr.IsNameInCache(&ni) {
-			if e := tc.cr.Cache().LookupNamespaceEntry(&ni); e != nil {
+		if tc.cr.IsNameInCache(ni) {
+			if e := tc.cr.Cache().LookupNamespaceEntry(ni); e != nil {
 				return haltLookups, e.GetID(), nil
 			}
 			return haltLookups, descpb.InvalidID, nil
@@ -600,7 +595,7 @@ func (tc *Collection) getNonVirtualDescriptorID(
 		if err != nil {
 			return haltLookups, descpb.InvalidID, err
 		}
-		if e := read.LookupNamespaceEntry(&ni); e != nil {
+		if e := read.LookupNamespaceEntry(ni); e != nil {
 			return haltLookups, e.GetID(), nil
 		}
 		return haltLookups, descpb.InvalidID, nil
@@ -638,6 +633,7 @@ func (tc *Collection) finalizeDescriptors(
 	descs []catalog.Descriptor,
 	validationLevels []catalog.ValidationLevel,
 ) error {
+	var requiredLevel catalog.ValidationLevel
 	// Add the descriptors to the uncommitted layer if we want them to be mutable.
 	if flags.isMutable {
 		for i, desc := range descs {
@@ -647,14 +643,13 @@ func (tc *Collection) finalizeDescriptors(
 			}
 			descs[i] = mut
 		}
+		requiredLevel = validate.MutableRead
+	} else {
+		requiredLevel = validate.ImmutableRead
 	}
 	// Ensure that all descriptors are sufficiently validated.
 	if !tc.validationModeProvider.ValidateDescriptorsOnRead() {
 		return nil
-	}
-	requiredLevel := validate.MutableRead
-	if !flags.layerFilters.withoutLeased {
-		requiredLevel = validate.ImmutableRead
 	}
 	var toValidate []catalog.Descriptor
 	for i := range descs {

@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package opttester
 
@@ -57,10 +52,9 @@ type forcingOptimizer struct {
 
 // newForcingOptimizer creates a forcing optimizer that stops applying any rules
 // after <steps> rules are matched. If ignoreNormRules is true, normalization
-// rules don't count against this limit. If disableCheckExpr is true, expression
-// validation in CheckExpr will not run.
+// rules don't count against this limit.
 func newForcingOptimizer(
-	tester *OptTester, steps int, ignoreNormRules bool, disableCheckExpr bool,
+	tester *OptTester, steps int, ignoreNormRules bool,
 ) (*forcingOptimizer, error) {
 	fo := &forcingOptimizer{
 		remaining:   steps,
@@ -104,7 +98,7 @@ func newForcingOptimizer(
 		fo.groups.AddGroup(expr)
 	})
 
-	if disableCheckExpr {
+	if tester.Flags.DisableCheckExpr {
 		fo.o.Memo().DisableCheckExpr()
 	}
 

@@ -1,26 +1,23 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { expectSaga } from "redux-saga-test-plan";
+import * as matchers from "redux-saga-test-plan/matchers";
 import {
   EffectProviders,
   StaticProvider,
   throwError,
 } from "redux-saga-test-plan/providers";
-import * as matchers from "redux-saga-test-plan/matchers";
-import { expectSaga } from "redux-saga-test-plan";
+
 import { DatabasesListResponse, getDatabasesList } from "../../api";
+
+import { actions, DatabasesListState, reducer } from "./databasesList.reducers";
 import {
   refreshDatabasesListSaga,
   requestDatabasesListSaga,
 } from "./databasesList.saga";
-import { actions, DatabasesListState, reducer } from "./databasesList.reducers";
 
 describe("DatabasesList sagas", () => {
   const databasesListResponse: DatabasesListResponse = {

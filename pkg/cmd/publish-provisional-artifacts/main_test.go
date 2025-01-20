@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package main
 
@@ -81,11 +76,15 @@ func (s *mockStorage) PutObject(i *release.PutObjectInput) error {
 type mockExecRunner struct {
 	fakeBazelBin string
 	cmds         []string
+	pkgDir       string
 }
 
 func (r *mockExecRunner) run(c *exec.Cmd) ([]byte, error) {
 	if r.fakeBazelBin == "" {
 		panic("r.fakeBazelBin not set")
+	}
+	if r.pkgDir == "" {
+		panic("r.pkgDir not set")
 	}
 	if c.Dir == "" {
 		return nil, fmt.Errorf("`Dir` must be specified")
@@ -132,6 +131,8 @@ func (r *mockExecRunner) run(c *exec.Cmd) ([]byte, error) {
 			}
 		}
 		paths = append(paths, path, pathSQL)
+		paths = append(paths, filepath.Join(r.pkgDir, "LICENSE"))
+		paths = append(paths, filepath.Join(r.pkgDir, "licenses", "THIRD-PARTY-NOTICES.txt"))
 		ext := release.SharedLibraryExtensionFromPlatform(platform)
 		if platform != release.PlatformMacOSArm && platform != release.PlatformWindows {
 			for _, lib := range release.CRDBSharedLibraries {
@@ -171,27 +172,27 @@ func TestProvisional(t *testing.T) {
 			},
 			expectedCmds: []string{
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64 version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary release' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxfipsbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64-fips version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64-fips",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64-fips",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary release' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxarmbase",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary release' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crossmacosbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary release' -c opt --config=force_build_cdeps --config=crossmacosarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crossmacosarmbase",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql --enable_runfiles " +
 					"'--workspace_status_command=." +
-					"/build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
+					"/build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary release' -c opt --config=force_build_cdeps --config=crosswindowsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosswindowsbase",
 			},
 			expectedGets: nil,
 			expectedPuts: []string{
@@ -232,8 +233,8 @@ func TestProvisional(t *testing.T) {
 			},
 			expectedCmds: []string{
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64 version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64",
@@ -257,18 +258,18 @@ func TestProvisional(t *testing.T) {
 			},
 			expectedCmds: []string{
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64 version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary release' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxfipsbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64-fips version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64-fips",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64-fips",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary release' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary release' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxarmbase",
 			},
 			expectedGets: nil,
 			expectedPuts: []string{
@@ -298,27 +299,27 @@ func TestProvisional(t *testing.T) {
 			},
 			expectedCmds: []string{
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release injected-tag' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary release injected-tag' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64 version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary release injected-tag' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary release injected-tag' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxfipsbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64-fips version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64-fips",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64-fips",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary release injected-tag' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary release injected-tag' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxarmbase",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary release injected-tag' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary release injected-tag' -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary release injected-tag' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crossmacosbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary release injected-tag' -c opt --config=force_build_cdeps --config=crossmacosarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crossmacosarmbase",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql --enable_runfiles " +
 					"'--workspace_status_command=." +
-					"/build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary release injected-tag' -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
+					"/build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary release injected-tag' -c opt --config=force_build_cdeps --config=crosswindowsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosswindowsbase",
 			},
 			expectedGets: nil,
 			expectedPuts: []string{
@@ -361,99 +362,99 @@ func TestProvisional(t *testing.T) {
 			expectedCmds: []string{
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
 					"'--workspace_status_command=." +
-					"/build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"/build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64 version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxfipsbase",
 				"env=[MALLOC_CONF=prof:true] args=./cockroach.linux-2.6.32-gnu-amd64-fips version",
 				"env=[] args=ldd ./cockroach.linux-2.6.32-gnu-amd64-fips",
 				"env=[] args=bazel run @go_sdk//:bin/go -- tool nm ./cockroach.linux-2.6.32-gnu-amd64-fips",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosslinuxarmbase",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
-				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config" +
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crossmacosbase",
+				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary' -c opt --config=force_build_cdeps --config=crossmacosarmbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config" +
 					"=crossmacosarmbase",
 				"env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql --enable_runfiles " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
-				"env=[] args=bazel info bazel-bin -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary' -c opt --config=force_build_cdeps --config=crosswindowsbase --norun_validations",
+				"env=[] args=bazel info bazel-bin -c opt --config=force_build_cdeps --config=crosswindowsbase",
 			},
 			expectedGets: nil,
 			expectedPuts: []string{
 				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-amd64.00SHA00 " +
 					"CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
 					"'--workspace_status_command=./build/bazelutil/stamp." +
-					"sh x86_64-pc-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"sh x86_64-pc-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-amd64.LATEST/no-cache " +
 					"REDIRECT /cockroach/cockroach.linux-gnu-amd64.00SHA00",
-				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-amd64.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-amd64.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-amd64.LATEST/no-cache REDIRECT /cockroach/cockroach-sql.linux-gnu-amd64.00SHA00",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-amd64.00SHA00." +
 					"so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-amd64.so.LATEST/no-cache REDIRECT /cockroach/lib/libgeos.linux-gnu-amd64.00SHA00.so",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-amd64.00SHA00." +
 					"so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-amd64.so.LATEST/no-cache REDIRECT /cockroach/lib/libgeos_c.linux-gnu-amd64.00SHA00.so",
-				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-amd64-fips.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-amd64-fips.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-amd64-fips.LATEST/no-cache REDIRECT /cockroach/cockroach.linux-gnu-amd64-fips.00SHA00",
-				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-amd64-fips.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-amd64-fips.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-amd64-fips.LATEST/no-cache REDIRECT /cockroach/cockroach-sql.linux-gnu-amd64-fips.00SHA00",
-				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-amd64-fips.00SHA00.so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-amd64-fips.00SHA00.so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-amd64-fips.so.LATEST/no-cache REDIRECT /cockroach/lib/libgeos.linux-gnu-amd64-fips.00SHA00.so",
-				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-amd64-fips.00SHA00.so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxfipsbase",
+				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-amd64-fips.00SHA00.so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-pc-linux-gnu official-fips-binary' -c opt --config=force_build_cdeps --config=crosslinuxfipsbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-amd64-fips.so.LATEST/no-cache REDIRECT /cockroach/lib/libgeos_c.linux-gnu-amd64-fips.00SHA00.so",
 				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-arm64.00SHA00 " +
 					"CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
 					"'--workspace_status_command=./build/bazelutil/stamp." +
-					"sh aarch64-unknown-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+					"sh aarch64-unknown-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach.linux-gnu-arm64.LATEST/no-cache " +
 					"REDIRECT /cockroach/cockroach.linux-gnu-arm64.00SHA00",
-				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-arm64.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-arm64.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach-sql.linux-gnu-arm64.LATEST/no-cache REDIRECT /cockroach/cockroach-sql.linux-gnu-arm64.00SHA00",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-arm64.00SHA00." +
 					"so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.linux-gnu-arm64.so.LATEST/no-cache REDIRECT /cockroach/lib/libgeos.linux-gnu-arm64.00SHA00.so",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-arm64.00SHA00." +
 					"so CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosslinuxarmbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh aarch64-unknown-linux-gnu official-binary' -c opt --config=force_build_cdeps --config=crosslinuxarmbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.linux-gnu-arm64.so.LATEST/no-cache REDIRECT /cockroach/lib/libgeos_c.linux-gnu-arm64.00SHA00.so",
 				"gs://edge-binaries-bucket/cockroach/cockroach.darwin-amd64.00SHA00 " +
 					"CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach.darwin-amd64.LATEST/no-cache " +
 					"REDIRECT /cockroach/cockroach.darwin-amd64.00SHA00",
-				"gs://edge-binaries-bucket/cockroach/cockroach-sql.darwin-amd64.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach-sql.darwin-amd64.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach-sql.darwin-amd64.LATEST/no-cache REDIRECT /cockroach/cockroach-sql." +
 					"darwin-amd64.00SHA00",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.darwin-amd64.00SHA00." +
 					"dylib CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
-					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
+					"'--workspace_status_command=./build/bazelutil/stamp.sh x86_64-apple-darwin19 official-binary' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos.darwin-amd64.dylib.LATEST/no-cache REDIRECT /cockroach/lib/libgeos.darwin-amd64.00SHA00.dylib",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.darwin-amd64.00SHA00." +
 					"dylib CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql //c-deps:libgeos " +
 					"'--workspace_status_command=./build/bazelutil/stamp." +
-					"sh x86_64-apple-darwin19 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosbase",
+					"sh x86_64-apple-darwin19 official-binary' -c opt --config=force_build_cdeps --config=crossmacosbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/lib/libgeos_c.darwin-amd64.dylib.LATEST/no-cache REDIRECT /cockroach/lib/libgeos_c.darwin-amd64.00SHA00.dylib",
-				"gs://edge-binaries-bucket/cockroach/cockroach.darwin-arm64.unsigned.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach.darwin-arm64.unsigned.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary' -c opt --config=force_build_cdeps --config=crossmacosarmbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach.darwin-arm64.unsigned.LATEST/no-cache REDIRECT /cockroach/cockroach.darwin-arm64.unsigned.00SHA00",
-				"gs://edge-binaries-bucket/cockroach/cockroach-sql.darwin-arm64.unsigned.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crossmacosarmbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach-sql.darwin-arm64.unsigned.00SHA00 CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql '--workspace_status_command=./build/bazelutil/stamp.sh aarch64-apple-darwin21.2 official-binary' -c opt --config=force_build_cdeps --config=crossmacosarmbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach-sql.darwin-arm64.unsigned.LATEST/no-cache REDIRECT /cockroach/cockroach-sql.darwin-arm64.unsigned.00SHA00",
 				"gs://edge-binaries-bucket/cockroach/cockroach.windows-amd64.00SHA00.exe " +
 					"CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql --enable_runfiles " +
 					"'--workspace_status_command=./build/bazelutil/stamp." +
-					"sh x86_64-w64-mingw32 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
+					"sh x86_64-w64-mingw32 official-binary' -c opt --config=force_build_cdeps --config=crosswindowsbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach.windows-amd64.LATEST/no-cache " +
 					"REDIRECT /cockroach/cockroach.windows-amd64.00SHA00.exe",
-				"gs://edge-binaries-bucket/cockroach/cockroach-sql.windows-amd64.00SHA00.exe CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql --enable_runfiles '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary' -c opt --config=ci --config=force_build_cdeps --config=crosswindowsbase",
+				"gs://edge-binaries-bucket/cockroach/cockroach-sql.windows-amd64.00SHA00.exe CONTENTS env=[] args=bazel build //pkg/cmd/cockroach //pkg/cmd/cockroach-sql --enable_runfiles '--workspace_status_command=./build/bazelutil/stamp.sh x86_64-w64-mingw32 official-binary' -c opt --config=force_build_cdeps --config=crosswindowsbase --norun_validations",
 				"gs://edge-binaries-bucket/cockroach/cockroach-sql.windows-amd64.LATEST/no-cache REDIRECT /cockroach/cockroach-sql.windows-amd64.00SHA00.exe",
 			},
 			platforms: release.DefaultPlatforms(),
@@ -473,6 +474,7 @@ func TestProvisional(t *testing.T) {
 			fakeBazelBin, cleanup := testutils.TempDir(t)
 			defer cleanup()
 			runner.fakeBazelBin = fakeBazelBin
+			runner.pkgDir = dir
 			flags := test.flags
 			flags.pkgDir = dir
 			execFn := release.ExecFn{MockExecFn: runner.run}

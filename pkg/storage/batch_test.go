@@ -1,12 +1,7 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package storage
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -184,7 +180,7 @@ func TestReadOnlyBasics(t *testing.T) {
 	successTestCases := []func(){
 		func() {
 			_ = ro.MVCCIterate(context.Background(), a.Key, a.Key, MVCCKeyIterKind, IterKeyTypePointsOnly,
-				UnknownReadCategory,
+				fs.UnknownReadCategory,
 				func(MVCCKeyValue, MVCCRangeKeyStack) error { return iterutil.StopIteration() })
 		},
 		func() {
@@ -721,7 +717,7 @@ func TestUnindexedBatchThatSupportsReader(t *testing.T) {
 	require.Equal(t, []byte("c"), mvccGetRaw(t, e, mvccKey("b")))
 }
 
-func TestWriteBatchPanicsAsReader(t *testing.T) {
+func TestWriteBatchCoerceAsReader(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -731,34 +727,9 @@ func TestWriteBatchPanicsAsReader(t *testing.T) {
 	batch := e.NewWriteBatch()
 	defer batch.Close()
 
-	// The underlying type returned by NewWriteBatch does implement Reader.
-	// Ensure that if a user coerces the WriteBatch into a Reader, it panics.
-	r := batch.(Reader)
-
-	// The various Reader methods on the batch should panic.
-	a := mvccKey("a")
-	b := mvccKey("b")
-	testCases := []func(){
-		func() {
-			_ = r.MVCCIterate(context.Background(), a.Key, b.Key, MVCCKeyIterKind, IterKeyTypePointsOnly,
-				UnknownReadCategory, nil)
-		},
-		func() {
-			_, _ = r.NewMVCCIterator(context.Background(), MVCCKeyIterKind, IterOptions{UpperBound: roachpb.KeyMax})
-		},
-	}
-	for i, f := range testCases {
-		func() {
-			defer func(i int) {
-				if r := recover(); r == nil {
-					t.Fatalf("%d: test did not panic", i)
-				} else if r != "write-only batch" {
-					t.Fatalf("%d: unexpected panic: %v", i, r)
-				}
-			}(i)
-			f()
-		}()
-	}
+	// The underlying type returned by NewWriteBatch does NOT implement Reader.
+	_, ok := batch.(Reader)
+	require.False(t, ok)
 }
 
 func TestBatchIteration(t *testing.T) {

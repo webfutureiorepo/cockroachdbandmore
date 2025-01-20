@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sctestdeps
 
@@ -18,10 +13,13 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
@@ -29,12 +27,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/funcdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/nstree"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/zone"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scbuild"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdecomp"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps/sctestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
@@ -93,6 +94,16 @@ func (s *TestState) ClusterSettings() *cluster.Settings {
 // Statements implements the scbuild.Dependencies interface.
 func (s *TestState) Statements() []string {
 	return s.statements
+}
+
+// EvalCtx implements the scbuild.Dependencies interface.
+func (s *TestState) EvalCtx() *eval.Context {
+	return s.evalCtx
+}
+
+// SemaCtx implements the scbuild.Dependencies interface.
+func (s *TestState) SemaCtx() *tree.SemaContext {
+	return s.semaCtx
 }
 
 // IncrementSchemaChangeAlterCounter implements the scbuild.Dependencies
@@ -322,6 +333,11 @@ func (s *TestState) MayResolveTable(
 	}
 	table, err := catalog.AsTableDescriptor(desc)
 	if err != nil {
+		// Finding a descriptor of a different type is not an error; it is
+		// equivalent to "not found".
+		if errors.Is(err, catalog.ErrDescriptorWrongType) {
+			return prefix, nil
+		}
 		panic(err)
 	}
 	return prefix, table
@@ -340,6 +356,11 @@ func (s *TestState) MayResolveType(
 	}
 	typ, err := catalog.AsTypeDescriptor(desc)
 	if err != nil {
+		// Finding a descriptor of a different type is not an error; it is
+		// equivalent to "not found".
+		if errors.Is(err, catalog.ErrDescriptorWrongType) {
+			return prefix, nil
+		}
 		panic(err)
 	}
 	return prefix, typ
@@ -639,6 +660,12 @@ func (s *TestState) MustReadDescriptor(ctx context.Context, id descpb.ID) catalo
 	if err != nil {
 		panic(err)
 	}
+	// Ensure that any types in the descriptor we read are hydrated. This is
+	// required to correctly print out TypeName in the ColumnType element.
+	err = typedesc.HydrateTypesInDescriptor(ctx, desc, s)
+	if err != nil {
+		panic(err)
+	}
 	return desc
 }
 
@@ -787,9 +814,95 @@ func (s *TestState) DeleteDescriptor(ctx context.Context, id descpb.ID) error {
 	return nil
 }
 
+// UpdateZoneConfig implements the scexec.Catalog interface.
+func (s *TestState) UpdateZoneConfig(
+	ctx context.Context, id descpb.ID, zc *zonepb.ZoneConfig,
+) error {
+	oldZc := s.uncommittedInMemory.LookupZoneConfig(id)
+
+	var rawBytes []byte
+	// If the zone config already exists, we need to preserve the raw bytes as the
+	// expected value that we will be updating. Otherwise, this will be a clean
+	// insert with no expected raw bytes.
+	if oldZc != nil {
+		rawBytes = oldZc.GetRawBytesInStorage()
+	}
+	newZc := zone.NewZoneConfigWithRawBytes(zc, rawBytes)
+	return s.WriteZoneConfigToBatch(ctx, id, newZc)
+}
+
+// UpdateSubzoneConfig implements the scexec.Catalog interface.
+func (s *TestState) UpdateSubzoneConfig(
+	ctx context.Context,
+	parentZone catalog.ZoneConfig,
+	subzone zonepb.Subzone,
+	subzoneSpans []zonepb.SubzoneSpan,
+	idxRefToDelete int32,
+) (catalog.ZoneConfig, error) {
+	var rawBytes []byte
+	var zc *zonepb.ZoneConfig
+	// If the zone config already exists, we need to preserve the raw bytes as the
+	// expected value that we will be updating. Otherwise, this will be a clean
+	// insert with no expected raw bytes.
+	if parentZone != nil {
+		rawBytes = parentZone.GetRawBytesInStorage()
+		zc = parentZone.ZoneConfigProto()
+	} else {
+		// If no zone config exists, create a new one that is a subzone placeholder.
+		zc = zonepb.NewZoneConfig()
+		zc.DeleteTableConfig()
+	}
+
+	if idxRefToDelete == -1 {
+		idxRefToDelete = zc.GetSubzoneIndex(subzone.IndexID, subzone.PartitionName)
+	}
+
+	// Update the subzone in the zone config.
+	zc.SetSubzone(subzone)
+	// Update the subzone spans.
+	subzoneSpansToWrite := subzoneSpans
+	// If there are subzone spans that currently exist, merge those with the new
+	// spans we are updating. Otherwise, the zone config's set of subzone spans
+	// will be our input subzoneSpans.
+	if len(zc.SubzoneSpans) != 0 {
+		zc.DeleteSubzoneSpansForSubzoneIndex(idxRefToDelete)
+		zc.MergeSubzoneSpans(subzoneSpansToWrite)
+		subzoneSpansToWrite = zc.SubzoneSpans
+	}
+	zc.SubzoneSpans = subzoneSpansToWrite
+
+	newZc := zone.NewZoneConfigWithRawBytes(zc, rawBytes)
+	return newZc, nil
+}
+
 // DeleteZoneConfig implements the scexec.Catalog interface.
-func (s *TestState) DeleteZoneConfig(ctx context.Context, id descpb.ID) error {
+func (s *TestState) DeleteZoneConfig(_ context.Context, id descpb.ID) error {
 	s.catalogChanges.zoneConfigsToDelete.Add(id)
+	return nil
+}
+
+// DeleteSubzoneConfig implements the scexec.Catalog interface.
+func (s *TestState) DeleteSubzoneConfig(
+	ctx context.Context, tableID descpb.ID, subzone zonepb.Subzone, subzoneSpans []zonepb.SubzoneSpan,
+) error {
+	var zc *zonepb.ZoneConfig
+	if czc, ok := s.catalogChanges.zoneConfigsToUpdate[tableID]; ok {
+		zc = czc
+	} else {
+		// No-op if nothing is there for us to discard.
+		return nil
+	}
+
+	// Delete the subzone in the zone config.
+	zc.DeleteSubzone(subzone.IndexID, subzone.PartitionName)
+	// If there are no more subzones after our delete and this table is a
+	// placeholder, we can just delete the table zone config.
+	if len(zc.Subzones) == 0 && zc.IsSubzonePlaceholder() {
+		return s.DeleteZoneConfig(ctx, tableID)
+	}
+	// Delete the subzone spans.
+	zc.DeleteSubzoneSpans(subzoneSpans)
+	s.catalogChanges.zoneConfigsToUpdate[tableID] = zc
 	return nil
 }
 
@@ -858,6 +971,18 @@ func (s *TestState) Validate(ctx context.Context) error {
 	for _, deletedID := range s.catalogChanges.zoneConfigsToDelete.Ordered() {
 		s.LogSideEffectf("deleting zone config for #%d", deletedID)
 		s.uncommittedInMemory.DeleteZoneConfig(deletedID)
+	}
+	for upsertedID, zc := range s.catalogChanges.zoneConfigsToUpdate {
+		s.LogSideEffectf("upsert zone config for #%d", upsertedID)
+		var val roachpb.Value
+		if err := val.SetProto(zc); err != nil {
+			return err
+		}
+		valBytes, err := val.GetBytes()
+		if err != nil {
+			return err
+		}
+		s.uncommittedInMemory.UpsertZoneConfig(upsertedID, zc, valBytes)
 	}
 	commentKeys := make([]catalogkeys.CommentKey, 0, len(s.catalogChanges.commentsToUpdate))
 	for key := range s.catalogChanges.commentsToUpdate {
@@ -987,27 +1112,25 @@ func (s *TestState) UpdateSchemaChangeJob(
 		TraceID:        0,
 	}
 	oldPayload := jobspb.Payload{
-		Description:                  scJob.Description,
-		Statement:                    scJob.Statements,
-		UsernameProto:                scJob.Username.EncodeProto(),
-		StartedMicros:                0,
-		FinishedMicros:               0,
-		DescriptorIDs:                scJob.DescriptorIDs,
-		Error:                        "",
-		ResumeErrors:                 nil,
-		CleanupErrors:                nil,
-		FinalResumeError:             nil,
-		Noncancelable:                scJob.NonCancelable,
-		Details:                      jobspb.WrapPayloadDetails(scJob.Details),
-		PauseReason:                  "",
-		RetriableExecutionFailureLog: nil,
+		Description:      scJob.Description,
+		Statement:        scJob.Statements,
+		UsernameProto:    scJob.Username.EncodeProto(),
+		StartedMicros:    0,
+		FinishedMicros:   0,
+		DescriptorIDs:    scJob.DescriptorIDs,
+		Error:            "",
+		ResumeErrors:     nil,
+		CleanupErrors:    nil,
+		FinalResumeError: nil,
+		Noncancelable:    scJob.NonCancelable,
+		Details:          jobspb.WrapPayloadDetails(scJob.Details),
+		PauseReason:      "",
 	}
 	oldJobMetadata := jobs.JobMetadata{
 		ID:       scJob.JobID,
 		Status:   jobs.StatusRunning,
 		Payload:  &oldPayload,
 		Progress: &oldProgress,
-		RunStats: nil,
 	}
 	updateProgress := func(newProgress *jobspb.Progress) {
 		scJob.Progress = *newProgress.GetNewSchemaChange()
@@ -1072,6 +1195,9 @@ func (s *TestState) WithTxnInJob(ctx context.Context, fn scrun.JobTxnFunc) (err 
 	s.WithTxn(func(s *TestState) { err = fn(ctx, s, s) })
 	return err
 }
+
+func (s *TestState) GetExplain() string           { return "" }
+func (s *TestState) SetExplain(_ string, _ error) {}
 
 // ValidateForwardIndexes implements the validator interface.
 func (s *TestState) ValidateForwardIndexes(
@@ -1173,6 +1299,9 @@ func (s *TestState) logEvent(event logpb.EventPayload) error {
 		// Remove common details from text output, they're never decorated.
 		if inM, ok := in.(map[string]interface{}); ok {
 			delete(inM, "common")
+
+			// Also remove latency measurement, since it's not deterministic.
+			delete(inM, "latencyNanos")
 		}
 	})
 	if err != nil {
@@ -1266,7 +1395,7 @@ func (s *TestState) ResolveFunction(
 	if err != nil {
 		return nil, err
 	}
-	fd, found := scDesc.GetResolvedFuncDefinition(fnName.Object())
+	fd, found := scDesc.GetResolvedFuncDefinition(ctx, fnName.Object())
 	if !found {
 		return nil, tree.ErrRoutineUndefined
 	}
@@ -1312,13 +1441,24 @@ func (s *TestState) ResolveFunctionByOID(
 }
 
 // ZoneConfigGetter implements scexec.Dependencies.
-func (s *TestState) ZoneConfigGetter() scbuild.ZoneConfigGetter {
+func (s *TestState) ZoneConfigGetter() scdecomp.ZoneConfigGetter {
 	return s
+}
+
+// WriteZoneConfigToBatch implements scexec.Dependencies.
+func (s *TestState) WriteZoneConfigToBatch(
+	_ context.Context, id descpb.ID, zc catalog.ZoneConfig,
+) error {
+	if s.catalogChanges.zoneConfigsToUpdate == nil {
+		s.catalogChanges.zoneConfigsToUpdate = make(map[descpb.ID]*zonepb.ZoneConfig)
+	}
+	s.catalogChanges.zoneConfigsToUpdate[id] = zc.ZoneConfigProto()
+	return nil
 }
 
 // GetZoneConfig implements scexec.Dependencies.
 func (s *TestState) GetZoneConfig(ctx context.Context, id descpb.ID) (catalog.ZoneConfig, error) {
-	return s.uncommittedInMemory.LookupZoneConfig(id), nil
+	return s.committed.LookupZoneConfig(id), nil
 }
 
 func (s *TestState) get(
@@ -1342,6 +1482,11 @@ func (s *TestState) GetSchemaComment(schemaID catid.DescID) (comment string, ok 
 // GetTableComment implements the scdecomp.CommentGetter interface.
 func (s *TestState) GetTableComment(tableID catid.DescID) (comment string, ok bool) {
 	return s.get(tableID, 0, catalogkeys.TableCommentType)
+}
+
+// GetTypeComment implements the scdecomp.CommentGetter interface.
+func (s *TestState) GetTypeComment(typeID catid.DescID) (comment string, ok bool) {
+	return s.get(typeID, 0, catalogkeys.TypeCommentType)
 }
 
 // GetColumnComment implements the scdecomp.CommentGetter interface.
@@ -1392,4 +1537,53 @@ func getNameEntryDescriptorType(parentID, parentSchemaID descpb.ID) string {
 // InitializeSequence is part of the scexec.Catalog interface.
 func (s *TestState) InitializeSequence(id descpb.ID, startVal int64) {
 	s.LogSideEffectf("initializing sequence %d with starting value of %d", id, startVal)
+}
+
+// TemporarySchemaName is part of scbuild.TemporarySchemaProvider interface.
+func (s *TestState) TemporarySchemaName() string {
+	return fmt.Sprintf("pg_temp_%d_%d", 123, 456)
+}
+
+// InsertTemporarySchema is part of scexec.TemporarySchemaCreator interface.
+func (s *TestState) InsertTemporarySchema(
+	tempSchemaName string, databaseID descpb.ID, schemaID descpb.ID,
+) {
+	// Setup the session data and insert a temporary schema descriptor.
+	s.sessionData.TemporarySchemaName = tempSchemaName
+	if s.sessionData.DatabaseIDToTempSchemaID == nil {
+		s.sessionData.DatabaseIDToTempSchemaID = make(map[uint32]uint32)
+	}
+	s.sessionData.DatabaseIDToTempSchemaID[uint32(databaseID)] = uint32(schemaID)
+	s.uncommittedInStorage.UpsertDescriptor(schemadesc.NewTemporarySchema(tempSchemaName, schemaID, databaseID))
+}
+
+func (s *TestState) TemporarySchemaProvider() scbuild.TemporarySchemaProvider {
+	return s
+}
+
+func (s *TestState) NodesStatusInfo() scbuild.NodesStatusInfo {
+	return s
+}
+
+func (s *TestState) RegionProvider() scbuild.RegionProvider {
+	return s
+}
+
+func (s *TestState) NodesStatusServer() *serverpb.OptionalNodesStatusServer {
+	return &serverpb.OptionalNodesStatusServer{}
+}
+
+func (s *TestState) GetRegions(ctx context.Context) (*serverpb.RegionsResponse, error) {
+	return &serverpb.RegionsResponse{Regions: map[string]*serverpb.RegionsResponse_Region{}}, nil
+}
+
+// SynthesizeRegionConfig implements the scbuildstmt.SynthesizeRegionConfig interface.
+func (s *TestState) SynthesizeRegionConfig(
+	ctx context.Context, dbID descpb.ID, opts ...multiregion.SynthesizeRegionConfigOption,
+) (multiregion.RegionConfig, error) {
+	return multiregion.RegionConfig{}, nil
+}
+
+func (s *TestState) GetDefaultZoneConfig() *zonepb.ZoneConfig {
+	return zonepb.DefaultSystemZoneConfigRef()
 }

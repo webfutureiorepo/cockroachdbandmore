@@ -1,12 +1,7 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package memo
 
@@ -192,6 +187,7 @@ func init() {
 	typingFuncMap[opt.ArrayFlattenOp] = typeArrayFlatten
 	typingFuncMap[opt.IfErrOp] = typeIfErr
 	typingFuncMap[opt.UDFCallOp] = typeUDFCall
+	typingFuncMap[opt.TxnControlOp] = typeTxnControl
 
 	// Override default typeAsAggregate behavior for aggregate functions with
 	// a large number of possible overloads or where ReturnType depends on
@@ -276,8 +272,9 @@ func typeIndirection(e opt.ScalarExpr) *types.T {
 
 // typeCollate returns the collated string typed with the given locale.
 func typeCollate(e opt.ScalarExpr) *types.T {
+	t := e.Child(0).(opt.ScalarExpr).DataType()
 	locale := e.(*CollateExpr).Locale
-	return types.MakeCollatedString(types.String, locale)
+	return types.MakeCollatedType(t, locale)
 }
 
 // typeArrayFlatten returns the type of the subquery as an array.
@@ -389,6 +386,11 @@ func typeCast(e opt.ScalarExpr) *types.T {
 // typeUDFCall returns the type of a UDF call operator
 func typeUDFCall(e opt.ScalarExpr) *types.T {
 	return e.(*UDFCallExpr).Def.Typ
+}
+
+// typeTxnControl returns the type of a TxnControlExpr operator
+func typeTxnControl(e opt.ScalarExpr) *types.T {
+	return e.(*TxnControlExpr).Def.Typ
 }
 
 // typeSubquery returns the type of a subquery, which is equal to the type of

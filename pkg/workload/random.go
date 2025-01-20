@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package workload
 
@@ -18,7 +13,7 @@ import (
 
 const (
 	flagName        = "seed"
-	flagDescription = "Random seed. Must be the same in 'init' and 'run'. Default changes in each run"
+	flagDescription = "Random seed. Default changes in each run"
 )
 
 // RandomSeed is the interface used by the workload runner to print

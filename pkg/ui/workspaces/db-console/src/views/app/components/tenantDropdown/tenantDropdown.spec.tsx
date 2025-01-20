@@ -1,45 +1,59 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-import {
-  selectTenantsFromMultitenantSessionCookie,
-  getCookieValue,
-} from "src/redux/cookies";
-import React from "react";
-import TenantDropdown from "./tenantDropdown";
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 import { shallow } from "enzyme";
+import fetchMock from "fetch-mock";
+import React from "react";
+
+import { getCookieValue } from "src/redux/cookies";
+
+import TenantDropdown from "./tenantDropdown";
 
 jest.mock("src/redux/cookies", () => ({
-  selectTenantsFromMultitenantSessionCookie: jest.fn(),
   getCookieValue: jest.fn(),
 }));
 
 describe("TenantDropdown", () => {
+  beforeEach(() => {});
+
+  afterEach(() => {
+    fetchMock.restore();
+  });
+
   it("returns null if there's no current virtual cluster", () => {
-    (
-      selectTenantsFromMultitenantSessionCookie as jest.MockedFn<
-        typeof selectTenantsFromMultitenantSessionCookie
-      >
-    ).mockReturnValueOnce([]);
+    fetchMock.mock({
+      matcher: `virtual_clusters`,
+      method: "GET",
+      response: () => {
+        return {
+          body: JSON.stringify({
+            virtual_clusters: [],
+          }),
+        };
+      },
+    });
+
     (
       getCookieValue as jest.MockedFn<typeof getCookieValue>
     ).mockReturnValueOnce(null);
     const wrapper = shallow(<TenantDropdown />);
     expect(wrapper.isEmptyRender());
   });
-  // Mutli-tenant scenarios
+  // Multi-tenant scenarios
   it("returns null if there are no virtual clusters or less than 2 in the session cookie", () => {
-    (
-      selectTenantsFromMultitenantSessionCookie as jest.MockedFn<
-        typeof selectTenantsFromMultitenantSessionCookie
-      >
-    ).mockReturnValueOnce(["system"]);
+    fetchMock.mock({
+      matcher: `virtual_clusters`,
+      method: "GET",
+      response: () => {
+        return {
+          body: JSON.stringify({
+            virtual_clusters: ["system"],
+          }),
+        };
+      },
+    });
+
     (
       getCookieValue as jest.MockedFn<typeof getCookieValue>
     ).mockReturnValueOnce("system");
@@ -47,11 +61,18 @@ describe("TenantDropdown", () => {
     expect(wrapper.isEmptyRender());
   });
   it("returns a dropdown list of tenant options if there are multiple virtual clusters in the session cookie", () => {
-    (
-      selectTenantsFromMultitenantSessionCookie as jest.MockedFn<
-        typeof selectTenantsFromMultitenantSessionCookie
-      >
-    ).mockReturnValueOnce(["system", "app"]);
+    fetchMock.mock({
+      matcher: `virtual_clusters`,
+      method: "GET",
+      response: () => {
+        return {
+          body: JSON.stringify({
+            virtual_clusters: ["system", "app"],
+          }),
+        };
+      },
+    });
+
     (
       getCookieValue as jest.MockedFn<typeof getCookieValue>
     ).mockReturnValueOnce("system");
@@ -61,11 +82,18 @@ describe("TenantDropdown", () => {
     ).toEqual(1);
   });
   it("returns a dropdown if the there is a single virtual cluster option but isn't system", () => {
-    (
-      selectTenantsFromMultitenantSessionCookie as jest.MockedFn<
-        typeof selectTenantsFromMultitenantSessionCookie
-      >
-    ).mockReturnValueOnce(["app"]);
+    fetchMock.mock({
+      matcher: `virtual_clusters`,
+      method: "GET",
+      response: () => {
+        return {
+          body: JSON.stringify({
+            virtual_clusters: ["app"],
+          }),
+        };
+      },
+    });
+
     (
       getCookieValue as jest.MockedFn<typeof getCookieValue>
     ).mockReturnValueOnce("app");

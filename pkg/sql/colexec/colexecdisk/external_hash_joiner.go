@@ -1,16 +1,13 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colexecdisk
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecjoin"
@@ -61,6 +58,7 @@ import (
 // components of the external hash joiner which is responsible for making sure
 // that the components stay within the memory limit.
 func NewExternalHashJoiner(
+	ctx context.Context,
 	unlimitedAllocator *colmem.Allocator,
 	flowCtx *execinfra.FlowCtx,
 	args *colexecargs.NewColOperatorArgs,
@@ -68,7 +66,7 @@ func NewExternalHashJoiner(
 	leftInput, rightInput colexecop.Operator,
 	createDiskBackedSorter DiskBackedSorterConstructor,
 	diskAcc *mon.BoundAccount,
-	converterMemAcc *mon.BoundAccount,
+	diskQueueMemAcc *mon.BoundAccount,
 ) colexecop.ClosableOperator {
 	// This memory limit will restrict the size of the batches output by the
 	// in-memory hash joiner in the main strategy as well as by the merge joiner
@@ -114,9 +112,9 @@ func NewExternalHashJoiner(
 			partitionedInputs[1], spec.Right.SourceTypes, rightOrdering, externalSorterMaxNumberPartitions,
 		)
 		return colexecjoin.NewMergeJoinOp(
-			unlimitedAllocator, memoryLimit, args.DiskQueueCfg, fdSemaphore, spec.JoinType,
+			ctx, unlimitedAllocator, memoryLimit, args.DiskQueueCfg, fdSemaphore, spec.JoinType,
 			leftPartitionSorter, rightPartitionSorter, spec.Left.SourceTypes,
-			spec.Right.SourceTypes, leftOrdering, rightOrdering, diskAcc, converterMemAcc, flowCtx.EvalCtx,
+			spec.Right.SourceTypes, leftOrdering, rightOrdering, diskAcc, diskQueueMemAcc, flowCtx.EvalCtx,
 		)
 	}
 	return newHashBasedPartitioner(
@@ -130,7 +128,7 @@ func NewExternalHashJoiner(
 		inMemMainOpConstructor,
 		diskBackedFallbackOpConstructor,
 		diskAcc,
-		converterMemAcc,
+		diskQueueMemAcc,
 		colexecop.ExternalHJMinPartitions,
 	)
 }

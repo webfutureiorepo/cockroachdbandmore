@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql_test
 
@@ -50,7 +45,7 @@ func TestDropTenantSynchronous(t *testing.T) {
 				Knobs: base.TestingKnobs{
 					Server: &server.TestingKnobs{
 						DisableAutomaticVersionUpgrade: make(chan struct{}),
-						BinaryVersionOverride:          clusterversion.MinSupported.Version(),
+						ClusterVersionOverride:         clusterversion.MinSupported.Version(),
 					},
 				},
 			},
@@ -112,8 +107,8 @@ func TestGetTenantIds(t *testing.T) {
 	}))
 	expectedIds := []roachpb.TenantID{
 		roachpb.MustMakeTenantID(1),
-		roachpb.MustMakeTenantID(2),
 		roachpb.MustMakeTenantID(3),
+		roachpb.MustMakeTenantID(4),
 	}
 	require.Equal(t, expectedIds, ids)
 
@@ -126,7 +121,7 @@ func TestGetTenantIds(t *testing.T) {
 	}))
 	expectedIds = []roachpb.TenantID{
 		roachpb.MustMakeTenantID(1),
-		roachpb.MustMakeTenantID(3),
+		roachpb.MustMakeTenantID(4),
 	}
 	require.Equal(t, expectedIds, ids)
 }

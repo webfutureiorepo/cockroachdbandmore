@@ -1,20 +1,18 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
+import { AxisUnits, util } from "@cockroachlabs/cluster-ui";
 import React from "react";
 
+import { cockroach } from "src/js/protos";
 import LineGraph from "src/views/cluster/components/linegraph";
 import { Metric, Axis } from "src/views/shared/components/metricQuery";
-import { AxisUnits } from "@cockroachlabs/cluster-ui";
 
 import { GraphDashboardProps } from "./dashboardUtils";
+
+import TimeSeriesQueryAggregator = cockroach.ts.tspb.TimeSeriesQueryAggregator;
 
 export default function (props: GraphDashboardProps) {
   const { storeSources, tenantSource } = props;
@@ -35,16 +33,31 @@ export default function (props: GraphDashboardProps) {
       </Axis>
     </LineGraph>,
     <LineGraph
-      title="SST Bytes"
+      title="Replication Lag"
       sources={storeSources}
       tenantSource={tenantSource}
-      tooltip={`Rate at which the SST bytes (compressed) are sent to KV by all replication jobs`}
+      tooltip={`Replication lag between primary and standby cluster`}
     >
-      <Axis units={AxisUnits.Bytes} label="bytes">
+      <Axis units={AxisUnits.Duration} label="duration">
         <Metric
-          name="cr.node.physical_replication.sst_bytes"
-          title="SST Bytes"
-          nonNegativeRate
+          downsampler={TimeSeriesQueryAggregator.MIN}
+          aggregator={TimeSeriesQueryAggregator.MAX}
+          name="cr.node.physical_replication.replicated_time_seconds"
+          title="Replication Lag"
+          transform={datapoints =>
+            datapoints
+              .filter(d => d.value !== 0)
+              .map(d =>
+                d.value
+                  ? {
+                      ...d,
+                      value:
+                        d.timestamp_nanos.toNumber() -
+                        util.SecondsToNano(d.value),
+                    }
+                  : d,
+              )
+          }
         />
       </Axis>
     </LineGraph>,

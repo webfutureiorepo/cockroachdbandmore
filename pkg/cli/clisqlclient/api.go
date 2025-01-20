@@ -1,12 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package clisqlclient
 
@@ -28,6 +23,10 @@ type Conn interface {
 
 	// Exec executes a statement.
 	Exec(ctx context.Context, query string, args ...interface{}) error
+
+	// ExecWithRowsAffected is like Exec but returns the number of
+	// affected rows.
+	ExecWithRowsAffected(ctx context.Context, query string, args ...interface{}) (int64, error)
 
 	// Query returns one or more SQL statements and returns the
 	// corresponding result set(s).
@@ -199,6 +198,7 @@ type TxBoundConn interface {
 type DriverConn interface {
 	Query(ctx context.Context, query string, args ...interface{}) (driver.Rows, error)
 	Exec(ctx context.Context, query string, args ...interface{}) error
+	ExecWithRowsAffected(ctx context.Context, query string, args ...interface{}) (int64, error)
 	CopyFrom(ctx context.Context, reader io.Reader, query string) (int64, error)
 	CopyTo(ctx context.Context, w io.Writer, query string) error
 }
@@ -218,6 +218,12 @@ func (d *driverConnAdapter) Query(
 
 func (d *driverConnAdapter) Exec(ctx context.Context, query string, args ...interface{}) error {
 	return d.c.Exec(ctx, query, args...)
+}
+
+func (d *driverConnAdapter) ExecWithRowsAffected(
+	ctx context.Context, query string, args ...interface{},
+) (int64, error) {
+	return d.c.ExecWithRowsAffected(ctx, query, args...)
 }
 
 func (d *driverConnAdapter) CopyFrom(

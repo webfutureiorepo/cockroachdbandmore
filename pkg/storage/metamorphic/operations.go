@@ -1,12 +1,7 @@
 // Copyright 2020 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package metamorphic
 
@@ -25,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uint128"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -238,7 +234,10 @@ func (m mvccCPutOp) run(ctx context.Context) string {
 	txn.Sequence++
 
 	_, err := storage.MVCCConditionalPut(ctx, writer, m.key,
-		txn.ReadTimestamp, m.value, m.expVal, true, storage.MVCCWriteOptions{Txn: txn})
+		txn.ReadTimestamp, m.value, m.expVal, storage.ConditionalPutWriteOptions{
+			MVCCWriteOptions:    storage.MVCCWriteOptions{Txn: txn},
+			AllowIfDoesNotExist: true,
+		})
 	if err != nil {
 		if writeTooOldErr := (*kvpb.WriteTooOldError)(nil); errors.As(err, &writeTooOldErr) {
 			txn.WriteTimestamp.Forward(writeTooOldErr.ActualTimestamp)
@@ -282,19 +281,20 @@ func (m mvccInitPutOp) run(ctx context.Context) string {
 }
 
 type mvccCheckForAcquireLockOp struct {
-	m                *metaTestRunner
-	writer           readWriterID
-	key              roachpb.Key
-	txn              txnID
-	strength         lock.Strength
-	maxLockConflicts int
+	m                       *metaTestRunner
+	writer                  readWriterID
+	key                     roachpb.Key
+	txn                     txnID
+	strength                lock.Strength
+	maxLockConflicts        int
+	targetLockConflictBytes int64
 }
 
 func (m mvccCheckForAcquireLockOp) run(ctx context.Context) string {
 	txn := m.m.getTxn(m.txn)
 	writer := m.m.getReadWriter(m.writer)
 
-	err := storage.MVCCCheckForAcquireLock(ctx, writer, txn, m.strength, m.key, int64(m.maxLockConflicts))
+	err := storage.MVCCCheckForAcquireLock(ctx, writer, txn, m.strength, m.key, int64(m.maxLockConflicts), m.targetLockConflictBytes)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -303,19 +303,20 @@ func (m mvccCheckForAcquireLockOp) run(ctx context.Context) string {
 }
 
 type mvccAcquireLockOp struct {
-	m                *metaTestRunner
-	writer           readWriterID
-	key              roachpb.Key
-	txn              txnID
-	strength         lock.Strength
-	maxLockConflicts int
+	m                       *metaTestRunner
+	writer                  readWriterID
+	key                     roachpb.Key
+	txn                     txnID
+	strength                lock.Strength
+	maxLockConflicts        int
+	targetLockConflictBytes int64
 }
 
 func (m mvccAcquireLockOp) run(ctx context.Context) string {
 	txn := m.m.getTxn(m.txn)
 	writer := m.m.getReadWriter(m.writer)
 
-	err := storage.MVCCAcquireLock(ctx, writer, txn, m.strength, m.key, nil, int64(m.maxLockConflicts))
+	err := storage.MVCCAcquireLock(ctx, writer, txn, m.strength, m.key, nil, int64(m.maxLockConflicts), m.targetLockConflictBytes)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -379,9 +380,8 @@ func (m mvccDeleteRangeUsingRangeTombstoneOp) run(ctx context.Context) string {
 		return "no-op due to no non-conflicting key range"
 	}
 
-	err := storage.MVCCDeleteRangeUsingTombstone(ctx, writer, nil, m.key, m.endKey, m.ts,
-		hlc.ClockTimestamp{}, m.key, m.endKey, false /* idempotent */, math.MaxInt64, /* maxLockConflicts */
-		nil /* msCovered */)
+	err := storage.MVCCDeleteRangeUsingTombstone(ctx, writer, nil, m.key, m.endKey, m.ts, hlc.ClockTimestamp{}, m.key,
+		m.endKey, false /* idempotent */, math.MaxInt64 /* maxLockConflicts */, 0 /* targetLockConflictBytes */, nil /* msCovered */)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -403,7 +403,7 @@ func (m mvccClearTimeRangeOp) run(ctx context.Context) string {
 		return "no-op due to no non-conflicting key range"
 	}
 	span, err := storage.MVCCClearTimeRange(ctx, m.m.engine, &enginepb.MVCCStats{}, m.key, m.endKey,
-		m.startTime, m.endTime, nil, nil, math.MaxInt64, math.MaxInt64, math.MaxInt64)
+		m.startTime, m.endTime, nil, nil, math.MaxInt64, math.MaxInt64, math.MaxInt64, 0)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -813,7 +813,7 @@ type ingestOp struct {
 
 func (i ingestOp) run(ctx context.Context) string {
 	sstPath := filepath.Join(i.m.path, "ingest.sst")
-	f, err := i.m.engineFS.Create(sstPath)
+	f, err := i.m.engineFS.Create(sstPath, fs.UnspecifiedWriteCategory)
 	if err != nil {
 		return fmt.Sprintf("error = %s", err.Error())
 	}

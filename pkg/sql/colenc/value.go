@@ -1,12 +1,7 @@
 // Copyright 2023 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package colenc
 
@@ -22,12 +17,12 @@ import (
 
 // valuesideEncodeCol is the vector version of valueside.Encode.
 func valuesideEncodeCol(
-	appendTo []byte, typ *types.T, colID valueside.ColumnIDDelta, vec coldata.Vec, row int,
+	appendTo []byte, colID valueside.ColumnIDDelta, vec *coldata.Vec, row int,
 ) ([]byte, error) {
 	if vec.Nulls().NullAt(row) {
 		return encoding.EncodeNullValue(appendTo, uint32(colID)), nil
 	}
-	switch typ.Family() {
+	switch typ := vec.Type(); typ.Family() {
 	case types.BoolFamily:
 		bs := vec.Bool()
 		return encoding.EncodeBoolValue(appendTo, uint32(colID), bs[row]), nil
@@ -75,6 +70,6 @@ func valuesideEncodeCol(
 		}
 		return encoding.EncodeUUIDValue(appendTo, uint32(colID), u), nil
 	default:
-		return valueside.Encode(appendTo, colID, vec.Datum().Get(row).(tree.Datum), nil)
+		return valueside.Encode(appendTo, colID, vec.Datum().Get(row).(tree.Datum))
 	}
 }

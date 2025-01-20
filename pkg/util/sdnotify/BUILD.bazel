@@ -22,10 +22,6 @@ go_test(
     size = "small",
     srcs = ["sdnotify_unix_test.go"],
     embed = [":sdnotify"],
-    exec_properties = select({
-        "//build/toolchains:is_heavy": {"Pool": "heavy"},
-        "//conditions:default": {"Pool": "default"},
-    }),
     deps = select({
         "@io_bazel_rules_go//go/platform:aix": [
             "//pkg/util/log",
@@ -71,7 +67,15 @@ go_test(
             "//pkg/util/log",
             "@com_github_stretchr_testify//require",
         ],
+        "@io_bazel_rules_go//go/platform:osx": [
+            "//pkg/util/log",
+            "@com_github_stretchr_testify//require",
+        ],
         "@io_bazel_rules_go//go/platform:plan9": [
+            "//pkg/util/log",
+            "@com_github_stretchr_testify//require",
+        ],
+        "@io_bazel_rules_go//go/platform:qnx": [
             "//pkg/util/log",
             "@com_github_stretchr_testify//require",
         ],

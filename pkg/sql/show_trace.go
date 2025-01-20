@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -24,6 +19,7 @@ import (
 
 // showTraceNode is a planNode that processes session trace data.
 type showTraceNode struct {
+	zeroInputPlanNode
 	columns colinfo.ResultColumns
 	compact bool
 
@@ -44,14 +40,16 @@ func (p *planner) ShowTrace(ctx context.Context, n *tree.ShowTraceForSession) (p
 	// does not get confused.
 	ageColIdx := colinfo.GetTraceAgeColumnIdx(n.Compact)
 	node = &sortNode{
-		plan: node,
+		singleInputPlanNode: singleInputPlanNode{node},
 		ordering: colinfo.ColumnOrdering{
 			colinfo.ColumnOrderInfo{ColIdx: ageColIdx, Direction: encoding.Ascending},
 		},
 	}
 
 	if n.TraceType == tree.ShowTraceReplica {
-		node = &showTraceReplicaNode{plan: node}
+		node = &showTraceReplicaNode{
+			singleInputPlanNode: singleInputPlanNode{node},
+		}
 	}
 	return node, nil
 }

@@ -1,12 +1,7 @@
 // Copyright 2019 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package gcp
 
@@ -36,6 +31,7 @@ import (
 	"google.golang.org/api/impersonate"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	gtransport "google.golang.org/api/transport/http"
 )
 
 const (
@@ -189,7 +185,23 @@ func makeGCSStorage(
 		opts = append(opts, assumeOpt)
 	}
 
-	g, err := gcs.NewClient(ctx, opts...)
+	clientName := args.ExternalStorageOptions().ClientName
+	baseTransport, err := cloud.MakeTransport(args.Settings, args.MetricsRecorder, "gcs", conf.Bucket, clientName)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create http transport")
+	}
+
+	t, err := gtransport.NewTransport(ctx, baseTransport, opts...)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create gcs http transport")
+	}
+
+	httpClient, err := cloud.MakeHTTPClientForTransport(t)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create http client")
+	}
+
+	g, err := gcs.NewClient(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create google cloud client")
 	}

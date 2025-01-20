@@ -1,12 +1,7 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package sql
 
@@ -18,13 +13,13 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
@@ -40,12 +35,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
@@ -62,7 +57,7 @@ const CopyBatchRowSizeDefault = 100
 const CopyBatchRowSizeVectorDefault = 32 << 10
 
 // When this many rows are in the copy buffer, they are inserted.
-var CopyBatchRowSize = util.ConstantWithMetamorphicTestRange("copy-batch-size", CopyBatchRowSizeDefault, 1, 50_000)
+var CopyBatchRowSize = metamorphic.ConstantWithTestRange("copy-batch-size", CopyBatchRowSizeDefault, 1, 50_000)
 
 // SetCopyFromBatchSize exports overriding copy batch size for test code.
 func SetCopyFromBatchSize(i int) int {
@@ -363,7 +358,30 @@ func newCopyMachine(
 	// exceed this due to large dynamic values we will bail early and
 	// insert the rows we have so far. Note once the coldata.Batch is full
 	// we still have all the encoder allocations to make.
-	c.maxRowMem = kvserverbase.MaxCommandSize.Get(c.p.execCfg.SV()) / 3
+	//
+	// We also make the fraction depend on the number of indexes in the table
+	// since each secondary index will require a separate CPut command for
+	// each input row. We want to pick the fraction to be in [0.1, 0.33] range
+	// so that 0.33 is used with no secondary indexes and 0.1 is used with 16 or
+	// more secondary indexes.
+	// TODO(yuzefovich): the choice of 1/3 as the upper bound with no secondary
+	// indexes was made in #98605 via empirical testing. However, it's possible
+	// that the testing was missing the realization that each secondary index
+	// results in a separate KV and was done on TPCH lineitem table (which has 8
+	// secondary indexes), so 1/3 might be actually too conservative.
+	maxCommandFraction := copyMaxCommandSizeFraction.Get(c.p.execCfg.SV())
+	if maxCommandFraction == 0 {
+		maxCommandFraction = 1.0 / 3.0
+		if numIndexes := len(tableDesc.AllIndexes()); numIndexes > 1 {
+			// Each additional secondary index is "penalized" by reducing the
+			// fraction by 1.5%, until 0.1 which is the lower bound.
+			maxCommandFraction -= 0.015 * float64(numIndexes-1)
+			if maxCommandFraction < 0.1 {
+				maxCommandFraction = 0.1
+			}
+		}
+	}
+	c.maxRowMem = int64(float64(kvserverbase.MaxCommandSize.Get(c.p.execCfg.SV())) * maxCommandFraction)
 
 	if c.canSupportVectorized(tableDesc) {
 		if err := c.initVectorizedCopy(ctx, typs); err != nil {
@@ -377,6 +395,16 @@ func newCopyMachine(
 	}
 	return c, nil
 }
+
+var copyMaxCommandSizeFraction = settings.RegisterFloatSetting(
+	settings.ApplicationLevel,
+	"sql.copy.fraction_of_max_command_size",
+	"determines the fraction of kv.raft.command.max_size that is used when "+
+		"sizing batches of rows when processing COPY commands. Use 0 for default "+
+		"adaptive strategy that considers number of secondary indexes",
+	0.0,
+	settings.Fraction,
+)
 
 func (c *copyMachine) canSupportVectorized(table catalog.TableDescriptor) bool {
 	// TODO(cucaroach): support vectorized binary.
@@ -446,9 +474,9 @@ func (c *copyMachine) initVectorizedCopy(ctx context.Context, typs []*types.T) e
 	c.vectorized = true
 	factory := coldataext.NewExtendedColumnFactory(c.p.EvalContext())
 	alloc := colmem.NewLimitedAllocator(ctx, &c.rowsMemAcc, nil /*optional unlimited memory account*/, factory)
-	alloc.SetMaxBatchSize(c.copyBatchRowSize)
 	// TODO(cucaroach): Avoid allocating selection vector.
-	c.accHelper.Init(alloc, c.maxRowMem, typs, false /*alwaysReallocate*/)
+	c.accHelper.Init(alloc, c.maxRowMem, typs, false /* alwaysReallocate */)
+	c.accHelper.SetMaxBatchSize(c.copyBatchRowSize)
 	// Start with small number of rows, compromise between going too big and
 	// overallocating memory and avoiding some doubling growth batches.
 	if err := colexecerror.CatchVectorizedRuntimeError(func() {
@@ -489,12 +517,12 @@ func (c *copyMachine) numInsertedRows() int {
 func (c *copyMachine) initMonitoring(ctx context.Context, parentMon *mon.BytesMonitor) {
 	// Create a monitor for the COPY command so it can be tracked separate from transaction or session.
 	memMetrics := &MemoryMetrics{}
-	const noteworthyCopyMemoryUsageBytes = 10 << 20
-	c.copyMon = mon.NewMonitor("copy",
-		mon.MemoryResource,
-		memMetrics.CurBytesCount, memMetrics.MaxBytesHist,
-		0, /* increment */
-		noteworthyCopyMemoryUsageBytes, c.p.ExecCfg().Settings)
+	c.copyMon = mon.NewMonitor(mon.Options{
+		Name:     mon.MakeMonitorName("copy"),
+		CurCount: memMetrics.CurBytesCount,
+		MaxHist:  memMetrics.MaxBytesHist,
+		Settings: c.p.ExecCfg().Settings,
+	})
 	c.copyMon.StartNoReserved(ctx, parentMon)
 	c.bufMemAcc = c.copyMon.MakeBoundAccount()
 	c.rowsMemAcc = c.copyMon.MakeBoundAccount()
@@ -592,7 +620,7 @@ Loop:
 		switch typ {
 		case pgwirebase.ClientMsgCopyData:
 			if err := c.processCopyData(
-				ctx, unsafeUint8ToString(readBuf.Msg), false, /* final */
+				ctx, encoding.UnsafeConvertBytesToString(readBuf.Msg), false, /* final */
 			); err != nil {
 				return err
 			}
@@ -967,6 +995,7 @@ func (c *copyMachine) readBinaryTuple(ctx context.Context) (bytesRead int, err e
 			c.resultColumns[i].Typ,
 			pgwirebase.FormatBinary,
 			data,
+			c.p.datumAlloc,
 		)
 		if err != nil {
 			return bytesRead, pgerror.Wrapf(err, pgcode.BadCopyFileFormat,
@@ -1114,19 +1143,33 @@ func (c *copyMachine) insertRows(ctx context.Context, finalBatch bool) error {
 			// for the next batch.
 			return c.doneWithRows(ctx)
 		} else {
-			// It is currently only safe to retry if we are not in atomic copy
-			// mode & we are in an implicit transaction.
-			// NOTE: we cannot re-use the connExecutor retry scheme here as COPY
-			// consumes directly from the read buffer, and the data would no
-			// longer be available during the retry.
-			if c.implicitTxn && !c.p.SessionData().CopyFromAtomicEnabled && c.p.SessionData().CopyFromRetriesEnabled && errIsRetriable(err) {
-				log.SqlExec.Infof(ctx, "%s failed on attempt %d and is retrying, error %+v", c.copyFromAST.String(), r.CurrentAttempt(), err)
-				if c.p.ExecCfg().TestingKnobs.CopyFromInsertRetry != nil {
-					if err := c.p.ExecCfg().TestingKnobs.CopyFromInsertRetry(); err != nil {
-						return err
+			if errIsRetriable(err) {
+				log.SqlExec.Infof(ctx, "%s failed on attempt %d and with retriable error %+v", c.copyFromAST.String(), r.CurrentAttempt(), err)
+				// It is currently only safe to retry if we are not in atomic copy
+				// mode & we are in an implicit transaction.
+				//
+				// NOTE: we cannot re-use the connExecutor retry scheme here as COPY
+				// consumes directly from the read buffer, and the data would no
+				// longer be available during the retry.
+				if c.implicitTxn && !c.p.SessionData().CopyFromAtomicEnabled && c.p.SessionData().CopyFromRetriesEnabled {
+					log.SqlExec.Infof(ctx, "%s is retrying", c.copyFromAST.String())
+					if c.p.ExecCfg().TestingKnobs.CopyFromInsertRetry != nil {
+						if err := c.p.ExecCfg().TestingKnobs.CopyFromInsertRetry(); err != nil {
+							return err
+						}
 					}
+					continue
+				} else {
+					log.SqlExec.Infof(
+						ctx,
+						"%s is not retrying; "+
+							"implicit: %v; copy_from_atomic_enabled: %v; copy_from_retriable_enabled %v",
+						c.copyFromAST.String(), c.implicitTxn,
+						c.p.SessionData().CopyFromAtomicEnabled, c.p.SessionData().CopyFromRetriesEnabled,
+					)
 				}
-				continue
+			} else {
+				log.SqlExec.Infof(ctx, "%s failed on attempt %d and with non-retriable error %+v", c.copyFromAST.String(), r.CurrentAttempt(), err)
 			}
 			return err
 		}
@@ -1248,7 +1291,7 @@ func (c *copyMachine) readTextTuple(ctx context.Context, line []byte) error {
 func (c *copyMachine) readTextTupleDatum(ctx context.Context, parts [][]byte) error {
 	datums := c.scratchRow
 	for i, part := range parts {
-		s := unsafeUint8ToString(part)
+		s := encoding.UnsafeConvertBytesToString(part)
 		// Disable NULL conversion during file uploads.
 		if !c.forceNotNull && s == c.null {
 			datums[i] = tree.DNull
@@ -1291,7 +1334,7 @@ func (c *copyMachine) readTextTupleDatum(ctx context.Context, parts [][]byte) er
 
 func (c *copyMachine) readTextTupleVec(ctx context.Context, parts [][]byte) error {
 	for i, part := range parts {
-		s := unsafeUint8ToString(part)
+		s := encoding.UnsafeConvertBytesToString(part)
 		// Disable NULL conversion during file uploads.
 		if !c.forceNotNull && s == c.null {
 			c.valueHandlers[i].Null()
@@ -1441,7 +1484,3 @@ const (
 	binaryStateRead
 	binaryStateFoundTrailer
 )
-
-func unsafeUint8ToString(data []uint8) string {
-	return *(*string)(unsafe.Pointer(&data))
-}

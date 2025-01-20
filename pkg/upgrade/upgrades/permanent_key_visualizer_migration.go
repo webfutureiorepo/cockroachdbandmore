@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package upgrades
 
@@ -23,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
 )
@@ -41,8 +37,9 @@ func keyVisualizerTablesMigration(
 	}
 
 	for _, table := range tables {
-		err := createSystemTable(ctx, d.DB.KV(), d.Settings, keys.SystemSQLCodec,
-			table)
+		err := createSystemTable(ctx, d.DB, d.Settings, keys.SystemSQLCodec,
+			table,
+			tree.LocalityLevelTable)
 		if err != nil {
 			return err
 		}
@@ -64,7 +61,7 @@ func keyVisualizerTablesMigration(
 			ctx,
 			"set-SpanStatsTenantBoundariesTable-TTL",
 			nil,
-			sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+			sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
 			"ALTER TABLE system.span_stats_tenant_boundaries CONFIGURE ZONE USING gc.ttlseconds = $1",
 			3600, /* one hour */
 		); err != nil {

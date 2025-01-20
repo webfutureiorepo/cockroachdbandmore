@@ -1,12 +1,7 @@
 // Copyright 2022 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package catkv
 
@@ -16,6 +11,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/nstree"
@@ -108,7 +104,7 @@ func (c *cachedCatalogReader) IsIDInCache(id descpb.ID) bool {
 }
 
 // IsNameInCache is part of the CatalogReader interface.
-func (c *cachedCatalogReader) IsNameInCache(key catalog.NameKey) bool {
+func (c *cachedCatalogReader) IsNameInCache(key descpb.NameInfo) bool {
 	return c.cache.LookupNamespaceEntry(key) != nil
 }
 
@@ -200,17 +196,38 @@ func (c *cachedCatalogReader) ScanAll(ctx context.Context, txn *kv.Txn) (nstree.
 	c.hasScanAll = true
 	c.hasScanNamespaceForDatabases = true
 	c.hasScanAllComments = true
-	for id, s := range c.byIDState {
-		s.hasScanNamespaceForDatabaseEntries = true
-		s.hasScanNamespaceForDatabaseSchemas = true
-		s.hasGetDescriptorEntries = true
-		c.byIDState[id] = s
-	}
-	for ni, s := range c.byNameState {
-		s.hasGetNamespaceEntries = true
-		c.byNameState[ni] = s
+	if err := read.ForEachDescriptor(func(desc catalog.Descriptor) error {
+		// We must update the byID and byName states for each descriptor that
+		// was read.
+		var idState byIDStateValue
+		var nameState byNameStateValue
+		idState.hasScanNamespaceForDatabaseEntries = true
+		idState.hasScanNamespaceForDatabaseSchemas = true
+		idState.hasGetDescriptorEntries = true
+		nameState.hasGetNamespaceEntries = true
+		c.setByIDState(desc.GetID(), idState)
+		ni := descpb.NameInfo{
+			ParentID: desc.GetParentID(),
+			Name:     desc.GetName(),
+		}
+		if typ := desc.DescriptorType(); typ != catalog.Database && typ != catalog.Schema {
+			ni.ParentSchemaID = desc.GetParentSchemaID()
+		}
+		c.setByNameState(ni, nameState)
+		return nil
+	}); err != nil {
+		return nstree.Catalog{}, err
 	}
 	return read, nil
+}
+
+// ScanDescriptorsInSpans is part of the CatalogReader interface.
+func (c *cachedCatalogReader) ScanDescriptorsInSpans(
+	ctx context.Context, txn *kv.Txn, spans []roachpb.Span,
+) (nstree.Catalog, error) {
+	// TODO (brian.dillmann@): explore caching these calls.
+	// https://github.com/cockroachdb/cockroach/issues/134666
+	return c.cr.ScanDescriptorsInSpans(ctx, txn, spans)
 }
 
 // ScanNamespaceForDatabases is part of the CatalogReader interface.
@@ -371,8 +388,8 @@ func (c *cachedCatalogReader) GetByNames(
 		if c.byNameState[ni].hasGetNamespaceEntries || c.hasScanAll {
 			continue
 		}
-		if id, ts := c.systemDatabaseCache.lookupDescriptorID(c.version, &ni); id != descpb.InvalidID {
-			c.cache.UpsertNamespaceEntry(&ni, id, ts)
+		if id, ts := c.systemDatabaseCache.lookupDescriptorID(c.version, ni); id != descpb.InvalidID {
+			c.cache.UpsertNamespaceEntry(ni, id, ts)
 			s := c.byNameState[ni]
 			s.hasGetNamespaceEntries = true
 			c.setByNameState(ni, s)

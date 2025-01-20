@@ -1,10 +1,7 @@
 // Copyright 2021 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
 
 package multiregionccl_test
 
@@ -18,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
@@ -46,7 +44,31 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// TestMultiRegionDataDriven is a data-driven test to test various multi-region
+func TestMultiRegionDataDriven_global_tables(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "global_tables")
+}
+
+func TestMultiRegionDataDriven_regional_by_row(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "regional_by_row")
+}
+
+func TestMultiRegionDataDriven_regional_by_table(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "regional_by_table")
+}
+
+func TestMultiRegionDataDriven_secondary_region(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	testMultiRegionDataDriven(t, "secondary_region")
+}
+
+// testMultiRegionDataDriven is a data-driven test to test various multi-region
 // invariants at a high level. This is accomplished by allowing custom cluster
 // configurations when creating the test cluster and providing directives to
 // assert expectations in query traces.
@@ -111,10 +133,7 @@ import (
 //
 // "cleanup-cluster": destroys the cluster. Must be done before creating a new
 // cluster.
-func TestMultiRegionDataDriven(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
+func testMultiRegionDataDriven(t *testing.T, testPath string) {
 	// This test speeds up replication changes by proactively enqueuing replicas
 	// into various queues. This has the benefit of reducing the time taken after
 	// zone config changes, however the downside of added overhead. Disable the
@@ -123,7 +142,7 @@ func TestMultiRegionDataDriven(t *testing.T) {
 	skip.UnderRace(t, "flaky test")
 	skip.UnderDeadlock(t, "flaky test")
 	ctx := context.Background()
-	datadriven.Walk(t, datapathutils.TestDataPath(t), func(t *testing.T, path string) {
+	datadriven.Walk(t, datapathutils.TestDataPath(t, testPath), func(t *testing.T, path string) {
 		ds := datadrivenTestState{}
 		defer ds.cleanup(ctx)
 		var mu syncutil.Mutex
@@ -168,6 +187,7 @@ func TestMultiRegionDataDriven(t *testing.T) {
 						Locality: localityCfg,
 						Settings: st,
 						Knobs: base.TestingKnobs{
+							JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(), // speeds up test
 							SQLExecutor: &sql.ExecutorTestingKnobs{
 								WithStatementTrace: func(trace tracingpb.Recording, stmt string) {
 									mu.Lock()
@@ -177,6 +197,10 @@ func TestMultiRegionDataDriven(t *testing.T) {
 									}
 								},
 							},
+							// NB: This test is asserting on whether it reads from the leaseholder
+							// or the follower first, so it has to route to leaseholder when
+							// requested.
+							KVClient: &kvcoord.ClientTestingKnobs{RouteToLeaseholderFirst: true},
 						},
 					}
 				}
@@ -319,11 +343,11 @@ SET CLUSTER SETTING kv.allocator.min_lease_transfer_interval = '5m'
 				}
 				cache := ds.tc.Server(idx).DistSenderI().(*kvcoord.DistSender).RangeDescriptorCache()
 				tablePrefix := keys.MustAddr(keys.SystemSQLCodec.TablePrefix(tableID))
-				entry := cache.GetCached(ctx, tablePrefix, false /* inverted */)
-				if entry == nil {
-					return errors.Newf("no entry found for %s in cache", tbName).Error()
+				entry, err := cache.TestingGetCached(ctx, tablePrefix, false, roachpb.LAG_BY_CLUSTER_SETTING)
+				if err != nil {
+					return err.Error()
 				}
-				return entry.ClosedTimestampPolicy().String()
+				return entry.ClosedTimestampPolicy.String()
 
 			case "wait-for-zone-config-changes":
 				lookupKey, err := getRangeKeyForInput(t, d, ds.tc)
@@ -361,7 +385,7 @@ SET CLUSTER SETTING kv.allocator.min_lease_transfer_interval = '5m'
 						return errors.New(`could not find replica`)
 					}
 					for _, queueName := range []string{"split", "replicate", "raftsnapshot"} {
-						_, processErr, err := store.Enqueue(
+						processErr, err := store.Enqueue(
 							ctx, queueName, repl, true /* skipShouldQueue */, false, /* async */
 						)
 						if processErr != nil {
@@ -383,12 +407,20 @@ SET CLUSTER SETTING kv.allocator.min_lease_transfer_interval = '5m'
 
 							// We want to only initiate a lease transfer if our target replica
 							// is a voter. Otherwise, TransferRangeLease will silently fail.
-							newLeaseholderType := actualPlacement.getReplicaType(expectedLeaseIdx)
+							newLeaseholderType, found := actualPlacement.getReplicaType(expectedLeaseIdx)
+							if !found {
+								return errors.CombineErrors(
+									leaseErr,
+									errors.Newf(
+										"expected node %d to have a replica; it doesn't have one yet",
+										expectedLeaseIdx),
+								)
+							}
 							if newLeaseholderType != replicaTypeVoter {
 								return errors.CombineErrors(
 									leaseErr,
 									errors.Newf(
-										"expected node %s to be a voter but was %s",
+										"expected node %d to be a voter but was %s",
 										expectedLeaseIdx,
 										newLeaseholderType.String()))
 							}
@@ -438,7 +470,7 @@ SET CLUSTER SETTING kv.allocator.min_lease_transfer_interval = '5m'
 					}
 
 					return nil
-				}, 2*time.Minute); err != nil {
+				}, 5*time.Minute); err != nil {
 					return err.Error()
 				}
 
@@ -745,8 +777,9 @@ func (r *replicaPlacement) getLeaseholder() int {
 	return r.leaseholder
 }
 
-func (r *replicaPlacement) getReplicaType(nodeIdx int) replicaType {
-	return r.nodeToReplicaType[nodeIdx]
+func (r *replicaPlacement) getReplicaType(nodeIdx int) (_ replicaType, found bool) {
+	rType, found := r.nodeToReplicaType[nodeIdx]
+	return rType, found
 }
 
 func getRangeKeyForInput(
